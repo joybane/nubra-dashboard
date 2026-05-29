@@ -1,5 +1,7 @@
 import { ChartModule } from './chart.js';
 import { OptionChainModule } from './optionchain.js';
+import { TradingModule } from './trading.js';
+import { WatchlistModule } from './watchlist.js';
 
 // ── State ────────────────────────────────────────────────────────────────────
 const state = {
@@ -150,6 +152,10 @@ function handleWsMessage(msg) {
   }
   if (msg.type === 'option_chain') {
     OptionChainModule.onWsTick(msg.data);
+    return;
+  }
+  if (msg.type === 'paper_update') {
+    TradingModule.onPaperUpdate();
     return;
   }
 }
@@ -408,8 +414,15 @@ function initApp() {
   connectWs();
   ChartModule.init();
   OptionChainModule.init();
-  // Restore saved theme (must be after chart init so chart options can be set)
+  TradingModule.init();
+  WatchlistModule.init();
   applyTheme(currentTheme);
+
+  // Preload refdata (ref_id → stock_name) for NSE + BSE immediately after auth.
+  // This runs in the background so it's ready before the user opens the option chain.
+  OptionChainModule.preloadRefdata().then(() => {
+    console.log('[App] Refdata preloaded — option chain navigation ready.');
+  });
 }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

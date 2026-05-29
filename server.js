@@ -131,7 +131,10 @@ app.post('/auth/send-otp', async (req, res) => {
     res.json({ ok: true, message: 'OTP sent to registered mobile number.' });
   } catch (err) {
     console.error('send-otp error:', err.message);
-    res.status(500).json({ ok: false, error: err.message });
+    const friendly = err.message.includes('ENOTFOUND') || err.message.includes('ECONNREFUSED')
+      ? 'Cannot reach Nubra servers. Check your internet connection and try again.'
+      : err.message;
+    res.status(500).json({ ok: false, error: friendly });
   }
 });
 
@@ -202,6 +205,19 @@ function requireAuth(req, res, next) {
   }
   next();
 }
+
+// ─── Raw refdata (full instrument list for ref_id → nubra_name mapping) ───────
+app.get('/api/refdata/:date', requireAuth, async (req, res) => {
+  try {
+    const { date } = req.params;
+    const { exchange = 'NSE' } = req.query;
+    const data = await nubraGet(`/refdata/refdata/${date}`, { exchange });
+    res.json(data);
+  } catch (err) {
+    console.error('refdata error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ─── Instruments search ───────────────────────────────────────────────────────
 app.get('/api/instruments/search', requireAuth, async (req, res) => {
@@ -361,9 +377,17 @@ function connectNubraWs() {
   nubraWs.on('message', (data, isBinary) => {
     if (isBinary) {
       const decoded = decodeBinaryMsg(data);
-      if (decoded) broadcast(decoded);
+      if (decoded) {
+        // Update live prices for paper trading
+        if (decoded.type === 'ohlcv' && decoded.data) {
+          const all = [...(decoded.data.indexes || []), ...(decoded.data.instruments || [])];
+          for (const b of all) {
+            if (b.indexname && b.close) paperUpdatePrice(b.indexname, Number(b.close) / 100);
+          }
+        }
+        broadcast(decoded);
+      }
     } else {
-      // Text: subscription acks, errors
       const text = data.toString().trim();
       if (text) console.log('[Nubra WS]', text);
     }
@@ -438,6 +462,148 @@ setInterval(() => {
     connectNubraWs();
   }
 }, 2000);
+
+// ─── Paper trading ────────────────────────────────────────────────────────────
+const PAPER_FILE  = path.join(__dirname, 'paper_trading.json');
+const paperPrices = {}; // symbol → latest price in ₹ (updated from WS)
+const PAPER_CASH_DEFAULT = 1_000_000; // ₹10 lakh starting virtual cash
+
+function loadPaperData() {
+  try {
+    if (existsSync(PAPER_FILE)) return JSON.parse(readFileSync(PAPER_FILE, 'utf8'));
+  } catch { }
+  return { orders: [], cash: PAPER_CASH_DEFAULT };
+}
+function savePaperData() {
+  try { writeFileSync(PAPER_FILE, JSON.stringify({ orders: paperOrders, cash: paperCash }), 'utf8'); }
+  catch { }
+}
+
+const paperData = loadPaperData();
+let paperOrders = paperData.orders || [];
+let paperCash   = paperData.cash  ?? PAPER_CASH_DEFAULT;
+
+function computePositions() {
+  const pos = {};
+  for (const o of paperOrders) {
+    if (o.status !== 'EXECUTED') continue;
+    if (!pos[o.symbol]) pos[o.symbol] = {
+      symbol: o.symbol, exchange: o.exchange,
+      instrumentType: o.instrumentType, netQty: 0,
+      buyQty: 0, sellQty: 0, avgBuyPrice: 0, avgSellPrice: 0, realizedPnl: 0,
+    };
+    const p = pos[o.symbol];
+    if (o.side === 'BUY') {
+      const tot = p.buyQty + o.qty;
+      p.avgBuyPrice  = (p.avgBuyPrice * p.buyQty + o.executedPrice * o.qty) / tot;
+      p.buyQty = tot;
+    } else {
+      const tot = p.sellQty + o.qty;
+      p.avgSellPrice = (p.avgSellPrice * p.sellQty + o.executedPrice * o.qty) / tot;
+      p.sellQty = tot;
+      p.realizedPnl += (o.executedPrice - p.avgBuyPrice) * o.qty;
+    }
+    p.netQty = p.buyQty - p.sellQty;
+  }
+  return Object.values(pos).map(p => {
+    const ltp = paperPrices[p.symbol] || 0;
+    const unrealized = p.netQty > 0
+      ? (ltp - p.avgBuyPrice) * p.netQty
+      : p.netQty < 0 ? (p.avgSellPrice - ltp) * Math.abs(p.netQty) : 0;
+    return { ...p, ltp, unrealizedPnl: unrealized, totalPnl: p.realizedPnl + unrealized };
+  });
+}
+
+function paperUpdatePrice(symbol, priceRs) {
+  paperPrices[symbol] = priceRs;
+  // Execute pending limit/SL orders
+  for (const o of paperOrders) {
+    if (o.status !== 'PENDING' || o.symbol !== symbol) continue;
+    let fire = false;
+    if (o.orderType === 'LMT') {
+      fire = o.side === 'BUY' ? priceRs <= o.price : priceRs >= o.price;
+    } else if (o.orderType === 'SL') {
+      fire = o.side === 'BUY' ? priceRs >= o.triggerPrice : priceRs <= o.triggerPrice;
+    }
+    if (fire) {
+      o.status = 'EXECUTED'; o.executedPrice = priceRs; o.executedAt = Date.now();
+      if (o.side === 'BUY') paperCash -= priceRs * o.qty;
+      else                  paperCash += priceRs * o.qty;
+      savePaperData();
+      broadcast({ type: 'paper_update' });
+    }
+  }
+}
+
+// GET positions
+app.get('/api/paper/positions', requireAuth, (req, res) => {
+  res.json({ positions: computePositions(), cash: paperCash });
+});
+
+// GET orders (newest first)
+app.get('/api/paper/orders', requireAuth, (req, res) => {
+  res.json({ orders: [...paperOrders].reverse() });
+});
+
+// POST place order
+app.post('/api/paper/order', requireAuth, (req, res) => {
+  try {
+    const { symbol, exchange, side, orderType, qty, price, triggerPrice, instrumentType } = req.body;
+    if (!symbol || !side || !qty || qty <= 0) {
+      return res.status(400).json({ error: 'symbol, side, qty required' });
+    }
+    const order = {
+      id: randomUUID(), symbol, exchange: exchange || 'NSE',
+      side: side.toUpperCase(), orderType: (orderType || 'MKT').toUpperCase(),
+      instrumentType: instrumentType || 'STOCK',
+      qty: Number(qty), price: price ? Number(price) : 0,
+      triggerPrice: triggerPrice ? Number(triggerPrice) : 0,
+      status: 'PENDING', executedPrice: 0,
+      createdAt: Date.now(), executedAt: null,
+    };
+    if (order.orderType === 'MKT') {
+      const cur = paperPrices[symbol] || 0;
+      if (!cur) return res.status(400).json({ error: `No live price for ${symbol}. Load its chart first to subscribe.` });
+      order.status = 'EXECUTED'; order.executedPrice = cur; order.executedAt = Date.now();
+      if (order.side === 'BUY') paperCash -= cur * order.qty;
+      else                      paperCash += cur * order.qty;
+    }
+    paperOrders.push(order);
+    savePaperData();
+    broadcast({ type: 'paper_update' });
+    res.json({ ok: true, order });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// DELETE cancel order
+app.delete('/api/paper/order/:id', requireAuth, (req, res) => {
+  const o = paperOrders.find(x => x.id === req.params.id);
+  if (!o) return res.status(404).json({ error: 'Order not found' });
+  if (o.status !== 'PENDING') return res.status(400).json({ error: 'Can only cancel PENDING orders' });
+  o.status = 'CANCELLED'; savePaperData(); broadcast({ type: 'paper_update' });
+  res.json({ ok: true });
+});
+
+// PUT reset paper account
+app.put('/api/paper/reset', requireAuth, (req, res) => {
+  paperOrders = []; paperCash = PAPER_CASH_DEFAULT;
+  savePaperData(); broadcast({ type: 'paper_update' });
+  res.json({ ok: true });
+});
+
+// GET current tracked price for a symbol
+app.get('/api/paper/price/:symbol', requireAuth, (req, res) => {
+  const p = paperPrices[req.params.symbol];
+  res.json({ price: p || null });
+});
+
+// GET bulk prices for watchlist (comma-separated symbols)
+app.get('/api/paper/prices', requireAuth, (req, res) => {
+  const syms = (req.query.symbols || '').split(',').filter(Boolean);
+  const result = {};
+  for (const s of syms) result[s] = paperPrices[s] || null;
+  res.json(result);
+});
 
 // ─── Startup session restore ───────────────────────────────────────────────────
 async function tryRestoreSession() {

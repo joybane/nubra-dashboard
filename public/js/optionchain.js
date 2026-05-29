@@ -13,11 +13,13 @@ const suggestionsEl= document.getElementById('oc-suggestions');
 let currentSymbol   = '';
 let currentExchange = 'NSE';
 let currentExpiry   = '';
-let maxCeOi = 1, maxPeOi = 1; // for OI bar scaling in table
+let maxCeOi = 1, maxPeOi = 1;
+
+// ref_id → nubra_name: built once from refdata when chain loads
+const refIdMap = new Map();
 
 // Cell map for incremental live updates: "23950-ce-ltp" → TD element
 const cellMap  = new Map();
-// Poll fallback
 let pollTimer  = null;
 
 const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
@@ -130,6 +132,45 @@ function loadFromInstrument(item) {
   currentExchange = item.exchange || 'NSE';
   currentExpiry   = '';
   loadExpiryThenChain();
+}
+
+// ── Refdata ref_id → nubra_name map ──────────────────────────────────────────
+// Loaded once per session (or per exchange change). Gives us exact instrument
+// names so we never have to guess weekly vs monthly naming conventions.
+let refdataLoaded = false;
+
+// Preload both NSE and BSE refdata so ref_id → stock_name map is ready before any clicks.
+// stock_name is the trading symbol (e.g. "NIFTY26JUN0223600CE") that the historical API accepts.
+// nubra_name/zanskar_name is the internal DB id (e.g. "OPT_NIFTY_20260602_CE_2360000") — NOT usable for charts.
+async function ensureRefdata(exchange) {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const res   = await fetch(`/api/refdata/${today}?exchange=${exchange}`);
+    const data  = await res.json();
+    const rows  = Array.isArray(data.refdata) ? data.refdata :
+                  Array.isArray(data.data)    ? data.data    :
+                  Array.isArray(data)         ? data         : [];
+
+    let count = 0;
+    for (const row of rows) {
+      const id        = row.ref_id ?? row.zanskar_id;
+      // Use stock_name (trading symbol) — NOT zanskar_name/nubra_name (internal id)
+      const stockName = row.stock_name;
+      if (id != null && stockName) {
+        refIdMap.set(Number(id), stockName);
+        count++;
+      }
+    }
+    console.log(`[Refdata ${exchange}] ${count} instruments mapped`);
+  } catch (err) {
+    console.warn(`[Refdata ${exchange}] load failed:`, err.message);
+  }
+}
+
+// Call this at app startup to preload refdata for both exchanges
+export async function preloadRefdata() {
+  refdataLoaded = true; // mark before awaiting so concurrent calls don't double-load
+  await Promise.all([ensureRefdata('NSE'), ensureRefdata('BSE')]);
 }
 
 // ── Live feed management ──────────────────────────────────────────────────────
@@ -320,6 +361,9 @@ function renderChain(chain) {
     const tr = document.createElement('tr');
     tr.className = isAtm ? 'atm-row' : '';
     tr.setAttribute('data-strike', strike);
+    // Store ref_ids so the click handler can look up exact nubra_name
+    if (ce?.ref_id) tr.setAttribute('data-ce-refid', ce.ref_id);
+    if (pe?.ref_id) tr.setAttribute('data-pe-refid', pe.ref_id);
 
     tr.innerHTML =
       ceGreek(g(ce,'vega'),  4)   +
@@ -351,19 +395,17 @@ function renderChain(chain) {
     ];
     tds.forEach((td, i) => { if (colKeys[i]) cellMap.set(colKeys[i], td); });
 
-    // Click CE → chart
-    const ceIdx = 6; // LTP column index (0-based)
     tr.addEventListener('click', (e) => {
-      const td    = e.target.closest('td');
+      const td  = e.target.closest('td');
       if (!td) return;
-      const tds   = [...tr.querySelectorAll('td')];
-      const idx   = tds.indexOf(td);
+      const tds = [...tr.querySelectorAll('td')];
+      const idx = tds.indexOf(td);
       if (idx < 7) {
-        // CE side clicked
-        navigateToOptionChart(currentSymbol, strike, 'CE');
+        const ceRefId = Number(tr.getAttribute('data-ce-refid'));
+        navigateToOptionChart(currentSymbol, strike, 'CE', ceRefId);
       } else if (idx > 8) {
-        // PE side clicked
-        navigateToOptionChart(currentSymbol, strike, 'PE');
+        const peRefId = Number(tr.getAttribute('data-pe-refid'));
+        navigateToOptionChart(currentSymbol, strike, 'PE', peRefId);
       }
     });
 
@@ -383,47 +425,48 @@ function renderChain(chain) {
 }
 
 // ── Navigate to chart for an option ──────────────────────────────────────────
-// Uses refdata search to get the exact nubra_name (weekly/monthly formats differ)
-async function navigateToOptionChart(underlying, strikeRs, optType) {
+// Uses ref_id → refdata map (loaded at chain load time) for exact nubra_name.
+// This correctly handles weekly vs monthly naming conventions.
+function navigateToOptionChart(underlying, strikeRs, optType, refId) {
   const strike = Math.round(strikeRs);
 
-  try {
-    const q   = `${underlying}${strike}${optType}`;
-    const res  = await fetch(`/api/instruments/search?q=${encodeURIComponent(q)}&limit=50`);
-    const data = await res.json();
-
-    const match = (data.results || []).find(item => {
-      if ((item.derivative_type || '').toUpperCase() !== 'OPT') return false;
-      if ((item.option_type || '').toUpperCase() !== optType) return false;
-
-      // Expiry match (stored as int in refdata, e.g. 20260602)
-      const itemExpiry = String(item.expiry ?? '');
-      if (currentExpiry && itemExpiry && itemExpiry !== currentExpiry) return false;
-
-      // Strike match — refdata may be in paise or rupees
-      const sp = Number(item.strike_price);
-      return sp === strike || sp === strike * 100 || Math.round(sp / 100) === strike;
-    });
-
-    if (match) {
-      console.log('[OC→chart]', match.nubra_name || match.stock_name);
-      document.dispatchEvent(new CustomEvent('load-chart', { detail: { instrument: match } }));
-      return;
-    }
-  } catch (err) {
-    console.warn('Option lookup failed:', err.message);
+  // 1. Best: exact lookup from refdata map via ref_id
+  if (refId && refIdMap.has(refId)) {
+    const nubraName = refIdMap.get(refId);
+    console.log('[OC→chart refId]', refId, '→', nubraName);
+    dispatch(nubraName);
+    return;
   }
 
-  // Fallback: construct name (works for monthly options)
+  // 2. Refdata still loading — wait then retry
+  if (refId && !refdataLoaded) {
+    console.log('[OC→chart] Waiting for refdata…');
+    ensureRefdata(currentExchange).then(() => {
+      navigateToOptionChart(underlying, strikeRs, optType, refId);
+    });
+    return;
+  }
+
+  // 3. Last resort: construct name (correct for monthly, may be wrong for weekly)
   const expStr = currentExpiry || '';
   const yr  = expStr.slice(2, 4);
   const mo  = expStr.length >= 6 ? MONTHS[parseInt(expStr.slice(4, 6)) - 1] : '';
   const nubraName = `${underlying}${yr}${mo}${strike}${optType}`;
-  console.log('[OC→chart fallback]', nubraName);
-  document.dispatchEvent(new CustomEvent('load-chart', { detail: { instrument: {
-    stock_name: nubraName, nubra_name: nubraName,
-    exchange: currentExchange, derivative_type: 'OPT', asset_type: 'OPT',
-  }}}));
+  console.warn('[OC→chart fallback]', nubraName, '— ref_id not in refdata');
+  dispatch(nubraName);
+
+  function dispatch(name) {
+    // Use stock_name for both fields — chart.js picks nubra_name first for the query
+    // stock_name IS the correct query value (e.g. "NIFTY26JUN0223600CE")
+    document.dispatchEvent(new CustomEvent('load-chart', { detail: { instrument: {
+      stock_name:      name,
+      nubra_name:      name,
+      asset:           currentSymbol,
+      exchange:        currentExchange,
+      derivative_type: 'OPT',
+      asset_type:      'OPT',
+    }}}));
+  }
 }
 
 // ── Cell builders ─────────────────────────────────────────────────────────────
@@ -534,4 +577,4 @@ function setMessage(msg) {
   tbody.innerHTML = `<tr><td colspan="16" class="center" style="color:var(--text-muted);padding:32px;font-size:14px">${msg}</td></tr>`;
 }
 
-export const OptionChainModule = { init, loadFromInstrument, onWsTick };
+export const OptionChainModule = { init, loadFromInstrument, onWsTick, preloadRefdata };

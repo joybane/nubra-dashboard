@@ -1,4 +1,5 @@
 import { subscribe, unsubscribe } from './app.js';
+import { TradingModule } from './trading.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const INTRADAY    = new Set(['1m','2m','3m','5m','10m','15m','30m','1h']);
@@ -162,11 +163,25 @@ function init() {
       minimumWidth:   72,
     },
     timeScale: {
-      borderColor:          '#2a2d32',
-      timeVisible:          true,
-      secondsVisible:       false,
+      borderColor:               '#2a2d32',
+      timeVisible:               true,
+      secondsVisible:            false,
       shiftVisibleRangeOnNewBar: true,
       tickMarkMaxCharacterLength: 8,
+      // Show only date (no time) for session-boundary ticks
+      tickMarkFormatter: (time, tickMarkType) => {
+        const d = new Date(time * 1000);
+        const h  = d.getUTCHours();
+        const m  = d.getUTCMinutes();
+        const hStr = h.toString().padStart(2,'0');
+        const mStr = m.toString().padStart(2,'0');
+        // Session boundary: only show date when it's near midnight (gap period)
+        if (h < 9 || h >= 16) {
+          // Non-trading time — show date
+          return d.toLocaleDateString('en-IN', { day:'2-digit', month:'short', timeZone:'UTC' });
+        }
+        return `${hStr}:${mStr}`;
+      },
     },
     handleScroll: true,
     handleScale:  true,
@@ -416,6 +431,9 @@ async function loadSymbol(instrument) {
 
     const sym2 = instrument.nubra_name || instrument.stock_name || instrument.asset;
     subscribe('index_bucket', { instruments: [], indexes: [sym2] }, currentInterval, instrument.exchange || 'NSE');
+
+    // Notify paper trading module so Buy/Sell buttons know current symbol
+    TradingModule.setChartSymbol(sym2, instrument.exchange || 'NSE', nubraType(instrument));
   } catch (err) {
     showLoading(`Error: ${err.message}`);
     console.error('loadSymbol error:', err);
@@ -585,6 +603,17 @@ function hideLoading() {
   loadingEl.style.display = 'none';
 }
 
+// ── Market hours check (IST 9:15 AM – 3:30 PM, Mon–Fri) ──────────────────────
+function isMarketOpen() {
+  const nowUtcMs = Date.now();
+  const istMs    = nowUtcMs + IST_OFFSET * 1000;
+  const ist      = new Date(istMs);
+  const day      = ist.getUTCDay(); // 0=Sun,6=Sat
+  if (day === 0 || day === 6) return false;
+  const totalMin = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  return totalMin >= 555 && totalMin < 930; // 9:15 = 555, 15:30 = 930
+}
+
 // ── Candle countdown — positioned on the price axis below current price ───────
 function startCountdown() {
   if (countdownTimer) clearInterval(countdownTimer);
@@ -598,7 +627,10 @@ function stopCountdown() {
 }
 
 function tickCountdown() {
-  if (!currentInterval || !currentInstrument) { stopCountdown(); return; }
+  if (!currentInterval || !currentInstrument || !isMarketOpen()) {
+    stopCountdown();
+    return;
+  }
   const intSec    = intervalToSeconds(currentInterval);
   const nowUtc    = Math.floor(Date.now() / 1000);
   const elapsed   = (nowUtc + IST_OFFSET) % intSec;
