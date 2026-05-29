@@ -516,12 +516,19 @@ function computePositions() {
   const pos = {};
   for (const o of paperOrders) {
     if (o.status !== 'EXECUTED') continue;
-    if (!pos[o.symbol]) pos[o.symbol] = {
+    const sid = o.strategyId || 'default';
+    // Key = symbol + strategy so each strategy tracks its own P&L independently
+    const key = `${o.symbol}::${sid}`;
+    if (!pos[key]) pos[key] = {
       symbol: o.symbol, exchange: o.exchange,
-      instrumentType: o.instrumentType, netQty: 0,
-      buyQty: 0, sellQty: 0, avgBuyPrice: 0, avgSellPrice: 0, realizedPnl: 0,
+      instrumentType: o.instrumentType, strategyId: sid,
+      netQty: 0, buyQty: 0, sellQty: 0,
+      avgBuyPrice: 0, avgSellPrice: 0, realizedPnl: 0,
+      executedAt: o.executedAt || o.createdAt,
     };
-    const p = pos[o.symbol];
+    const p = pos[key];
+    // Track earliest entry time for P&L chart
+    if ((o.executedAt || o.createdAt) < p.executedAt) p.executedAt = o.executedAt || o.createdAt;
     if (o.side === 'BUY') {
       const tot = p.buyQty + o.qty;
       p.avgBuyPrice  = (p.avgBuyPrice * p.buyQty + o.executedPrice * o.qty) / tot;

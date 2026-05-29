@@ -942,7 +942,7 @@ td.ltp-cell.down { color: var(--red); }
 .btn-sell-chart { background: #ef4444; color: #fff; }
 .btn-buy-chart:hover, .btn-sell-chart:hover { opacity: 0.85; }
 
-/* ── Order placement modal ───────────────────────────────────────────── */
+/* ── Order placement modal (broker-style) ────────────────────────────── */
 .order-overlay {
   position: fixed; inset: 0; z-index: 500;
   background: rgba(0,0,0,0.55);
@@ -951,75 +951,92 @@ td.ltp-cell.down { color: var(--red); }
 
 .order-card {
   background: var(--bg-card); border: 1px solid var(--border);
-  border-radius: 12px; width: 380px;
-  padding: 20px; display: flex; flex-direction: column; gap: 14px;
-  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  border-radius: 10px; width: 400px; overflow: hidden;
+  display: flex; flex-direction: column;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.6);
 }
 
-.order-card-top {
-  display: flex; align-items: center; gap: 10px;
+/* Header changes color based on BUY/SELL */
+.om-header {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 14px 16px 12px; position: relative;
+  transition: background 0.15s;
 }
+.om-header.buy  { background: rgba(34,197,94,0.18); border-bottom: 2px solid #22c55e; }
+.om-header.sell { background: rgba(239,68,68,0.18);  border-bottom: 2px solid #ef4444; }
 
-.order-sym-info { display: flex; align-items: center; gap: 8px; flex: 1; }
-.order-sym-name { font-size: 16px; font-weight: 700; color: var(--text-primary); }
-.order-sym-exch {
-  font-size: 10px; padding: 2px 6px; border-radius: 3px;
-  background: rgba(99,102,241,0.15); color: #818cf8;
+/* Large BUY/SELL tabs — clearly show which is active */
+.om-side-tabs { display: flex; gap: 6px; }
+.om-side-tab {
+  flex: 1; padding: 9px 0; border: 2px solid transparent;
+  border-radius: 6px; font-size: 14px; font-weight: 800;
+  cursor: pointer; font-family: var(--font); transition: all 0.12s;
+  background: var(--bg-hover); color: var(--text-muted);
 }
-.order-sym-ltp  { font-size: 13px; color: var(--text-secondary); margin-left: auto; }
+.om-side-tab.buy  { border-color: #22c55e; color: #22c55e; }
+.om-side-tab.sell { border-color: #ef4444; color: #ef4444; }
+.om-side-tab.buy.active  { background: #22c55e; color: #fff; }
+.om-side-tab.sell.active { background: #ef4444; color: #fff; }
+.om-side-tab:not(.active):hover { background: var(--bg-card); }
 
-.order-side-toggle { display: flex; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
-.side-btn {
-  padding: 6px 14px; border: none; font-size: 12px; font-weight: 700;
-  cursor: pointer; background: var(--bg-hover); color: var(--text-muted);
-  font-family: var(--font);
+.om-sym-row {
+  display: flex; align-items: center; gap: 8px;
 }
-.side-btn.buy.active  { background: #22c55e; color: #fff; }
-.side-btn.sell.active { background: #ef4444; color: #fff; }
+.om-sym  { font-size: 13px; font-weight: 700; color: var(--text-primary); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.om-exch { font-size: 10px; padding: 2px 6px; border-radius: 3px; background: rgba(99,102,241,0.15); color: #818cf8; }
+.om-ltp  { font-size: 12px; color: var(--text-secondary); }
 
-.order-close {
+.om-close-btn {
+  position: absolute; top: 10px; right: 12px;
   background: none; border: none; color: var(--text-muted);
-  font-size: 16px; cursor: pointer; padding: 4px;
+  font-size: 16px; cursor: pointer;
 }
-.order-close:hover { color: var(--text-primary); }
+.om-close-btn:hover { color: var(--text-primary); }
 
-.order-type-row {
-  display: flex; gap: 4px; background: var(--bg-secondary);
-  border-radius: 6px; padding: 3px;
+/* Order type tabs */
+.om-type-row {
+  display: flex; gap: 0; background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
 }
 .otype-btn {
-  flex: 1; padding: 5px; border: none; border-radius: 4px;
+  flex: 1; padding: 8px; border: none; border-bottom: 2px solid transparent;
   font-size: 12px; font-weight: 500; cursor: pointer;
   background: none; color: var(--text-secondary); font-family: var(--font);
   transition: all 0.12s;
 }
-.otype-btn.active { background: var(--accent); color: #fff; }
+.otype-btn:hover   { color: var(--text-primary); }
+.otype-btn.active  { color: var(--accent); border-bottom-color: var(--accent); font-weight: 700; }
 
-.order-fields { display: flex; flex-direction: column; gap: 10px; }
-.order-field  { display: flex; flex-direction: column; gap: 4px; }
-.order-field label { font-size: 11px; color: var(--text-secondary); font-weight: 500; }
-.order-field input {
+/* Body fields */
+.om-body { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
+.om-row  { display: flex; gap: 10px; }
+.om-field { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.om-field.half { flex: 1; }
+.om-field label { font-size: 11px; color: var(--text-secondary); font-weight: 500; text-transform: uppercase; letter-spacing: 0.3px; }
+.om-field input, .om-field select {
   background: var(--bg-secondary); border: 1px solid var(--border);
-  border-radius: 6px; padding: 8px 10px; color: var(--text-primary);
-  font-size: 14px; outline: none; font-family: var(--font);
+  border-radius: 6px; padding: 9px 10px; color: var(--text-primary);
+  font-size: 14px; outline: none; font-family: var(--font); width: 100%;
 }
-.order-field input:focus { border-color: var(--accent); }
+.om-field input:focus, .om-field select:focus { border-color: var(--accent); }
 
-.order-info-row { font-size: 12px; color: var(--text-muted); text-align: center; }
+.om-info { font-size: 11px; color: var(--text-muted); text-align: center; padding: 0 16px 4px; }
 
-.order-submit {
-  padding: 11px; border: none; border-radius: 7px;
-  font-size: 14px; font-weight: 700; cursor: pointer;
-  font-family: var(--font); transition: opacity 0.15s;
+/* Submit button — full width, big, color matches BUY/SELL */
+.om-submit-btn {
+  margin: 0 16px 14px; padding: 13px; border: none; border-radius: 7px;
+  font-size: 15px; font-weight: 800; cursor: pointer;
+  font-family: var(--font); transition: opacity 0.15s; letter-spacing: 0.3px;
 }
-.order-submit.buy  { background: #22c55e; color: #fff; }
-.order-submit.sell { background: #ef4444; color: #fff; }
-.order-submit:hover:not(:disabled) { opacity: 0.88; }
-.order-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+.om-submit-btn.buy  { background: #22c55e; color: #fff; }
+.om-submit-btn.sell { background: #ef4444; color: #fff; }
+.om-submit-btn:hover:not(:disabled) { opacity: 0.88; }
+.om-submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.order-error {
-  font-size: 12px; color: var(--red); background: rgba(239,68,68,0.1);
-  border-radius: 5px; padding: 7px 10px; text-align: center;
+.om-error {
+  margin: 0 16px 12px; font-size: 12px; color: var(--red);
+  background: rgba(239,68,68,0.1); border-radius: 5px;
+  padding: 8px 10px; text-align: center; line-height: 1.5;
 }
 
 /* ── Trading panel (bottom) ──────────────────────────────────────────── */

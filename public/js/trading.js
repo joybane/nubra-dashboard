@@ -6,6 +6,7 @@ const btnChartSell   = document.getElementById('btn-chart-sell');
 
 // Order modal
 const orderModal     = document.getElementById('order-modal');
+const omHeader       = document.getElementById('om-header');
 const omSymbol       = document.getElementById('om-symbol');
 const omExchange     = document.getElementById('om-exchange');
 const omLtp          = document.getElementById('om-ltp');
@@ -224,19 +225,25 @@ function closeModal() { orderModal.classList.add('hidden'); }
 
 function setSide(side) {
   orderSide = side;
-  omBuyBtn.classList.toggle('active', side === 'BUY');
-  omSellBtn.classList.toggle('active', side === 'SELL');
-  omSubmit.textContent = `Place ${side === 'BUY' ? 'Buy' : 'Sell'} Order`;
-  omSubmit.className   = `order-submit ${side === 'BUY' ? 'buy' : 'sell'}`;
+  const isBuy = side === 'BUY';
+  omBuyBtn.classList.toggle('active', isBuy);
+  omSellBtn.classList.toggle('active', !isBuy);
+  // Header background changes to green (buy) or red (sell)
+  if (omHeader) {
+    omHeader.className = `om-header ${isBuy ? 'buy' : 'sell'}`;
+  }
+  omSubmit.textContent = isBuy ? '▲ Place Buy Order' : '▼ Place Sell Order';
+  omSubmit.className   = `om-submit-btn ${isBuy ? 'buy' : 'sell'}`;
 }
 
 function setOrderType(type) {
   orderType = type;
-  omPriceWrap.classList.toggle('hidden', type === 'MKT');
-  omTriggerWrap.classList.toggle('hidden', type !== 'SL');
-  omInfo.textContent = type === 'MKT' ? 'Executes immediately at live price'
+  // For new layout: price-wrap row is always shown for LMT/SL
+  if (omPriceWrap) omPriceWrap.classList.toggle('hidden', type === 'MKT');
+  if (omTriggerWrap) omTriggerWrap.classList.toggle('hidden', type !== 'SL');
+  if (omInfo) omInfo.textContent = type === 'MKT' ? 'Executes immediately at live price'
     : type === 'LMT' ? 'Executes when price reaches your target'
-    : 'Triggers at specified price, executes at market';
+    : 'Stop-loss: trigger price activates the order';
 }
 
 async function submitOrder() {
@@ -244,9 +251,32 @@ async function submitOrder() {
   const qty     = Number(omQty.value);
   const price   = orderType !== 'MKT' ? Number(omPrice.value)   : 0;
   const trigger = orderType === 'SL'  ? Number(omTrigger.value) : 0;
-  if (!qty || qty <= 0)            return showError('Enter a valid quantity.');
-  if (orderType === 'LMT' && !price)   return showError('Enter limit price.');
+  if (!qty || qty <= 0)              return showError('Enter a valid quantity.');
+  if (orderType === 'LMT' && !price) return showError('Enter limit price.');
   if (orderType === 'SL'  && !trigger) return showError('Enter trigger price.');
+
+  // For MARKET orders: verify we have a price (WS cache or knownPrice from caller)
+  if (orderType === 'MKT' && !knownModalPrice) {
+    // Try server cache one more time
+    try {
+      const r = await fetch(`/api/paper/price/${encodeURIComponent(currentSym)}`);
+      const d = await r.json();
+      if (d.price) {
+        knownModalPrice = d.price;
+        omLtp.textContent = `₹${d.price.toFixed(2)}`;
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Still no price? Switch to Limit so user can enter it manually
+  if (orderType === 'MKT' && !knownModalPrice) {
+    document.querySelectorAll('.otype-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector('.otype-btn[data-otype="LMT"]').classList.add('active');
+    setOrderType('LMT');
+    showError('Live price not available. Enter the price you see on screen and place a Limit order.');
+    omPrice.focus();
+    return;
+  }
 
   omSubmit.disabled = true; omSubmit.textContent = 'Placing…';
   try {
@@ -266,8 +296,8 @@ async function submitOrder() {
   finally { omSubmit.disabled = false; setSide(orderSide); }
 }
 
-function showError(msg) { omError.textContent = msg; omError.classList.remove('hidden'); }
-function hideError()    { omError.classList.add('hidden'); }
+function showError(msg) { if (omError) { omError.textContent = msg; omError.classList.remove('hidden'); } }
+function hideError()    { omError?.classList.add('hidden'); }
 
 // ── Positions grouped by strategy ────────────────────────────────────────────
 async function loadPositions() {
@@ -373,8 +403,8 @@ function renderStrategiesWithPositions(positions) {
             <td class="${upR ? 'up' : 'down'}">${upR?'+':''}₹${fmtP(Math.abs(p.realizedPnl))}</td>
             <td>
               <button class="tp-action-btn pos-pnl-btn" title="View P&L chart">📈</button>
-              <button class="tp-action-btn" onclick="window._tp.openModal('BUY','${p.symbol}','${p.exchange}')">B</button>
-              <button class="tp-action-btn sell" onclick="window._tp.openModal('SELL','${p.symbol}','${p.exchange}')">S</button>
+              <button class="tp-action-btn" onclick="window._tp.openModal('BUY','${p.symbol}','${p.exchange}','${p.instrumentType}',undefined,${p.ltp||0})">B</button>
+              <button class="tp-action-btn sell" onclick="window._tp.openModal('SELL','${p.symbol}','${p.exchange}','${p.instrumentType}',undefined,${p.ltp||0})">S</button>
             </td>
           </tr>`;
         }).join('')}</tbody>

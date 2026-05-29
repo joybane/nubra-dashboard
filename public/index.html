@@ -301,56 +301,63 @@
   </div><!-- #main -->
 </div><!-- #app -->
 
-<!-- ── Order placement modal ─────────────────────────────────────────────── -->
+<!-- ── Order placement modal (broker-style) ──────────────────────────────── -->
 <div id="order-modal" class="order-overlay hidden">
   <div class="order-card" id="order-card">
-    <div class="order-card-top">
-      <div class="order-sym-info">
-        <span class="order-sym-name" id="om-symbol">NIFTY</span>
-        <span class="order-sym-exch" id="om-exchange">NSE</span>
-        <span class="order-sym-ltp" id="om-ltp">₹—</span>
+
+    <!-- Side selector — fills the header with green/red -->
+    <div class="om-header" id="om-header">
+      <div class="om-side-tabs">
+        <button class="om-side-tab buy active" id="om-buy">▲ BUY</button>
+        <button class="om-side-tab sell" id="om-sell">▼ SELL</button>
       </div>
-      <div class="order-side-toggle">
-        <button class="side-btn buy active" id="om-buy">BUY</button>
-        <button class="side-btn sell" id="om-sell">SELL</button>
+      <div class="om-sym-row">
+        <span class="om-sym" id="om-symbol">—</span>
+        <span class="om-exch" id="om-exchange">NSE</span>
+        <span class="om-ltp" id="om-ltp">LTP: —</span>
       </div>
-      <button class="order-close" id="om-close">✕</button>
+      <button class="om-close-btn" id="om-close">✕</button>
     </div>
 
-    <div class="order-type-row">
+    <!-- Order type tabs -->
+    <div class="om-type-row">
       <button class="otype-btn active" data-otype="MKT">Market</button>
       <button class="otype-btn" data-otype="LMT">Limit</button>
       <button class="otype-btn" data-otype="SL">Stop Loss</button>
     </div>
 
-    <div class="order-fields">
-      <div class="order-field">
-        <label>Strategy</label>
-        <div class="strategy-select-wrap">
-          <select id="om-strategy"></select>
-          <button class="btn-new-strategy" id="om-new-strategy" title="Create new strategy">+</button>
+    <!-- Fields -->
+    <div class="om-body">
+      <div class="om-row">
+        <div class="om-field half">
+          <label>Strategy</label>
+          <div class="strategy-select-wrap">
+            <select id="om-strategy"></select>
+            <button class="btn-new-strategy" id="om-new-strategy" title="New strategy">+</button>
+          </div>
+        </div>
+        <div class="om-field half">
+          <label>Qty</label>
+          <input type="number" id="om-qty" min="1" value="1" />
         </div>
       </div>
-      <div class="order-field">
-        <label>Qty (shares/units)</label>
-        <input type="number" id="om-qty" min="1" value="1" />
-      </div>
-      <div class="order-field" id="om-price-wrap">
-        <label>Price (₹)</label>
-        <input type="number" id="om-price" step="0.05" placeholder="0.00" />
-      </div>
-      <div class="order-field hidden" id="om-trigger-wrap">
-        <label>Trigger Price (₹)</label>
-        <input type="number" id="om-trigger" step="0.05" placeholder="0.00" />
+      <div class="om-row" id="om-price-wrap">
+        <div class="om-field half">
+          <label>Price (₹)</label>
+          <input type="number" id="om-price" step="0.05" placeholder="0.00" />
+        </div>
+        <div class="om-field half hidden" id="om-trigger-wrap">
+          <label>Trigger (₹)</label>
+          <input type="number" id="om-trigger" step="0.05" placeholder="0.00" />
+        </div>
       </div>
     </div>
 
-    <div class="order-info-row">
-      <span id="om-info">Market order executes at live price</span>
-    </div>
+    <div class="om-info" id="om-info">Executes immediately at live price</div>
 
-    <button class="order-submit buy" id="om-submit">Place Buy Order</button>
-    <div class="order-error hidden" id="om-error"></div>
+    <button class="om-submit-btn" id="om-submit">Place Buy Order</button>
+    <div class="om-error hidden" id="om-error"></div>
+
   </div>
 </div>
 
