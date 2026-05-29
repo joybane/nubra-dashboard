@@ -382,7 +382,22 @@ function connectNubraWs() {
         if (decoded.type === 'ohlcv' && decoded.data) {
           const all = [...(decoded.data.indexes || []), ...(decoded.data.instruments || [])];
           for (const b of all) {
-            if (b.indexname && b.close) paperUpdatePrice(b.indexname, Number(b.close) / 100);
+            if (b.indexname && b.close) {
+              const pr = Number(b.close) / 100;
+              paperUpdatePrice(b.indexname, pr);
+              recordTick(b.indexname, pr);
+            }
+          }
+        }
+        // Also update prices from live index tick (index subscription)
+        if (decoded.type === 'index_tick' && decoded.data) {
+          const all2 = [...(decoded.data.indexes || []), ...(decoded.data.instruments || [])];
+          for (const b of all2) {
+            if (b.indexname && b.index_value) {
+              const pr2 = Number(b.index_value) / 100;
+              paperUpdatePrice(b.indexname, pr2);
+              recordTick(b.indexname, pr2);
+            }
           }
         }
         broadcast(decoded);
@@ -422,12 +437,15 @@ wss.on('connection', (ws) => {
         const verb    = msg.action === 'subscribe' ? 'batch_subscribe' : 'batch_unsubscribe';
         const token   = authState.sessionToken;
         const payload = JSON.stringify(msg.payload || { instruments: [], indexes: [] });
-        const interval= msg.interval || '1m';
-        const exchange= msg.exchange  || 'NSE';
-        const cmd     = `${verb} ${token} index_bucket ${payload} ${interval} ${exchange}`;
+        const exchange= msg.exchange || 'NSE';
+        const bucket  = msg.bucket   || 'index_bucket';
+        // 'index' type has no interval; 'index_bucket' needs one
+        const cmd = bucket === 'index'
+          ? `${verb} ${token} index ${payload} ${exchange}`
+          : `${verb} ${token} index_bucket ${payload} ${msg.interval || '1m'} ${exchange}`;
         if (nubraWs && nubraWs.readyState === WebSocket.OPEN) {
           nubraWs.send(cmd);
-          console.log('[WS cmd]', cmd.slice(0, 80));
+          console.log('[WS cmd]', cmd.slice(0, 90));
         } else if (msg.action === 'subscribe') {
           pendingSubs.push(cmd);
           connectNubraWs();
@@ -475,13 +493,24 @@ function loadPaperData() {
   return { orders: [], cash: PAPER_CASH_DEFAULT };
 }
 function savePaperData() {
-  try { writeFileSync(PAPER_FILE, JSON.stringify({ orders: paperOrders, cash: paperCash }), 'utf8'); }
+  try { writeFileSync(PAPER_FILE, JSON.stringify({ orders: paperOrders, cash: paperCash, strategies: paperStrategies }), 'utf8'); }
   catch { }
 }
 
-const paperData = loadPaperData();
-let paperOrders = paperData.orders || [];
-let paperCash   = paperData.cash  ?? PAPER_CASH_DEFAULT;
+const paperData       = loadPaperData();
+let paperOrders      = paperData.orders     || [];
+let paperCash        = paperData.cash       ?? PAPER_CASH_DEFAULT;
+let paperStrategies  = paperData.strategies || [{ id: 'default', name: 'Default Strategy', createdAt: Date.now() }];
+
+// Tick history per symbol — ring buffer, last 2000 ticks
+const tickHistory = {}; // symbol → [{ts, price}]
+const TICK_MAX    = 2000;
+
+function recordTick(symbol, priceRs) {
+  if (!tickHistory[symbol]) tickHistory[symbol] = [];
+  tickHistory[symbol].push({ ts: Date.now(), price: priceRs });
+  if (tickHistory[symbol].length > TICK_MAX) tickHistory[symbol].shift();
+}
 
 function computePositions() {
   const pos = {};
@@ -548,7 +577,7 @@ app.get('/api/paper/orders', requireAuth, (req, res) => {
 // POST place order
 app.post('/api/paper/order', requireAuth, (req, res) => {
   try {
-    const { symbol, exchange, side, orderType, qty, price, triggerPrice, instrumentType } = req.body;
+    const { symbol, exchange, side, orderType, qty, price, triggerPrice, instrumentType, strategyId, knownPrice } = req.body;
     if (!symbol || !side || !qty || qty <= 0) {
       return res.status(400).json({ error: 'symbol, side, qty required' });
     }
@@ -556,14 +585,16 @@ app.post('/api/paper/order', requireAuth, (req, res) => {
       id: randomUUID(), symbol, exchange: exchange || 'NSE',
       side: side.toUpperCase(), orderType: (orderType || 'MKT').toUpperCase(),
       instrumentType: instrumentType || 'STOCK',
+      strategyId: strategyId || 'default',
       qty: Number(qty), price: price ? Number(price) : 0,
       triggerPrice: triggerPrice ? Number(triggerPrice) : 0,
       status: 'PENDING', executedPrice: 0,
       createdAt: Date.now(), executedAt: null,
     };
     if (order.orderType === 'MKT') {
-      const cur = paperPrices[symbol] || 0;
-      if (!cur) return res.status(400).json({ error: `No live price for ${symbol}. Load its chart first to subscribe.` });
+      // Use WS price → knownPrice (from UI) → reject
+      const cur = paperPrices[symbol] || (knownPrice ? Number(knownPrice) : 0);
+      if (!cur) return res.status(400).json({ error: `No live price for ${symbol}. Add it to the watchlist or load its chart to get live data.` });
       order.status = 'EXECUTED'; order.executedPrice = cur; order.executedAt = Date.now();
       if (order.side === 'BUY') paperCash -= cur * order.qty;
       else                      paperCash += cur * order.qty;
@@ -595,6 +626,47 @@ app.put('/api/paper/reset', requireAuth, (req, res) => {
 app.get('/api/paper/price/:symbol', requireAuth, (req, res) => {
   const p = paperPrices[req.params.symbol];
   res.json({ price: p || null });
+});
+
+// ── Strategies CRUD ───────────────────────────────────────────────────────────
+app.get('/api/paper/strategies', requireAuth, (req, res) => {
+  res.json({ strategies: paperStrategies });
+});
+
+app.post('/api/paper/strategies', requireAuth, (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const s = { id: randomUUID(), name: name.trim(), createdAt: Date.now() };
+  paperStrategies.push(s);
+  savePaperData();
+  res.json({ ok: true, strategy: s });
+});
+
+app.put('/api/paper/strategies/:id', requireAuth, (req, res) => {
+  const s = paperStrategies.find(x => x.id === req.params.id);
+  if (!s) return res.status(404).json({ error: 'Strategy not found' });
+  s.name = (req.body.name || s.name).trim();
+  savePaperData();
+  res.json({ ok: true, strategy: s });
+});
+
+app.delete('/api/paper/strategies/:id', requireAuth, (req, res) => {
+  const id = req.params.id;
+  if (id === 'default') return res.status(400).json({ error: 'Cannot delete default strategy' });
+  // Move orders to default
+  paperOrders.forEach(o => { if (o.strategyId === id) o.strategyId = 'default'; });
+  paperStrategies = paperStrategies.filter(s => s.id !== id);
+  savePaperData();
+  broadcast({ type: 'paper_update' });
+  res.json({ ok: true });
+});
+
+// GET tick history for a symbol from a given timestamp
+app.get('/api/paper/ticks/:symbol', requireAuth, (req, res) => {
+  const { symbol } = req.params;
+  const from   = Number(req.query.from) || 0;
+  const ticks  = (tickHistory[symbol] || []).filter(t => t.ts >= from);
+  res.json({ ticks, symbol });
 });
 
 // GET bulk prices for watchlist (comma-separated symbols)

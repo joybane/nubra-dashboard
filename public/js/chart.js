@@ -98,7 +98,7 @@ const ohlcVol        = document.getElementById('ohlc-vol');
 const symbolEl       = document.getElementById('chart-symbol');
 const priceEl        = document.getElementById('chart-price');
 const changeEl       = document.getElementById('chart-change');
-const intervalGroup  = document.getElementById('interval-group');
+const intervalSelect = document.getElementById('interval-select');
 const btnIndicators  = document.getElementById('btn-indicators');
 const indDropdown    = document.getElementById('indicator-dropdown');
 const indVolCheck    = document.getElementById('ind-volume');
@@ -341,14 +341,10 @@ function init() {
   // Subscribe to visible range change
   // (done via subscription after chart creation below)
 
-  // Interval buttons
-  intervalGroup.querySelectorAll('.interval-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      intervalGroup.querySelectorAll('.interval-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      currentInterval = btn.dataset.interval;
-      if (currentInstrument) loadSymbol(currentInstrument);
-    });
+  // Interval dropdown
+  intervalSelect?.addEventListener('change', () => {
+    currentInterval = intervalSelect.value;
+    if (currentInstrument) loadSymbol(currentInstrument);
   });
 }
 

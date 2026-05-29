@@ -149,24 +149,25 @@
           </div>
         </div>
 
-        <div class="interval-group" id="interval-group">
-          <!-- Minutes -->
-          <button class="interval-btn" data-interval="1m">1m</button>
-          <button class="interval-btn" data-interval="2m">2m</button>
-          <button class="interval-btn" data-interval="3m">3m</button>
-          <button class="interval-btn active" data-interval="5m">5m</button>
-          <button class="interval-btn" data-interval="10m">10m</button>
-          <button class="interval-btn" data-interval="15m">15m</button>
-          <button class="interval-btn" data-interval="30m">30m</button>
-          <div class="interval-sep"></div>
-          <!-- Hours -->
-          <button class="interval-btn" data-interval="1h">1H</button>
-          <div class="interval-sep"></div>
-          <!-- Days -->
-          <button class="interval-btn" data-interval="1d">1D</button>
-          <button class="interval-btn" data-interval="1w">1W</button>
-          <button class="interval-btn" data-interval="1mt">1M</button>
-        </div>
+        <select id="interval-select" class="interval-select">
+          <optgroup label="Minutes">
+            <option value="1m">1 min</option>
+            <option value="2m">2 min</option>
+            <option value="3m">3 min</option>
+            <option value="5m" selected>5 min</option>
+            <option value="10m">10 min</option>
+            <option value="15m">15 min</option>
+            <option value="30m">30 min</option>
+          </optgroup>
+          <optgroup label="Hours">
+            <option value="1h">1 Hour</option>
+          </optgroup>
+          <optgroup label="Days">
+            <option value="1d">1 Day</option>
+            <option value="1w">1 Week</option>
+            <option value="1mt">1 Month</option>
+          </optgroup>
+        </select>
       </div>
 
       <div id="chart-container">
@@ -262,7 +263,7 @@
       <div id="tp-resize-handle" title="Drag to resize"></div>
       <div class="tp-header">
         <div class="tp-tabs">
-          <button class="tp-tab active" data-tp="positions">Positions</button>
+          <button class="tp-tab active" data-tp="strategies">Strategies</button>
           <button class="tp-tab" data-tp="orders">Orders</button>
           <button class="tp-tab" data-tp="holdings">Holdings</button>
         </div>
@@ -275,21 +276,18 @@
         <button class="tp-toggle" id="tp-toggle" title="Collapse / Expand">▼</button>
       </div>
       <div id="tp-body">
-        <div id="tp-positions" class="tp-content active">
-          <table class="tp-table">
-            <thead><tr>
-              <th>Symbol</th><th>Exch</th><th>Net Qty</th>
-              <th>Avg Price</th><th>LTP</th>
-              <th>Unrealised P&amp;L</th><th>Realised P&amp;L</th><th>Actions</th>
-            </tr></thead>
-            <tbody id="pos-tbody"><tr class="tp-empty"><td colspan="8">No open positions</td></tr></tbody>
-          </table>
+        <!-- Strategies tab: grouped positions by strategy -->
+        <div id="tp-strategies" class="tp-content active">
+          <div class="strat-toolbar">
+            <button class="strat-new-btn" id="btn-new-strategy">+ New Strategy</button>
+          </div>
+          <div id="strat-list"></div>
         </div>
         <div id="tp-orders" class="tp-content hidden">
           <table class="tp-table">
             <thead><tr>
               <th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th>
-              <th>Price</th><th>Exec Price</th><th>Status</th><th>Time</th><th>Actions</th>
+              <th>Price</th><th>Exec Price</th><th>Status</th><th>Strategy</th><th>Time</th><th></th>
             </tr></thead>
             <tbody id="ord-tbody"><tr class="tp-empty"><td colspan="9">No orders placed</td></tr></tbody>
           </table>
@@ -327,6 +325,13 @@
 
     <div class="order-fields">
       <div class="order-field">
+        <label>Strategy</label>
+        <div class="strategy-select-wrap">
+          <select id="om-strategy"></select>
+          <button class="btn-new-strategy" id="om-new-strategy" title="Create new strategy">+</button>
+        </div>
+      </div>
+      <div class="order-field">
         <label>Qty (shares/units)</label>
         <input type="number" id="om-qty" min="1" value="1" />
       </div>
@@ -346,6 +351,27 @@
 
     <button class="order-submit buy" id="om-submit">Place Buy Order</button>
     <div class="order-error hidden" id="om-error"></div>
+  </div>
+</div>
+
+<!-- P&L tick-by-tick chart modal -->
+<div id="pnl-modal" class="order-overlay hidden">
+  <div class="pnl-card">
+    <div class="pnl-card-header">
+      <div class="pnl-title-wrap">
+        <span id="pnl-sym">—</span>
+        <span id="pnl-side-badge" class="pnl-side">—</span>
+        <span id="pnl-meta" class="pnl-meta">—</span>
+      </div>
+      <div class="pnl-stats">
+        <span>Entry: <strong id="pnl-entry">—</strong></span>
+        <span>LTP: <strong id="pnl-ltp">—</strong></span>
+        <span>P&amp;L: <strong id="pnl-total">—</strong></span>
+      </div>
+      <button id="pnl-close" class="order-close">✕</button>
+    </div>
+    <div id="pnl-chart-container" style="height:280px;position:relative;background:#0d0f11;"></div>
+    <div class="pnl-footer" id="pnl-footer">Loading ticks…</div>
   </div>
 </div>
 

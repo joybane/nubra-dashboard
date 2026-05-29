@@ -1,4 +1,5 @@
 // ── Watchlist Module ──────────────────────────────────────────────────────────
+import { subscribeIndex } from './app.js';
 
 const STORAGE_KEY = 'nubra-watchlist-v2';
 
@@ -47,6 +48,7 @@ function open() {
   panel?.classList.remove('hidden');
   document.getElementById('content-area')?.classList.add('wl-open');
   btnToggle?.classList.add('active');
+  subscribeAllItems(); // subscribe/re-subscribe when panel opens
   startPoll();
 }
 
@@ -104,7 +106,21 @@ function addItem(item) {
   items.push(item);
   saveItems();
   render();
+  subscribeAllItems();
   if (panelOpen) startPoll();
+}
+
+// Subscribe to live index prices for all watchlist items
+function subscribeAllItems() {
+  if (!items.length) return;
+  // Group by exchange and subscribe
+  const byExch = {};
+  for (const it of items) {
+    (byExch[it.exchange] = byExch[it.exchange] || []).push(it.symbol);
+  }
+  for (const [exch, syms] of Object.entries(byExch)) {
+    subscribeIndex(syms, exch);
+  }
 }
 
 function removeItem(symbol, exchange) {
@@ -212,4 +228,4 @@ async function fetchPrices() {
   } catch { /* ignore */ }
 }
 
-export const WatchlistModule = { init };
+export const WatchlistModule = { init, subscribeAllItems };

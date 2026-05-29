@@ -396,6 +396,20 @@ function renderChain(chain) {
     tds.forEach((td, i) => { if (colKeys[i]) cellMap.set(colKeys[i], td); });
 
     tr.addEventListener('click', (e) => {
+      // B/S buttons in LTP cells open order modal with the LTP pre-filled
+      const ocBtn = e.target.closest('.oc-ob');
+      if (ocBtn) {
+        e.stopPropagation();
+        const refId  = Number(ocBtn.dataset.refid);
+        const price  = Number(ocBtn.dataset.price);
+        const side   = ocBtn.dataset.side;
+        const optType= ocBtn.closest('td')?.classList.contains('ce-side') ? 'CE' : 'PE';
+        const sym = refIdMap.has(refId) ? refIdMap.get(refId)
+          : `${currentSymbol}${optType}${strike}`;
+        window._tp?.openModal(side, sym, currentExchange, 'OPT', undefined, price);
+        return;
+      }
+
       const td  = e.target.closest('td');
       if (!td) return;
       const tds = [...tr.querySelectorAll('td')];
@@ -478,7 +492,14 @@ function ceLtp(row) {
   const price = ltp / 100;
   const up    = chg == null ? true : chg >= 0;
   const pct   = chg != null ? `<div class="ltp-chg ${up?'up':'down'}">${up?'+':''}${Number(chg).toFixed(2)}%</div>` : '';
-  return `<td class="ce-side ltp-cell ${up?'up':'down'}" title="Click to view chart">₹${fmtPrice(price)}${pct}</td>`;
+  const refid = row.ref_id || '';
+  return `<td class="ce-side ltp-cell ${up?'up':'down'}" title="Click to chart | B/S to order">
+    <div class="ltp-val">₹${fmtPrice(price)}${pct}</div>
+    <div class="oc-order-btns">
+      <button class="oc-ob buy" data-refid="${refid}" data-price="${price}" data-side="BUY">B</button>
+      <button class="oc-ob sell" data-refid="${refid}" data-price="${price}" data-side="SELL">S</button>
+    </div>
+  </td>`;
 }
 
 function peLtp(row) {
@@ -489,7 +510,14 @@ function peLtp(row) {
   const price = ltp / 100;
   const up    = chg == null ? true : chg >= 0;
   const pct   = chg != null ? `<div class="ltp-chg ${up?'up':'down'}">${up?'+':''}${Number(chg).toFixed(2)}%</div>` : '';
-  return `<td class="pe-side ltp-cell ${up?'up':'down'}" title="Click to view chart">₹${fmtPrice(price)}${pct}</td>`;
+  const refid = row.ref_id || '';
+  return `<td class="pe-side ltp-cell ${up?'up':'down'}" title="Click to chart | B/S to order">
+    <div class="ltp-val">₹${fmtPrice(price)}${pct}</div>
+    <div class="oc-order-btns">
+      <button class="oc-ob buy" data-refid="${refid}" data-price="${price}" data-side="BUY">B</button>
+      <button class="oc-ob sell" data-refid="${refid}" data-price="${price}" data-side="SELL">S</button>
+    </div>
+  </td>`;
 }
 
 function ceOiVol(val, maxVal, cls) {

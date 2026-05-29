@@ -141,6 +141,8 @@ function connectWs() {
 function handleWsMessage(msg) {
   if (msg.type === 'ws_status') {
     setWsDot(msg.connected);
+    // Re-subscribe watchlist on every WS connect
+    if (msg.connected) WatchlistModule.subscribeAllItems();
     return;
   }
   if (msg.type === 'auth_status') {
@@ -168,6 +170,17 @@ function setWsDot(connected) {
 export function subscribe(bucket, payload, interval, exchange = 'NSE') {
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     state.ws.send(JSON.stringify({ action: 'subscribe', bucket, payload, interval, exchange }));
+  }
+}
+
+// Subscribe to live index prices (for watchlist) — no interval needed
+export function subscribeIndex(symbols, exchange = 'NSE') {
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({
+      action: 'subscribe', bucket: 'index',
+      payload: { instruments: [], indexes: Array.isArray(symbols) ? symbols : [symbols] },
+      exchange,
+    }));
   }
 }
 
