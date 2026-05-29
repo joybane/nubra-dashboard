@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en" id="root">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nubra Dashboard</title>
+  <!-- Apply saved theme immediately to avoid flash -->
+  <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('nubra-theme') || 'dark');</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css" />
+  <!-- TradingView Lightweight Charts -->
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+
+<!-- ── Login overlay ──────────────────────────────────────────────── -->
+<div id="login-overlay">
+  <div class="login-card">
+    <div>
+      <h2>Nubra <span style="color:var(--accent)">Dashboard</span></h2>
+      <p class="subtitle">Sign in to continue</p>
+    </div>
+
+    <!-- Step 1: Send OTP -->
+    <div id="login-step-1" class="login-step active">
+      <p style="font-size:13px;color:var(--text-secondary)">
+        Click below to send an OTP to your registered mobile number.
+      </p>
+      <button class="btn-primary" id="btn-send-otp">Send OTP</button>
+    </div>
+
+    <!-- Step 2: Enter OTP -->
+    <div id="login-step-2" class="login-step">
+      <label for="otp-input">Enter OTP</label>
+      <input id="otp-input" type="text" inputmode="numeric" maxlength="6" placeholder="6-digit OTP" autocomplete="one-time-code" />
+      <button class="btn-primary" id="btn-verify-otp">Verify OTP</button>
+    </div>
+
+    <!-- Step 3: MPIN (auto-submits from env) -->
+    <div id="login-step-3" class="login-step">
+      <p style="font-size:13px;color:var(--text-secondary)">
+        Verifying MPIN from server configuration...
+      </p>
+    </div>
+
+    <div id="login-status" class="login-status"></div>
+  </div>
+</div>
+
+<!-- ── Main app ───────────────────────────────────────────────────── -->
+<div id="app">
+  <!-- Top nav -->
+  <nav id="topnav">
+    <span class="brand">Nubra <span>Trade</span></span>
+
+    <div class="nav-tabs">
+      <button class="nav-tab active" data-view="chart">Chart</button>
+      <button class="nav-tab" data-view="optionchain">Option Chain</button>
+    </div>
+
+    <div class="search-wrap">
+      <span class="search-icon">&#x2315;</span>
+      <input id="search-input" type="text" placeholder="Search symbol…" autocomplete="off" />
+      <div id="search-dropdown"></div>
+    </div>
+
+    <div id="ws-dot" class="ws-dot" title="WebSocket: disconnected"></div>
+
+    <!-- Theme toggle -->
+    <button class="theme-toggle" id="btn-theme" title="Toggle theme">
+      <span id="theme-icon">☀</span>
+    </button>
+  </nav>
+
+  <!-- Views -->
+  <div id="main">
+
+    <!-- Chart view -->
+    <div id="view-chart">
+      <div class="chart-toolbar">
+        <span class="chart-title" id="chart-symbol">—</span>
+        <span class="chart-price" id="chart-price"></span>
+        <span class="chart-change" id="chart-change"></span>
+
+        <!-- Indicators button -->
+        <div class="indicator-wrap">
+          <button class="indicator-btn" id="btn-indicators">+ Indicators</button>
+          <div class="indicator-dropdown" id="indicator-dropdown">
+            <label class="indicator-item">
+              <input type="checkbox" id="ind-volume" /> Volume
+            </label>
+          </div>
+        </div>
+
+        <!-- OI Profile button -->
+        <div class="indicator-wrap">
+          <button class="indicator-btn" id="btn-oi-profile">⊕ OI Profile</button>
+          <div class="oi-profile-popup" id="oi-profile-popup">
+            <div class="oi-popup-title">OI Profile Settings</div>
+            <div class="oi-popup-section">
+              <div class="oi-popup-label">EXPIRES INCLUDED</div>
+              <div id="oi-expiry-checks"></div>
+            </div>
+            <div class="oi-popup-section">
+              <div class="oi-popup-label">VISUAL SETTINGS</div>
+              <label class="oi-visual-item">
+                <input type="checkbox" id="oi-show-calls" checked />
+                <span class="oi-dot" style="background:#26a69a"></span> CALLS
+              </label>
+              <label class="oi-visual-item">
+                <input type="checkbox" id="oi-show-puts" checked />
+                <span class="oi-dot" style="background:#ef5350"></span> PUTS
+              </label>
+            </div>
+            <div class="oi-popup-actions">
+              <button class="btn-sm oi-cancel-btn" id="btn-oi-cancel">Cancel</button>
+              <button class="btn-sm" id="btn-oi-apply">Apply</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="interval-group" id="interval-group">
+          <!-- Minutes -->
+          <button class="interval-btn" data-interval="1m">1m</button>
+          <button class="interval-btn" data-interval="2m">2m</button>
+          <button class="interval-btn" data-interval="3m">3m</button>
+          <button class="interval-btn active" data-interval="5m">5m</button>
+          <button class="interval-btn" data-interval="10m">10m</button>
+          <button class="interval-btn" data-interval="15m">15m</button>
+          <button class="interval-btn" data-interval="30m">30m</button>
+          <div class="interval-sep"></div>
+          <!-- Hours -->
+          <button class="interval-btn" data-interval="1h">1H</button>
+          <div class="interval-sep"></div>
+          <!-- Days -->
+          <button class="interval-btn" data-interval="1d">1D</button>
+          <button class="interval-btn" data-interval="1w">1W</button>
+          <button class="interval-btn" data-interval="1mt">1M</button>
+        </div>
+      </div>
+
+      <div id="chart-container">
+        <div class="chart-loading" id="chart-loading">Select a symbol to begin</div>
+
+        <!-- OHLC info overlay (top-left, like Nubra/TradingView) -->
+        <div id="chart-ohlc" class="chart-ohlc hidden">
+          <div class="ohlc-row1">
+            <span class="ohlc-label">O</span><span id="ohlc-o" class="ohlc-val">—</span>
+            <span class="ohlc-label">H</span><span id="ohlc-h" class="ohlc-val ohlc-high">—</span>
+            <span class="ohlc-label">L</span><span id="ohlc-l" class="ohlc-val ohlc-low">—</span>
+            <span class="ohlc-label">C</span><span id="ohlc-c" class="ohlc-val">—</span>
+            <span id="ohlc-chg" class="ohlc-chg">—</span>
+          </div>
+          <div class="ohlc-row2">
+            <span class="ohlc-label">Vol</span><span id="ohlc-vol" class="ohlc-val">—</span>
+          </div>
+        </div>
+
+        <!-- Load-more indicator -->
+        <div id="chart-loadmore" class="chart-loadmore hidden">Loading…</div>
+
+        <!-- OI Profile canvas overlay -->
+        <canvas id="oi-canvas" class="oi-canvas hidden"></canvas>
+
+        <!-- Candle countdown timer -->
+        <div id="candle-countdown" class="candle-countdown hidden"></div>
+      </div>
+    </div>
+
+    <!-- Option chain view -->
+    <div id="view-optionchain">
+      <div class="oc-toolbar">
+        <!-- Quick F&O picks -->
+        <div class="oc-quick">
+          <button class="oc-quick-btn" data-sym="NIFTY"      data-exch="NSE">NIFTY</button>
+          <button class="oc-quick-btn" data-sym="BANKNIFTY"  data-exch="NSE">BANKNIFTY</button>
+          <button class="oc-quick-btn" data-sym="FINNIFTY"   data-exch="NSE">FINNIFTY</button>
+          <button class="oc-quick-btn" data-sym="MIDCPNIFTY" data-exch="NSE">MIDCPNIFTY</button>
+          <button class="oc-quick-btn" data-sym="SENSEX"     data-exch="BSE">SENSEX</button>
+        </div>
+        <div class="oc-sep"></div>
+        <label>Symbol</label>
+        <div style="position:relative">
+          <input id="oc-symbol-input" type="text" placeholder="e.g. NIFTY" style="width:110px" autocomplete="off" />
+          <div id="oc-suggestions" class="oc-suggestions"></div>
+        </div>
+        <label>Exchange</label>
+        <select id="oc-exchange">
+          <option value="NSE">NSE</option>
+          <option value="BSE">BSE</option>
+        </select>
+        <label>Expiry</label>
+        <select id="oc-expiry" style="width:130px"></select>
+        <button class="btn-sm" id="btn-load-oc">Load</button>
+        <div class="oc-spot" id="oc-spot"></div>
+      </div>
+
+      <div id="oc-scroll">
+        <table class="oc-table" id="oc-table">
+          <thead>
+            <tr class="oc-section-header">
+              <th colspan="7" class="oc-calls-th">Calls</th>
+              <th colspan="2" class="oc-center-th"></th>
+              <th colspan="7" class="oc-puts-th">Puts</th>
+            </tr>
+            <tr class="oc-col-names">
+              <!-- CE side -->
+              <th>Vega</th><th>Gamma</th><th>Theta</th><th>Delta</th>
+              <th>OI (L)</th><th>Vol (L)</th><th>LTP</th>
+              <!-- Center -->
+              <th class="strike-header">Strike</th>
+              <th class="strike-header">IV</th>
+              <!-- PE side -->
+              <th>LTP</th><th>Vol (L)</th><th>OI (L)</th>
+              <th>Delta</th><th>Theta</th><th>Gamma</th><th>Vega</th>
+            </tr>
+          </thead>
+          <tbody id="oc-tbody">
+            <tr><td colspan="16" class="center" style="color:var(--text-muted);padding:32px;font-size:14px">
+              Click a symbol above or type one and press Load
+            </td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- #main -->
+</div><!-- #app -->
+
+<script src="js/app.js" type="module"></script>
+</body>
+</html>

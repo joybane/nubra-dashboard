@@ -1,0 +1,99 @@
+syntax = "proto3";
+package nubra;
+
+// Mirrors google.protobuf.Any (field numbers are identical)
+message AnyMsg {
+  string type_url = 1;
+  bytes value = 2;
+}
+
+enum Interval {
+  INTERVAL_INVALID = 0;
+  INTERVAL_1_SECOND = 1;
+  INTERVAL_10_SECOND = 2;
+  INTERVAL_1_MINUTE = 3;
+  INTERVAL_2_MINUTE = 4;
+  INTERVAL_3_MINUTE = 5;
+  INTERVAL_5_MINUTE = 6;
+  INTERVAL_10_MINUTE = 7;
+  INTERVAL_15_MINUTE = 8;
+  INTERVAL_30_MINUTE = 9;
+  INTERVAL_1_HOUR = 10;
+  INTERVAL_2_HOUR = 11;
+  INTERVAL_4_HOUR = 12;
+  INTERVAL_1_DAY = 13;
+  INTERVAL_1_WEEK = 14;
+  INTERVAL_1_MONTH = 15;
+  INTERVAL_1_YEAR = 16;
+  INTERVAL_5_SECOND = 17;
+}
+
+message WebSocketMsgIndexBucket {
+  string indexname = 1;
+  string exchange = 2;
+  int32 interval = 3;
+  int64 timestamp = 4;
+  int64 open = 5;
+  int64 high = 6;
+  int64 low = 7;
+  int64 close = 8;
+  int64 bucket_volume = 9;
+  int64 tick_volume = 10;
+  int64 cumulative_volume = 11;
+  int64 bucket_timestamp = 12;
+}
+
+message BatchWebSocketIndexBucketMessage {
+  int64 timestamp = 1;
+  repeated WebSocketMsgIndexBucket indexes = 2;
+  repeated WebSocketMsgIndexBucket instruments = 3;
+}
+
+message WebSocketMsgIndex {
+  string indexname = 1;
+  int64 timestamp = 2;
+  int64 index_value = 3;
+  int64 high_index_value = 4;
+  int64 low_index_value = 5;
+  int64 volume = 6;
+  float changepercent = 7;
+  int64 tick_volume = 8;
+  int64 prev_close = 9;
+  string exchange = 10;
+  int64 volume_oi = 11;
+}
+
+message BatchWebSocketIndexMessage {
+  int64 timestamp = 1;
+  repeated WebSocketMsgIndex indexes = 2;
+  repeated WebSocketMsgIndex instruments = 3;
+}
+
+// Option chain live updates
+message WebSocketMsgOptionChainItem {
+  int64 inst_id   = 1;
+  int64 ts        = 2;
+  int64 sp        = 3;
+  int32 ls        = 4;
+  int64 ltp       = 5;
+  float ltpchg    = 6;
+  float iv        = 7;
+  float delta     = 8;
+  float gamma     = 9;
+  float theta     = 10;
+  float vega      = 11;
+  int64 oi        = 12;
+  int64 volume    = 13;
+  int64 ref_id    = 14;
+  int64 prev_oi   = 15;
+}
+
+message WebSocketMsgOptionChainUpdate {
+  string asset         = 1;
+  string expiry        = 2;
+  repeated WebSocketMsgOptionChainItem ce = 3;
+  repeated WebSocketMsgOptionChainItem pe = 4;
+  int64  atm           = 5;
+  int64  currentprice  = 6;
+  string exchange      = 7;
+}
