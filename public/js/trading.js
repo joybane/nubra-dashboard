@@ -10,10 +10,13 @@ const omHeader       = document.getElementById('om-header');
 const omSymbol       = document.getElementById('om-symbol');
 const omExchange     = document.getElementById('om-exchange');
 const omLtp          = document.getElementById('om-ltp');
+const omLtpChg       = document.getElementById('om-ltp-chg');
 const omBuyBtn       = document.getElementById('om-buy');
 const omSellBtn      = document.getElementById('om-sell');
 const omClose        = document.getElementById('om-close');
 const omQty          = document.getElementById('om-qty');
+const omQtyLabel     = document.getElementById('om-qty-label');
+const omLotInfo      = document.getElementById('om-lot-info');
 const omPrice        = document.getElementById('om-price');
 const omTrigger      = document.getElementById('om-trigger');
 const omPriceWrap    = document.getElementById('om-price-wrap');
@@ -23,6 +26,9 @@ const omError        = document.getElementById('om-error');
 const omInfo         = document.getElementById('om-info');
 const omStrategyEl   = document.getElementById('om-strategy');
 const omNewStrategy  = document.getElementById('om-new-strategy');
+const omMarginLabel  = document.getElementById('om-margin-label');
+const omMarginReq    = document.getElementById('om-margin-req');
+const omMarginAvail  = document.getElementById('om-margin-avail');
 
 // Trading panel
 const tpToggle       = document.getElementById('tp-toggle');
@@ -51,9 +57,11 @@ const pnlFooter      = document.getElementById('pnl-footer');
 // ── State ─────────────────────────────────────────────────────────────────────
 let orderSide     = 'BUY';
 let orderType     = 'MKT';
+let orderProduct  = 'INTRADAY';
 let currentSym    = '';
 let currentExch   = 'NSE';
 let currentIType  = 'STOCK';
+let currentLotSize = 1;
 let panelOpen     = true;
 let refreshTimer  = null;
 let strategies    = [];
@@ -75,6 +83,16 @@ function init() {
       setOrderType(btn.dataset.otype);
     });
   });
+
+  document.querySelectorAll('.oprod-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.oprod-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      orderProduct = btn.dataset.prod;
+    });
+  });
+
+  omQty?.addEventListener('input', () => updateLotInfo());
 
   omClose?.addEventListener('click', closeModal);
   orderModal?.addEventListener('click', e => { if (e.target === orderModal) closeModal(); });
@@ -186,15 +204,16 @@ async function deleteStrategy(id) {
 // ── Order modal ───────────────────────────────────────────────────────────────
 let knownModalPrice = 0; // price passed in from option chain / watchlist
 
-function openModal(side, symbol, exchange, instrumentType, strategyId, ltpHint) {
+function openModal(side, symbol, exchange, instrumentType, strategyId, ltpHint, lotSize) {
   const sym  = symbol || currentSym;
   if (!sym) { alert('Load a chart or add a symbol to watchlist first.'); return; }
 
   omSymbol.textContent   = sym;
   omExchange.textContent = exchange || currentExch;
-  currentSym   = sym;
-  currentExch  = exchange || currentExch;
-  currentIType = instrumentType || currentIType;
+  currentSym    = sym;
+  currentExch   = exchange || currentExch;
+  currentIType  = instrumentType || currentIType;
+  currentLotSize = Number(lotSize) || 1;
   knownModalPrice = ltpHint ? Number(ltpHint) : 0;
 
   setSide(side || 'BUY');
@@ -202,23 +221,66 @@ function openModal(side, symbol, exchange, instrumentType, strategyId, ltpHint) 
   omQty.value = '1'; omPrice.value = ''; omTrigger.value = ''; hideError();
   document.querySelectorAll('.otype-btn').forEach(b => b.classList.remove('active'));
   document.querySelector('.otype-btn[data-otype="MKT"]').classList.add('active');
+  document.querySelectorAll('.oprod-btn').forEach(b => b.classList.remove('active'));
+  document.querySelector('.oprod-btn[data-prod="INTRADAY"]').classList.add('active');
+  orderProduct = 'INTRADAY';
 
   if (strategyId && omStrategyEl) omStrategyEl.value = strategyId;
 
-  // Show price: WS cache first, then hint from caller, then fetch
-  fetch(`/api/paper/price/${encodeURIComponent(sym)}`)
+  updateLotInfo();
+
+  // Show price: WS cache first, then hint from caller, then fetch (with REST fallback)
+  const priceUrl = `/api/paper/price/${encodeURIComponent(sym)}?exchange=${currentExch}&type=${currentIType}`;
+  fetch(priceUrl)
     .then(r => r.json())
     .then(d => {
       const p = d.price || knownModalPrice;
-      omLtp.textContent = p ? `₹${Number(p).toFixed(2)}` : '₹—';
-      if (p) knownModalPrice = p;
+      omLtp.textContent = p ? `₹${Number(p).toFixed(2)}` : '—';
+      if (p) { knownModalPrice = p; updateMarginDisplay(); }
     })
     .catch(() => {
       if (knownModalPrice) omLtp.textContent = `₹${knownModalPrice.toFixed(2)}`;
     });
 
+  // Show available capital
+  fetch('/api/paper/positions')
+    .then(r => r.json())
+    .then(d => {
+      if (omMarginAvail && d.cash != null)
+        omMarginAvail.textContent = `₹${Number(d.cash).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+    }).catch(() => {});
+
   orderModal.classList.remove('hidden');
   omQty.focus();
+}
+
+function updateLotInfo() {
+  const isFnO = ['OPT','FUT'].includes((currentIType || '').toUpperCase());
+  if (omQtyLabel) omQtyLabel.textContent = isFnO && currentLotSize > 1 ? 'Lots' : 'Qty';
+  if (omLotInfo) {
+    omLotInfo.textContent = isFnO && currentLotSize > 1
+      ? `× ${currentLotSize} = ${(Number(omQty?.value) || 1) * currentLotSize} shares`
+      : '';
+  }
+  updateMarginDisplay();
+}
+
+function updateMarginDisplay() {
+  if (!omMarginReq || !knownModalPrice) return;
+  const lots = Number(omQty?.value) || 1;
+  const qty  = currentLotSize > 1 ? lots * currentLotSize : lots;
+  fetch('/api/paper/margin', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      symbol: currentSym, side: orderSide, qty, price: knownModalPrice,
+      instrumentType: currentIType, lotSize: currentLotSize,
+    }),
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (omMarginLabel) omMarginLabel.textContent = d.label || 'Required Margin';
+      if (omMarginReq)   omMarginReq.textContent   = `₹${Number(d.required).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+    }).catch(() => {});
 }
 
 function closeModal() { orderModal.classList.add('hidden'); }
@@ -228,12 +290,10 @@ function setSide(side) {
   const isBuy = side === 'BUY';
   omBuyBtn.classList.toggle('active', isBuy);
   omSellBtn.classList.toggle('active', !isBuy);
-  // Header background changes to green (buy) or red (sell)
-  if (omHeader) {
-    omHeader.className = `om-header ${isBuy ? 'buy' : 'sell'}`;
-  }
+  if (omHeader) omHeader.className = `om-header ${isBuy ? 'buy' : 'sell'}`;
   omSubmit.textContent = isBuy ? '▲ Place Buy Order' : '▼ Place Sell Order';
   omSubmit.className   = `om-submit-btn ${isBuy ? 'buy' : 'sell'}`;
+  updateMarginDisplay();
 }
 
 function setOrderType(type) {
@@ -248,10 +308,11 @@ function setOrderType(type) {
 
 async function submitOrder() {
   hideError();
-  const qty     = Number(omQty.value);
+  const lotsOrQty = Number(omQty.value);
+  const qty     = currentLotSize > 1 ? lotsOrQty * currentLotSize : lotsOrQty;
   const price   = orderType !== 'MKT' ? Number(omPrice.value)   : 0;
   const trigger = orderType === 'SL'  ? Number(omTrigger.value) : 0;
-  if (!qty || qty <= 0)              return showError('Enter a valid quantity.');
+  if (!lotsOrQty || lotsOrQty <= 0)  return showError('Enter a valid quantity.');
   if (orderType === 'LMT' && !price) return showError('Enter limit price.');
   if (orderType === 'SL'  && !trigger) return showError('Enter trigger price.');
 
@@ -259,7 +320,7 @@ async function submitOrder() {
   if (orderType === 'MKT' && !knownModalPrice) {
     // Try server cache one more time
     try {
-      const r = await fetch(`/api/paper/price/${encodeURIComponent(currentSym)}`);
+      const r = await fetch(`/api/paper/price/${encodeURIComponent(currentSym)}?exchange=${currentExch}&type=${currentIType}`);
       const d = await r.json();
       if (d.price) {
         knownModalPrice = d.price;

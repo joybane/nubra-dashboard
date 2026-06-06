@@ -178,12 +178,16 @@ export function subscribe(bucket, payload, interval, exchange = 'NSE') {
   }
 }
 
-// Subscribe to live index prices (for watchlist) — no interval needed
-export function subscribeIndex(symbols, exchange = 'NSE') {
+// Subscribe to live prices (for watchlist).
+// indexSymbols → NIFTY/BANKNIFTY etc.; instrSymbols → RELIANCE/TCS etc.
+export function subscribeIndex(indexSymbols, instrSymbols = [], exchange = 'NSE') {
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     state.ws.send(JSON.stringify({
       action: 'subscribe', bucket: 'index',
-      payload: { instruments: [], indexes: Array.isArray(symbols) ? symbols : [symbols] },
+      payload: {
+        indexes:     Array.isArray(indexSymbols) ? indexSymbols : [indexSymbols],
+        instruments: Array.isArray(instrSymbols) ? instrSymbols : [instrSymbols],
+      },
       exchange,
     }));
   }

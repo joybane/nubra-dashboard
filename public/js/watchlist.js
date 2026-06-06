@@ -48,7 +48,8 @@ function open() {
   panel?.classList.remove('hidden');
   document.getElementById('content-area')?.classList.add('wl-open');
   btnToggle?.classList.add('active');
-  subscribeAllItems(); // subscribe/re-subscribe when panel opens
+  subscribeAllItems();
+  prefetchMissingPrices();
   startPoll();
 }
 
@@ -107,19 +108,24 @@ function addItem(item) {
   saveItems();
   render();
   subscribeAllItems();
+  prefetchMissingPrices();
   if (panelOpen) startPoll();
 }
 
-// Subscribe to live index prices for all watchlist items
+// Subscribe to live prices for all watchlist items.
+// Indices (NIFTY, BANKNIFTY…) go into the `indexes` array;
+// stocks/futures/options go into the `instruments` array.
 function subscribeAllItems() {
   if (!items.length) return;
-  // Group by exchange and subscribe
   const byExch = {};
   for (const it of items) {
-    (byExch[it.exchange] = byExch[it.exchange] || []).push(it.symbol);
+    if (!byExch[it.exchange]) byExch[it.exchange] = { indexes: [], instruments: [] };
+    const isIndex = (it.instrumentType || '').toUpperCase() === 'INDEX';
+    if (isIndex) byExch[it.exchange].indexes.push(it.symbol);
+    else         byExch[it.exchange].instruments.push(it.symbol);
   }
-  for (const [exch, syms] of Object.entries(byExch)) {
-    subscribeIndex(syms, exch);
+  for (const [exch, { indexes, instruments }] of Object.entries(byExch)) {
+    subscribeIndex(indexes, instruments, exch);
   }
 }
 
@@ -185,11 +191,11 @@ function render() {
 
     row.querySelector('.wl-btn-b').addEventListener('click', e => {
       e.stopPropagation();
-      window._tp?.openModal('BUY', item.symbol, item.exchange, item.instrumentType);
+      window._tp?.openModal('BUY', item.symbol, item.exchange, item.instrumentType, undefined, prices[item.symbol]?.ltp);
     });
     row.querySelector('.wl-btn-s').addEventListener('click', e => {
       e.stopPropagation();
-      window._tp?.openModal('SELL', item.symbol, item.exchange, item.instrumentType);
+      window._tp?.openModal('SELL', item.symbol, item.exchange, item.instrumentType, undefined, prices[item.symbol]?.ltp);
     });
     row.querySelector('.wl-btn-rm').addEventListener('click', e => {
       e.stopPropagation();
@@ -198,6 +204,23 @@ function render() {
 
     wlList.appendChild(row);
   });
+}
+
+// ── One-shot price prefetch (REST fallback for symbols with no WS price) ─────
+async function prefetchMissingPrices() {
+  const missing = items.filter(i => !prices[i.symbol]?.ltp);
+  if (!missing.length) return;
+  await Promise.allSettled(missing.map(async (item) => {
+    const type = (item.instrumentType || 'STOCK').toUpperCase();
+    try {
+      const r = await fetch(`/api/paper/price/${encodeURIComponent(item.symbol)}?exchange=${item.exchange}&type=${type}`);
+      const d = await r.json();
+      if (d.price) {
+        prices[item.symbol] = { ltp: d.price, change: 0, pct: 0 };
+      }
+    } catch { /* ignore */ }
+  }));
+  render();
 }
 
 // ── Live price polling ────────────────────────────────────────────────────────

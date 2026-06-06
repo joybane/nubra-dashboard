@@ -276,6 +276,24 @@ app.post('/api/historical', requireAuth, async (req, res) => {
     const data = await nubraPost('/charts/timeseries', req.body, {
       Authorization: `Bearer ${authState.sessionToken}`,
     });
+
+    // Cache the last candle close in paperPrices so Market orders work
+    // even when no live WS tick has arrived yet (e.g. after market hours).
+    // Only fills the gap — live WS prices take precedence.
+    try {
+      for (const group of data.result || []) {
+        for (const symbolMap of group.values || []) {
+          for (const [sym, chart] of Object.entries(symbolMap)) {
+            const closes = chart.close || [];
+            if (closes.length && !paperPrices[sym]) {
+              const last = closes[closes.length - 1];
+              if (last?.v != null) paperPrices[sym] = Number(last.v) / 100;
+            }
+          }
+        }
+      }
+    } catch { /* non-critical */ }
+
     res.json(data);
   } catch (err) {
     console.error('historical error:', err.message);
@@ -484,7 +502,7 @@ setInterval(() => {
 // ─── Paper trading ────────────────────────────────────────────────────────────
 const PAPER_FILE  = path.join(__dirname, 'paper_trading.json');
 const paperPrices = {}; // symbol → latest price in ₹ (updated from WS)
-const PAPER_CASH_DEFAULT = 1_000_000; // ₹10 lakh starting virtual cash
+const PAPER_CASH_DEFAULT = 100_000_000; // ₹10 crore — effectively unlimited for paper trading
 
 function loadPaperData() {
   try {
@@ -629,10 +647,104 @@ app.put('/api/paper/reset', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// GET current tracked price for a symbol
-app.get('/api/paper/price/:symbol', requireAuth, (req, res) => {
-  const p = paperPrices[req.params.symbol];
-  res.json({ price: p || null });
+// GET current tracked price for a symbol.
+// Falls back to the last daily candle from Nubra if no live WS price is cached.
+app.get('/api/paper/price/:symbol', requireAuth, async (req, res) => {
+  const sym = req.params.symbol;
+  const cached = paperPrices[sym];
+  if (cached) return res.json({ price: cached });
+
+  const exchange = (req.query.exchange || 'NSE').toUpperCase();
+  const type     = (req.query.type     || 'STOCK').toUpperCase();
+  try {
+    const now  = new Date();
+    const from = new Date(now - 7 * 24 * 60 * 60 * 1000);
+    const data = await nubraPost('/charts/timeseries', {
+      query: [{
+        exchange, type, values: [sym],
+        fields: ['close'],
+        startDate: from.toISOString(),
+        endDate:   now.toISOString(),
+        interval: '1d', intraDay: false, realTime: false,
+      }],
+    }, { Authorization: `Bearer ${authState.sessionToken}` });
+
+    for (const group of data.result || []) {
+      for (const symbolMap of group.values || []) {
+        for (const chart of Object.values(symbolMap)) {
+          const closes = chart.close || [];
+          if (closes.length) {
+            const last = closes[closes.length - 1];
+            if (last?.v != null) {
+              const price = Number(last.v) / 100;
+              paperPrices[sym] = price;
+              return res.json({ price });
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[price fallback]', sym, err.message);
+  }
+
+  res.json({ price: null });
+});
+
+// POST estimate margin for a potential order
+app.post('/api/paper/margin', requireAuth, (req, res) => {
+  const { symbol, side, qty, price, instrumentType, lotSize } = req.body;
+  const q = Number(qty) || 0;
+  const ltp = Number(price) || 0;
+  const ls  = Number(lotSize) || 1;
+  const lots = ls > 1 ? q / ls : q;
+  const premiumTotal = ltp * q;
+
+  if (!side || !q || !ltp) return res.json({ required: 0, label: 'Cost' });
+
+  if (side.toUpperCase() === 'BUY') {
+    return res.json({ required: premiumTotal, label: 'Cost (Premium)' });
+  }
+
+  const itype = (instrumentType || '').toUpperCase();
+
+  if (itype === 'OPT') {
+    // Parse underlying symbol from e.g. "NIFTY2660223350CE" → "NIFTY"
+    const m = symbol.match(/^([A-Z]+)\d/);
+    const underlying = m ? m[1] : null;
+    const uPrice = underlying ? (paperPrices[underlying] || 0) : 0;
+
+    let span;
+    if (uPrice && ls > 1) {
+      // Index/stock option: SPAN ≈ 7% of notional + 2% exposure
+      span = uPrice * ls * lots * 0.09;
+    } else {
+      // Fallback when no underlying price: 8× premium received
+      span = premiumTotal * 8;
+    }
+
+    // Hedge benefit: deduct value of existing long positions on same underlying
+    if (underlying) {
+      const positions = computePositions();
+      for (const p of positions) {
+        const isLong = p.netQty > 0;
+        const sameUnderlying = p.symbol.startsWith(underlying);
+        const isOpt = (p.instrumentType || '').toUpperCase() === 'OPT';
+        if (isLong && sameUnderlying && isOpt && p.ltp) {
+          const hedgeCredit = p.ltp * Math.abs(p.netQty);
+          span = Math.max(0, span - hedgeCredit);
+        }
+      }
+    }
+    return res.json({ required: Math.round(span), label: 'SPAN + Exposure (est.)' });
+  }
+
+  if (itype === 'FUT') {
+    return res.json({ required: Math.round(ltp * q * 0.12), label: 'SPAN Margin (est.)' });
+  }
+
+  // Stocks / delivery
+  return res.json({ required: Math.round(premiumTotal), label: 'Required Capital' });
 });
 
 // ── Strategies CRUD ───────────────────────────────────────────────────────────

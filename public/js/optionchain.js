@@ -13,6 +13,7 @@ const suggestionsEl= document.getElementById('oc-suggestions');
 let currentSymbol   = '';
 let currentExchange = 'NSE';
 let currentExpiry   = '';
+let currentLotSize  = 1;
 let maxCeOi = 1, maxPeOi = 1;
 
 // ref_id → nubra_name: built once from refdata when chain loads
@@ -321,6 +322,7 @@ async function fetchChainApi(symbol, exchange, expiry) {
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function renderChain(chain) {
+  currentLotSize = Number(chain.lot_size || chain.lot_size_quantity || chain.lotsize || 1);
   const ceList = chain.ce || [];
   const peList = chain.pe || [];
   if (!ceList.length && !peList.length) { setMessage('No data for this expiry.'); return; }
@@ -411,7 +413,7 @@ function renderChain(chain) {
         const optType= ocBtn.closest('td')?.classList.contains('ce-side') ? 'CE' : 'PE';
         const sym = refIdMap.has(refId) ? refIdMap.get(refId)
           : `${currentSymbol}${optType}${strike}`;
-        window._tp?.openModal(side, sym, currentExchange, 'OPT', undefined, price);
+        window._tp?.openModal(side, sym, currentExchange, 'OPT', undefined, price, currentLotSize);
         return;
       }
 
