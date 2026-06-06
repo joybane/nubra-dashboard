@@ -225,7 +225,7 @@ function updateChainCells(chain) {
     updateCell(`${sp}-ce-ltp`,    fmtLtpCell(ce, 'ce'));
     updateCell(`${sp}-ce-oi`,     fmtLakhVal(g(ce,'oi')));
     updateCell(`${sp}-ce-vol`,    fmtLakhVal(g(ce,'volume')));
-    updateCell(`${sp}-ce-iv`,     fmtDecVal(ceIv ?? peIv, 2));
+    updateCell(`${sp}-ce-iv`,     fmtIvVal(ceIv ?? peIv));
     updateCell(`${sp}-ce-delta`,  fmtDecVal(g(ce,'delta'), 4));
     updateCell(`${sp}-ce-gamma`,  fmtDecVal(g(ce,'gamma'), 4));
     updateCell(`${sp}-ce-theta`,  fmtDecVal(g(ce,'theta'), 2));
@@ -255,6 +255,7 @@ function fmtLtpCell(row, side) {
 
 function fmtLakhVal(v)     { return v == null ? '—' : fmtLakh(Number(v)); }
 function fmtDecVal(v, dp)  { return v == null ? '—' : Number(v).toFixed(dp); }
+function fmtIvVal(v)       { return v == null ? '—' : (Number(v) * 100).toFixed(2); }
 
 function updateCell(key, html) {
   const td = cellMap.get(key);
@@ -378,7 +379,7 @@ function renderChain(chain) {
       ceOiVol(g(ce,'volume'), 0,  'ce-vol') +
       ceLtp(ce) +
       `<td class="strike-cell">${isAtm ? `<div class="atm-label">ATM</div>` : ''}${fmtNum(strike)}</td>` +
-      `<td class="iv-cell">${(() => { const iv = g(ce,'iv') ?? g(pe,'iv'); return iv != null ? Number(iv).toFixed(2) : '—'; })()}</td>` +
+      `<td class="iv-cell">${(() => { const iv = g(ce,'iv') ?? g(pe,'iv'); return iv != null ? (Number(iv) * 100).toFixed(2) : '—'; })()}</td>` +
       peLtp(pe) +
       peOiVol(g(pe,'volume'), 0,  'pe-vol') +
       peOiVol(g(pe,'oi'),    maxPeOi, 'pe') +

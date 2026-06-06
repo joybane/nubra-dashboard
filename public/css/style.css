@@ -587,10 +587,11 @@ td.ltp-cell.down { color: var(--red); }
 
 /* IV column */
 .iv-cell {
-  background: var(--bg-card) !important;
-  color: var(--text-secondary); text-align: center !important;
-  font-size: 11px;
+  background: var(--bg-secondary) !important;
+  color: var(--text-primary); text-align: center !important;
+  font-size: 13px; font-weight: 500;
   border-right: 1px solid var(--border);
+  min-width: 56px;
 }
 
 /* ATM row */
