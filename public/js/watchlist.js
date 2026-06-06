@@ -228,4 +228,22 @@ async function fetchPrices() {
   } catch { /* ignore */ }
 }
 
-export const WatchlistModule = { init, subscribeAllItems };
+// ── Live tick from WebSocket index stream ─────────────────────────────────────
+function onTick(msg) {
+  const all = [...(msg.data?.indexes || []), ...(msg.data?.instruments || [])];
+  let updated = false;
+  for (const b of all) {
+    const sym = b.indexname;
+    if (!sym || !items.find(i => i.symbol === sym)) continue;
+    const ltp = Number(b.index_value) / 100;
+    if (!ltp) continue;
+    const prevClose = b.prev_close ? Number(b.prev_close) / 100 : (prices[sym]?.ltp ?? ltp);
+    const change = ltp - prevClose;
+    const pct = typeof b.changepercent === 'number' ? b.changepercent : (prevClose ? (change / prevClose) * 100 : 0);
+    prices[sym] = { ltp, change, pct };
+    updated = true;
+  }
+  if (updated) render();
+}
+
+export const WatchlistModule = { init, subscribeAllItems, onTick };

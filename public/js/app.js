@@ -148,7 +148,12 @@ function handleWsMessage(msg) {
   if (msg.type === 'auth_status') {
     return;
   }
-  if (msg.type === 'ohlcv' || msg.type === 'index_tick') {
+  if (msg.type === 'ohlcv') {
+    ChartModule.onTick(msg);
+    return;
+  }
+  if (msg.type === 'index_tick') {
+    WatchlistModule.onTick(msg);
     ChartModule.onTick(msg);
     return;
   }

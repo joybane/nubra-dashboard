@@ -215,12 +215,17 @@ function updateChainCells(chain) {
     spotEl.innerHTML = `Spot: <span>₹${fmtPrice(Number(cpPaise) / 100)}</span>`;
   }
 
+  const peByStrike = {};
+  for (const pe of peList) peByStrike[strikRs(pe)] = pe;
+
   for (const ce of ceList) {
-    const sp = strikRs(ce);
+    const sp  = strikRs(ce);
+    const ceIv = g(ce,'iv');
+    const peIv = g(peByStrike[sp], 'iv');
     updateCell(`${sp}-ce-ltp`,    fmtLtpCell(ce, 'ce'));
     updateCell(`${sp}-ce-oi`,     fmtLakhVal(g(ce,'oi')));
     updateCell(`${sp}-ce-vol`,    fmtLakhVal(g(ce,'volume')));
-    updateCell(`${sp}-ce-iv`,     fmtDecVal(g(ce,'iv'), 2));
+    updateCell(`${sp}-ce-iv`,     fmtDecVal(ceIv ?? peIv, 2));
     updateCell(`${sp}-ce-delta`,  fmtDecVal(g(ce,'delta'), 4));
     updateCell(`${sp}-ce-gamma`,  fmtDecVal(g(ce,'gamma'), 4));
     updateCell(`${sp}-ce-theta`,  fmtDecVal(g(ce,'theta'), 2));
@@ -231,7 +236,6 @@ function updateChainCells(chain) {
     updateCell(`${sp}-pe-ltp`,    fmtLtpCell(pe, 'pe'));
     updateCell(`${sp}-pe-oi`,     fmtLakhVal(g(pe,'oi')));
     updateCell(`${sp}-pe-vol`,    fmtLakhVal(g(pe,'volume')));
-    updateCell(`${sp}-pe-iv`,     fmtDecVal(g(pe,'iv'), 2));
     updateCell(`${sp}-pe-delta`,  fmtDecVal(g(pe,'delta'), 4));
     updateCell(`${sp}-pe-gamma`,  fmtDecVal(g(pe,'gamma'), 4));
     updateCell(`${sp}-pe-theta`,  fmtDecVal(g(pe,'theta'), 2));
@@ -374,7 +378,7 @@ function renderChain(chain) {
       ceOiVol(g(ce,'volume'), 0,  'ce-vol') +
       ceLtp(ce) +
       `<td class="strike-cell">${isAtm ? `<div class="atm-label">ATM</div>` : ''}${fmtNum(strike)}</td>` +
-      `<td class="iv-cell">${g(ce,'iv') != null ? Number(g(ce,'iv')).toFixed(2) : '—'}</td>` +
+      `<td class="iv-cell">${(() => { const iv = g(ce,'iv') ?? g(pe,'iv'); return iv != null ? Number(iv).toFixed(2) : '—'; })()}</td>` +
       peLtp(pe) +
       peOiVol(g(pe,'volume'), 0,  'pe-vol') +
       peOiVol(g(pe,'oi'),    maxPeOi, 'pe') +
@@ -389,7 +393,7 @@ function renderChain(chain) {
     const colKeys = [
       `${strike}-ce-vega`,`${strike}-ce-gamma`,`${strike}-ce-theta`,`${strike}-ce-delta`,
       `${strike}-ce-oi`,`${strike}-ce-vol`,`${strike}-ce-ltp`,
-      null, null, // strike + iv (not live-updated)
+      null, `${strike}-ce-iv`, // strike + iv
       `${strike}-pe-ltp`,`${strike}-pe-vol`,`${strike}-pe-oi`,
       `${strike}-pe-delta`,`${strike}-pe-theta`,`${strike}-pe-gamma`,`${strike}-pe-vega`,
     ];
