@@ -57,6 +57,7 @@
 
     <!-- Watchlist toggle -->
     <button class="wl-toggle-btn" id="btn-wl-toggle" title="Toggle Watchlist">☰ Watchlist</button>
+    <span class="nav-divider"></span>
 
     <div class="nav-tabs">
       <button class="nav-tab active" data-view="chart">Chart</button>
@@ -76,6 +77,39 @@
       <span id="theme-icon">☀</span>
     </button>
   </nav>
+
+  <!-- Market ticker strip -->
+  <div id="market-ticker">
+    <div class="ticker-item">
+      <span class="tick-sym">NIFTY 50</span>
+      <span class="tick-price" id="tick-price-NIFTY">—</span>
+      <span class="tick-chg" id="tick-chg-NIFTY">—</span>
+    </div>
+    <span class="ticker-sep">|</span>
+    <div class="ticker-item">
+      <span class="tick-sym">BANK NIFTY</span>
+      <span class="tick-price" id="tick-price-BANKNIFTY">—</span>
+      <span class="tick-chg" id="tick-chg-BANKNIFTY">—</span>
+    </div>
+    <span class="ticker-sep">|</span>
+    <div class="ticker-item">
+      <span class="tick-sym">FIN NIFTY</span>
+      <span class="tick-price" id="tick-price-FINNIFTY">—</span>
+      <span class="tick-chg" id="tick-chg-FINNIFTY">—</span>
+    </div>
+    <span class="ticker-sep">|</span>
+    <div class="ticker-item">
+      <span class="tick-sym">SENSEX</span>
+      <span class="tick-price" id="tick-price-SENSEX">—</span>
+      <span class="tick-chg" id="tick-chg-SENSEX">—</span>
+    </div>
+    <span class="ticker-sep">|</span>
+    <div class="ticker-item">
+      <span class="tick-sym">INDIA VIX</span>
+      <span class="tick-price" id="tick-price-INDIAVIX">—</span>
+      <span class="tick-chg" id="tick-chg-INDIAVIX">—</span>
+    </div>
+  </div>
 
   <!-- Views -->
   <div id="main">
@@ -230,9 +264,9 @@
         <table class="oc-table" id="oc-table">
           <thead>
             <tr class="oc-section-header">
-              <th colspan="7" class="oc-calls-th">Calls</th>
+              <th colspan="7" class="oc-calls-th">CALLS</th>
               <th colspan="2" class="oc-center-th"></th>
-              <th colspan="7" class="oc-puts-th">Puts</th>
+              <th colspan="7" class="oc-puts-th">PUTS</th>
             </tr>
             <tr class="oc-col-names">
               <!-- CE side -->
@@ -260,7 +294,9 @@
 
     <!-- ── Trading panel (positions / orders / holdings) ─────────────────── -->
     <div id="trading-panel">
-      <div id="tp-resize-handle" title="Drag to resize"></div>
+      <div id="tp-resize-handle" title="Double-click to collapse / Drag to resize">
+        <span class="tp-collapse-hint">▲ Collapse</span>
+      </div>
       <div class="tp-header">
         <div class="tp-tabs">
           <button class="tp-tab active" data-tp="strategies">Strategies</button>
@@ -269,11 +305,9 @@
         </div>
         <div class="tp-summary">
           <span>P&amp;L: <strong id="tp-pnl">₹0.00</strong></span>
-          <span class="tp-sep">|</span>
-          <span>Cash: <strong id="tp-cash">—</strong></span>
           <button class="tp-reset" id="btn-paper-reset" title="Reset paper account">Reset</button>
         </div>
-        <button class="tp-toggle" id="tp-toggle" title="Collapse / Expand">▼</button>
+        <button class="tp-toggle" id="tp-toggle" title="Collapse / Expand">▼ Collapse</button>
       </div>
       <div id="tp-body">
         <!-- Strategies tab: grouped positions by strategy -->
@@ -299,6 +333,10 @@
     </div>
 
   </div><!-- #main -->
+
+  <!-- Floating expand button — visible when trading panel is collapsed -->
+  <button id="tp-float-expand" class="tp-float-expand hidden" title="Show Order Book">▲ Order Book</button>
+
 </div><!-- #app -->
 
 <!-- ── Order placement modal (broker-style) ──────────────────────────────── -->
@@ -339,16 +377,18 @@
     <div class="om-body">
       <div class="om-row">
         <div class="om-field">
-          <label id="om-qty-label">Qty</label>
-          <input type="number" id="om-qty" min="1" value="1" />
-          <span class="om-lot-info" id="om-lot-info"></span>
-        </div>
-        <div class="om-field">
-          <label>Strategy</label>
+          <label>Strategy / Basket</label>
           <div class="strategy-select-wrap">
             <select id="om-strategy"></select>
             <button class="btn-new-strategy" id="om-new-strategy" title="New strategy">+</button>
           </div>
+        </div>
+      </div>
+      <div class="om-row">
+        <div class="om-field">
+          <label id="om-qty-label">Qty</label>
+          <input type="number" id="om-qty" min="1" value="1" />
+          <span class="om-lot-info" id="om-lot-info"></span>
         </div>
       </div>
       <div class="om-row" id="om-price-wrap">
@@ -370,10 +410,6 @@
       <div class="om-margin-row">
         <span id="om-margin-label">Required Margin</span>
         <span id="om-margin-req">—</span>
-      </div>
-      <div class="om-margin-row">
-        <span>Available Capital</span>
-        <span id="om-margin-avail">—</span>
       </div>
     </div>
 

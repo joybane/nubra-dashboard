@@ -16,8 +16,10 @@ let currentExpiry   = '';
 let currentLotSize  = 1;
 let maxCeOi = 1, maxPeOi = 1;
 
-// ref_id → nubra_name: built once from refdata when chain loads
-const refIdMap = new Map();
+// ref_id → stock_name (trading symbol): built from refdata
+const refIdMap   = new Map();
+// stock_name → ref_id: reverse map so we can look up ref_id from symbol
+const nameToRefId = new Map();
 
 // Cell map for incremental live updates: "23950-ce-ltp" → TD element
 const cellMap  = new Map();
@@ -154,11 +156,11 @@ async function ensureRefdata(exchange) {
 
     let count = 0;
     for (const row of rows) {
-      const id        = row.ref_id ?? row.zanskar_id;
-      // Use stock_name (trading symbol) — NOT zanskar_name/nubra_name (internal id)
+      const id        = row.ref_id ?? row.zanskar_id ?? row.instrument_id ?? row.id;
       const stockName = row.stock_name;
       if (id != null && stockName) {
         refIdMap.set(Number(id), stockName);
+        nameToRefId.set(stockName, Number(id)); // reverse: stock_name → ref_id
         count++;
       }
     }
@@ -196,6 +198,28 @@ function stopLiveFeed() {
   if (currentSymbol && currentExpiry) {
     unsubscribeOC(currentSymbol, currentExpiry, currentExchange);
   }
+}
+
+// Resolve ref_id for an option by pattern-matching nameToRefId.
+// Handles both monthly ("NIFTY26JUN23650CE") and weekly naming conventions.
+function resolveRefId(underlying, strikeRs, optType) {
+  const strike = String(Math.round(strikeRs));
+  const up     = underlying.toUpperCase();
+  const ot     = optType.toUpperCase();
+  // Year+month filter from current expiry (e.g. "20260616" → "26" + "JUN")
+  let expFilter = '';
+  if (currentExpiry && currentExpiry.length >= 6) {
+    const yr = String(currentExpiry).slice(2, 4);
+    const mo = MONTHS[parseInt(String(currentExpiry).slice(4, 6)) - 1] || '';
+    expFilter = `${yr}${mo}`; // e.g. "26JUN"
+  }
+  for (const [name, rid] of nameToRefId) {
+    const n = name.toUpperCase();
+    if (n.startsWith(up) && n.endsWith(strike + ot)) {
+      if (!expFilter || n.includes(expFilter)) return rid;
+    }
+  }
+  return null;
 }
 
 // Called by app.js when WS delivers a live option chain update
@@ -322,9 +346,13 @@ async function fetchChainApi(symbol, exchange, expiry) {
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function renderChain(chain) {
-  currentLotSize = Number(chain.lot_size || chain.lot_size_quantity || chain.lotsize || 1);
   const ceList = chain.ce || [];
   const peList = chain.pe || [];
+  // Try every known field name Nubra may use for lot size
+  const rawLs = chain.lot_size ?? chain.ls ?? chain.lot_size_quantity ?? chain.lotsize
+    ?? (ceList[0] && (ceList[0].lot_size ?? ceList[0].ls))
+    ?? 1;
+  currentLotSize = Math.max(1, Number(rawLs) || 1);
   if (!ceList.length && !peList.length) { setMessage('No data for this expiry.'); return; }
 
   const atmPaise = chain.atm ?? chain.at_the_money_strike ?? null;
@@ -368,9 +396,10 @@ function renderChain(chain) {
     const tr = document.createElement('tr');
     tr.className = isAtm ? 'atm-row' : '';
     tr.setAttribute('data-strike', strike);
-    // Store ref_ids so the click handler can look up exact nubra_name
-    if (ce?.ref_id) tr.setAttribute('data-ce-refid', ce.ref_id);
-    if (pe?.ref_id) tr.setAttribute('data-pe-refid', pe.ref_id);
+    const ceRefId = ce?.ref_id ?? ce?.zanskar_id ?? ce?.instrument_id ?? ce?.id ?? null;
+    const peRefId = pe?.ref_id ?? pe?.zanskar_id ?? pe?.instrument_id ?? pe?.id ?? null;
+    if (ceRefId) tr.setAttribute('data-ce-refid', ceRefId);
+    if (peRefId) tr.setAttribute('data-pe-refid', peRefId);
 
     tr.innerHTML =
       ceGreek(g(ce,'vega'),  4)   +
@@ -407,13 +436,21 @@ function renderChain(chain) {
       const ocBtn = e.target.closest('.oc-ob');
       if (ocBtn) {
         e.stopPropagation();
-        const refId  = Number(ocBtn.dataset.refid);
-        const price  = Number(ocBtn.dataset.price);
-        const side   = ocBtn.dataset.side;
-        const optType= ocBtn.closest('td')?.classList.contains('ce-side') ? 'CE' : 'PE';
-        const sym = refIdMap.has(refId) ? refIdMap.get(refId)
-          : `${currentSymbol}${optType}${strike}`;
-        window._tp?.openModal(side, sym, currentExchange, 'OPT', undefined, price, currentLotSize);
+        const rawRefId = Number(ocBtn.dataset.refid) || null;
+        const price    = Number(ocBtn.dataset.price);
+        const side     = ocBtn.dataset.side;
+        const optType  = ocBtn.closest('td')?.classList.contains('ce-side') ? 'CE' : 'PE';
+        // Resolve exact trading symbol from ref_id → stock_name map (refdata)
+        const sym = (rawRefId && refIdMap.has(rawRefId))
+          ? refIdMap.get(rawRefId)
+          : `${currentSymbol}${strike}${optType}`; // e.g. NIFTY23650CE
+        // ref_id: direct → stock_name map → pattern search in nameToRefId
+        const finalRefId = rawRefId
+          || nameToRefId.get(sym)
+          || resolveRefId(currentSymbol, Number(strike), optType)
+          || null;
+        // Pass expiry so the server can resolve ref_id even when we can't
+        window._tp?.openModal(side, sym, currentExchange, 'OPT', undefined, price, currentLotSize, finalRefId, currentExpiry);
         return;
       }
 
@@ -499,7 +536,7 @@ function ceLtp(row) {
   const price = ltp / 100;
   const up    = chg == null ? true : chg >= 0;
   const pct   = chg != null ? `<div class="ltp-chg ${up?'up':'down'}">${up?'+':''}${Number(chg).toFixed(2)}%</div>` : '';
-  const refid = row.ref_id || '';
+  const refid = row.ref_id ?? row.zanskar_id ?? row.instrument_id ?? row.id ?? '';
   return `<td class="ce-side ltp-cell ${up?'up':'down'}" title="Click to chart | B/S to order">
     <div class="ltp-val">₹${fmtPrice(price)}${pct}</div>
     <div class="oc-order-btns">
@@ -517,7 +554,7 @@ function peLtp(row) {
   const price = ltp / 100;
   const up    = chg == null ? true : chg >= 0;
   const pct   = chg != null ? `<div class="ltp-chg ${up?'up':'down'}">${up?'+':''}${Number(chg).toFixed(2)}%</div>` : '';
-  const refid = row.ref_id || '';
+  const refid = row.ref_id ?? row.zanskar_id ?? row.instrument_id ?? row.id ?? '';
   return `<td class="pe-side ltp-cell ${up?'up':'down'}" title="Click to chart | B/S to order">
     <div class="ltp-val">₹${fmtPrice(price)}${pct}</div>
     <div class="oc-order-btns">
@@ -565,6 +602,10 @@ function g(row, field) {
     iv:     ['iv'],
     delta:  ['delta'], gamma: ['gamma'],
     theta:  ['theta'], vega:  ['vega'],
+    rho:    ['rho'],
+    bid:    ['bid','best_bid','bp'],
+    ask:    ['ask','best_ask','ap','op'],
+    chg:    ['chg','ltp_change','change','price_change'],
   };
   for (const k of (aliases[field] || [field])) {
     if (row[k] !== undefined && row[k] !== null) return row[k];

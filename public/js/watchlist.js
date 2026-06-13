@@ -2,6 +2,12 @@
 import { subscribeIndex } from './app.js';
 
 const STORAGE_KEY = 'nubra-watchlist-v2';
+const DEFAULT_ITEMS = [
+  { symbol: 'NIFTY',     displayName: 'NIFTY 50',   exchange: 'NSE', instrumentType: 'INDEX' },
+  { symbol: 'BANKNIFTY', displayName: 'BANK NIFTY', exchange: 'NSE', instrumentType: 'INDEX' },
+  { symbol: 'FINNIFTY',  displayName: 'FIN NIFTY',  exchange: 'NSE', instrumentType: 'INDEX' },
+  { symbol: 'SENSEX',    displayName: 'SENSEX',      exchange: 'BSE', instrumentType: 'INDEX' },
+];
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const panel       = document.getElementById('watchlist-panel');
@@ -136,8 +142,10 @@ function removeItem(symbol, exchange) {
 }
 
 function loadItems() {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
-  catch { return []; }
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    return saved.length ? saved : [...DEFAULT_ITEMS];
+  } catch { return [...DEFAULT_ITEMS]; }
 }
 
 function saveItems() { localStorage.setItem(STORAGE_KEY, JSON.stringify(items)); }
@@ -175,6 +183,7 @@ function render() {
       <div class="wl-row-actions">
         <button class="wl-btn-b" title="Buy">B</button>
         <button class="wl-btn-s" title="Sell">S</button>
+        <button class="wl-btn-bskt" title="Add to Basket / Strategy">⊕</button>
         <button class="wl-btn-rm" title="Remove">✕</button>
       </div>
     `;
@@ -200,6 +209,39 @@ function render() {
     row.querySelector('.wl-btn-rm').addEventListener('click', e => {
       e.stopPropagation();
       removeItem(item.symbol, item.exchange);
+    });
+
+    row.querySelector('.wl-btn-bskt').addEventListener('click', async e => {
+      e.stopPropagation();
+      // Remove any existing basket menu
+      document.querySelectorAll('.wl-basket-menu').forEach(m => m.remove());
+
+      let strategies = [];
+      try {
+        const res  = await fetch('/api/paper/strategies');
+        const data = await res.json();
+        strategies = data.strategies || [];
+      } catch { strategies = [{ id: 'default', name: 'Default Strategy' }]; }
+
+      const menu = document.createElement('div');
+      menu.className = 'wl-basket-menu';
+      strategies.forEach(s => {
+        const it = document.createElement('div');
+        it.className = 'wl-basket-item';
+        it.textContent = s.name;
+        it.addEventListener('mousedown', ev => {
+          ev.preventDefault();
+          menu.remove();
+          window._tp?.openModal('BUY', item.symbol, item.exchange, item.instrumentType,
+            s.id, prices[item.symbol]?.ltp);
+        });
+        menu.appendChild(it);
+      });
+
+      row.querySelector('.wl-row-actions').appendChild(menu);
+
+      const close = ev => { if (!menu.contains(ev.target)) { menu.remove(); document.removeEventListener('click', close); } };
+      setTimeout(() => document.addEventListener('click', close), 0);
     });
 
     wlList.appendChild(row);

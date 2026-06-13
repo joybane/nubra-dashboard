@@ -186,6 +186,8 @@ app.post('/auth/verify-pin', async (req, res) => {
     authState.sessionToken = sessionToken;
     authState.status       = 'authenticated';
     console.log('Authenticated. Session token acquired.');
+    // Pre-build server-side refdata cache so margin lookups are instant.
+    ensureServerRefdata().catch(() => {});
     res.json({ ok: true, message: 'Authenticated successfully.' });
   } catch (err) {
     console.error('verify-pin error:', err.message);
@@ -204,6 +206,55 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Not authenticated. Complete login first.' });
   }
   next();
+}
+
+// ─── Server-side refdata cache ────────────────────────────────────────────────
+// Map: stock_name (uppercase) → ref_id, built once per session from Nubra refdata.
+// Used by the margin endpoint to auto-resolve ref_id when the client can't provide it.
+const serverNameToRefId  = new Map(); // stock_name → ref_id
+const serverRefIdToLotSize = new Map(); // ref_id → lot_size
+let refdataCacheDate = '';
+
+async function ensureServerRefdata() {
+  const today = new Date().toISOString().slice(0, 10);
+  if (refdataCacheDate === today && serverNameToRefId.size > 0) return;
+  if (!authState.sessionToken) return;
+  try {
+    for (const exch of ['NSE', 'BSE']) {
+      const data = await nubraGet(`/refdata/refdata/${today}`, { exchange: exch });
+      const arr  = Array.isArray(data.refdata) ? data.refdata
+                 : Array.isArray(data.data)    ? data.data
+                 : Array.isArray(data)         ? data : [];
+      for (const row of arr) {
+        const id   = row.ref_id ?? row.zanskar_id ?? row.instrument_id ?? row.id;
+        const name = (row.stock_name || row.nubra_name || row.asset || '').toUpperCase().trim();
+        if (id != null && name) {
+          serverNameToRefId.set(name, Number(id));
+          const ls = row.lot_size ?? row.ls ?? row.lot_size_quantity ?? row.lotsize;
+          if (ls != null) serverRefIdToLotSize.set(Number(id), Number(ls));
+        }
+      }
+    }
+    refdataCacheDate = today;
+    console.log(`[refdata] cached ${serverNameToRefId.size} entries`);
+  } catch (err) {
+    console.warn('[refdata] cache build failed:', err.message);
+  }
+}
+
+// Fuzzy ref_id resolution: try exact name first, then build pattern from symbol.
+// symbol may be raw like "NIFTY23650CE" or full like "NIFTY26JUN0223650CE".
+const MONTHS_SRV = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+function resolveRefIdFromSymbol(symbol) {
+  const up = (symbol || '').toUpperCase();
+  // 1. Exact match
+  if (serverNameToRefId.has(up)) return serverNameToRefId.get(up);
+  // 2. Pattern scan: find any key that contains the symbol's suffix
+  for (const [name, rid] of serverNameToRefId) {
+    if (name === up) return rid; // already tried, skip
+    if (name.endsWith(up)) return rid; // e.g. stored as "NIFTY26JUN23650CE", query "23650CE"
+  }
+  return null;
 }
 
 // ─── Raw refdata (full instrument list for ref_id → nubra_name mapping) ───────
@@ -447,6 +498,11 @@ function broadcast(obj) {
 wss.on('connection', (ws) => {
   browserClients.add(ws);
   ws.send(JSON.stringify({ type: 'auth_status', status: authState.status }));
+  // Tell the new browser client whether Nubra WS is already live.
+  // Without this, browsers connecting after session-restore never see ws_status.connected = true
+  // and therefore never subscribe to market data (ticker bar, watchlist).
+  const nubraAlreadyUp = nubraWs && nubraWs.readyState === WebSocket.OPEN;
+  ws.send(JSON.stringify({ type: 'ws_status', connected: nubraAlreadyUp }));
 
   ws.on('message', (data) => {
     try {
@@ -548,14 +604,25 @@ function computePositions() {
     // Track earliest entry time for P&L chart
     if ((o.executedAt || o.createdAt) < p.executedAt) p.executedAt = o.executedAt || o.createdAt;
     if (o.side === 'BUY') {
+      // Closing a short → realize P&L only on the closing portion
+      const netShort = p.sellQty - p.buyQty;
+      if (netShort > 0) {
+        const closingQty = Math.min(o.qty, netShort);
+        p.realizedPnl += (p.avgSellPrice - o.executedPrice) * closingQty;
+      }
       const tot = p.buyQty + o.qty;
-      p.avgBuyPrice  = (p.avgBuyPrice * p.buyQty + o.executedPrice * o.qty) / tot;
+      p.avgBuyPrice = (p.avgBuyPrice * p.buyQty + o.executedPrice * o.qty) / tot;
       p.buyQty = tot;
     } else {
+      // Closing a long → realize P&L only on the closing portion
+      const netLong = p.buyQty - p.sellQty;
+      if (netLong > 0) {
+        const closingQty = Math.min(o.qty, netLong);
+        p.realizedPnl += (o.executedPrice - p.avgBuyPrice) * closingQty;
+      }
       const tot = p.sellQty + o.qty;
       p.avgSellPrice = (p.avgSellPrice * p.sellQty + o.executedPrice * o.qty) / tot;
       p.sellQty = tot;
-      p.realizedPnl += (o.executedPrice - p.avgBuyPrice) * o.qty;
     }
     p.netQty = p.buyQty - p.sellQty;
   }
@@ -692,9 +759,10 @@ app.get('/api/paper/price/:symbol', requireAuth, async (req, res) => {
 });
 
 // POST estimate margin for a potential order
-app.post('/api/paper/margin', requireAuth, (req, res) => {
-  const { symbol, side, qty, price, instrumentType, lotSize } = req.body;
-  const q = Number(qty) || 0;
+// Uses real Nubra margin API when ref_id is provided; falls back to SPAN approximation.
+app.post('/api/paper/margin', requireAuth, async (req, res) => {
+  const { symbol, side, qty, price, instrumentType, lotSize, refId, exchange, product, optExpiry } = req.body;
+  const q  = Number(qty)   || 0;
   const ltp = Number(price) || 0;
   const ls  = Number(lotSize) || 1;
   const lots = ls > 1 ? q / ls : q;
@@ -702,6 +770,89 @@ app.post('/api/paper/margin', requireAuth, (req, res) => {
 
   if (!side || !q || !ltp) return res.json({ required: 0, label: 'Cost' });
 
+  // ── Real Nubra margin API (when ref_id is known or resolvable) ────────────
+  // Auto-resolve ref_id from symbol if client didn't provide one.
+  let resolvedRefId = refId ? Number(refId) : null;
+  if (!resolvedRefId && symbol && authState.sessionToken) {
+    await ensureServerRefdata();
+    resolvedRefId = resolveRefIdFromSymbol(symbol);
+
+    // If simple lookup fails and we have expiry, construct the full Nubra name.
+    // symbol may be partial like "NIFTY23650CE"; expiry like "20260616".
+    // Nubra stock_name format: {UNDERLYING}{YY}{M_no_pad}{DD}{STRIKE}{TYPE}
+    // e.g. NIFTY + 26 + 6 + 16 + 23650 + CE = "NIFTY2661623650CE"
+    if (!resolvedRefId && optExpiry && symbol) {
+      const mo = /^([A-Z]+)(\d+)(CE|PE)$/i.exec(symbol.toUpperCase());
+      if (mo) {
+        const [, underlying, strike, ot] = mo;
+        const expStr = String(optExpiry);
+        const yr  = expStr.slice(2, 4);                       // "26"
+        const mon = parseInt(expStr.slice(4, 6), 10);         // 6 (no leading zero)
+        const day = expStr.slice(6, 8);                       // "16"
+        const nubraName = `${underlying}${yr}${mon}${day}${strike}${ot}`;
+        resolvedRefId = serverNameToRefId.get(nubraName) || null;
+        if (resolvedRefId) console.log('[margin] resolved via name construct:', nubraName, '→', resolvedRefId);
+      }
+    }
+  }
+
+  if (resolvedRefId && authState.sessionToken) {
+    // Look up lot_size from refdata cache so we can auto-correct qty and return it to client.
+    const refLotSize = serverRefIdToLotSize.get(resolvedRefId) || Number(lotSize) || 1;
+    const itype2     = (instrumentType || '').toUpperCase();
+    // F&O orders are always in lot multiples.
+    // If client sent raw qty less than one lot (e.g. user typed 1 meaning 1 lot, not 1 share),
+    // multiply to get actual share count.
+    const isFnO = itype2 === 'OPT' || itype2 === 'FUT';
+    const actualQty = (isFnO && refLotSize > 1 && q < refLotSize)
+      ? q * refLotSize
+      : q;
+
+    try {
+      const isBuy      = side.toUpperCase() === 'BUY';
+      const isIntraday = (product || 'INTRADAY').toUpperCase() === 'INTRADAY';
+      const exch       = (exchange || 'NSE').toUpperCase();
+
+      const deliveryType = isIntraday
+        ? 'ORDER_DELIVERY_TYPE_IDAY'
+        : isFnO
+          ? 'ORDER_DELIVERY_TYPE_NRML'
+          : 'ORDER_DELIVERY_TYPE_CNC';
+
+      const data = await nubraPost('/orders/v2/margin_required', {
+        with_portfolio: true,
+        with_legs:      false,
+        is_basket:      false,
+        order_req: {
+          exchange: exch,
+          orders: [{
+            ref_id:              resolvedRefId,
+            order_type:          'ORDER_TYPE_REGULAR',
+            price_type:          'MARKET',
+            order_qty:           actualQty,
+            order_price:         0,
+            order_side:          isBuy ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
+            order_delivery_type: deliveryType,
+            validity_type:       'IOC',
+            request_type:        'ORDER_REQUEST_NEW',
+          }],
+        },
+      }, { Authorization: `Bearer ${authState.sessionToken}` });
+
+      if (data.total_margin != null) {
+        const totalRs   = Math.round(data.total_margin / 100);
+        const benefitRs = data.margin_benefit ? Math.round(data.margin_benefit / 100) : 0;
+        const label = benefitRs > 0
+          ? `Margin (hedge -₹${benefitRs.toLocaleString('en-IN')})`
+          : 'Margin (SPAN + Exposure)';
+        return res.json({ required: totalRs, label, lot_size: refLotSize });
+      }
+    } catch (err) {
+      console.warn('[margin API]', err.message, '— using estimate');
+    }
+  }
+
+  // ── Fallback: local SPAN approximation ────────────────────────────────────
   if (side.toUpperCase() === 'BUY') {
     return res.json({ required: premiumTotal, label: 'Cost (Premium)' });
   }
@@ -709,21 +860,17 @@ app.post('/api/paper/margin', requireAuth, (req, res) => {
   const itype = (instrumentType || '').toUpperCase();
 
   if (itype === 'OPT') {
-    // Parse underlying symbol from e.g. "NIFTY2660223350CE" → "NIFTY"
     const m = symbol.match(/^([A-Z]+)\d/);
     const underlying = m ? m[1] : null;
     const uPrice = underlying ? (paperPrices[underlying] || 0) : 0;
 
     let span;
     if (uPrice && ls > 1) {
-      // Index/stock option: SPAN ≈ 7% of notional + 2% exposure
       span = uPrice * ls * lots * 0.09;
     } else {
-      // Fallback when no underlying price: 8× premium received
       span = premiumTotal * 8;
     }
 
-    // Hedge benefit: deduct value of existing long positions on same underlying
     if (underlying) {
       const positions = computePositions();
       for (const p of positions) {
@@ -731,8 +878,7 @@ app.post('/api/paper/margin', requireAuth, (req, res) => {
         const sameUnderlying = p.symbol.startsWith(underlying);
         const isOpt = (p.instrumentType || '').toUpperCase() === 'OPT';
         if (isLong && sameUnderlying && isOpt && p.ltp) {
-          const hedgeCredit = p.ltp * Math.abs(p.netQty);
-          span = Math.max(0, span - hedgeCredit);
+          span = Math.max(0, span - p.ltp * Math.abs(p.netQty));
         }
       }
     }
@@ -743,7 +889,6 @@ app.post('/api/paper/margin', requireAuth, (req, res) => {
     return res.json({ required: Math.round(ltp * q * 0.12), label: 'SPAN Margin (est.)' });
   }
 
-  // Stocks / delivery
   return res.json({ required: Math.round(premiumTotal), label: 'Required Capital' });
 });
 
@@ -796,6 +941,28 @@ app.get('/api/paper/prices', requireAuth, (req, res) => {
   res.json(result);
 });
 
+// ─── Real Nubra portfolio (orders / positions / holdings) ─────────────────────
+app.get('/api/real/orders', requireAuth, async (req, res) => {
+  try {
+    const data = await nubraGet('/orders/v2/orders');
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/real/positions', requireAuth, async (req, res) => {
+  try {
+    const data = await nubraGet('/positions/v2/positions');
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/real/holdings', requireAuth, async (req, res) => {
+  try {
+    const data = await nubraGet('/portfolio/v2/holdings');
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // ─── Startup session restore ───────────────────────────────────────────────────
 async function tryRestoreSession() {
   if (!authState.authToken) return;
@@ -814,6 +981,7 @@ async function tryRestoreSession() {
     authState.status       = 'authenticated';
     console.log('Session restored — OTP not needed.');
     connectNubraWs();
+    ensureServerRefdata().catch(() => {});
   } catch (err) {
     console.log(`Saved token expired (${err.message}). Fresh OTP required.`);
     authState.authToken = null;

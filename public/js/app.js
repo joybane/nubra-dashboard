@@ -138,11 +138,67 @@ function connectWs() {
   });
 }
 
+// ── Market ticker bar ─────────────────────────────────────────────────────────
+function updateTickerBar(msg) {
+  const all = [...(msg.data?.indexes || []), ...(msg.data?.instruments || [])];
+  for (const b of all) {
+    const sym = b.indexname;
+    const ltp = b.index_value ? Number(b.index_value) / 100 : null;
+    if (!sym || !ltp) continue;
+
+    const priceEl = document.getElementById(`tick-price-${sym}`);
+    const chgEl   = document.getElementById(`tick-chg-${sym}`);
+    if (!priceEl) continue;
+
+    const prevClose = b.prev_close ? Number(b.prev_close) / 100 : ltp;
+    const chg = ltp - prevClose;
+    const pct = b.changepercent != null ? Number(b.changepercent)
+      : (prevClose ? (chg / prevClose) * 100 : 0);
+    const up = chg >= 0;
+
+    priceEl.textContent = ltp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    priceEl.className   = `tick-price ${up ? 'up' : 'down'}`;
+    chgEl.textContent   = `${up ? '+' : ''}${pct.toFixed(2)}%`;
+    chgEl.className     = `tick-chg ${up ? 'up' : 'down'}`;
+  }
+}
+
+function subscribeMarketTicker() {
+  subscribeIndex(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'INDIAVIX'], [], 'NSE');
+  subscribeIndex(['SENSEX'], [], 'BSE');
+}
+
+// Prefetch last known prices for the ticker bar via REST (instant display before first WS tick).
+async function prefetchTickerPrices() {
+  const items = [
+    { sym: 'NIFTY',     exchange: 'NSE' },
+    { sym: 'BANKNIFTY', exchange: 'NSE' },
+    { sym: 'FINNIFTY',  exchange: 'NSE' },
+    { sym: 'INDIAVIX',  exchange: 'NSE' },
+    { sym: 'SENSEX',    exchange: 'BSE' },
+  ];
+  await Promise.allSettled(items.map(async ({ sym, exchange }) => {
+    try {
+      const r = await fetch(`/api/paper/price/${encodeURIComponent(sym)}?exchange=${exchange}&type=INDEX`);
+      const d = await r.json();
+      if (!d.price) return;
+      const priceEl = document.getElementById(`tick-price-${sym}`);
+      const chgEl   = document.getElementById(`tick-chg-${sym}`);
+      if (!priceEl || priceEl.textContent !== '—') return; // already have a live value
+      priceEl.textContent = Number(d.price).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      priceEl.className   = 'tick-price';
+      if (chgEl) { chgEl.textContent = ''; chgEl.className = 'tick-chg'; }
+    } catch { /* ignore */ }
+  }));
+}
+
 function handleWsMessage(msg) {
   if (msg.type === 'ws_status') {
     setWsDot(msg.connected);
-    // Re-subscribe watchlist on every WS connect
-    if (msg.connected) WatchlistModule.subscribeAllItems();
+    if (msg.connected) {
+      WatchlistModule.subscribeAllItems();
+      subscribeMarketTicker();
+    }
     return;
   }
   if (msg.type === 'auth_status') {
@@ -155,6 +211,7 @@ function handleWsMessage(msg) {
   if (msg.type === 'index_tick') {
     WatchlistModule.onTick(msg);
     ChartModule.onTick(msg);
+    updateTickerBar(msg);
     return;
   }
   if (msg.type === 'option_chain') {
@@ -439,6 +496,9 @@ function initApp() {
   TradingModule.init();
   WatchlistModule.init();
   applyTheme(currentTheme);
+
+  // Prefetch ticker bar prices via REST immediately — shows real values before first WS tick.
+  prefetchTickerPrices();
 
   // Preload refdata (ref_id → stock_name) for NSE + BSE immediately after auth.
   // This runs in the background so it's ready before the user opens the option chain.

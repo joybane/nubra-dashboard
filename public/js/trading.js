@@ -62,6 +62,8 @@ let currentSym    = '';
 let currentExch   = 'NSE';
 let currentIType  = 'STOCK';
 let currentLotSize = 1;
+let currentRefId     = null;
+let currentOptExpiry = null; // e.g. "20260616" — used by server to resolve ref_id
 let panelOpen     = true;
 let refreshTimer  = null;
 let strategies    = [];
@@ -89,6 +91,7 @@ function init() {
       document.querySelectorAll('.oprod-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       orderProduct = btn.dataset.prod;
+      updateMarginDisplay();
     });
   });
 
@@ -99,9 +102,32 @@ function init() {
   omSubmit?.addEventListener('click', submitOrder);
   omNewStrategy?.addEventListener('click', promptNewStrategy);
 
-  // Trading panel tab switching
+  function expandPanel() {
+    panelOpen = true;
+    tpBody?.classList.remove('hidden');
+    tpToggle.textContent = '▼ Collapse';
+    const hint = tpResizeHandle?.querySelector('.tp-collapse-hint');
+    if (hint) hint.textContent = '▲ Collapse';
+    if (tpPanel) {
+      const savedH = Number(localStorage.getItem('tp-height')) || 220;
+      tpPanel.style.height = tpPanel.style.maxHeight = `${savedH}px`;
+    }
+  }
+
+  function togglePanel() {
+    if (!panelOpen) { expandPanel(); return; }
+    panelOpen = false;
+    tpBody?.classList.add('hidden');
+    tpToggle.textContent = '▲ Expand';
+    const hint = tpResizeHandle?.querySelector('.tp-collapse-hint');
+    if (hint) hint.textContent = '▼ Expand';
+    if (tpPanel) tpPanel.style.height = tpPanel.style.maxHeight = '36px';
+  }
+
+  // Trading panel tab switching — auto-expand if collapsed
   document.querySelectorAll('.tp-tab').forEach(tab => {
     tab.addEventListener('click', () => {
+      if (!panelOpen) expandPanel();
       document.querySelectorAll('.tp-tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
       document.querySelectorAll('.tp-content').forEach(c => c.classList.add('hidden'));
@@ -110,11 +136,8 @@ function init() {
     });
   });
 
-  tpToggle?.addEventListener('click', () => {
-    panelOpen = !panelOpen;
-    tpBody?.classList.toggle('hidden', !panelOpen);
-    tpToggle.textContent = panelOpen ? '▼' : '▲';
-  });
+  tpToggle?.addEventListener('click', togglePanel);
+  tpResizeHandle?.addEventListener('dblclick', togglePanel);
 
   btnReset?.addEventListener('click', async () => {
     if (!confirm('Reset paper trading account? All orders and positions will be cleared.')) return;
@@ -204,7 +227,7 @@ async function deleteStrategy(id) {
 // ── Order modal ───────────────────────────────────────────────────────────────
 let knownModalPrice = 0; // price passed in from option chain / watchlist
 
-function openModal(side, symbol, exchange, instrumentType, strategyId, ltpHint, lotSize) {
+function openModal(side, symbol, exchange, instrumentType, strategyId, ltpHint, lotSize, refId, optExpiry) {
   const sym  = symbol || currentSym;
   if (!sym) { alert('Load a chart or add a symbol to watchlist first.'); return; }
 
@@ -214,6 +237,8 @@ function openModal(side, symbol, exchange, instrumentType, strategyId, ltpHint, 
   currentExch   = exchange || currentExch;
   currentIType  = instrumentType || currentIType;
   currentLotSize = Number(lotSize) || 1;
+  currentRefId     = refId || null;
+  currentOptExpiry = optExpiry || null;
   knownModalPrice = ltpHint ? Number(ltpHint) : 0;
 
   setSide(side || 'BUY');
@@ -225,7 +250,11 @@ function openModal(side, symbol, exchange, instrumentType, strategyId, ltpHint, 
   document.querySelector('.oprod-btn[data-prod="INTRADAY"]').classList.add('active');
   orderProduct = 'INTRADAY';
 
-  if (strategyId && omStrategyEl) omStrategyEl.value = strategyId;
+  if (omStrategyEl) {
+    populateStrategyDropdown();
+    if (strategyId) omStrategyEl.value = strategyId;
+    else if (!omStrategyEl.value) omStrategyEl.value = 'default';
+  }
 
   updateLotInfo();
 
@@ -274,12 +303,21 @@ function updateMarginDisplay() {
     body: JSON.stringify({
       symbol: currentSym, side: orderSide, qty, price: knownModalPrice,
       instrumentType: currentIType, lotSize: currentLotSize,
+      refId: currentRefId, exchange: currentExch, product: orderProduct,
+      optExpiry: currentOptExpiry,
     }),
   })
     .then(r => r.json())
     .then(d => {
       if (omMarginLabel) omMarginLabel.textContent = d.label || 'Required Margin';
       if (omMarginReq)   omMarginReq.textContent   = `₹${Number(d.required).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+      // Server returns authoritative lot_size from refdata — update if we had wrong value.
+      if (d.lot_size && d.lot_size > 1 && currentLotSize !== d.lot_size) {
+        currentLotSize = d.lot_size;
+        const lots2 = Number(omQty?.value) || 1;
+        if (omLotInfo) omLotInfo.textContent = `× ${currentLotSize} = ${lots2 * currentLotSize} shares`;
+        if (omQtyLabel) omQtyLabel.textContent = 'Lots';
+      }
     }).catch(() => {});
 }
 
@@ -454,11 +492,12 @@ function renderStrategiesWithPositions(positions) {
         </tr></thead>
         <tbody>${g.positions.map(p => {
           const upU = p.unrealizedPnl >= 0, upR = p.realizedPnl >= 0;
-          return `<tr class="strat-pos-row" data-sym="${p.symbol}" data-entry="${p.avgBuyPrice}" data-qty="${p.netQty}" data-side="${p.netQty >= 0 ? 'BUY' : 'SELL'}" data-from="${p.executedAt || 0}">
+          const avgEntry = p.netQty >= 0 ? p.avgBuyPrice : p.avgSellPrice;
+          return `<tr class="strat-pos-row" data-sym="${p.symbol}" data-entry="${avgEntry}" data-qty="${p.netQty}" data-side="${p.netQty >= 0 ? 'BUY' : 'SELL'}" data-from="${p.executedAt || 0}">
             <td class="pos-sym-cell" style="cursor:pointer">${p.symbol}</td>
             <td class="${p.netQty >= 0 ? 'up' : 'down'}">${p.netQty >= 0 ? 'LONG' : 'SHORT'}</td>
             <td>${Math.abs(p.netQty)}</td>
-            <td>₹${fmtP(p.avgBuyPrice)}</td>
+            <td>₹${fmtP(avgEntry)}</td>
             <td>₹${fmtP(p.ltp)}</td>
             <td class="${upU ? 'up' : 'down'}">${upU?'+':''}₹${fmtP(Math.abs(p.unrealizedPnl))}</td>
             <td class="${upR ? 'up' : 'down'}">${upR?'+':''}₹${fmtP(Math.abs(p.realizedPnl))}</td>
@@ -495,10 +534,7 @@ function renderStrategiesWithPositions(positions) {
   }
 }
 
-function renderCash(cash) {
-  if (cash == null || !tpCash) return;
-  tpCash.textContent = `₹${Number(cash).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
-}
+function renderCash(_cash) { /* cash display removed — unlimited virtual funds */ }
 
 // ── Orders ────────────────────────────────────────────────────────────────────
 async function loadOrders() {
