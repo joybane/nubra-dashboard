@@ -477,6 +477,343 @@ setInterval(() => {
   }
 }, 2000);
 
+// ─── UAT (Paper Trading) ─────────────────────────────────────────────────────
+const UAT_BASE_URL     = 'https://uatapi.nubra.io';
+const UAT_SESSION_FILE = path.join(__dirname, '..', 'uat-session.json');
+
+function loadUatSession(): { authToken?: string; deviceId?: string } {
+  try {
+    if (!existsSync(UAT_SESSION_FILE)) return {};
+    return JSON.parse(readFileSync(UAT_SESSION_FILE, 'utf8'));
+  } catch { return {}; }
+}
+function saveUatSession(): void {
+  try {
+    writeFileSync(UAT_SESSION_FILE, JSON.stringify({ authToken: uatState.authToken, deviceId: uatState.deviceId }), 'utf8');
+  } catch { /* non-critical */ }
+}
+
+const _uatSaved = loadUatSession();
+const uatState = {
+  deviceId:     _uatSaved.deviceId  || 'paper-' + randomUUID().slice(0, 8),
+  tempToken:    null as string | null,
+  authToken:    _uatSaved.authToken || null as string | null,
+  sessionToken: null as string | null,
+  status:       'idle' as 'idle' | 'awaiting_otp' | 'awaiting_mpin' | 'authenticated',
+};
+
+// zanskar_name → UAT ref_id (built after UAT login)
+const uatRefMap = new Map<string, number>();
+
+function uatBaseHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return { 'Content-Type': 'application/json', 'x-device-id': uatState.deviceId, 'x-app-version': '0.4.2', 'x-device-os': 'web', ...extra };
+}
+
+async function uatPost(endpoint: string, body: object, extraHeaders: Record<string, string> = {}): Promise<Record<string, unknown>> {
+  const res  = await fetch(`${UAT_BASE_URL}${endpoint}`, { method: 'POST', headers: uatBaseHeaders(extraHeaders), body: JSON.stringify(body) });
+  const text = await res.text();
+  let data: Record<string, unknown> = {};
+  if (text.trim()) { try { data = JSON.parse(text); } catch { data = { message: text }; } }
+  if (!res.ok) throw new Error((data.message || data.error || `HTTP ${res.status}`) as string);
+  return data;
+}
+
+async function uatGet(endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
+  const qs  = new URLSearchParams(params).toString();
+  const res = await fetch(`${UAT_BASE_URL}${endpoint}${qs ? '?' + qs : ''}`, {
+    headers: uatBaseHeaders({ Authorization: `Bearer ${uatState.sessionToken}` }),
+  });
+  const text = await res.text();
+  let data: unknown;
+  if (text.trim()) { try { data = JSON.parse(text); } catch { data = { message: text }; } }
+  if (!res.ok) {
+    const d = data as Record<string, unknown>;
+    throw new Error((d?.message || d?.error || `HTTP ${res.status}`) as string);
+  }
+  return data;
+}
+
+async function uatDelete(endpoint: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${UAT_BASE_URL}${endpoint}`, {
+    method: 'DELETE',
+    headers: uatBaseHeaders({ Authorization: `Bearer ${uatState.sessionToken}` }),
+  });
+  const text = await res.text();
+  let data: Record<string, unknown> = {};
+  if (text.trim()) { try { data = JSON.parse(text); } catch { data = { message: text }; } }
+  if (!res.ok) throw new Error((data.message || data.error || `HTTP ${res.status}`) as string);
+  return data;
+}
+
+function requireUatAuth(reply: Parameters<typeof requireAuth>[0]): boolean {
+  if (uatState.status !== 'authenticated' || !uatState.sessionToken) {
+    reply.status(401).send({ error: 'Paper trading not connected. Complete UAT login first.' });
+    return false;
+  }
+  return true;
+}
+
+async function buildUatRefMap(): Promise<void> {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const raw   = await uatGet(`/refdata/refdata/${today}`, { exchange: 'NSE' }) as Record<string, unknown>;
+    const arr: Record<string, unknown>[] =
+      Array.isArray(raw.refdata) ? raw.refdata as Record<string, unknown>[] :
+      Array.isArray(raw.data)    ? raw.data    as Record<string, unknown>[] :
+      Array.isArray(raw)         ? raw as unknown as Record<string, unknown>[] : [];
+    uatRefMap.clear();
+    for (const item of arr) {
+      const name  = (item.zanskar_name || item.nubra_name) as string | undefined;
+      const refId = item.ref_id as number | undefined;
+      if (name && refId) uatRefMap.set(name, refId);
+    }
+    console.log(`UAT ref_id map: ${uatRefMap.size} instruments cached`);
+  } catch (err) {
+    console.error('UAT ref_id map build failed:', (err as Error).message);
+  }
+}
+
+// ─── UAT Auth endpoints ───────────────────────────────────────────────────────
+fastify.post('/paper/auth/send-otp', async (_req, reply) => {
+  try {
+    const phone = process.env.PHONE_NO;
+    if (!phone) return reply.status(500).send({ ok: false, error: 'PHONE_NO not set' });
+    const data = await uatPost('/sendphoneotp', { phone, flow: '', skip_totp: false });
+    let tempToken = data.temp_token as string;
+    if (!tempToken) throw new Error('temp_token missing in response');
+    if (data.next === 'VERIFY_TOTP') {
+      const d2  = await uatPost('/sendphoneotp', { phone, flow: '', skip_totp: true }, { 'x-temp-token': tempToken });
+      tempToken = d2.temp_token as string;
+      if (!tempToken) throw new Error('temp_token missing after skip_totp');
+    }
+    uatState.tempToken = tempToken;
+    uatState.status    = 'awaiting_otp';
+    return reply.send({ ok: true, message: 'UAT OTP sent to registered mobile number.' });
+  } catch (err: unknown) {
+    return reply.status(500).send({ ok: false, error: (err as Error).message });
+  }
+});
+
+fastify.post<{ Body: { otp: string } }>('/paper/auth/verify-otp', async (req, reply) => {
+  try {
+    const { otp } = req.body;
+    if (!otp || !uatState.tempToken) return reply.status(400).send({ ok: false, error: 'Send OTP first.' });
+    const data = await uatPost(
+      '/verifyphoneotp',
+      { phone: process.env.PHONE_NO!, otp: String(otp) },
+      { 'x-temp-token': uatState.tempToken },
+    );
+    const authToken = data.auth_token as string;
+    if (!authToken) throw new Error('auth_token missing in response');
+    uatState.authToken = authToken;
+    uatState.status    = 'awaiting_mpin';
+    saveUatSession();
+    return reply.send({ ok: true, message: 'UAT OTP verified.' });
+  } catch (err: unknown) {
+    return reply.status(500).send({ ok: false, error: (err as Error).message });
+  }
+});
+
+fastify.post('/paper/auth/verify-pin', async (_req, reply) => {
+  try {
+    const mpin = process.env.MPIN;
+    if (!mpin || !uatState.authToken) return reply.status(400).send({ ok: false, error: 'Verify OTP first.' });
+    const data = await uatPost('/verifypin', { pin: mpin }, { Authorization: `Bearer ${uatState.authToken}` });
+    const sessionToken = (data.session_token || (data.data as Record<string, unknown>)?.token) as string;
+    if (!sessionToken) throw new Error('session_token missing in response');
+    uatState.sessionToken = sessionToken;
+    uatState.status       = 'authenticated';
+    console.log('UAT authenticated.');
+    buildUatRefMap();
+    return reply.send({ ok: true, message: 'UAT authenticated.' });
+  } catch (err: unknown) {
+    return reply.status(500).send({ ok: false, error: (err as Error).message });
+  }
+});
+
+fastify.get('/paper/auth/status', async (_req, reply) => {
+  return reply.send({ status: uatState.status, authenticated: uatState.status === 'authenticated', refMapSize: uatRefMap.size });
+});
+
+// ─── Paper Trading routes ─────────────────────────────────────────────────────
+fastify.get<{ Querystring: { live?: string; executed?: string; tag?: string } }>('/paper/orders', async (req, reply) => {
+  if (!requireUatAuth(reply)) return;
+  try {
+    const params: Record<string, string> = {};
+    if (req.query.live)     params.live     = req.query.live;
+    if (req.query.executed) params.executed = req.query.executed;
+    if (req.query.tag)      params.tag      = req.query.tag;
+    const data = await uatGet('/orders/v2', params);
+    return reply.send(data);
+  } catch (err: unknown) {
+    return reply.status(500).send({ error: (err as Error).message });
+  }
+});
+
+interface PaperOrderBody {
+  nubraName: string;
+  liveRefId?: number;
+  order_type: string;
+  order_qty: number;
+  order_side: string;
+  order_delivery_type: string;
+  validity_type: string;
+  order_price?: number;
+  trigger_price?: number;
+  tag?: string;
+}
+
+fastify.post<{ Body: PaperOrderBody }>('/paper/orders', async (req, reply) => {
+  if (!requireUatAuth(reply)) return;
+  try {
+    const { nubraName, order_type, order_qty, order_side, order_delivery_type, validity_type, order_price, trigger_price, tag } = req.body;
+    const uatRefId = uatRefMap.get(nubraName);
+    if (!uatRefId) return reply.status(404).send({ error: `Instrument not found in UAT: ${nubraName}. Map has ${uatRefMap.size} entries.` });
+    const payload: Record<string, unknown> = { ref_id: uatRefId, order_type, order_qty, order_side, order_delivery_type, validity_type };
+    if (order_price   != null) payload.order_price   = order_price;
+    if (trigger_price != null) payload.trigger_price = trigger_price;
+    if (tag)                   payload.tag           = tag;
+    const data = await uatPost('/orders/v2', payload, { Authorization: `Bearer ${uatState.sessionToken!}` });
+    return reply.send(data);
+  } catch (err: unknown) {
+    return reply.status(500).send({ error: (err as Error).message });
+  }
+});
+
+interface MultiOrderLeg {
+  nubraName: string;
+  order_type: string;
+  order_qty: number;
+  order_side: string;
+  order_delivery_type: string;
+  validity_type: string;
+  order_price?: number;
+  trigger_price?: number;
+}
+
+fastify.post<{ Body: { orders: MultiOrderLeg[] } }>('/paper/orders/multi', async (req, reply) => {
+  if (!requireUatAuth(reply)) return;
+  try {
+    const resolved = req.body.orders.map((o) => {
+      const uatRefId = uatRefMap.get(o.nubraName);
+      if (!uatRefId) throw new Error(`UAT instrument not found: ${o.nubraName}`);
+      const leg: Record<string, unknown> = {
+        ref_id: uatRefId, order_type: o.order_type, order_qty: o.order_qty,
+        order_side: o.order_side, order_delivery_type: o.order_delivery_type, validity_type: o.validity_type,
+      };
+      if (o.order_price   != null) leg.order_price   = o.order_price;
+      if (o.trigger_price != null) leg.trigger_price = o.trigger_price;
+      return leg;
+    });
+    const data = await uatPost('/orders/v2/multi', { orders: resolved }, { Authorization: `Bearer ${uatState.sessionToken!}` });
+    return reply.send(data);
+  } catch (err: unknown) {
+    return reply.status(500).send({ error: (err as Error).message });
+  }
+});
+
+fastify.post('/paper/orders/basket', async (req, reply) => {
+  if (!requireUatAuth(reply)) return;
+  try {
+    const body = req.body as Record<string, unknown>;
+    const legs = (body.orders as Array<Record<string, unknown>>).map((o) => {
+      const uatRefId = uatRefMap.get(o.nubraName as string);
+      if (!uatRefId) throw new Error(`UAT instrument not found: ${o.nubraName}`);
+      const { nubraName: _n, ...rest } = o;
+      return { ref_id: uatRefId, ...rest };
+    });
+    const data = await uatPost('/orders/v2/basket', { ...body, orders: legs }, { Authorization: `Bearer ${uatState.sessionToken!}` });
+    return reply.send(data);
+  } catch (err: unknown) {
+    return reply.status(500).send({ error: (err as Error).message });
+  }
+});
+
+fastify.post<{ Params: { id: string }; Body: Record<string, unknown> }>('/paper/orders/modify/:id', async (req, reply) => {
+  if (!requireUatAuth(reply)) return;
+  try {
+    const data = await uatPost(`/orders/v2/modify/${req.params.id}`, req.body, { Authorization: `Bearer ${uatState.sessionToken!}` });
+    return reply.send(data);
+  } catch (err: unknown) {
+    return reply.status(500).send({ error: (err as Error).message });
+  }
+});
+
+fastify.delete<{ Params: { id: string } }>('/paper/orders/:id', async (req, reply) => {
+  if (!requireUatAuth(reply)) return;
+  try {
+    const data = await uatDelete(`/orders/${req.params.id}`);
+    return reply.send(data);
+  } catch (err: unknown) {
+    return reply.status(500).send({ error: (err as Error).message });
+  }
+});
+
+fastify.get('/paper/positions', async (_req, reply) => {
+  if (!requireUatAuth(reply)) return;
+  try {
+    return reply.send(await uatGet('/portfolio/positions'));
+  } catch (err: unknown) {
+    return reply.status(500).send({ error: (err as Error).message });
+  }
+});
+
+fastify.get('/paper/holdings', async (_req, reply) => {
+  if (!requireUatAuth(reply)) return;
+  try {
+    return reply.send(await uatGet('/portfolio/holdings'));
+  } catch (err: unknown) {
+    return reply.status(500).send({ error: (err as Error).message });
+  }
+});
+
+interface MarginBody {
+  liveRefId: number;
+  order_qty: number;
+  order_side: string;
+  order_type: string;
+  order_price?: number;
+  order_delivery_type: string;
+}
+
+fastify.post<{ Body: MarginBody }>('/paper/margin', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  try {
+    const { liveRefId, order_qty, order_side, order_type, order_price, order_delivery_type } = req.body;
+    const order: Record<string, unknown> = { ref_id: liveRefId, order_side, order_qty, order_type, order_delivery_type };
+    if (order_price != null) order.order_price = order_price;
+    const data = await nubraPost(
+      '/orders/v2/margin_required',
+      { with_portfolio: true, orders: [order] },
+      { Authorization: `Bearer ${authState.sessionToken!}` },
+    );
+    return reply.send(data);
+  } catch (err: unknown) {
+    return reply.status(500).send({ error: (err as Error).message });
+  }
+});
+
+// ─── UAT session restore helper ───────────────────────────────────────────────
+async function tryRestoreUatSession(): Promise<void> {
+  if (!uatState.authToken) return;
+  const mpin = process.env.MPIN;
+  if (!mpin) return;
+  try {
+    console.log('Restoring UAT session…');
+    const data = await uatPost('/verifypin', { pin: mpin }, { Authorization: `Bearer ${uatState.authToken}` });
+    const tok  = (data.session_token || (data.data as Record<string, unknown>)?.token) as string;
+    if (!tok) throw new Error('no session_token');
+    uatState.sessionToken = tok;
+    uatState.status       = 'authenticated';
+    console.log('UAT session restored.');
+    buildUatRefMap();
+  } catch (err) {
+    console.log(`UAT token expired (${(err as Error).message}). Re-login required.`);
+    uatState.authToken = null;
+    uatState.status    = 'idle';
+  }
+}
+
 // ─── Startup session restore ──────────────────────────────────────────────────
 async function tryRestoreSession(): Promise<void> {
   if (!authState.authToken) return;
@@ -505,4 +842,5 @@ await fastify.ready();
 httpServer.listen(PORT, async () => {
   console.log(`Nubra Dashboard server → http://localhost:${PORT}`);
   await tryRestoreSession();
+  await tryRestoreUatSession();
 });

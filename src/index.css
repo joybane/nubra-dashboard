@@ -92,16 +92,27 @@ body {
   text-align: right;
 }
 
-.oc-table td.strike-col {
+.oc-table td.strike-col,
+.oc-table td.strike-cell {
   text-align: center;
   font-weight: 600;
   color: var(--text-secondary);
-  background: var(--bg-secondary);
-  position: sticky;
-  left: 0;
-  z-index: 1;
+  background: var(--bg-card);
   border-left:  1px solid var(--border);
   border-right: 1px solid var(--border);
+}
+
+.oc-table td.iv-cell {
+  text-align: center;
+  color: var(--text-secondary);
+  background: var(--bg-card);
+  border-right: 1px solid var(--border);
+  font-size: 11px;
+}
+
+/* Sticky second-row header needs higher z-index */
+.oc-table thead tr:nth-child(2) th {
+  top: 28px;
 }
 
 .oc-table tr:hover td { background: var(--bg-hover); }
@@ -109,13 +120,37 @@ body {
 .ce-side { background: var(--green-dim); }
 .pe-side { background: var(--red-dim); }
 
+/* Calls/Puts header group labels */
+.oc-calls-th {
+  background: var(--green-dim);
+  color: var(--green);
+  border-bottom: 2px solid var(--green);
+}
+.oc-puts-th {
+  background: var(--red-dim);
+  color: var(--red);
+  border-bottom: 2px solid var(--red);
+}
+
 .atm-row td {
   border-top:    2px solid var(--accent) !important;
   border-bottom: 2px solid var(--accent) !important;
 }
-.atm-row td.strike-col {
+.atm-row td.strike-col,
+.atm-row td.strike-cell {
   color:  var(--accent);
   border-color: var(--accent) !important;
+}
+.atm-row td.iv-cell {
+  color: var(--accent);
+  border-color: var(--accent) !important;
+}
+
+/* LTP cell: slight cursor pointer indication */
+.ltp-cell:hover {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 /* OI bar inside cell */

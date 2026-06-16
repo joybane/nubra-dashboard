@@ -1,8 +1,10 @@
 // ─── Instrument ───────────────────────────────────────────────────────────────
 export interface Instrument {
+  ref_id?:          number;
   stock_name?:      string;
   nubra_name?:      string;
   zanskar_name?:    string;
+  display_name?:    string;
   asset?:           string;
   symbol?:          string;
   exchange?:        string;
@@ -168,3 +170,83 @@ export interface WorkspaceState {
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
 export type Theme = 'dark' | 'light';
+
+// ─── Paper Trading ────────────────────────────────────────────────────────────
+export type PaperOrderType     = 'ORDER_TYPE_MARKET' | 'ORDER_TYPE_REGULAR' | 'ORDER_TYPE_STOPLOSS' | 'ORDER_TYPE_ICEBERG';
+export type PaperOrderSide     = 'ORDER_SIDE_BUY' | 'ORDER_SIDE_SELL';
+export type PaperDeliveryType  = 'ORDER_DELIVERY_TYPE_CNC' | 'ORDER_DELIVERY_TYPE_IDAY';
+export type PaperOrderStatus   =
+  | 'ORDER_STATUS_PENDING'
+  | 'ORDER_STATUS_OPEN'
+  | 'ORDER_STATUS_FILLED'
+  | 'ORDER_STATUS_CANCELLED'
+  | 'ORDER_STATUS_REJECTED';
+
+export interface PaperRefData {
+  ref_id?:          number;
+  stock_name?:      string;
+  zanskar_name?:    string;
+  option_type?:     string;
+  derivative_type?: string;
+  exchange?:        string;
+  lot_size?:        number;
+  strike_price?:    number;
+  expiry?:          string;
+}
+
+export interface PaperOrder {
+  order_id:           number;
+  ref_id:             number;
+  basket_id?:         number;
+  order_type:         PaperOrderType;
+  order_side:         PaperOrderSide;
+  order_price:        number;
+  trigger_price?:     number;
+  order_qty:          number;
+  filled_qty:         number;
+  avg_filled_price:   number;
+  order_status:       PaperOrderStatus;
+  order_time:         number;
+  filled_time?:       number | null;
+  last_modified?:     number | null;
+  order_delivery_type: PaperDeliveryType;
+  validity_type?:     string;
+  display_name?:      string;
+  LTP?:               number | null;
+  tag?:               string;
+  ref_data?:          PaperRefData;
+}
+
+export interface PaperPosition {
+  ref_id:             number;
+  display_name?:      string;
+  zanskar_name?:      string;
+  order_side?:        string;
+  qty:                number;
+  avg_price:          number;
+  last_traded_price:  number;
+  pnl:                number;
+  pnl_chg?:           number;
+  unrealised_pnl?:    number;
+  realised_pnl?:      number;
+  product?:           string;
+  derivative_type?:   string;
+  option_type?:       string;
+  strike_price?:      number;
+  expiry?:            string;
+}
+
+export interface PaperHolding {
+  ref_id:             number;
+  display_name?:      string;
+  nubra_name?:        string;
+  symbol?:            string;
+  quantity:           number;
+  avg_price:          number;
+  last_traded_price:  number;
+  net_pnl:            number;
+  net_pnl_chg?:       number;
+  day_pnl?:           number;
+  invested_value?:    number;
+  current_value?:     number;
+}

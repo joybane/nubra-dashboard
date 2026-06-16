@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useWs } from './hooks/useWsContext';
 import type { Instrument, OptionChainData, OptionLeg, WsMessage } from './types';
 import { getSymbol } from './types';
@@ -35,30 +35,84 @@ interface Props {
 }
 
 export default function OptionChain({ instrument, onNavigateToChart }: Props) {
-  const [symbol,   setSymbol]   = useState('');
-  const [exchange, setExchange] = useState('NSE');
-  const [expiry,   setExpiry]   = useState('');
-  const [expiries, setExpiries] = useState<string[]>([]);
-  const [spot,     setSpot]     = useState<number | null>(null);
-  const [chain,    setChain]    = useState<OptionChainData | null>(null);
-  const [loading,  setLoading]  = useState(false);
-  const [error,    setError]    = useState<string | null>(null);
+  const [symbol,      setSymbol]      = useState('');
+  const [exchange,    setExchange]    = useState('NSE');
+  const [expiry,      setExpiry]      = useState('');
+  const [expiries,    setExpiries]    = useState<string[]>([]);
+  const [spot,        setSpot]        = useState<number | null>(null);
+  const [chain,       setChain]       = useState<OptionChainData | null>(null);
+  const [loading,     setLoading]     = useState(false);
+  const [error,       setError]       = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<Instrument[]>([]);
-  const [showSug, setShowSug]   = useState(false);
-  const [symInput, setSymInput] = useState('');
+  const [showSug,     setShowSug]     = useState(false);
+  const [symInput,    setSymInput]    = useState('');
   const [activeQuick, setActiveQuick] = useState<string | null>(null);
+  const [showGoToAtm, setShowGoToAtm] = useState(false);
+  const [atmDir,      setAtmDir]      = useState<'up' | 'down'>('up');
 
-  // Cell refs for direct DOM updates (no re-render on each tick)
-  const cellMapRef = useRef(new Map<string, HTMLTableCellElement>());
-  const maxCeOiRef = useRef(1);
-  const maxPeOiRef = useRef(1);
-  const currentSymRef   = useRef('');
-  const currentExchRef  = useRef('NSE');
-  const currentExpRef   = useRef('');
-  const pollRef         = useRef<number | null>(null);
-  const sugTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cellMapRef        = useRef(new Map<string, HTMLTableCellElement>());
+  const maxCeOiRef        = useRef(1);
+  const maxPeOiRef        = useRef(1);
+  const currentSymRef     = useRef('');
+  const currentExchRef    = useRef('NSE');
+  const currentExpRef     = useRef('');
+  const pollRef           = useRef<number | null>(null);
+  const sugTimerRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const tableContainerRef = useRef<HTMLDivElement>(null);
+  const atmRowRef         = useRef<HTMLTableRowElement | null>(null);
+  const scrollDoneRef     = useRef(false); // true only after a successful scroll-to-ATM
 
   const { subscribe, subscribeOC, unsubscribeOC } = useWs();
+
+  // ── scroll-to-ATM ──────────────────────────────────────────────────────────
+  function scrollToAtm(): boolean {
+    const container = tableContainerRef.current;
+    if (!container) return false;
+    const atmRow = atmRowRef.current ?? (container.querySelector('tr.atm-row') as HTMLElement | null);
+    if (!atmRow) return false;
+
+    const cRect = container.getBoundingClientRect();
+    const rRect = atmRow.getBoundingClientRect();
+    const newScrollTop = container.scrollTop + (rRect.top - cRect.top)
+      - container.clientHeight / 2 + atmRow.offsetHeight / 2;
+    container.scrollTop = Math.max(0, newScrollTop);
+    return true;
+  }
+
+  // Reset scroll-done whenever a fresh load starts (chain cleared to null)
+  useEffect(() => {
+    if (!chain) { scrollDoneRef.current = false; atmRowRef.current = null; }
+  }, [chain]);
+
+  // Scroll to ATM once the table is visible and ATM is known.
+  useEffect(() => {
+    if (!chain || loading || scrollDoneRef.current) return;
+    const raf = requestAnimationFrame(() => {
+      if (scrollToAtm()) scrollDoneRef.current = true;
+    });
+    return () => cancelAnimationFrame(raf);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chain, loading, spot]);
+
+  // Track ATM visibility to show/hide "Go to ATM" button
+  useEffect(() => {
+    const container = tableContainerRef.current;
+    if (!container || !chain) { setShowGoToAtm(false); return; }
+
+    function checkAtm() {
+      const atmRow = atmRowRef.current ?? (container!.querySelector('tr.atm-row') as HTMLElement | null);
+      if (!atmRow) { setShowGoToAtm(false); return; }
+      const cRect = container!.getBoundingClientRect();
+      const rRect = atmRow.getBoundingClientRect();
+      const visible = rRect.bottom > cRect.top + 32 && rRect.top < cRect.bottom - 32;
+      setShowGoToAtm(!visible);
+      if (!visible) setAtmDir(rRect.top < cRect.top ? 'up' : 'down');
+    }
+
+    container.addEventListener('scroll', checkAtm, { passive: true });
+    requestAnimationFrame(checkAtm);
+    return () => container.removeEventListener('scroll', checkAtm);
+  }, [chain]);
 
   // Load from instrument prop
   useEffect(() => {
@@ -76,8 +130,8 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     const unsub = subscribe('option_chain', (msg: WsMessage) => {
       if (msg.type !== 'option_chain') return;
       const data = msg.data as OptionChainData;
-      const asset  = (data.asset || '').toUpperCase();
-      const exp    = data.expiry || '';
+      const asset = (data.asset || '').toUpperCase();
+      const exp   = data.expiry || '';
       if (asset !== currentSymRef.current || exp !== currentExpRef.current) return;
       updateCells(data);
     });
@@ -120,13 +174,12 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     setError(null);
     setChain(null);
     try {
-      const data  = await fetchChainApi(sym, exch, '');
+      const data    = await fetchChainApi(sym, exch, '');
       const rawExps = data.chain?.all_expiries || [];
-      // Sort ascending and prefer upcoming expiries
-      const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      const sorted = [...rawExps].sort();
-      const future = sorted.filter((e) => e >= today);
-      const exps   = future.length ? future : sorted;
+      const today   = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const sorted  = [...rawExps].sort();
+      const future  = sorted.filter((e) => e >= today);
+      const exps    = future.length ? future : sorted;
       setExpiries(exps);
       const firstExp = exps[0] || '';
       setExpiry(firstExp);
@@ -151,6 +204,7 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     cellMapRef.current.clear();
     setLoading(true);
     setError(null);
+    setChain(null);
     currentExpRef.current = exp;
     try {
       const data = await fetchChainApi(currentSymRef.current, currentExchRef.current, exp);
@@ -165,19 +219,25 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     }
   }
 
-  // Incremental DOM cell update -- avoids full React re-render on every tick
+  // ── DOM cell updates (no full re-render) ───────────────────────────────────
   function updateCells(data: OptionChainData) {
     const ceList = data.ce || [];
     const peList = data.pe || [];
     const cp = data.cp ?? data.currentprice;
     if (cp) setSpot(Number(cp) / 100);
 
+    const peMap = new Map<number, OptionLeg>();
+    for (const pe of peList) peMap.set(strikeRs(pe), pe);
+
     for (const ce of ceList) {
-      const sp = strikeRs(ce);
+      const sp  = strikeRs(ce);
+      const pe  = peMap.get(sp) ?? null;
+      // IV: prefer CE, fallback to PE (put-call parity → same value)
+      const iv  = g(ce, 'iv') ?? g(pe, 'iv');
       setCellHtml(`${sp}-ce-ltp`,   ltpHtml(ce, 'ce'));
-      setCellHtml(`${sp}-ce-oi`,    fmtLakh(g(ce, 'oi')));
-      setCellHtml(`${sp}-ce-vol`,   fmtLakh(g(ce, 'volume')));
-      setCellHtml(`${sp}-ce-iv`,    fmtDec(g(ce, 'iv'), 2));
+      setCellHtml(`${sp}-ce-iv`,    fmtIV(iv));
+      setCellHtml(`${sp}-ce-oi`,    fmtOI(g(ce, 'oi')));
+      setCellHtml(`${sp}-ce-vol`,   fmtOI(g(ce, 'volume')));
       setCellHtml(`${sp}-ce-delta`, fmtDec(g(ce, 'delta'), 4));
       setCellHtml(`${sp}-ce-gamma`, fmtDec(g(ce, 'gamma'), 4));
       setCellHtml(`${sp}-ce-theta`, fmtDec(g(ce, 'theta'), 2));
@@ -186,9 +246,8 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     for (const pe of peList) {
       const sp = strikeRs(pe);
       setCellHtml(`${sp}-pe-ltp`,   ltpHtml(pe, 'pe'));
-      setCellHtml(`${sp}-pe-oi`,    fmtLakh(g(pe, 'oi')));
-      setCellHtml(`${sp}-pe-vol`,   fmtLakh(g(pe, 'volume')));
-      setCellHtml(`${sp}-pe-iv`,    fmtDec(g(pe, 'iv'), 2));
+      setCellHtml(`${sp}-pe-oi`,    fmtOI(g(pe, 'oi')));
+      setCellHtml(`${sp}-pe-vol`,   fmtOI(g(pe, 'volume')));
       setCellHtml(`${sp}-pe-delta`, fmtDec(g(pe, 'delta'), 4));
       setCellHtml(`${sp}-pe-gamma`, fmtDec(g(pe, 'gamma'), 4));
       setCellHtml(`${sp}-pe-theta`, fmtDec(g(pe, 'theta'), 2));
@@ -207,7 +266,9 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     const price = ltp / 100;
     const chg   = g(row, 'ltpchg');
     const up    = chg == null ? true : chg >= 0;
-    const pct   = chg != null ? `<div style="font-size:10px;color:${up?'var(--green)':'var(--red)'}">${up?'+':''}${chg.toFixed(2)}%</div>` : '';
+    const pct   = chg != null
+      ? `<div style="font-size:10px;color:${up ? 'var(--green)' : 'var(--red)'}">${up ? '+' : ''}${chg.toFixed(2)}%</div>`
+      : '';
     return `₹${fmtPrice(price)}${pct}`;
   }
 
@@ -215,7 +276,19 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     return v == null ? '—' : v.toFixed(dp);
   }
 
-  // Suggestions search
+  // API returns IV as decimal (0.1905); display as percentage (19.05)
+  function fmtIV(v: number | null): string {
+    return v == null ? '—' : (v * 100).toFixed(2);
+  }
+
+  // Show '0' for zero (distinguishes 0 from null/missing)
+  function fmtOI(v: number | null): string {
+    if (v == null) return '—';
+    if (v === 0) return '0';
+    return fmtLakh(v);
+  }
+
+  // ── Search suggestions ─────────────────────────────────────────────────────
   function onSymInput(e: React.ChangeEvent<HTMLInputElement>) {
     setSymInput(e.target.value);
     if (sugTimerRef.current) clearTimeout(sugTimerRef.current);
@@ -258,7 +331,6 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
       });
       if (match) { onNavigateToChart(match); return; }
     } catch { /* fallback */ }
-    // Fallback construct
     const exp  = currentExpRef.current;
     const yr   = exp.slice(2, 4);
     const mo   = exp.length >= 6 ? MONTHS[parseInt(exp.slice(4, 6)) - 1] : '';
@@ -266,7 +338,7 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     onNavigateToChart({ stock_name: name, nubra_name: name, exchange: currentExchRef.current, derivative_type: 'OPT' });
   }
 
-  // Render chain table rows
+  // ── Render rows ────────────────────────────────────────────────────────────
   const renderRows = () => {
     if (!chain) return null;
     const ceList = chain.ce || [];
@@ -287,58 +359,88 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     maxPeOiRef.current = Math.max(1, ...peList.map((p) => g(p, 'oi') || 0));
 
     const chainCp  = chain.cp ?? chain.currentprice;
-    const refPrice = spot ?? (chainCp ? chainCp / 100 : null) ?? (chain.atm ? chain.atm / 100 : null);
+    // Treat 0 as missing (API sometimes returns 0 before market open)
+    const refPrice = (spot && spot > 0)
+      ? spot
+      : (chainCp && chainCp > 0 ? chainCp / 100 : null)
+        ?? (chain.atm && chain.atm > 0 ? chain.atm / 100 : null);
     const atm = refPrice != null
       ? strikes.reduce((b, s) => Math.abs(s - refPrice) < Math.abs(b - refPrice) ? s : b, strikes[0])
       : null;
 
-    // Register cell refs after render via callback ref
     const registerCell = (sp: number, key: string) => (el: HTMLTableCellElement | null) => {
       if (el) cellMapRef.current.set(`${sp}-${key}`, el);
     };
 
-    return strikes.map((sp) => {
+    const rows: React.ReactNode[] = [];
+    for (const sp of strikes) {
       const { ce, pe } = map[sp];
-      const isAtm = sp === atm;
-      const ceOi  = g(ce, 'oi') || 0;
-      const peOi  = g(pe, 'oi') || 0;
+      const isAtm  = sp === atm;
+      const ceOi   = g(ce, 'oi') || 0;
+      const peOi   = g(pe, 'oi') || 0;
+      const iv     = g(ce, 'iv') ?? g(pe, 'iv');
 
-      return (
-        <tr key={sp} className={isAtm ? 'atm-row' : ''} data-strike={sp}>
-          {/* CE Greeks */}
+      if (isAtm && spot) {
+        rows.push(
+          <tr key={`${sp}-spot-line`} className="pointer-events-none select-none">
+            <td colSpan={16} className="p-0" style={{ height: '18px' }}>
+              <div className="flex items-center h-full px-1">
+                <div className="flex-1 h-px bg-[var(--accent)] opacity-50" />
+                <span className="mx-2 px-2 py-[2px] rounded text-[9px] font-bold bg-[var(--accent)] text-white leading-none whitespace-nowrap">
+                  Spot: {fmtPrice(spot)}
+                </span>
+                <div className="flex-1 h-px bg-[var(--accent)] opacity-50" />
+              </div>
+            </td>
+          </tr>
+        );
+      }
+
+      rows.push(
+        <tr
+          key={sp}
+          className={isAtm ? 'atm-row' : ''}
+          data-strike={sp}
+          ref={isAtm ? (el) => { atmRowRef.current = el; } : undefined}
+        >
+          {/* CE: Vega Gamma Theta Delta OI Vol LTP */}
           <td ref={registerCell(sp,'ce-vega')}  className="ce-side text-right px-2 py-1.5 text-[12px]">{ce ? fmtDec(g(ce, 'vega'), 4) : '—'}</td>
           <td ref={registerCell(sp,'ce-gamma')} className="ce-side text-right px-2 py-1.5 text-[12px]">{ce ? fmtDec(g(ce, 'gamma'), 4) : '—'}</td>
           <td ref={registerCell(sp,'ce-theta')} className="ce-side text-right px-2 py-1.5 text-[12px]">{ce ? fmtDec(g(ce, 'theta'), 2) : '—'}</td>
           <td ref={registerCell(sp,'ce-delta')} className="ce-side text-right px-2 py-1.5 text-[12px]">{ce ? fmtDec(g(ce, 'delta'), 4) : '—'}</td>
-          {/* CE OI */}
           <td ref={registerCell(sp,'ce-oi')} className="ce-side text-right px-2 py-1.5 text-[12px]">
-            {ce ? <><div>{fmtLakh(g(ce, 'oi'))}</div><div className="oi-bar-wrap"><div className="oi-bar oi-bar-ce" style={{ width: `${Math.min(100, (ceOi / maxCeOiRef.current) * 100)}%` }} /></div></> : '—'}
+            {ce
+              ? <><div>{fmtOI(g(ce, 'oi'))}</div><div className="oi-bar-wrap"><div className="oi-bar oi-bar-ce" style={{ width: `${Math.min(100, (ceOi / maxCeOiRef.current) * 100)}%` }} /></div></>
+              : '—'}
           </td>
-          <td ref={registerCell(sp,'ce-vol')}   className="ce-side text-right px-2 py-1.5 text-[12px]">{ce ? fmtLakh(g(ce, 'volume')) : '—'}</td>
-          {/* CE LTP */}
+          <td ref={registerCell(sp,'ce-vol')} className="ce-side text-right px-2 py-1.5 text-[12px]">{ce ? fmtOI(g(ce, 'volume')) : '—'}</td>
           <td
             ref={registerCell(sp,'ce-ltp')}
             className="ce-side ltp-cell text-right px-2 py-1.5 text-[12px] cursor-pointer font-semibold"
             onClick={() => navigateToChart(sp, 'CE')}
             dangerouslySetInnerHTML={{ __html: ce ? ltpHtml(ce, 'ce') : '—' }}
           />
-          {/* Strike / IV */}
-          <td className="strike-cell text-center px-2 py-1.5 text-[13px] font-bold relative">
-            {isAtm && <span className="absolute top-0.5 left-1/2 -translate-x-1/2 text-[9px] font-semibold text-yellow-400 tracking-wide">ATM</span>}
+
+          {/* Strike + IV (center) */}
+          <td className="strike-cell text-center px-1 py-1.5 text-[13px] font-bold">
             {sp.toLocaleString('en-IN')}
           </td>
-          <td ref={registerCell(sp,'ce-iv')} className="iv-cell text-center px-2 py-1.5 text-[11px]">{ce ? fmtDec(g(ce, 'iv'), 2) : '—'}</td>
-          {/* PE LTP */}
+          <td ref={registerCell(sp,'ce-iv')} className="iv-cell text-center px-2 py-1.5 text-[11px] font-medium">
+            {fmtIV(iv)}
+          </td>
+
+          {/* PE: LTP Vol OI Delta Theta Gamma Vega */}
           <td
             ref={registerCell(sp,'pe-ltp')}
             className="pe-side ltp-cell text-right px-2 py-1.5 text-[12px] cursor-pointer font-semibold"
             onClick={() => navigateToChart(sp, 'PE')}
             dangerouslySetInnerHTML={{ __html: pe ? ltpHtml(pe, 'pe') : '—' }}
           />
-          <td ref={registerCell(sp,'pe-vol')} className="pe-side text-right px-2 py-1.5 text-[12px]">{pe ? fmtLakh(g(pe, 'volume')) : '—'}</td>
-          {/* PE OI */}
+          <td ref={registerCell(sp,'pe-vol')} className="pe-side text-right px-2 py-1.5 text-[12px]">{pe ? fmtOI(g(pe, 'volume')) : '—'}</td>
           <td ref={registerCell(sp,'pe-oi')} className="pe-side text-right px-2 py-1.5 text-[12px]">
-            {pe ? <><div>{fmtLakh(g(pe, 'oi'))}</div><div className="oi-bar-wrap"><div className="oi-bar oi-bar-pe" style={{ width: `${Math.min(100, (peOi / maxPeOiRef.current) * 100)}%` }} /></div></> : '—'}
+            {pe
+              ? <><div>{fmtOI(g(pe, 'oi'))}</div><div className="oi-bar-wrap"><div className="oi-bar oi-bar-pe" style={{ width: `${Math.min(100, (peOi / maxPeOiRef.current) * 100)}%` }} /></div></>
+              : '—'}
           </td>
           <td ref={registerCell(sp,'pe-delta')} className="pe-side text-right px-2 py-1.5 text-[12px]">{pe ? fmtDec(g(pe, 'delta'), 4) : '—'}</td>
           <td ref={registerCell(sp,'pe-theta')} className="pe-side text-right px-2 py-1.5 text-[12px]">{pe ? fmtDec(g(pe, 'theta'), 2) : '—'}</td>
@@ -346,14 +448,15 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
           <td ref={registerCell(sp,'pe-vega')}  className="pe-side text-right px-2 py-1.5 text-[12px]">{pe ? fmtDec(g(pe, 'vega'), 4) : '—'}</td>
         </tr>
       );
-    });
+    }
+    return rows;
   };
 
+  // ── JSX ────────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Toolbar */}
       <div className="h-12 bg-[var(--bg-secondary)] border-b border-[var(--border)] flex items-center gap-2 px-3 overflow-x-auto shrink-0">
-        {/* Quick picks */}
         <div className="flex gap-1 shrink-0">
           {QUICK_PICKS.map(({ sym, exch }) => (
             <button
@@ -377,13 +480,16 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
         </div>
         <div className="w-px h-5 bg-[var(--border)] shrink-0 mx-1" />
 
-        {/* Symbol input with suggestions */}
+        {/* Symbol input */}
         <div className="relative shrink-0">
           <input
             type="text"
             value={symInput}
             onChange={onSymInput}
-            onKeyDown={(e) => { if (e.key === 'Enter') { setSymbol(symInput.toUpperCase()); loadExpiryThenChain(symInput.toUpperCase(), exchange); } if (e.key === 'Escape') setShowSug(false); }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') { setSymbol(symInput.toUpperCase()); loadExpiryThenChain(symInput.toUpperCase(), exchange); }
+              if (e.key === 'Escape') setShowSug(false);
+            }}
             placeholder="Symbol"
             className="w-[110px] px-2 py-1 bg-[var(--bg-card)] border border-[var(--border)] rounded text-[var(--text-primary)] text-[12px] focus:outline-none focus:border-[var(--accent)]"
           />
@@ -434,36 +540,49 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
         )}
       </div>
 
-      {/* Table */}
-      <div className="flex-1 overflow-auto bg-[var(--bg-primary)]">
-        {loading && <div className="flex items-center justify-center h-40 text-[var(--text-secondary)] text-[14px]">Loading...</div>}
-        {error   && <div className="flex items-center justify-center h-40 text-[var(--red)] text-[14px]">{error}</div>}
-        {!loading && !error && (
-          <table className="oc-table w-full text-[12px] border-collapse" style={{ tableLayout: 'fixed' }}>
-            <thead>
-              <tr className="sticky top-0 z-10">
-                <th colSpan={7} className="oc-calls-th text-center py-1.5 text-[13px] font-bold">Calls</th>
-                <th colSpan={2} className="bg-[var(--bg-card)] border-b-2 border-[var(--border)]" />
-                <th colSpan={7} className="oc-puts-th text-center py-1.5 text-[13px] font-bold">Puts</th>
-              </tr>
-              <tr className="sticky top-8 z-10 bg-[var(--bg-secondary)]">
-                {['Vega','Gamma','Theta','Delta','OI (L)','Vol (L)','LTP'].map((h) => (
-                  <th key={h} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
-                ))}
-                <th className="text-center px-2 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] border-b border-[var(--border)] bg-[var(--bg-card)]">Strike</th>
-                <th className="text-center px-2 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] border-b border-[var(--border)] bg-[var(--bg-card)]">IV</th>
-                {['LTP','Vol (L)','OI (L)','Delta','Theta','Gamma','Vega'].map((h) => (
-                  <th key={h} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>{renderRows()}</tbody>
-          </table>
-        )}
-        {!loading && !error && !chain && (
-          <div className="flex items-center justify-center h-40 text-[var(--text-muted)] text-[14px]">
-            Select a symbol and click Load
-          </div>
+      {/* Table container (relative so Go-to-ATM button can be absolute-positioned inside) */}
+      <div className="flex-1 relative overflow-hidden">
+        <div ref={tableContainerRef} className="h-full overflow-auto bg-[var(--bg-primary)]">
+          {loading && <div className="flex items-center justify-center h-40 text-[var(--text-secondary)] text-[14px]">Loading…</div>}
+          {error   && <div className="flex items-center justify-center h-40 text-[var(--red)] text-[14px]">{error}</div>}
+          {!loading && !error && (
+            <table className="oc-table w-full text-[12px] border-collapse" style={{ tableLayout: 'fixed' }}>
+              <thead>
+                <tr className="sticky top-0 z-10">
+                  <th colSpan={7} className="oc-calls-th text-center py-1.5 text-[13px] font-bold">Calls</th>
+                  <th colSpan={2} className="bg-[var(--bg-card)] border-b-2 border-[var(--border)]" />
+                  <th colSpan={7} className="oc-puts-th text-center py-1.5 text-[13px] font-bold">Puts</th>
+                </tr>
+                <tr className="sticky top-8 z-10 bg-[var(--bg-secondary)]">
+                  {['Vega','Gamma','Theta','Delta','OI (L)','Vol (L)','LTP'].map((h) => (
+                    <th key={h} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
+                  ))}
+                  <th className="text-center px-2 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] border-b border-[var(--border)] bg-[var(--bg-card)]">Strike</th>
+                  <th className="text-center px-2 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] border-b border-[var(--border)] bg-[var(--bg-card)]">IV %</th>
+                  {['LTP','Vol (L)','OI (L)','Delta','Theta','Gamma','Vega'].map((h) => (
+                    <th key={h} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>{renderRows()}</tbody>
+            </table>
+          )}
+          {!loading && !error && !chain && (
+            <div className="flex items-center justify-center h-40 text-[var(--text-muted)] text-[14px]">
+              Select a symbol and click Load
+            </div>
+          )}
+        </div>
+
+        {/* Go to ATM floating button */}
+        {showGoToAtm && chain && (
+          <button
+            onClick={scrollToAtm}
+            className="absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[var(--accent)] text-white text-[12px] font-semibold shadow-lg hover:bg-[var(--accent-dim)] transition-all"
+            style={{ [atmDir === 'up' ? 'top' : 'bottom']: '10px' }}
+          >
+            {atmDir === 'up' ? '↑' : '↓'} Go to ATM
+          </button>
         )}
       </div>
     </div>
@@ -478,5 +597,3 @@ async function fetchChainApi(symbol: string, exchange: string, expiry: string): 
   if (data.error) throw new Error(data.error);
   return data;
 }
-
-
