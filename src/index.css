@@ -1,0 +1,198 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ─── CSS variable palette ──────────────────────────────── */
+:root,
+[data-theme="dark"] {
+  --bg-primary:    #0f0f11;
+  --bg-secondary:  #16161a;
+  --bg-card:       #1c1c22;
+  --bg-hover:      #26262e;
+  --border:        #2a2a34;
+  --text-primary:  #e8e8f0;
+  --text-secondary:#a0a0b0;
+  --text-muted:    #606070;
+  --accent:        #5865f2;
+  --accent-dim:    #4752c4;
+  --green:         #22c55e;
+  --red:           #ef4444;
+  --green-dim:     rgba(34,197,94,0.12);
+  --red-dim:       rgba(239,68,68,0.12);
+  --yellow:        #eab308;
+  --scrollbar-thumb: #2a2a3a;
+}
+
+[data-theme="light"] {
+  --bg-primary:    #f4f4f7;
+  --bg-secondary:  #ffffff;
+  --bg-card:       #ffffff;
+  --bg-hover:      #f0f0f5;
+  --border:        #e0e0ea;
+  --text-primary:  #1a1a2e;
+  --text-secondary:#4a4a6a;
+  --text-muted:    #8a8aa0;
+  --accent:        #5865f2;
+  --accent-dim:    #4752c4;
+  --green:         #16a34a;
+  --red:           #dc2626;
+  --green-dim:     rgba(22,163,74,0.1);
+  --red-dim:       rgba(220,38,38,0.1);
+  --yellow:        #ca8a04;
+  --scrollbar-thumb: #d0d0e0;
+}
+
+/* ─── Base resets ──────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html, body, #root       { height: 100%; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: var(--bg-primary);
+  color:      var(--text-primary);
+  font-size:  13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── Scrollbars ────────────────────────────────────────── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+
+/* ─── Option chain table ────────────────────────────────── */
+.oc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.oc-table th {
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 4px 6px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 1px solid var(--border);
+}
+
+.oc-table td {
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  text-align: right;
+}
+
+.oc-table td.strike-col {
+  text-align: center;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  border-left:  1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
+.oc-table tr:hover td { background: var(--bg-hover); }
+
+.ce-side { background: var(--green-dim); }
+.pe-side { background: var(--red-dim); }
+
+.atm-row td {
+  border-top:    2px solid var(--accent) !important;
+  border-bottom: 2px solid var(--accent) !important;
+}
+.atm-row td.strike-col {
+  color:  var(--accent);
+  border-color: var(--accent) !important;
+}
+
+/* OI bar inside cell */
+.oi-bar-wrap { position: relative; height: 100%; }
+.oi-bar {
+  position: absolute;
+  bottom: 0;
+  height: 3px;
+  border-radius: 1px;
+  opacity: 0.5;
+}
+.oi-bar.oi-bar-ce { background: var(--green); right: 0; }
+.oi-bar.oi-bar-pe { background: var(--red);   left:  0; }
+
+/* Positive / negative colouring helpers */
+.pos { color: var(--green); }
+.neg { color: var(--red);   }
+
+/* ─── Chart pane countdown ──────────────────────────────── */
+.candle-countdown {
+  position: absolute;
+  right: 60px;
+  bottom: 30px;
+  font-size: 11px;
+  color: var(--text-muted);
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ─── OI Profile overlay ────────────────────────────────── */
+.oi-profile-canvas {
+  position: absolute;
+  right: 60px;
+  top: 0;
+  pointer-events: none;
+}
+
+/* ─── Tooltip (lightweight shared) ─────────────────────── */
+.tooltip {
+  position: absolute;
+  z-index: 50;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  pointer-events: none;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+/* ─── Misc helpers ──────────────────────────────────────── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+}
+.badge-eq  { background: rgba(99,102,241,0.15); color: #818cf8; }
+.badge-idx { background: rgba(234,179,8,0.15);  color: #facc15; }
+.badge-fno { background: rgba(34,197,94,0.15);  color: #4ade80; }
+.badge-etf { background: rgba(249,115,22,0.15); color: #fb923c; }
+
+/* ─── Login overlay ─────────────────────────────────────── */
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(0,0,0,0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+}
+
+/* ─── LWC chart fix: no border-box override ─────────────── */
+.tv-lightweight-charts canvas { box-sizing: content-box !important; }

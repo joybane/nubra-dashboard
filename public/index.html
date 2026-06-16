@@ -55,10 +55,6 @@
   <nav id="topnav">
     <span class="brand">Nubra <span>Trade</span></span>
 
-    <!-- Watchlist toggle -->
-    <button class="wl-toggle-btn" id="btn-wl-toggle" title="Toggle Watchlist">☰ Watchlist</button>
-    <span class="nav-divider"></span>
-
     <div class="nav-tabs">
       <button class="nav-tab active" data-view="chart">Chart</button>
       <button class="nav-tab" data-view="optionchain">Option Chain</button>
@@ -78,60 +74,8 @@
     </button>
   </nav>
 
-  <!-- Market ticker strip -->
-  <div id="market-ticker">
-    <div class="ticker-item">
-      <span class="tick-sym">NIFTY 50</span>
-      <span class="tick-price" id="tick-price-NIFTY">—</span>
-      <span class="tick-chg" id="tick-chg-NIFTY">—</span>
-    </div>
-    <span class="ticker-sep">|</span>
-    <div class="ticker-item">
-      <span class="tick-sym">BANK NIFTY</span>
-      <span class="tick-price" id="tick-price-BANKNIFTY">—</span>
-      <span class="tick-chg" id="tick-chg-BANKNIFTY">—</span>
-    </div>
-    <span class="ticker-sep">|</span>
-    <div class="ticker-item">
-      <span class="tick-sym">FIN NIFTY</span>
-      <span class="tick-price" id="tick-price-FINNIFTY">—</span>
-      <span class="tick-chg" id="tick-chg-FINNIFTY">—</span>
-    </div>
-    <span class="ticker-sep">|</span>
-    <div class="ticker-item">
-      <span class="tick-sym">SENSEX</span>
-      <span class="tick-price" id="tick-price-SENSEX">—</span>
-      <span class="tick-chg" id="tick-chg-SENSEX">—</span>
-    </div>
-    <span class="ticker-sep">|</span>
-    <div class="ticker-item">
-      <span class="tick-sym">INDIA VIX</span>
-      <span class="tick-price" id="tick-price-INDIAVIX">—</span>
-      <span class="tick-chg" id="tick-chg-INDIAVIX">—</span>
-    </div>
-  </div>
-
   <!-- Views -->
   <div id="main">
-
-    <!-- Content area: watchlist sidebar + chart/oc views -->
-    <div id="content-area">
-
-      <!-- Watchlist sidebar -->
-      <div id="watchlist-panel" class="hidden">
-        <div class="wl-header">
-          <span class="wl-title">Watchlist</span>
-          <button class="wl-close" id="wl-close">✕</button>
-        </div>
-        <div class="wl-search-wrap">
-          <input id="wl-search" type="text" placeholder="Search symbol to add…" autocomplete="off" />
-          <div id="wl-search-dropdown" class="wl-dropdown"></div>
-        </div>
-        <div id="wl-list"></div>
-      </div>
-
-      <!-- Right: chart + option chain views -->
-      <div id="views">
 
     <!-- Chart view -->
     <div id="view-chart">
@@ -139,12 +83,6 @@
         <span class="chart-title" id="chart-symbol">—</span>
         <span class="chart-price" id="chart-price"></span>
         <span class="chart-change" id="chart-change"></span>
-
-        <!-- Buy / Sell quick-order buttons -->
-        <div class="buy-sell-wrap">
-          <button class="btn-buy-chart" id="btn-chart-buy">Buy</button>
-          <button class="btn-sell-chart" id="btn-chart-sell">Sell</button>
-        </div>
 
         <!-- Indicators button -->
         <div class="indicator-wrap">
@@ -183,25 +121,24 @@
           </div>
         </div>
 
-        <select id="interval-select" class="interval-select">
-          <optgroup label="Minutes">
-            <option value="1m">1 min</option>
-            <option value="2m">2 min</option>
-            <option value="3m">3 min</option>
-            <option value="5m" selected>5 min</option>
-            <option value="10m">10 min</option>
-            <option value="15m">15 min</option>
-            <option value="30m">30 min</option>
-          </optgroup>
-          <optgroup label="Hours">
-            <option value="1h">1 Hour</option>
-          </optgroup>
-          <optgroup label="Days">
-            <option value="1d">1 Day</option>
-            <option value="1w">1 Week</option>
-            <option value="1mt">1 Month</option>
-          </optgroup>
-        </select>
+        <div class="interval-group" id="interval-group">
+          <!-- Minutes -->
+          <button class="interval-btn" data-interval="1m">1m</button>
+          <button class="interval-btn" data-interval="2m">2m</button>
+          <button class="interval-btn" data-interval="3m">3m</button>
+          <button class="interval-btn active" data-interval="5m">5m</button>
+          <button class="interval-btn" data-interval="10m">10m</button>
+          <button class="interval-btn" data-interval="15m">15m</button>
+          <button class="interval-btn" data-interval="30m">30m</button>
+          <div class="interval-sep"></div>
+          <!-- Hours -->
+          <button class="interval-btn" data-interval="1h">1H</button>
+          <div class="interval-sep"></div>
+          <!-- Days -->
+          <button class="interval-btn" data-interval="1d">1D</button>
+          <button class="interval-btn" data-interval="1w">1W</button>
+          <button class="interval-btn" data-interval="1mt">1M</button>
+        </div>
       </div>
 
       <div id="chart-container">
@@ -264,9 +201,9 @@
         <table class="oc-table" id="oc-table">
           <thead>
             <tr class="oc-section-header">
-              <th colspan="7" class="oc-calls-th">CALLS</th>
+              <th colspan="7" class="oc-calls-th">Calls</th>
               <th colspan="2" class="oc-center-th"></th>
-              <th colspan="7" class="oc-puts-th">PUTS</th>
+              <th colspan="7" class="oc-puts-th">Puts</th>
             </tr>
             <tr class="oc-col-names">
               <!-- CE side -->
@@ -289,156 +226,8 @@
       </div>
     </div>
 
-      </div><!-- #views -->
-    </div><!-- #content-area -->
-
-    <!-- ── Trading panel (positions / orders / holdings) ─────────────────── -->
-    <div id="trading-panel">
-      <div id="tp-resize-handle" title="Double-click to collapse / Drag to resize">
-        <span class="tp-collapse-hint">▲ Collapse</span>
-      </div>
-      <div class="tp-header">
-        <div class="tp-tabs">
-          <button class="tp-tab active" data-tp="strategies">Strategies</button>
-          <button class="tp-tab" data-tp="orders">Orders</button>
-          <button class="tp-tab" data-tp="holdings">Holdings</button>
-        </div>
-        <div class="tp-summary">
-          <span>P&amp;L: <strong id="tp-pnl">₹0.00</strong></span>
-          <button class="tp-reset" id="btn-paper-reset" title="Reset paper account">Reset</button>
-        </div>
-        <button class="tp-toggle" id="tp-toggle" title="Collapse / Expand">▼ Collapse</button>
-      </div>
-      <div id="tp-body">
-        <!-- Strategies tab: grouped positions by strategy -->
-        <div id="tp-strategies" class="tp-content active">
-          <div class="strat-toolbar">
-            <button class="strat-new-btn" id="btn-new-strategy">+ New Strategy</button>
-          </div>
-          <div id="strat-list"></div>
-        </div>
-        <div id="tp-orders" class="tp-content hidden">
-          <table class="tp-table">
-            <thead><tr>
-              <th>Symbol</th><th>Side</th><th>Qty</th><th>Type</th>
-              <th>Price</th><th>Exec Price</th><th>Status</th><th>Strategy</th><th>Time</th><th></th>
-            </tr></thead>
-            <tbody id="ord-tbody"><tr class="tp-empty"><td colspan="9">No orders placed</td></tr></tbody>
-          </table>
-        </div>
-        <div id="tp-holdings" class="tp-content hidden">
-          <div class="tp-empty-msg">Holdings will appear here for overnight equity positions.</div>
-        </div>
-      </div>
-    </div>
-
   </div><!-- #main -->
-
-  <!-- Floating expand button — visible when trading panel is collapsed -->
-  <button id="tp-float-expand" class="tp-float-expand hidden" title="Show Order Book">▲ Order Book</button>
-
 </div><!-- #app -->
-
-<!-- ── Order placement modal (broker-style) ──────────────────────────────── -->
-<div id="order-modal" class="order-overlay hidden">
-  <div class="order-card" id="order-card">
-
-    <!-- Header -->
-    <div class="om-header buy" id="om-header">
-      <div class="om-side-tabs">
-        <button class="om-side-tab buy active" id="om-buy">▲ BUY</button>
-        <button class="om-side-tab sell" id="om-sell">▼ SELL</button>
-      </div>
-      <div class="om-sym-row">
-        <span class="om-sym" id="om-symbol">—</span>
-        <span class="om-exch" id="om-exchange">NSE</span>
-      </div>
-      <div class="om-ltp-row">
-        <span class="om-ltp" id="om-ltp">—</span>
-        <span class="om-ltp-chg" id="om-ltp-chg"></span>
-      </div>
-      <button class="om-close-btn" id="om-close">✕</button>
-    </div>
-
-    <!-- Product type -->
-    <div class="om-product-row">
-      <button class="oprod-btn active" data-prod="INTRADAY">Intraday</button>
-      <button class="oprod-btn" data-prod="DELIVERY">Delivery / NRML</button>
-    </div>
-
-    <!-- Order type tabs -->
-    <div class="om-type-row">
-      <button class="otype-btn active" data-otype="MKT">Market</button>
-      <button class="otype-btn" data-otype="LMT">Limit</button>
-      <button class="otype-btn" data-otype="SL">Stop Loss</button>
-    </div>
-
-    <!-- Fields -->
-    <div class="om-body">
-      <div class="om-row">
-        <div class="om-field">
-          <label>Strategy / Basket</label>
-          <div class="strategy-select-wrap">
-            <select id="om-strategy"></select>
-            <button class="btn-new-strategy" id="om-new-strategy" title="New strategy">+</button>
-          </div>
-        </div>
-      </div>
-      <div class="om-row">
-        <div class="om-field">
-          <label id="om-qty-label">Qty</label>
-          <input type="number" id="om-qty" min="1" value="1" />
-          <span class="om-lot-info" id="om-lot-info"></span>
-        </div>
-      </div>
-      <div class="om-row" id="om-price-wrap">
-        <div class="om-field half">
-          <label>Price (₹)</label>
-          <input type="number" id="om-price" step="0.05" placeholder="0.00" />
-        </div>
-        <div class="om-field half hidden" id="om-trigger-wrap">
-          <label>Trigger (₹)</label>
-          <input type="number" id="om-trigger" step="0.05" placeholder="0.00" />
-        </div>
-      </div>
-    </div>
-
-    <div class="om-info" id="om-info">Executes immediately at live price</div>
-
-    <!-- Margin info -->
-    <div class="om-margin-panel" id="om-margin-panel">
-      <div class="om-margin-row">
-        <span id="om-margin-label">Required Margin</span>
-        <span id="om-margin-req">—</span>
-      </div>
-    </div>
-
-    <button class="om-submit-btn buy" id="om-submit">▲ Place Buy Order</button>
-    <div class="om-error hidden" id="om-error"></div>
-
-  </div>
-</div>
-
-<!-- P&L tick-by-tick chart modal -->
-<div id="pnl-modal" class="order-overlay hidden">
-  <div class="pnl-card">
-    <div class="pnl-card-header">
-      <div class="pnl-title-wrap">
-        <span id="pnl-sym">—</span>
-        <span id="pnl-side-badge" class="pnl-side">—</span>
-        <span id="pnl-meta" class="pnl-meta">—</span>
-      </div>
-      <div class="pnl-stats">
-        <span>Entry: <strong id="pnl-entry">—</strong></span>
-        <span>LTP: <strong id="pnl-ltp">—</strong></span>
-        <span>P&amp;L: <strong id="pnl-total">—</strong></span>
-      </div>
-      <button id="pnl-close" class="order-close">✕</button>
-    </div>
-    <div id="pnl-chart-container" style="height:280px;position:relative;background:#0d0f11;"></div>
-    <div class="pnl-footer" id="pnl-footer">Loading ticks…</div>
-  </div>
-</div>
 
 <script src="js/app.js" type="module"></script>
 </body>
