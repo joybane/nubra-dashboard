@@ -23,6 +23,14 @@ export function fmtLakh(v: number | null | undefined): string {
   return n.toString();
 }
 
+export function fmtOI(v: number | null | undefined): string {
+  if (v == null || v === 0) return '—';
+  const n = Number(v);
+  if (n >= 1e5)  return (n / 1e5).toFixed(2) + ' L';
+  if (n >= 1000) return (n / 1000).toFixed(1) + ' K';
+  return n.toLocaleString('en-IN');
+}
+
 export function fmtVol(v: number | null | undefined): string {
   if (v == null) return '—';
   if (v >= 1e7)  return (v / 1e7).toFixed(2) + ' Cr';

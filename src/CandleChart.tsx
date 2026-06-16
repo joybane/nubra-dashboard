@@ -14,7 +14,7 @@ import type { Instrument, OhlcBar, OhlcvData, VolBar, WsMessage } from './types'
 import { getSymbol } from './types';
 import {
   toChartTime, snapToCandle, sortKey, historyDays, chunkDays,
-  intervalToSeconds, isIntradayInterval, IST_OFFSET, fmtVol, fmtPrice, formatExpiry,
+  intervalToSeconds, isIntradayInterval, IST_OFFSET, fmtVol, fmtPrice, formatExpiry, fmtOI,
 } from './lib/utils';
 
 const INTERVALS = ['1m','2m','3m','5m','10m','15m','30m','1h','1d','1w','1mt'] as const;
@@ -51,6 +51,9 @@ export default function CandleChart({ instrument, theme }: Props) {
   const oiBaselineRef    = useRef<OiSnap | null>(null);
   const oiToSnapRef      = useRef<OiSnap | null>(null);
   const lastOiSnapTimeRef= useRef(0);
+  const oiWsAssetRef     = useRef<string | null>(null);
+  const oiWsExpiryRef    = useRef<string | null>(null);
+  const oiWsExchRef      = useRef<string>('NSE');
 
   const [interval,   setInterval]   = useState<Interval>('5m');
   const [loading,    setLoading]    = useState<string | null>('Select a symbol to begin');
@@ -69,8 +72,9 @@ export default function CandleChart({ instrument, theme }: Props) {
   const [countdownY, setCountdownY] = useState(0);
   const [priceDisplay, setPriceDisplay] = useState<{ price:number; diff:number; pct:string; up:boolean } | null>(null);
   const [loadMore, setLoadMore] = useState(false);
+  const [oiHover, setOiHover] = useState<{ x: number; y: number; strike: number; ceOi: number; peOi: number } | null>(null);
 
-  const { subscribe, subscribeChart, unsubscribeChart } = useWs();
+  const { subscribe, subscribeOC, unsubscribeOC, subscribeChart, unsubscribeChart } = useWs();
   const intervalRef = useRef(interval);
   intervalRef.current = interval;
 
@@ -179,6 +183,67 @@ export default function CandleChart({ instrument, theme }: Props) {
     }
   }, [showVol]);
 
+  // ── OI WebSocket helpers ──────────────────────────────────────────────────
+  function subscribeOiWs(asset: string, expiry: string, exchange: string) {
+    if (oiWsAssetRef.current === asset && oiWsExpiryRef.current === expiry) return;
+    if (oiWsAssetRef.current && oiWsExpiryRef.current) {
+      unsubscribeOC(oiWsAssetRef.current, oiWsExpiryRef.current, oiWsExchRef.current);
+    }
+    oiWsAssetRef.current  = asset;
+    oiWsExpiryRef.current = expiry;
+    oiWsExchRef.current   = exchange;
+    subscribeOC(asset, expiry, exchange);
+  }
+
+  function unsubscribeOiWs() {
+    if (oiWsAssetRef.current && oiWsExpiryRef.current) {
+      unsubscribeOC(oiWsAssetRef.current, oiWsExpiryRef.current, oiWsExchRef.current);
+    }
+    oiWsAssetRef.current  = null;
+    oiWsExpiryRef.current = null;
+  }
+
+  // ── Live OI updates from WebSocket ───────────────────────────────────────
+  useEffect(() => {
+    const unsub = subscribe('option_chain', (msg: WsMessage) => {
+      if (msg.type !== 'option_chain' || !oiEnabledRef.current || !oiChainRef.current) return;
+      const data = msg.data as OptionChainData;
+      if ((data.asset || '').toUpperCase() !== oiWsAssetRef.current) return;
+      if ((data.expiry || '') !== oiWsExpiryRef.current) return;
+
+      // Build strike(rupees) → oi lookup from WS tick
+      const ceOiMap: Record<number, number> = {};
+      const peOiMap: Record<number, number> = {};
+      for (const leg of (data.ce || [])) {
+        const raw = Number(leg.sp);
+        const sp  = raw > 10000 ? raw / 100 : raw;
+        const oi  = Number((leg as Record<string,unknown>).oi ?? (leg as Record<string,unknown>).open_interest) || 0;
+        if (sp > 0 && oi > 0) ceOiMap[sp] = oi;
+      }
+      for (const leg of (data.pe || [])) {
+        const raw = Number(leg.sp);
+        const sp  = raw > 10000 ? raw / 100 : raw;
+        const oi  = Number((leg as Record<string,unknown>).oi ?? (leg as Record<string,unknown>).open_interest) || 0;
+        if (sp > 0 && oi > 0) peOiMap[sp] = oi;
+      }
+      if (!Object.keys(ceOiMap).length && !Object.keys(peOiMap).length) return;
+
+      // Patch OI values in the existing structure — preserves the sp format
+      // established by reloadOIExpiries so drawOI coordinates stay correct.
+      oiChainRef.current = {
+        ce: oiChainRef.current.ce.map(leg => {
+          const raw = Number(leg.sp); const spRs = raw > 10000 ? raw / 100 : raw;
+          return spRs in ceOiMap ? { ...leg, oi: ceOiMap[spRs] } : leg;
+        }),
+        pe: oiChainRef.current.pe.map(leg => {
+          const raw = Number(leg.sp); const spRs = raw > 10000 ? raw / 100 : raw;
+          return spRs in peOiMap ? { ...leg, oi: peOiMap[spRs] } : leg;
+        }),
+      };
+    });
+    return unsub;
+  }, [subscribe]);
+
   // ── WebSocket ticks ───────────────────────────────────────────────────────
   useEffect(() => {
     const unsub = subscribe('ohlcv', (msg: WsMessage) => {
@@ -221,6 +286,7 @@ export default function CandleChart({ instrument, theme }: Props) {
       const oldSym = getSymbol(currentInstRef.current);
       unsubscribeChart({ indexes: [oldSym] }, iv, currentInstRef.current.exchange || 'NSE');
     }
+    unsubscribeOiWs();
 
     currentInstRef.current = inst;
     allBarsRef.current    = [];
@@ -306,8 +372,14 @@ export default function CandleChart({ instrument, theme }: Props) {
   }
   function tickCountdown() {
     if (!intervalRef.current || !currentInstRef.current) { stopCountdown(); return; }
+    const nowUtc = Math.floor(Date.now() / 1000);
+    const istSec = (nowUtc + IST_OFFSET) % 86400; // seconds since midnight IST
+    // Hide outside NSE market hours (9:15 AM – 3:30 PM IST)
+    if (istSec < 9 * 3600 + 15 * 60 || istSec > 15 * 3600 + 30 * 60) {
+      setCountdown(null);
+      return;
+    }
     const intSec    = intervalToSeconds(intervalRef.current);
-    const nowUtc    = Math.floor(Date.now() / 1000);
     const elapsed   = (nowUtc + IST_OFFSET) % intSec;
     const remaining = intSec - elapsed;
     const mm = Math.floor(remaining / 60).toString().padStart(2, '0');
@@ -318,7 +390,7 @@ export default function CandleChart({ instrument, theme }: Props) {
   function updateCountdownPosition() {
     if (!lastBarRef.current || !candleRef.current) return;
     const y = candleRef.current.priceToCoordinate(lastBarRef.current.close);
-    if (y != null) setCountdownY(Math.round(y) + 20);
+    if (y != null) setCountdownY(Math.round(y) + 13);
   }
 
   // ── Price display ─────────────────────────────────────────────────────────
@@ -340,11 +412,11 @@ export default function CandleChart({ instrument, theme }: Props) {
       if (!chain) return;
       const expiries = chain.all_expiries || [];
       setOiExpiries(expiries);
-      setSelExpiries(expiries.slice(0, 1));
-      oiChainRef.current = { ce: chain.ce || [], pe: chain.pe || [] };
-      oiEnabledRef.current = true;
-      setOiOn(true);
-      startOILoop();
+      const first = expiries.slice(0, 1);
+      setSelExpiries(first);
+      // Fetch with the specific nearest expiry so we get correct single-expiry OI,
+      // not the multi-expiry dump returned by the no-expiry endpoint.
+      await reloadOIExpiries(first);
     } catch { /* ignore */ }
   }
 
@@ -360,18 +432,18 @@ export default function CandleChart({ instrument, theme }: Props) {
         if (!data.chain) continue;
         for (const ce of (data.chain.ce || [])) {
           const sp = Number(ce.sp) > 10000 ? Number(ce.sp) / 100 : Number(ce.sp);
-          ceMap[sp] = (ceMap[sp] || 0) + (Number(ce.oi) || 0);
+          const oi = Number(ce.oi ?? ce.open_interest) || 0;
+          ceMap[sp] = (ceMap[sp] || 0) + oi;
         }
         for (const pe of (data.chain.pe || [])) {
           const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
-          peMap[sp] = (peMap[sp] || 0) + (Number(pe.oi) || 0);
+          const oi = Number(pe.oi ?? pe.open_interest) || 0;
+          peMap[sp] = (peMap[sp] || 0) + oi;
         }
       } catch { /* ignore */ }
     }
     const hasData = Object.values(ceMap).some(v => v > 0) || Object.values(peMap).some(v => v > 0);
     if (hasData) {
-      // Multiply sp back by 100 so drawOI's "sp > 10000 → /100" normalisation
-      // produces the correct strike price (same raw format as loadOIChain stores).
       oiChainRef.current = {
         ce: Object.entries(ceMap).map(([sp, oi]) => ({ sp: Number(sp) * 100, oi })),
         pe: Object.entries(peMap).map(([sp, oi]) => ({ sp: Number(sp) * 100, oi })),
@@ -379,6 +451,15 @@ export default function CandleChart({ instrument, theme }: Props) {
     }
     oiEnabledRef.current = true;
     setOiOn(true);
+    if (expiries.length === 1 && currentInstRef.current) {
+      subscribeOiWs(
+        getSymbol(currentInstRef.current).toUpperCase(),
+        expiries[0],
+        currentInstRef.current.exchange || 'NSE',
+      );
+    } else {
+      unsubscribeOiWs();
+    }
     startOILoop();
     requestAnimationFrame(drawOI);
   }
@@ -441,16 +522,16 @@ export default function CandleChart({ instrument, theme }: Props) {
     for (const ce of ceList) {
       const sp = Number(ce.sp) > 10000 ? Number(ce.sp) / 100 : Number(ce.sp);
       if (!map[sp]) map[sp] = { ceOi: 0, peOi: 0 };
-      map[sp].ceOi = Number(ce.oi) || 0;
+      map[sp].ceOi += Number(ce.oi ?? ce.open_interest) || 0;
     }
     for (const pe of peList) {
       const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
       if (!map[sp]) map[sp] = { ceOi: 0, peOi: 0 };
-      map[sp].peOi = Number(pe.oi) || 0;
+      map[sp].peOi += Number(pe.oi ?? pe.open_interest) || 0;
     }
 
     const allOi = Object.values(map).flatMap((v) => [v.ceOi, v.peOi]).filter((v) => v > 0).sort((a, b) => b - a);
-    const maxOi = allOi[Math.floor(allOi.length * 0.15)] || allOi[0] || 1;
+    const maxOi = allOi[0] || 1;
 
     const priceScaleW = 72;
     const maxBarW     = (w - priceScaleW) * 0.35 * oiWidthScaleRef.current;
@@ -476,15 +557,6 @@ export default function CandleChart({ instrument, theme }: Props) {
       }
     }
     ctx.globalAlpha = 1;
-    const handleX = w - priceScaleW - maxBarW;
-    ctx.strokeStyle = 'rgba(150,150,180,0.5)';
-    ctx.lineWidth   = 2;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(handleX, 20);
-    ctx.lineTo(handleX, h - 40);
-    ctx.stroke();
-    ctx.setLineDash([]);
   }
   drawOIRef.current = drawOI;
 
@@ -521,19 +593,68 @@ export default function CandleChart({ instrument, theme }: Props) {
   }
 
   function handleMouseMove(e: React.MouseEvent) {
-    if (!oiEnabledRef.current || !containerRef.current) return;
-    const rect       = containerRef.current.getBoundingClientRect();
-    const x          = e.clientX - rect.left;
-    const priceScaleW= 72;
-    const maxBarW    = (containerRef.current.clientWidth - priceScaleW) * 0.35 * oiWidthScaleRef.current;
-    const handleX    = containerRef.current.clientWidth - priceScaleW - maxBarW;
-    containerRef.current.style.cursor = Math.abs(x - handleX) <= 15 ? 'ew-resize' : '';
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const priceScaleW = 72;
+    const w = containerRef.current.clientWidth;
+    const maxBarW = (w - priceScaleW) * 0.35 * oiWidthScaleRef.current;
+    const handleX = w - priceScaleW - maxBarW;
+
+    if (oiEnabledRef.current) {
+      containerRef.current.style.cursor = Math.abs(x - handleX) <= 15 ? 'ew-resize' : '';
+    }
+
+    // OI bar hover tooltip — only when cursor is physically over a rendered bar
+    if (oiEnabledRef.current && oiChainRef.current && candleRef.current && x >= handleX - 5) {
+      const price = candleRef.current.coordinateToPrice(y);
+      if (price != null && price > 0) {
+        const strikeMap: Record<number, { ceOi: number; peOi: number }> = {};
+        for (const ce of oiChainRef.current.ce) {
+          const sp = Number(ce.sp) > 10000 ? Number(ce.sp) / 100 : Number(ce.sp);
+          if (!strikeMap[sp]) strikeMap[sp] = { ceOi: 0, peOi: 0 };
+          strikeMap[sp].ceOi += Number(ce.oi) || 0;
+        }
+        for (const pe of oiChainRef.current.pe) {
+          const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
+          if (!strikeMap[sp]) strikeMap[sp] = { ceOi: 0, peOi: 0 };
+          strikeMap[sp].peOi += Number(pe.oi) || 0;
+        }
+        const strikes = Object.keys(strikeMap).map(Number).sort((a, b) => a - b);
+        if (strikes.length > 1) {
+          const nearest = strikes.reduce((prev, curr) =>
+            Math.abs(curr - price) < Math.abs(prev - price) ? curr : prev, strikes[0]);
+          const interval = strikes[1] - strikes[0];
+          if (Math.abs(nearest - price) <= interval * 0.65) {
+            const d = strikeMap[nearest];
+            const yStrike = candleRef.current.priceToCoordinate(nearest);
+            if (yStrike != null) {
+              const barH = 20;
+              const right = w - priceScaleW;
+              const allOiVals = Object.values(strikeMap).flatMap(v => [v.ceOi, v.peOi]).filter(v => v > 0).sort((a, b) => b - a);
+              const maxOi = allOiVals[0] || 1;
+              const bwCe = Math.max(3, Math.min((d.ceOi / maxOi) * maxBarW, maxBarW));
+              const bwPe = Math.max(3, Math.min((d.peOi / maxOi) * maxBarW, maxBarW));
+              const overCe = d.ceOi > 0 && y >= yStrike - barH / 2 && y <= yStrike     && x >= right - bwCe;
+              const overPe = d.peOi > 0 && y >= yStrike              && y <= yStrike + barH / 2 && x >= right - bwPe;
+              if (overCe || overPe) {
+                setOiHover({ x, y, strike: nearest, ceOi: d.ceOi, peOi: d.peOi });
+                return;
+              }
+            }
+          }
+        }
+      }
+    }
+    setOiHover(null);
   }
 
   function handleMouseLeave() {
     if (containerRef.current && !oiDragRef.current.dragging) {
       containerRef.current.style.cursor = '';
     }
+    setOiHover(null);
   }
 
   // ── Toolbar ───────────────────────────────────────────────────────────────
@@ -576,6 +697,7 @@ export default function CandleChart({ instrument, theme }: Props) {
                 oiEnabledRef.current = false;
                 setOiOn(false);
                 setShowOiPopup(false);
+                unsubscribeOiWs();
                 drawOI();
               } else if (oiChainRef.current) {
                 oiEnabledRef.current = true;
@@ -781,11 +903,45 @@ export default function CandleChart({ instrument, theme }: Props) {
           </div>
         )}
 
+        {/* OI bar hover tooltip */}
+        {oiHover && oiOn && (
+          <div
+            className="absolute z-20 pointer-events-none"
+            style={{
+              left: Math.max(4, oiHover.x - 210),
+              top: Math.max(4, Math.min(oiHover.y - 58, (containerRef.current?.clientHeight ?? 400) - 120)),
+            }}
+          >
+            <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-2xl px-4 py-3 min-w-[178px]">
+              <div className="text-[14px] font-semibold text-[var(--text-primary)] mb-2 pb-1.5 border-b border-[var(--border)]">
+                Strike {oiHover.strike.toLocaleString('en-IN')}
+              </div>
+              <div className="flex items-center justify-between gap-4 text-[13px] mb-1">
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 rounded-[2px] bg-[#22c55e] shrink-0" />
+                  <span className="text-[var(--text-muted)]">Call</span>
+                </div>
+                <span className="text-[var(--text-primary)] font-medium tabular-nums">{fmtOI(oiHover.ceOi)}</span>
+              </div>
+              <div className="flex items-center justify-between gap-4 text-[13px]">
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 rounded-[2px] bg-[#ef4444] shrink-0" />
+                  <span className="text-[var(--text-muted)]">Put</span>
+                </div>
+                <span className="text-[var(--text-primary)] font-medium tabular-nums">{fmtOI(oiHover.peOi)}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Candle countdown */}
         {countdown && (
           <div
-            className="absolute right-0 w-[72px] text-center bg-[#1a1d24] text-[var(--text-secondary)] text-[12px] font-semibold py-0.5 z-20 pointer-events-none font-mono border-t border-[var(--border)]"
-            style={{ top: countdownY }}
+            className="absolute right-0 w-[72px] text-center text-white text-[11px] font-semibold py-0.5 z-20 pointer-events-none font-mono"
+            style={{
+              top: countdownY,
+              backgroundColor: priceDisplay ? (priceDisplay.up ? '#22c55e' : '#ef4444') : '#2962ff',
+            }}
           >
             {countdown}
           </div>

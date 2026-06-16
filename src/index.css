@@ -132,18 +132,12 @@ body {
   border-bottom: 2px solid var(--red);
 }
 
-.atm-row td {
-  border-top:    2px solid var(--accent) !important;
-  border-bottom: 2px solid var(--accent) !important;
-}
 .atm-row td.strike-col,
 .atm-row td.strike-cell {
-  color:  var(--accent);
-  border-color: var(--accent) !important;
+  color: var(--accent);
 }
 .atm-row td.iv-cell {
   color: var(--accent);
-  border-color: var(--accent) !important;
 }
 
 /* LTP cell: slight cursor pointer indication */
