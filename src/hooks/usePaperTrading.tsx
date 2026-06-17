@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { Instrument } from '../types';
 
-export type UatStatus = 'idle' | 'awaiting_otp' | 'awaiting_mpin' | 'authenticated';
+export type AuthStatus = 'idle' | 'awaiting_otp' | 'awaiting_mpin' | 'authenticated';
 
 export interface OrderTicketConfig {
   instrument: Instrument | null;
@@ -9,33 +9,30 @@ export interface OrderTicketConfig {
 }
 
 interface PaperTradingCtx {
-  uatStatus:      UatStatus;
-  refMapSize:     number;
-  refreshUatStatus: () => Promise<void>;
-  ticketOpen:     boolean;
-  ticketConfig:   OrderTicketConfig;
-  openTicket:     (cfg?: Partial<OrderTicketConfig>) => void;
-  closeTicket:    () => void;
+  authenticated:    boolean;
+  refreshAuthStatus: () => Promise<void>;
+  ticketOpen:       boolean;
+  ticketConfig:     OrderTicketConfig;
+  openTicket:       (cfg?: Partial<OrderTicketConfig>) => void;
+  closeTicket:      () => void;
 }
 
 const Ctx = createContext<PaperTradingCtx | null>(null);
 
 export function PaperTradingProvider({ children }: { children: React.ReactNode }) {
-  const [uatStatus,  setUatStatus]  = useState<UatStatus>('idle');
-  const [refMapSize, setRefMapSize] = useState(0);
-  const [ticketOpen, setTicketOpen] = useState(false);
-  const [ticketConfig, setTicketConfig] = useState<OrderTicketConfig>({ instrument: null, side: 'BUY' });
+  const [authenticated, setAuthenticated] = useState(false);
+  const [ticketOpen,    setTicketOpen]    = useState(false);
+  const [ticketConfig,  setTicketConfig]  = useState<OrderTicketConfig>({ instrument: null, side: 'BUY' });
 
-  const refreshUatStatus = useCallback(async () => {
+  const refreshAuthStatus = useCallback(async () => {
     try {
       const res = await fetch('/paper/auth/status');
-      const d   = await res.json() as { status: UatStatus; refMapSize: number };
-      setUatStatus(d.status);
-      setRefMapSize(d.refMapSize ?? 0);
+      const d   = await res.json() as { authenticated: boolean };
+      setAuthenticated(d.authenticated);
     } catch { /* ignore */ }
   }, []);
 
-  useEffect(() => { refreshUatStatus(); }, [refreshUatStatus]);
+  useEffect(() => { refreshAuthStatus(); }, [refreshAuthStatus]);
 
   const openTicket = useCallback((cfg?: Partial<OrderTicketConfig>) => {
     setTicketConfig((prev) => ({ ...prev, ...cfg }));
@@ -45,7 +42,7 @@ export function PaperTradingProvider({ children }: { children: React.ReactNode }
   const closeTicket = useCallback(() => setTicketOpen(false), []);
 
   return (
-    <Ctx.Provider value={{ uatStatus, refMapSize, refreshUatStatus, ticketOpen, ticketConfig, openTicket, closeTicket }}>
+    <Ctx.Provider value={{ authenticated, refreshAuthStatus, ticketOpen, ticketConfig, openTicket, closeTicket }}>
       {children}
     </Ctx.Provider>
   );

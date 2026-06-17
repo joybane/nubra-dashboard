@@ -43,93 +43,6 @@ const STATUS_LABEL: Record<string, string> = {
 const MIN_H = 120;
 const DEFAULT_H = 220;
 
-// ─── UAT login banner (inline) ───────────────────────────────────────────────
-function UatLoginBanner({ onAuth }: { onAuth: () => void }) {
-  const [step,    setStep]    = useState<'idle' | 'otp' | 'pin'>('idle');
-  const [otp,     setOtp]     = useState('');
-  const [loading, setLoading] = useState(false);
-  const [msg,     setMsg]     = useState('');
-
-  async function sendOtp() {
-    setLoading(true); setMsg('');
-    try {
-      const res  = await fetch('/paper/auth/send-otp', { method: 'POST' });
-      const d    = await res.json() as { ok: boolean; message?: string; error?: string };
-      if (!d.ok) throw new Error(d.error);
-      setStep('otp');
-      setMsg(d.message || 'OTP sent.');
-      setTimeout(() => document.getElementById('uat-otp')?.focus(), 80);
-    } catch (e) { setMsg((e as Error).message); }
-    finally     { setLoading(false); }
-  }
-
-  async function verifyOtp() {
-    if (!otp.trim()) { setMsg('Enter OTP first.'); return; }
-    setLoading(true); setMsg('Verifying…');
-    try {
-      const res = await fetch('/paper/auth/verify-otp', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ otp }),
-      });
-      const d = await res.json() as { ok: boolean; message?: string; error?: string };
-      if (!d.ok) throw new Error(d.error);
-      setStep('pin');
-      await verifyPin();
-    } catch (e) { setMsg((e as Error).message); setStep('otp'); }
-    finally    { setLoading(false); }
-  }
-
-  async function verifyPin() {
-    try {
-      const res = await fetch('/paper/auth/verify-pin', { method: 'POST' });
-      const d   = await res.json() as { ok: boolean; message?: string; error?: string };
-      if (!d.ok) throw new Error(d.error);
-      setMsg('Paper trading connected!');
-      setTimeout(onAuth, 500);
-    } catch (e) { setMsg((e as Error).message); setStep('otp'); }
-  }
-
-  return (
-    <div className="flex-1 flex items-center justify-center gap-4 flex-wrap px-4 text-[12px]">
-      <span className="text-[var(--text-muted)]">Paper trading not connected.</span>
-
-      {step === 'idle' && (
-        <button
-          onClick={sendOtp} disabled={loading}
-          className="px-3 py-1 rounded bg-[var(--accent)] text-white font-semibold hover:bg-[var(--accent-dim)] disabled:opacity-50"
-        >
-          {loading ? 'Sending…' : 'Connect Paper Account'}
-        </button>
-      )}
-
-      {step === 'otp' && (
-        <div className="flex items-center gap-2">
-          <input
-            id="uat-otp" type="text" inputMode="numeric" maxLength={6} placeholder="OTP"
-            value={otp} onChange={(e) => setOtp(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && verifyOtp()}
-            className="w-24 px-2 py-1 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
-          />
-          <button
-            onClick={verifyOtp} disabled={loading}
-            className="px-3 py-1 rounded bg-[var(--accent)] text-white font-semibold hover:bg-[var(--accent-dim)] disabled:opacity-50"
-          >
-            {loading ? 'Verifying…' : 'Verify OTP'}
-          </button>
-        </div>
-      )}
-
-      {step === 'pin' && (
-        <span className="text-[var(--text-muted)] flex items-center gap-1">
-          <span className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin inline-block" />
-          Verifying MPIN…
-        </span>
-      )}
-
-      {msg && <span className="text-[var(--text-muted)]">{msg}</span>}
-    </div>
-  );
-}
-
 // ─── Orders table ─────────────────────────────────────────────────────────────
 function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
   const [openOrders,   setOpenOrders]   = useState<PaperOrder[]>([]);
@@ -137,14 +50,16 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
   const [subTab,       setSubTab]       = useState<'open' | 'closed'>('open');
   const [loading,      setLoading]      = useState(false);
   const [cancelling,   setCancelling]   = useState<number | null>(null);
+  const [dayPnl,       setDayPnl]       = useState<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchOrders = useCallback(async () => {
     if (!uatAuth) return;
     try {
-      const [liveRes, doneRes] = await Promise.all([
+      const [liveRes, doneRes, pnlRes] = await Promise.all([
         fetch('/paper/orders?live=1'),
         fetch('/paper/orders?executed=1'),
+        fetch('/paper/pnl'),
       ]);
       if (liveRes.ok) {
         const d = await liveRes.json() as PaperOrder[] | { orders?: PaperOrder[] };
@@ -153,6 +68,10 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
       if (doneRes.ok) {
         const d = await doneRes.json() as PaperOrder[] | { orders?: PaperOrder[] };
         setClosedOrders(Array.isArray(d) ? d : (d.orders ?? []));
+      }
+      if (pnlRes.ok) {
+        const d = await pnlRes.json() as { total?: number };
+        setDayPnl(d.total ?? null);
       }
     } catch { /* ignore */ }
   }, [uatAuth]);
@@ -175,11 +94,11 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
   }
 
   const rows = subTab === 'open' ? openOrders : closedOrders;
-  const dayPnl = closedOrders.reduce((s, o) => {
-    if (o.order_status !== 'ORDER_STATUS_FILLED') return s;
-    const sign = o.order_side === 'ORDER_SIDE_SELL' ? 1 : -1;
-    return s + sign * (o.avg_filled_price / 100) * o.filled_qty;
-  }, 0);
+  // dayPnl is fetched from /paper/pnl (realised + unrealised across all positions).
+  // The old approach of summing signed order cash flows was wrong: a BUY-only position
+  // would show a large negative "P&L" equal to the cash outflow, not the actual profit.
+  const pnlPaise = dayPnl ?? 0;
+  const pnlRs    = pnlPaise / 100;
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -197,7 +116,7 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
           </button>
         ))}
         <span className="ml-auto text-[11px] text-[var(--text-muted)]">
-          Day P&L: <span className={dayPnl >= 0 ? 'text-green-400' : 'text-red-400'}>{dayPnl >= 0 ? '+' : ''}₹{fmtPrice(Math.abs(dayPnl))}</span>
+          Day P&L: <span className={pnlRs >= 0 ? 'text-green-400' : 'text-red-400'}>{pnlRs >= 0 ? '+' : ''}₹{fmtPrice(Math.abs(pnlRs))}</span>
         </span>
         {loading && <span className="w-3 h-3 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin ml-2" />}
       </div>
@@ -410,11 +329,10 @@ function HoldingsTab({ uatAuth }: { uatAuth: boolean }) {
 
 // ─── OrderTerminal ────────────────────────────────────────────────────────────
 export default function OrderTerminal() {
-  const { uatStatus, refreshUatStatus, openTicket } = usePaperTrading();
+  const { authenticated: uatAuth, refreshAuthStatus, openTicket } = usePaperTrading();
   const [tab,    setTab]    = useState<'orders' | 'positions' | 'holdings'>('orders');
   const [height, setHeight] = useState(DEFAULT_H);
   const dragRef  = useRef<{ startY: number; startH: number } | null>(null);
-  const uatAuth  = uatStatus === 'authenticated';
 
   // ── resize drag ──────────────────────────────────────────────────────────
   function onHandleMouseDown(e: React.MouseEvent) {
@@ -462,12 +380,11 @@ export default function OrderTerminal() {
         <button onClick={() => setTab('holdings')}  className={TAB_STYLE('holdings')}>Holdings</button>
 
         <div className="ml-auto flex items-center gap-2 pr-1">
-          {/* UAT status pill */}
           <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
             uatAuth ? 'bg-green-500/15 text-green-400' : 'bg-[var(--bg-hover)] text-[var(--text-muted)]'
           }`}>
             <span className={`w-1.5 h-1.5 rounded-full ${uatAuth ? 'bg-green-400' : 'bg-[var(--text-muted)]'}`} />
-            PAPER
+            SIM
           </span>
 
           {uatAuth && (
@@ -480,7 +397,7 @@ export default function OrderTerminal() {
           )}
 
           <button
-            onClick={refreshUatStatus}
+            onClick={refreshAuthStatus}
             title="Refresh"
             className="w-6 h-6 flex items-center justify-center rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] text-[14px]"
           >
@@ -492,8 +409,8 @@ export default function OrderTerminal() {
       {/* body */}
       <div className="flex-1 overflow-hidden">
         {!uatAuth ? (
-          <div className="flex h-full">
-            <UatLoginBanner onAuth={refreshUatStatus} />
+          <div className="flex h-full items-center justify-center text-[12px] text-[var(--text-muted)]">
+            Login to Nubra to use paper trading.
           </div>
         ) : (
           <>

@@ -152,7 +152,7 @@ export interface BacktestResult {
 }
 
 // ─── Workspace ────────────────────────────────────────────────────────────────
-export type ViewType = 'chart' | 'optionchain' | 'straddle' | 'strategy' | 'basket' | 'backtest';
+export type ViewType = 'chart' | 'optionchain' | 'straddle' | 'strategy' | 'basket' | 'backtest' | 'watchlist';
 
 export type LayoutType = 'single' | 'hsplit' | 'vsplit' | 'grid' | 'tleft' | 'tright';
 
@@ -166,6 +166,20 @@ export interface WorkspaceState {
   layout: LayoutType;
   panes:  PaneState[];
   activePane: string;
+}
+
+// ─── Watchlist ────────────────────────────────────────────────────────────────
+export interface WatchlistItem {
+  id:           string;
+  displayName:  string;
+  underlying:   string;
+  exchange:     string;
+  ref_id?:      number;
+  nubraName?:   string;
+  optionType?:  'CE' | 'PE';
+  strike?:      number;
+  expiry?:      string;
+  ltpAtAdd:     number;
 }
 
 // ─── Theme ───────────────────────────────────────────────────────────────────

@@ -10,8 +10,9 @@ export default defineConfig({
   server: {
     port: 8000,
     proxy: {
-      '/auth': { target: 'http://localhost:3000', changeOrigin: true },
-      '/api':  { target: 'http://localhost:3000', changeOrigin: true },
+      '/auth':  { target: 'http://localhost:3000', changeOrigin: true },
+      '/api':   { target: 'http://localhost:3000', changeOrigin: true },
+      '/paper': { target: 'http://localhost:3000', changeOrigin: true },
       '/ws': {
         target: 'ws://localhost:3000',
         ws: true,

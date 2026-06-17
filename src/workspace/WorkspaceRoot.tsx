@@ -28,8 +28,9 @@ export default function WorkspaceRoot({ theme }: WorkspaceRootProps) {
 
   const navigateToChart = useCallback((paneId: string) => (inst: Instrument) => {
     setActivePane(paneId);
+    setPaneView(paneId, 'chart');         // switch the pane to chart view
     loadInstrumentInActivePane(inst);
-  }, [setActivePane, loadInstrumentInActivePane]);
+  }, [setActivePane, setPaneView, loadInstrumentInActivePane]);
 
   const { layout, panes, activePane } = state;
 

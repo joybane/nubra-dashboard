@@ -5,6 +5,7 @@ import StraddleChart from '../StraddleChart';
 import StrategyChart from '../StrategyChart';
 import BasketOrder from '../BasketOrder';
 import Backtest from '../Backtest';
+import Watchlist from '../Watchlist';
 
 const VIEW_LABELS: Record<ViewType, string> = {
   chart:       'Chart',
@@ -13,14 +14,15 @@ const VIEW_LABELS: Record<ViewType, string> = {
   strategy:    'Strategy',
   basket:      'Basket',
   backtest:    'Backtest',
+  watchlist:   'Watchlist',
 };
 
 interface PaneShellProps {
-  pane:             PaneState;
-  theme:            'dark' | 'light';
-  isActive:         boolean;
-  onActivate:       () => void;
-  onViewChange:     (view: ViewType) => void;
+  pane:               PaneState;
+  theme:              'dark' | 'light';
+  isActive:           boolean;
+  onActivate:         () => void;
+  onViewChange:       (view: ViewType) => void;
   onNavigateToChart?: (inst: Instrument) => void;
 }
 
@@ -33,7 +35,7 @@ export default function PaneShell({
       case 'chart':
         return <CandleChart instrument={pane.instrument} theme={theme} />;
       case 'optionchain':
-        return <OptionChain instrument={pane.instrument} onNavigateToChart={onNavigateToChart} />;
+        return <OptionChain instrument={pane.instrument} onNavigateToChart={onNavigateToChart} onChangeView={onViewChange} />;
       case 'straddle':
         return <StraddleChart instrument={pane.instrument} />;
       case 'strategy':
@@ -42,6 +44,8 @@ export default function PaneShell({
         return <BasketOrder instrument={pane.instrument} />;
       case 'backtest':
         return <Backtest instrument={pane.instrument} />;
+      case 'watchlist':
+        return <Watchlist />;
     }
   })();
 

@@ -10,7 +10,7 @@ import {
   type HistogramSeriesOptions,
 } from 'lightweight-charts';
 import { useWs } from './hooks/useWsContext';
-import type { Instrument, OhlcBar, OhlcvData, VolBar, WsMessage } from './types';
+import type { Instrument, OhlcBar, OhlcvData, OptionChainData, VolBar, WsMessage } from './types';
 import { getSymbol } from './types';
 import {
   toChartTime, snapToCandle, sortKey, historyDays, chunkDays,
@@ -54,6 +54,14 @@ export default function CandleChart({ instrument, theme }: Props) {
   const oiWsAssetRef     = useRef<string | null>(null);
   const oiWsExpiryRef    = useRef<string | null>(null);
   const oiWsExchRef      = useRef<string>('NSE');
+  const oiHistoricalRef  = useRef<Map<string, {ts: number; v: number}[]>>(new Map());
+  const oiHistFetchedRef = useRef(false);
+  const oiHistLoadingRef = useRef(false);
+  const oiFromMsRef      = useRef<number | null>(null);
+  const oiToMsRef        = useRef<number | null>(null);
+  const oiDeltasRef      = useRef<Record<number, { ceDelta: number; peDelta: number }>>({});
+  const oiSymbolMapRef   = useRef<{ ce: Map<number,string>; pe: Map<number,string> }>({ ce: new Map(), pe: new Map() });
+  const oiDrawPendingRef = useRef(false);   // deduplicates concurrent rAF drawOI requests
 
   const [interval,   setInterval]   = useState<Interval>('5m');
   const [loading,    setLoading]    = useState<string | null>('Select a symbol to begin');
@@ -77,6 +85,8 @@ export default function CandleChart({ instrument, theme }: Props) {
   const { subscribe, subscribeOC, unsubscribeOC, subscribeChart, unsubscribeChart } = useWs();
   const intervalRef = useRef(interval);
   intervalRef.current = interval;
+  const oiModeRef = useRef(oiMode);
+  oiModeRef.current = oiMode;
 
   // ── Chart initialization ──────────────────────────────────────────────────
   useEffect(() => {
@@ -131,7 +141,10 @@ export default function CandleChart({ instrument, theme }: Props) {
 
     chart.subscribeCrosshairMove((param) => {
       updateCountdownPosition();
-      if (oiEnabledRef.current) requestAnimationFrame(drawOI);
+      if (oiEnabledRef.current && !oiDrawPendingRef.current) {
+        oiDrawPendingRef.current = true;
+        requestAnimationFrame(() => { drawOIRef.current(); oiDrawPendingRef.current = false; });
+      }
       const bar  = param.seriesData?.get(candle) as OhlcBar | undefined;
       const vBar = param.seriesData?.get(vol) as { value: number } | undefined;
       if (bar) {
@@ -142,7 +155,10 @@ export default function CandleChart({ instrument, theme }: Props) {
     });
 
     chart.timeScale().subscribeVisibleLogicalRangeChange(async (range) => {
-      if (oiEnabledRef.current) requestAnimationFrame(drawOI);
+      if (oiEnabledRef.current && !oiDrawPendingRef.current) {
+        oiDrawPendingRef.current = true;
+        requestAnimationFrame(() => { drawOIRef.current(); oiDrawPendingRef.current = false; });
+      }
       if (!range || isLoadingRef.current || !currentInstRef.current || !earliestRef.current) return;
       if (range.from > 10) return;
       await loadMoreHistory();
@@ -217,13 +233,13 @@ export default function CandleChart({ instrument, theme }: Props) {
       for (const leg of (data.ce || [])) {
         const raw = Number(leg.sp);
         const sp  = raw > 10000 ? raw / 100 : raw;
-        const oi  = Number((leg as Record<string,unknown>).oi ?? (leg as Record<string,unknown>).open_interest) || 0;
+        const oi  = Number(leg.oi ?? (leg as { open_interest?: number }).open_interest) || 0;
         if (sp > 0 && oi > 0) ceOiMap[sp] = oi;
       }
       for (const leg of (data.pe || [])) {
         const raw = Number(leg.sp);
         const sp  = raw > 10000 ? raw / 100 : raw;
-        const oi  = Number((leg as Record<string,unknown>).oi ?? (leg as Record<string,unknown>).open_interest) || 0;
+        const oi  = Number(leg.oi ?? (leg as { open_interest?: number }).open_interest) || 0;
         if (sp > 0 && oi > 0) peOiMap[sp] = oi;
       }
       if (!Object.keys(ceOiMap).length && !Object.keys(peOiMap).length) return;
@@ -288,12 +304,20 @@ export default function CandleChart({ instrument, theme }: Props) {
     }
     unsubscribeOiWs();
 
-    currentInstRef.current = inst;
-    allBarsRef.current    = [];
-    allVolBarsRef.current = [];
-    earliestRef.current   = null;
-    lastBarRef.current    = null;
-    dayOpenRef.current    = null;
+    currentInstRef.current  = inst;
+    allBarsRef.current      = [];
+    allVolBarsRef.current   = [];
+    earliestRef.current     = null;
+    lastBarRef.current      = null;
+    dayOpenRef.current      = null;
+    // Clear OI state so stale previous-instrument bars don't render on the new chart
+    if (oiEnabledRef.current) { oiEnabledRef.current = false; setOiOn(false); }
+    oiChainRef.current       = null;
+    oiHistoricalRef.current  = new Map();
+    oiHistFetchedRef.current = false;
+    oiSnapshotsRef.current   = new Map();
+    oiBaselineRef.current    = null;
+    oiToSnapRef.current      = null;
     stopCountdown();
     setLoading('Loading historical data…');
     setPriceDisplay(null);
@@ -401,6 +425,61 @@ export default function CandleChart({ instrument, theme }: Props) {
     setPriceDisplay({ price, diff, pct, up });
   }
 
+  // ── OI Change helpers ────────────────────────────────────────────────────
+  function buildOptionName(asset: string, expiry: string, spPaise: number, type: 'CE' | 'PE'): string {
+    const yy  = expiry.slice(2, 4);
+    const mon = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][parseInt(expiry.slice(4, 6)) - 1];
+    return `${asset}${yy}${mon}${spPaise / 100}${type}`;
+  }
+
+  function timeToMs(hhmm: string): number {
+    const [h, m] = hhmm.split(':').map(Number);
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    return d.getTime();
+  }
+
+  async function fetchOIHistory() {
+    if (!oiChainRef.current || !currentInstRef.current || oiHistLoadingRef.current) return;
+    const symMap = oiSymbolMapRef.current;
+    if (!symMap.ce.size) return;
+    oiHistLoadingRef.current = true;
+
+    const values: string[] = [];
+    const seen = new Set<string>();
+    for (const [sp, ceSym] of symMap.ce.entries()) {
+      const peSym = symMap.pe.get(sp);
+      if (ceSym && !seen.has(ceSym)) { seen.add(ceSym); values.push(ceSym); }
+      if (peSym && !seen.has(peSym)) { seen.add(peSym); values.push(peSym); }
+    }
+    console.log('[OI Hist] fetching', values.slice(0, 4), 'total:', values.length);
+
+    try {
+      const today    = new Date();
+      const startUTC = new Date(today);
+      startUTC.setUTCHours(3, 45, 0, 0); // 9:15 IST
+
+      const res  = await fetch('/api/historical', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: [{ exchange: currentInstRef.current.exchange || 'NSE', type: 'OPT', values, fields: ['cumulative_oi'], startDate: startUTC.toISOString(), endDate: today.toISOString(), interval: '1m', intraDay: true, realTime: false }] }),
+      });
+      if (!res.ok) { console.error('[OI Hist] API error', res.status); oiHistLoadingRef.current = false; return; }
+      const data = await res.json() as { result?: Array<{ values?: Array<Record<string, { cumulative_oi?: Array<{ts: number; v: number}> }>> }> };
+      const map  = new Map<string, {ts: number; v: number}[]>();
+      for (const row of data.result?.[0]?.values ?? []) {
+        for (const [name, series] of Object.entries(row)) {
+          if (series?.cumulative_oi?.length) map.set(name, series.cumulative_oi);
+        }
+      }
+      console.log('[OI Hist] loaded', map.size, 'instruments, sample:', [...map.keys()].slice(0, 3));
+      oiHistoricalRef.current  = map;
+      oiHistFetchedRef.current = true;
+      requestAnimationFrame(drawOI);
+    } catch (e) { console.error('[OI Hist] fetch error', e); }
+    finally { oiHistLoadingRef.current = false; }
+  }
+
   // ── OI Profile ────────────────────────────────────────────────────────────
   async function loadOIChain() {
     if (!currentInstRef.current) return;
@@ -425,6 +504,8 @@ export default function CandleChart({ instrument, theme }: Props) {
     const sym = getSymbol(currentInstRef.current);
     const ceMap: Record<number, number> = {};
     const peMap: Record<number, number> = {};
+    const ceSymMap = new Map<number, string>();
+    const peSymMap = new Map<number, string>();
     for (const exp of expiries) {
       try {
         const res  = await fetch(`/api/optionchain/${encodeURIComponent(sym)}?expiry=${encodeURIComponent(exp)}`);
@@ -434,14 +515,17 @@ export default function CandleChart({ instrument, theme }: Props) {
           const sp = Number(ce.sp) > 10000 ? Number(ce.sp) / 100 : Number(ce.sp);
           const oi = Number(ce.oi ?? ce.open_interest) || 0;
           ceMap[sp] = (ceMap[sp] || 0) + oi;
+          if (ce.symbol && !ceSymMap.has(Number(ce.sp))) ceSymMap.set(Number(ce.sp), String(ce.symbol));
         }
         for (const pe of (data.chain.pe || [])) {
           const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
           const oi = Number(pe.oi ?? pe.open_interest) || 0;
           peMap[sp] = (peMap[sp] || 0) + oi;
+          if (pe.symbol && !peSymMap.has(Number(pe.sp))) peSymMap.set(Number(pe.sp), String(pe.symbol));
         }
       } catch { /* ignore */ }
     }
+    oiSymbolMapRef.current = { ce: ceSymMap, pe: peSymMap };
     const hasData = Object.values(ceMap).some(v => v > 0) || Object.values(peMap).some(v => v > 0);
     if (hasData) {
       oiChainRef.current = {
@@ -449,6 +533,8 @@ export default function CandleChart({ instrument, theme }: Props) {
         pe: Object.entries(peMap).map(([sp, oi]) => ({ sp: Number(sp) * 100, oi })),
       };
     }
+    oiHistoricalRef.current  = new Map();
+    oiHistFetchedRef.current = false;
     oiEnabledRef.current = true;
     setOiOn(true);
     if (expiries.length === 1 && currentInstRef.current) {
@@ -472,6 +558,12 @@ export default function CandleChart({ instrument, theme }: Props) {
       if (now - lastOiSnapTimeRef.current > 30000) {
         oiSnapshotsRef.current.set(now, { ce: [...oiChainRef.current.ce], pe: [...oiChainRef.current.pe] });
         lastOiSnapTimeRef.current = now;
+        // Prune entries older than 8 h (market day) to prevent unbounded memory growth.
+        // Without this a full trading session stores ~960 snapshots × chain size objects.
+        const cutoff = now - 8 * 3_600_000;
+        for (const [ts] of oiSnapshotsRef.current) {
+          if (ts < cutoff) oiSnapshotsRef.current.delete(ts);
+        }
       }
     };
     storeSnap(); // initial snapshot when loop starts
@@ -505,7 +597,67 @@ export default function CandleChart({ instrument, theme }: Props) {
     ctx.clearRect(0, 0, w, h);
     if (!oiEnabledRef.current) return;
 
-    // Apply "to" snapshot or baseline (from) for time-range OI view
+    const priceScaleW = 72;
+    const maxBarW     = (w - priceScaleW) * 0.35 * oiWidthScaleRef.current;
+    const barH        = 20;
+
+    if (oiModeRef.current === 'oi_change' && oiHistFetchedRef.current) {
+      // ── OI Change mode ─────────────────────────────────────────────────────
+      const fromMs   = oiFromMsRef.current;
+      const toMs     = oiToMsRef.current;
+      const symMap   = oiSymbolMapRef.current;
+
+      function getHistOI(name: string, targetMs: number | null): number {
+        const s = oiHistoricalRef.current.get(name);
+        if (!s?.length) return 0;
+        if (targetMs === null) return s[s.length - 1].v;
+        let best = s[0];
+        for (const pt of s) { if (pt.ts / 1_000_000 <= targetMs) best = pt; else break; }
+        return best?.v ?? 0;
+      }
+
+      const deltas: Record<number, { ceDelta: number; peDelta: number }> = {};
+      const seen = new Set<number>();
+      for (const ce of oiChainRef.current.ce) {
+        const sp = Number(ce.sp);
+        if (seen.has(sp)) continue;
+        seen.add(sp);
+        const ceName  = symMap.ce.get(sp) || '';
+        const peName  = symMap.pe.get(sp) || '';
+        if (!ceName && !peName) continue;
+        const ceBase  = getHistOI(ceName, fromMs ?? timeToMs('09:15'));
+        const peBase  = getHistOI(peName, fromMs ?? timeToMs('09:15'));
+        const ceEnd   = toMs !== null ? getHistOI(ceName, toMs) : (Number(oiChainRef.current.ce.find(c => Number(c.sp) === sp)?.oi) || getHistOI(ceName, null));
+        const peEnd   = toMs !== null ? getHistOI(peName, toMs) : (Number(oiChainRef.current.pe.find(p => Number(p.sp) === sp)?.oi) || getHistOI(peName, null));
+        deltas[sp] = { ceDelta: ceEnd - ceBase, peDelta: peEnd - peBase };
+      }
+      oiDeltasRef.current = deltas;
+
+      const maxAbs = Math.max(...Object.values(deltas).flatMap(d => [Math.abs(d.ceDelta), Math.abs(d.peDelta)]), 1);
+
+      for (const [spStr, { ceDelta, peDelta }] of Object.entries(deltas)) {
+        const strikeRs = Number(spStr) / 100;
+        const y = series.priceToCoordinate(strikeRs);
+        if (y == null || y < 2 || y > h - 2) continue;
+        const right = w - priceScaleW;
+        if (showCalls && ceDelta !== 0) {
+          const bw = Math.max(3, Math.min((Math.abs(ceDelta) / maxAbs) * maxBarW, maxBarW));
+          ctx.globalAlpha = ceDelta > 0 ? 0.85 : 0.35;
+          ctx.fillStyle   = '#22c55e';
+          ctx.fillRect(right - bw, y - barH / 2, bw, barH / 2);
+        }
+        if (showPuts && peDelta !== 0) {
+          const bw = Math.max(3, Math.min((Math.abs(peDelta) / maxAbs) * maxBarW, maxBarW));
+          ctx.globalAlpha = peDelta > 0 ? 0.85 : 0.35;
+          ctx.fillStyle   = '#ef4444';
+          ctx.fillRect(right - bw, y, bw, barH / 2);
+        }
+      }
+      ctx.globalAlpha = 1;
+      return;
+    }
+
+    // ── Absolute OI mode ───────────────────────────────────────────────────
     let ceList = oiToSnapRef.current ? oiToSnapRef.current.ce : oiChainRef.current.ce;
     let peList = oiToSnapRef.current ? oiToSnapRef.current.pe : oiChainRef.current.pe;
     const baseline = oiBaselineRef.current;
@@ -532,10 +684,6 @@ export default function CandleChart({ instrument, theme }: Props) {
 
     const allOi = Object.values(map).flatMap((v) => [v.ceOi, v.peOi]).filter((v) => v > 0).sort((a, b) => b - a);
     const maxOi = allOi[0] || 1;
-
-    const priceScaleW = 72;
-    const maxBarW     = (w - priceScaleW) * 0.35 * oiWidthScaleRef.current;
-    const barH        = 20;
 
     for (const [strikeStr, { ceOi, peOi }] of Object.entries(map)) {
       const strike = Number(strikeStr);
@@ -610,17 +758,28 @@ export default function CandleChart({ instrument, theme }: Props) {
     if (oiEnabledRef.current && oiChainRef.current && candleRef.current && x >= handleX - 5) {
       const price = candleRef.current.coordinateToPrice(y);
       if (price != null && price > 0) {
+        const isChangeMode = oiModeRef.current === 'oi_change' && oiHistFetchedRef.current;
+
+        // Build strike map — deltas in change mode, absolute OI otherwise
         const strikeMap: Record<number, { ceOi: number; peOi: number }> = {};
-        for (const ce of oiChainRef.current.ce) {
-          const sp = Number(ce.sp) > 10000 ? Number(ce.sp) / 100 : Number(ce.sp);
-          if (!strikeMap[sp]) strikeMap[sp] = { ceOi: 0, peOi: 0 };
-          strikeMap[sp].ceOi += Number(ce.oi) || 0;
+        if (isChangeMode) {
+          for (const [spStr, { ceDelta, peDelta }] of Object.entries(oiDeltasRef.current)) {
+            const sp = Number(spStr) / 100;
+            strikeMap[sp] = { ceOi: ceDelta, peOi: peDelta };
+          }
+        } else {
+          for (const ce of oiChainRef.current.ce) {
+            const sp = Number(ce.sp) > 10000 ? Number(ce.sp) / 100 : Number(ce.sp);
+            if (!strikeMap[sp]) strikeMap[sp] = { ceOi: 0, peOi: 0 };
+            strikeMap[sp].ceOi += Number(ce.oi) || 0;
+          }
+          for (const pe of oiChainRef.current.pe) {
+            const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
+            if (!strikeMap[sp]) strikeMap[sp] = { ceOi: 0, peOi: 0 };
+            strikeMap[sp].peOi += Number(pe.oi) || 0;
+          }
         }
-        for (const pe of oiChainRef.current.pe) {
-          const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
-          if (!strikeMap[sp]) strikeMap[sp] = { ceOi: 0, peOi: 0 };
-          strikeMap[sp].peOi += Number(pe.oi) || 0;
-        }
+
         const strikes = Object.keys(strikeMap).map(Number).sort((a, b) => a - b);
         if (strikes.length > 1) {
           const nearest = strikes.reduce((prev, curr) =>
@@ -630,14 +789,14 @@ export default function CandleChart({ instrument, theme }: Props) {
             const d = strikeMap[nearest];
             const yStrike = candleRef.current.priceToCoordinate(nearest);
             if (yStrike != null) {
-              const barH = 20;
+              const barH  = 20;
               const right = w - priceScaleW;
-              const allOiVals = Object.values(strikeMap).flatMap(v => [v.ceOi, v.peOi]).filter(v => v > 0).sort((a, b) => b - a);
-              const maxOi = allOiVals[0] || 1;
-              const bwCe = Math.max(3, Math.min((d.ceOi / maxOi) * maxBarW, maxBarW));
-              const bwPe = Math.max(3, Math.min((d.peOi / maxOi) * maxBarW, maxBarW));
-              const overCe = d.ceOi > 0 && y >= yStrike - barH / 2 && y <= yStrike     && x >= right - bwCe;
-              const overPe = d.peOi > 0 && y >= yStrike              && y <= yStrike + barH / 2 && x >= right - bwPe;
+              const allVals = Object.values(strikeMap).flatMap(v => [Math.abs(v.ceOi), Math.abs(v.peOi)]).filter(v => v > 0).sort((a, b) => b - a);
+              const maxVal  = allVals[0] || 1;
+              const bwCe = Math.max(3, Math.min((Math.abs(d.ceOi) / maxVal) * maxBarW, maxBarW));
+              const bwPe = Math.max(3, Math.min((Math.abs(d.peOi) / maxVal) * maxBarW, maxBarW));
+              const overCe = d.ceOi !== 0 && y >= yStrike - barH / 2 && y <= yStrike            && x >= right - bwCe;
+              const overPe = d.peOi !== 0 && y >= yStrike             && y <= yStrike + barH / 2 && x >= right - bwPe;
               if (overCe || overPe) {
                 setOiHover({ x, y, strike: nearest, ceOi: d.ceOi, peOi: d.peOi });
                 return;
@@ -742,7 +901,12 @@ export default function CandleChart({ instrument, theme }: Props) {
                 {(['oi', 'oi_change'] as const).map((mode) => (
                   <button
                     key={mode}
-                    onClick={() => setOiMode(mode)}
+                    onClick={() => {
+                      setOiMode(mode);
+                      if (mode === 'oi_change' && !oiHistFetchedRef.current && !oiHistLoadingRef.current) {
+                        fetchOIHistory();
+                      }
+                    }}
                     className={`flex-1 py-2.5 text-[12px] font-medium transition-all border-b-2 -mb-px ${oiMode === mode ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'}`}
                   >
                     {mode === 'oi' ? 'Open Interest' : 'Change in OI'}
@@ -826,7 +990,12 @@ export default function CandleChart({ instrument, theme }: Props) {
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
-        onWheel={() => { if (oiEnabledRef.current) requestAnimationFrame(drawOI); }}
+        onWheel={() => {
+          if (oiEnabledRef.current && !oiDrawPendingRef.current) {
+            oiDrawPendingRef.current = true;
+            requestAnimationFrame(() => { drawOIRef.current(); oiDrawPendingRef.current = false; });
+          }
+        }}
       >
         {/* OI canvas overlay */}
         <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none z-[5]" />
@@ -841,10 +1010,14 @@ export default function CandleChart({ instrument, theme }: Props) {
               onChange={(e) => {
                 const v = e.target.value;
                 setOiFromTime(v);
-                const toMs = (t: string) => { const [h, m] = t.split(':').map(Number); const d = new Date(); d.setHours(h, m, 0, 0); return d.getTime(); };
-                const snaps = Array.from(oiSnapshotsRef.current.entries()).sort((a, b) => a[0] - b[0]);
-                if (v && snaps.length) { const ms = toMs(v); const s = snaps.find(([ts]) => ts >= ms) ?? snaps[0]; oiBaselineRef.current = s[1]; }
-                else oiBaselineRef.current = null;
+                if (oiModeRef.current === 'oi_change') {
+                  oiFromMsRef.current = v ? timeToMs(v) : null;
+                } else {
+                  const toMs = (t: string) => { const [h, m] = t.split(':').map(Number); const d = new Date(); d.setHours(h, m, 0, 0); return d.getTime(); };
+                  const snaps = Array.from(oiSnapshotsRef.current.entries()).sort((a, b) => a[0] - b[0]);
+                  if (v && snaps.length) { const ms = toMs(v); const s = snaps.find(([ts]) => ts >= ms) ?? snaps[0]; oiBaselineRef.current = s[1]; }
+                  else oiBaselineRef.current = null;
+                }
                 drawOIRef.current();
               }}
               className="text-[11px] bg-transparent text-[var(--text-primary)] border-none outline-none w-[62px] [color-scheme:dark]"
@@ -856,17 +1029,21 @@ export default function CandleChart({ instrument, theme }: Props) {
               onChange={(e) => {
                 const v = e.target.value;
                 setOiToTime(v);
-                const toMs = (t: string) => { const [h, m] = t.split(':').map(Number); const d = new Date(); d.setHours(h, m, 0, 0); return d.getTime(); };
-                const snaps = Array.from(oiSnapshotsRef.current.entries()).sort((a, b) => a[0] - b[0]);
-                if (v && snaps.length) { const ms = toMs(v); const candidates = snaps.filter(([ts]) => ts <= ms); const s = candidates[candidates.length - 1] ?? snaps[0]; oiToSnapRef.current = s[1]; }
-                else oiToSnapRef.current = null;
+                if (oiModeRef.current === 'oi_change') {
+                  oiToMsRef.current = v ? timeToMs(v) : null;
+                } else {
+                  const toMs = (t: string) => { const [h, m] = t.split(':').map(Number); const d = new Date(); d.setHours(h, m, 0, 0); return d.getTime(); };
+                  const snaps = Array.from(oiSnapshotsRef.current.entries()).sort((a, b) => a[0] - b[0]);
+                  if (v && snaps.length) { const ms = toMs(v); const candidates = snaps.filter(([ts]) => ts <= ms); const s = candidates[candidates.length - 1] ?? snaps[0]; oiToSnapRef.current = s[1]; }
+                  else oiToSnapRef.current = null;
+                }
                 drawOIRef.current();
               }}
               className="text-[11px] bg-transparent text-[var(--text-primary)] border-none outline-none w-[62px] [color-scheme:dark]"
             />
             {(oiFromTime || oiToTime) && (
               <button
-                onClick={() => { setOiFromTime(''); setOiToTime(''); oiBaselineRef.current = null; oiToSnapRef.current = null; drawOIRef.current(); }}
+                onClick={() => { setOiFromTime(''); setOiToTime(''); oiBaselineRef.current = null; oiToSnapRef.current = null; oiFromMsRef.current = null; oiToMsRef.current = null; drawOIRef.current(); }}
                 className="text-[12px] text-[var(--text-muted)] hover:text-[var(--red)] leading-none ml-0.5"
                 title="Reset time range"
               >
@@ -919,16 +1096,20 @@ export default function CandleChart({ instrument, theme }: Props) {
               <div className="flex items-center justify-between gap-4 text-[13px] mb-1">
                 <div className="flex items-center gap-2">
                   <span className="w-3 h-3 rounded-[2px] bg-[#22c55e] shrink-0" />
-                  <span className="text-[var(--text-muted)]">Call</span>
+                  <span className="text-[var(--text-muted)]">{oiMode === 'oi_change' ? 'Call Δ' : 'Call'}</span>
                 </div>
-                <span className="text-[var(--text-primary)] font-medium tabular-nums">{fmtOI(oiHover.ceOi)}</span>
+                <span className={`font-medium tabular-nums ${oiMode === 'oi_change' ? (oiHover.ceOi >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]') : 'text-[var(--text-primary)]'}`}>
+                  {oiMode === 'oi_change' ? `${oiHover.ceOi >= 0 ? '+' : ''}${fmtOI(Math.abs(oiHover.ceOi))}` : fmtOI(oiHover.ceOi)}
+                </span>
               </div>
               <div className="flex items-center justify-between gap-4 text-[13px]">
                 <div className="flex items-center gap-2">
                   <span className="w-3 h-3 rounded-[2px] bg-[#ef4444] shrink-0" />
-                  <span className="text-[var(--text-muted)]">Put</span>
+                  <span className="text-[var(--text-muted)]">{oiMode === 'oi_change' ? 'Put Δ' : 'Put'}</span>
                 </div>
-                <span className="text-[var(--text-primary)] font-medium tabular-nums">{fmtOI(oiHover.peOi)}</span>
+                <span className={`font-medium tabular-nums ${oiMode === 'oi_change' ? (oiHover.peOi >= 0 ? 'text-[#ef4444]' : 'text-[#22c55e]') : 'text-[var(--text-primary)]'}`}>
+                  {oiMode === 'oi_change' ? `${oiHover.peOi >= 0 ? '+' : ''}${fmtOI(Math.abs(oiHover.peOi))}` : fmtOI(oiHover.peOi)}
+                </span>
               </div>
             </div>
           </div>

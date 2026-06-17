@@ -15,7 +15,7 @@ export default function Navbar({ onInstrumentSelect, theme, onThemeToggle }: Nav
     <nav className="h-12 bg-[var(--bg-secondary)] border-b border-[var(--border)] flex items-center px-4 gap-4 shrink-0">
       {/* Brand */}
       <span className="text-[15px] font-bold text-[var(--text-primary)] shrink-0 whitespace-nowrap">
-        Stark <span className="text-[var(--accent)]">Venture Capital</span>
+        bRODHa
       </span>
 
       {/* Search — takes remaining space */}

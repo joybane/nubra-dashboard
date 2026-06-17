@@ -1,10 +1,17 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWs } from './hooks/useWsContext';
-import type { Instrument, OptionChainData, OptionLeg, WsMessage } from './types';
+import type { Instrument, OptionChainData, OptionLeg, ViewType, WsMessage } from './types';
 import { getSymbol } from './types';
+import { useWatchlist } from './hooks/useWatchlistContext';
+import { usePaperTrading } from './hooks/usePaperTrading';
 import { fmtPrice, fmtLakh, formatExpiry, strikeRs } from './lib/utils';
 
 const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+
+function extractUnderlying(input: string): string {
+  const m = input.match(/^([A-Za-z]+)/);
+  return m ? m[1].toUpperCase() : input.toUpperCase();
+}
 
 const QUICK_PICKS: { sym: string; exch: string }[] = [
   { sym: 'NIFTY', exch: 'NSE' }, { sym: 'BANKNIFTY', exch: 'NSE' },
@@ -30,11 +37,12 @@ function g(row: unknown, field: string): number | null {
 }
 
 interface Props {
-  instrument: Instrument | null;
+  instrument:         Instrument | null;
   onNavigateToChart?: (inst: Instrument) => void;
+  onChangeView?:      (view: ViewType) => void;
 }
 
-export default function OptionChain({ instrument, onNavigateToChart }: Props) {
+export default function OptionChain({ instrument, onNavigateToChart, onChangeView }: Props) {
   const [symbol,      setSymbol]      = useState('');
   const [exchange,    setExchange]    = useState('NSE');
   const [expiry,      setExpiry]      = useState('');
@@ -63,6 +71,51 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
   const scrollDoneRef     = useRef(false); // true only after a successful scroll-to-ATM
 
   const { subscribe, subscribeOC, unsubscribeOC } = useWs();
+  const { addItem: watchlistAdd } = useWatchlist();
+  const { openTicket } = usePaperTrading();
+
+  const openOrderTicket = useCallback((
+    sp: number, optType: 'CE' | 'PE', side: 'BUY' | 'SELL', leg: OptionLeg | null,
+  ) => {
+    if (!leg) return;
+    const la = leg as Record<string, unknown>;
+    openTicket({
+      instrument: {
+        zanskar_name:    String(la.zanskar_name || la.nubra_name || la.symbol || ''),
+        stock_name:      currentSymRef.current,
+        asset:           currentSymRef.current,
+        exchange:        currentExchRef.current,
+        derivative_type: 'OPT',
+        option_type:     optType,
+        strike_price:    sp * 100,
+        expiry:          currentExpRef.current,
+        ref_id:          (la.ref_id as number | undefined) ?? undefined,
+        lot_size:        (la.ls as number | undefined) ?? (la.lot_size as number | undefined),
+      },
+      side,
+    });
+  }, [openTicket]);
+
+  const addToWatchlistFn = useCallback((sp: number, optType: 'CE' | 'PE', leg: OptionLeg | null) => {
+    if (!leg) return;
+    const la  = leg as Record<string, unknown>;
+    const ltp = g(leg, 'ltp');
+    watchlistAdd({
+      displayName: `${currentSymRef.current} ${sp} ${optType}`,
+      underlying:  currentSymRef.current,
+      exchange:    currentExchRef.current,
+      ref_id:      (la.ref_id as number | undefined) ?? undefined,
+      nubraName:   String(la.zanskar_name || la.nubra_name || la.symbol || ''),
+      optionType:  optType,
+      strike:      sp,
+      expiry:      currentExpRef.current,
+      ltpAtAdd:    ltp != null ? ltp / 100 : 0,
+    });
+  }, [watchlistAdd]);
+
+  const addToBasketFn = useCallback(() => {
+    onChangeView?.('basket');
+  }, [onChangeView]);
 
   // ── scroll-to-ATM ──────────────────────────────────────────────────────────
   function scrollToAtm(): boolean {
@@ -114,14 +167,26 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     return () => container.removeEventListener('scroll', checkAtm);
   }, [chain]);
 
-  // Load from instrument prop
+  // Load from instrument prop — if a derivative (FUT/OPT) is passed, use its underlying asset
   useEffect(() => {
     if (!instrument) return;
-    const sym = getSymbol(instrument).toUpperCase();
+    const derivType    = (instrument.derivative_type || instrument.asset_type || '').toUpperCase();
+    const isDerivative = derivType === 'FUT' || derivType === 'OPT';
+    let sym: string;
+    if (isDerivative) {
+      sym = instrument.asset
+        ? instrument.asset.toUpperCase()
+        : extractUnderlying(getSymbol(instrument));
+    } else {
+      sym = getSymbol(instrument).toUpperCase();
+    }
+    // Safety: always strip expiry/strike suffixes so we pass just the index/stock name
+    sym = extractUnderlying(sym) || sym;
+    const exch = instrument.exchange || 'NSE';
     setSymInput(sym);
     setSymbol(sym);
-    setExchange(instrument.exchange || 'NSE');
-    loadExpiryThenChain(sym, instrument.exchange || 'NSE');
+    setExchange(exch);
+    loadExpiryThenChain(sym, exch);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instrument]);
 
@@ -226,17 +291,26 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     const cp = data.cp ?? data.currentprice;
     if (cp) setSpot(Number(cp) / 100);
 
+    // Recompute max OI on every tick so bar widths scale correctly after data changes.
+    // Without this, live updates would call setCellHtml with plain fmtOI() text, stripping the bar.
+    let maxCeOi = 1, maxPeOi = 1;
+    for (const ce of ceList) { const v = g(ce, 'oi') || 0; if (v > maxCeOi) maxCeOi = v; }
+    for (const pe of peList) { const v = g(pe, 'oi') || 0; if (v > maxPeOi) maxPeOi = v; }
+    maxCeOiRef.current = maxCeOi;
+    maxPeOiRef.current = maxPeOi;
+
     const peMap = new Map<number, OptionLeg>();
     for (const pe of peList) peMap.set(strikeRs(pe), pe);
 
     for (const ce of ceList) {
-      const sp  = strikeRs(ce);
-      const pe  = peMap.get(sp) ?? null;
-      // IV: prefer CE, fallback to PE (put-call parity → same value)
-      const iv  = g(ce, 'iv') ?? g(pe, 'iv');
+      const sp    = strikeRs(ce);
+      const pe    = peMap.get(sp) ?? null;
+      const iv    = g(ce, 'iv') ?? g(pe, 'iv');
+      const ceOi  = g(ce, 'oi') || 0;
+      const cePct = Math.min(100, (ceOi / maxCeOiRef.current) * 100);
       setCellHtml(`${sp}-ce-ltp`,   ltpHtml(ce, 'ce'));
       setCellHtml(`${sp}-ce-iv`,    fmtIV(iv));
-      setCellHtml(`${sp}-ce-oi`,    fmtOI(g(ce, 'oi')));
+      setCellHtml(`${sp}-ce-oi`,    `<div>${fmtOI(ceOi)}</div><div class="oi-bar-wrap"><div class="oi-bar oi-bar-ce" style="width:${cePct}%"></div></div>`);
       setCellHtml(`${sp}-ce-vol`,   fmtOI(g(ce, 'volume')));
       setCellHtml(`${sp}-ce-delta`, fmtDec(g(ce, 'delta'), 4));
       setCellHtml(`${sp}-ce-gamma`, fmtDec(g(ce, 'gamma'), 4));
@@ -244,9 +318,11 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
       setCellHtml(`${sp}-ce-vega`,  fmtDec(g(ce, 'vega'), 4));
     }
     for (const pe of peList) {
-      const sp = strikeRs(pe);
+      const sp    = strikeRs(pe);
+      const peOi  = g(pe, 'oi') || 0;
+      const pePct = Math.min(100, (peOi / maxPeOiRef.current) * 100);
       setCellHtml(`${sp}-pe-ltp`,   ltpHtml(pe, 'pe'));
-      setCellHtml(`${sp}-pe-oi`,    fmtOI(g(pe, 'oi')));
+      setCellHtml(`${sp}-pe-oi`,    `<div>${fmtOI(peOi)}</div><div class="oi-bar-wrap"><div class="oi-bar oi-bar-pe" style="width:${pePct}%"></div></div>`);
       setCellHtml(`${sp}-pe-vol`,   fmtOI(g(pe, 'volume')));
       setCellHtml(`${sp}-pe-delta`, fmtDec(g(pe, 'delta'), 4));
       setCellHtml(`${sp}-pe-gamma`, fmtDec(g(pe, 'gamma'), 4));
@@ -298,7 +374,10 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
       try {
         const res  = await fetch(`/api/instruments/search?q=${encodeURIComponent(q)}&limit=10`);
         const data = await res.json() as { results: Instrument[] };
-        const items = (data.results || []).filter((it) => (it.derivative_type || '').toUpperCase() !== 'OPT');
+        const items = (data.results || []).filter((it) => {
+          const dt = (it.derivative_type || '').toUpperCase();
+          return dt !== 'OPT' && dt !== 'FUT';  // only allow underlying assets (INDEX/STOCK/ETF)
+        });
         setSuggestions(items.slice(0, 8));
         setShowSug(true);
       } catch { /* ignore */ }
@@ -335,11 +414,13 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
     const yr   = exp.slice(2, 4);
     const mo   = exp.length >= 6 ? MONTHS[parseInt(exp.slice(4, 6)) - 1] : '';
     const name = `${symbol}${yr}${mo}${strike}${optType}`;
-    onNavigateToChart({ stock_name: name, nubra_name: name, exchange: currentExchRef.current, derivative_type: 'OPT' });
+    onNavigateToChart({ stock_name: name, nubra_name: name, exchange: currentExchRef.current, derivative_type: 'OPT', asset: currentSymRef.current });
   }
 
   // ── Render rows ────────────────────────────────────────────────────────────
-  const renderRows = () => {
+  // Memoised on [chain, spot]: spot drives ATM detection; chain changes only on load.
+  // All other state changes (search input, scroll buttons, etc.) no longer rebuild the table.
+  const tableRows = useMemo(() => {
     if (!chain) return null;
     const ceList = chain.ce || [];
     const peList = chain.pe || [];
@@ -399,7 +480,7 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
       rows.push(
         <tr
           key={sp}
-          className={isAtm ? 'atm-row' : ''}
+          className={`group ${isAtm ? 'atm-row' : ''}`}
           data-strike={sp}
           ref={isAtm ? (el) => { atmRowRef.current = el; } : undefined}
         >
@@ -414,28 +495,67 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
               : '—'}
           </td>
           <td ref={registerCell(sp,'ce-vol')} className="ce-side text-right px-2 py-1.5 text-[12px]">{ce ? fmtOI(g(ce, 'volume')) : '—'}</td>
-          <td
-            ref={registerCell(sp,'ce-ltp')}
-            className="ce-side ltp-cell text-right px-2 py-1.5 text-[12px] cursor-pointer font-semibold"
-            onClick={() => navigateToChart(sp, 'CE')}
-            dangerouslySetInnerHTML={{ __html: ce ? ltpHtml(ce, 'ce') : '—' }}
-          />
 
-          {/* Strike + IV (center) */}
-          <td className="strike-cell text-center px-1 py-1.5 text-[13px] font-bold">
-            {sp.toLocaleString('en-IN')}
+          {/* CE LTP — live price + B/S buttons revealed on row hover */}
+          <td className="ce-side ltp-cell px-2 py-1.5 text-[12px] font-semibold">
+            <div className="flex items-center justify-end gap-0.5">
+              {ce && (
+                <div className="invisible group-hover:visible flex items-center gap-0.5 shrink-0">
+                  <button className="px-1 py-0.5 rounded text-[9px] font-bold text-[var(--green)] bg-[var(--green)]/15 hover:bg-[var(--green)]/40 border border-[var(--green)]/30 leading-none"
+                    onClick={(e) => { e.stopPropagation(); openOrderTicket(sp, 'CE', 'BUY', ce); }}>B</button>
+                  <button className="px-1 py-0.5 rounded text-[9px] font-bold text-[var(--red)] bg-[var(--red)]/15 hover:bg-[var(--red)]/40 border border-[var(--red)]/30 leading-none"
+                    onClick={(e) => { e.stopPropagation(); openOrderTicket(sp, 'CE', 'SELL', ce); }}>S</button>
+                </div>
+              )}
+              <div
+                ref={(el) => { if (el) cellMapRef.current.set(`${sp}-ce-ltp`, el); }}
+                className="cursor-pointer text-right"
+                onClick={() => navigateToChart(sp, 'CE')}
+                dangerouslySetInnerHTML={{ __html: ce ? ltpHtml(ce, 'ce') : '—' }}
+              />
+            </div>
           </td>
+
+          {/* Strike (center) — watchlist/basket buttons revealed on row hover */}
+          <td className="strike-cell text-center px-1 py-1.5 text-[13px] font-bold">
+            <div className="relative inline-block w-full">
+              <span className="group-hover:invisible transition-opacity select-none">{sp.toLocaleString('en-IN')}</span>
+              <div className="invisible group-hover:visible absolute inset-0 flex items-center justify-center gap-0.5">
+                <button className="px-1 py-0.5 rounded text-[9px] font-bold text-amber-400 bg-amber-500/15 hover:bg-amber-500/40 border border-amber-500/30 leading-none"
+                  onClick={(e) => { e.stopPropagation(); addToWatchlistFn(sp, 'CE', ce); }}>★CE</button>
+                <button className="px-1 py-0.5 rounded text-[9px] font-bold text-[var(--accent)] bg-[var(--accent)]/15 hover:bg-[var(--accent)]/40 border border-[var(--accent)]/30 leading-none"
+                  onClick={(e) => { e.stopPropagation(); addToBasketFn(); }}>+</button>
+                <button className="px-1 py-0.5 rounded text-[9px] font-bold text-amber-400 bg-amber-500/15 hover:bg-amber-500/40 border border-amber-500/30 leading-none"
+                  onClick={(e) => { e.stopPropagation(); addToWatchlistFn(sp, 'PE', pe); }}>★PE</button>
+              </div>
+            </div>
+          </td>
+
           <td ref={registerCell(sp,'ce-iv')} className="iv-cell text-center px-2 py-1.5 text-[11px] font-medium">
             {fmtIV(iv)}
           </td>
 
-          {/* PE: LTP Vol OI Delta Theta Gamma Vega */}
-          <td
-            ref={registerCell(sp,'pe-ltp')}
-            className="pe-side ltp-cell text-right px-2 py-1.5 text-[12px] cursor-pointer font-semibold"
-            onClick={() => navigateToChart(sp, 'PE')}
-            dangerouslySetInnerHTML={{ __html: pe ? ltpHtml(pe, 'pe') : '—' }}
-          />
+          {/* PE LTP — live price + B/S buttons revealed on row hover */}
+          <td className="pe-side ltp-cell px-2 py-1.5 text-[12px] font-semibold">
+            <div className="flex items-center justify-start gap-0.5">
+              <div
+                ref={(el) => { if (el) cellMapRef.current.set(`${sp}-pe-ltp`, el); }}
+                className="cursor-pointer flex-1 text-right"
+                onClick={() => navigateToChart(sp, 'PE')}
+                dangerouslySetInnerHTML={{ __html: pe ? ltpHtml(pe, 'pe') : '—' }}
+              />
+              {pe && (
+                <div className="invisible group-hover:visible flex items-center gap-0.5 shrink-0">
+                  <button className="px-1 py-0.5 rounded text-[9px] font-bold text-[var(--green)] bg-[var(--green)]/15 hover:bg-[var(--green)]/40 border border-[var(--green)]/30 leading-none"
+                    onClick={(e) => { e.stopPropagation(); openOrderTicket(sp, 'PE', 'BUY', pe); }}>B</button>
+                  <button className="px-1 py-0.5 rounded text-[9px] font-bold text-[var(--red)] bg-[var(--red)]/15 hover:bg-[var(--red)]/40 border border-[var(--red)]/30 leading-none"
+                    onClick={(e) => { e.stopPropagation(); openOrderTicket(sp, 'PE', 'SELL', pe); }}>S</button>
+                </div>
+              )}
+            </div>
+          </td>
+
+          {/* PE: Vol OI Delta Theta Gamma Vega */}
           <td ref={registerCell(sp,'pe-vol')} className="pe-side text-right px-2 py-1.5 text-[12px]">{pe ? fmtOI(g(pe, 'volume')) : '—'}</td>
           <td ref={registerCell(sp,'pe-oi')} className="pe-side text-right px-2 py-1.5 text-[12px]">
             {pe
@@ -450,7 +570,8 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
       );
     }
     return rows;
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chain, spot]);
 
   // ── JSX ────────────────────────────────────────────────────────────────────
   return (
@@ -487,7 +608,7 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
             value={symInput}
             onChange={onSymInput}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') { setSymbol(symInput.toUpperCase()); loadExpiryThenChain(symInput.toUpperCase(), exchange); }
+              if (e.key === 'Enter') { const u = extractUnderlying(symInput); setSymInput(u); setSymbol(u); loadExpiryThenChain(u, exchange); }
               if (e.key === 'Escape') setShowSug(false);
             }}
             placeholder="Symbol"
@@ -527,7 +648,7 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
         </select>
 
         <button
-          onClick={() => loadExpiryThenChain(symInput.toUpperCase() || symbol, exchange)}
+          onClick={() => { const u = extractUnderlying(symInput) || symbol; setSymInput(u); setSymbol(u); loadExpiryThenChain(u, exchange); }}
           className="px-3 py-1 rounded bg-[var(--accent)] text-white text-[12px] font-semibold hover:bg-[var(--accent-dim)] transition-colors shrink-0"
         >
           Load
@@ -564,7 +685,7 @@ export default function OptionChain({ instrument, onNavigateToChart }: Props) {
                   ))}
                 </tr>
               </thead>
-              <tbody>{renderRows()}</tbody>
+              <tbody>{tableRows}</tbody>
             </table>
           )}
           {!loading && !error && !chain && (

@@ -18,6 +18,30 @@ const __dirname  = path.dirname(__filename);
 const BASE_URL = process.env.NUBRA_BASE_URL || 'https://api2.nubra.io';
 const PORT     = Number(process.env.SERVER_PORT || 3000);
 
+// ─── Server-side refdata cache ────────────────────────────────────────────────
+// Avoids fetching 100k+ instrument records from Nubra on every search keystroke.
+// Keyed by exchange; auto-invalidated when the calendar date rolls over.
+const _refdataCache    = new Map<string, Record<string, unknown>[]>();
+let   _refdataCacheDay = '';
+
+async function getRefdata(exchange: string): Promise<Record<string, unknown>[]> {
+  const today = new Date().toISOString().slice(0, 10);
+  if (_refdataCacheDay !== today) {
+    _refdataCache.clear();
+    _refdataCacheDay = today;
+  }
+  const hit = _refdataCache.get(exchange);
+  if (hit) return hit;
+  const raw = await nubraGet(`/refdata/refdata/${today}`, { exchange });
+  const arr: Record<string, unknown>[] =
+    Array.isArray(raw.refdata) ? raw.refdata as Record<string, unknown>[] :
+    Array.isArray(raw.data)    ? raw.data    as Record<string, unknown>[] :
+    Array.isArray(raw)         ? raw          as unknown as Record<string, unknown>[] : [];
+  _refdataCache.set(exchange, arr);
+  console.log(`[Refdata] Cached ${arr.length} instruments for ${exchange}`);
+  return arr;
+}
+
 // ─── Session persistence ──────────────────────────────────────────────────────
 const SESSION_FILE = path.join(__dirname, '..', 'session.json');
 
@@ -205,9 +229,8 @@ fastify.get<{ Querystring: { exchange?: string } }>('/api/refdata', async (req, 
   if (!requireAuth(reply)) return;
   try {
     const exchange = req.query.exchange || 'NSE';
-    const today = new Date().toISOString().slice(0, 10);
-    const data  = await nubraGet(`/refdata/refdata/${today}`, { exchange });
-    return reply.send(data);
+    const arr = await getRefdata(exchange);
+    return reply.send({ refdata: arr });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return reply.status(500).send({ error: msg });
@@ -221,12 +244,7 @@ fastify.get<{ Querystring: { q?: string; exchange?: string; type?: string; limit
     if (!requireAuth(reply)) return;
     try {
       const { q = '', exchange = 'NSE', type = '', limit = '20' } = req.query;
-      const today = new Date().toISOString().slice(0, 10);
-      const data  = await nubraGet(`/refdata/refdata/${today}`, { exchange });
-
-      const arr: Record<string, unknown>[] = Array.isArray(data.refdata) ? data.refdata as Record<string, unknown>[] :
-                  Array.isArray(data.data)    ? data.data as Record<string, unknown>[]    :
-                  Array.isArray(data)         ? data as unknown as Record<string, unknown>[] : [];
+      const arr = await getRefdata(exchange);
 
       const q2 = q.toLowerCase();
 
@@ -393,7 +411,10 @@ function connectNubraWs(): void {
   nubraWs.on('message', (data: Buffer, isBinary: boolean) => {
     if (isBinary) {
       const decoded = decodeBinaryMsg(data);
-      if (decoded) broadcast(decoded);
+      if (decoded) {
+        broadcast(decoded);
+        routeTickToSim(decoded);  // feed live prices into SimBroker for fill simulation
+      }
     } else {
       const text = data.toString().trim();
       if (text) console.log('[Nubra WS]', text);
@@ -477,294 +498,489 @@ setInterval(() => {
   }
 }, 2000);
 
-// ─── UAT (Paper Trading) ─────────────────────────────────────────────────────
-const UAT_BASE_URL     = 'https://uatapi.nubra.io';
-const UAT_SESSION_FILE = path.join(__dirname, '..', 'uat-session.json');
+// ─── Live Broker Simulation (SimBroker) ──────────────────────────────────────
+// All paper orders are simulated locally against real-time PROD WebSocket data.
+// No orders are sent to any live or UAT brokerage account.
 
-function loadUatSession(): { authToken?: string; deviceId?: string } {
-  try {
-    if (!existsSync(UAT_SESSION_FILE)) return {};
-    return JSON.parse(readFileSync(UAT_SESSION_FILE, 'utf8'));
-  } catch { return {}; }
-}
-function saveUatSession(): void {
-  try {
-    writeFileSync(UAT_SESSION_FILE, JSON.stringify({ authToken: uatState.authToken, deviceId: uatState.deviceId }), 'utf8');
-  } catch { /* non-critical */ }
+function simSpread(ltp: number): number {
+  // Half-spread per side in paise, calibrated to Indian equity/options markets
+  if (ltp <= 0)      return 1;
+  if (ltp < 100)     return Math.max(1,  Math.round(ltp * 0.005));
+  if (ltp < 1_000)   return Math.max(2,  Math.round(ltp * 0.004));
+  if (ltp < 10_000)  return Math.max(5,  Math.round(ltp * 0.003));
+  return               Math.max(10, Math.round(ltp * 0.002));
 }
 
-const _uatSaved = loadUatSession();
-const uatState = {
-  deviceId:     _uatSaved.deviceId  || 'paper-' + randomUUID().slice(0, 8),
-  tempToken:    null as string | null,
-  authToken:    _uatSaved.authToken || null as string | null,
-  sessionToken: null as string | null,
-  status:       'idle' as 'idle' | 'awaiting_otp' | 'awaiting_mpin' | 'authenticated',
-};
-
-// zanskar_name → UAT ref_id (built after UAT login)
-const uatRefMap = new Map<string, number>();
-
-function uatBaseHeaders(extra: Record<string, string> = {}): Record<string, string> {
-  return { 'Content-Type': 'application/json', 'x-device-id': uatState.deviceId, 'x-app-version': '0.4.2', 'x-device-os': 'web', ...extra };
+interface SimOrder {
+  order_id:            number;
+  ref_id:              number;
+  nubraName:           string;
+  display_name:        string;
+  order_type:          string;
+  order_side:          string;
+  order_price:         number;          // paise; 0 = market
+  trigger_price:       number;          // paise; 0 = none
+  order_qty:           number;
+  filled_qty:          number;
+  avg_filled_price:    number;          // paise
+  order_status:        string;
+  order_time:          number;          // nanoseconds epoch
+  filled_time:         number | null;
+  order_delivery_type: string;
+  validity_type:       string;
+  tag?:                string;
+  sl_triggered:        boolean;
 }
 
-async function uatPost(endpoint: string, body: object, extraHeaders: Record<string, string> = {}): Promise<Record<string, unknown>> {
-  const res  = await fetch(`${UAT_BASE_URL}${endpoint}`, { method: 'POST', headers: uatBaseHeaders(extraHeaders), body: JSON.stringify(body) });
-  const text = await res.text();
-  let data: Record<string, unknown> = {};
-  if (text.trim()) { try { data = JSON.parse(text); } catch { data = { message: text }; } }
-  if (!res.ok) throw new Error((data.message || data.error || `HTTP ${res.status}`) as string);
-  return data;
+interface SimPosition {
+  ref_id:              number;
+  nubraName:           string;
+  display_name:        string;
+  qty:                 number;          // positive = long, negative = short
+  avg_price:           number;          // paise
+  realized_pnl:        number;          // paise
+  last_traded_price:   number;          // paise, kept current by tick feed
+  order_delivery_type: string;
 }
 
-async function uatGet(endpoint: string, params: Record<string, string> = {}): Promise<unknown> {
-  const qs  = new URLSearchParams(params).toString();
-  const res = await fetch(`${UAT_BASE_URL}${endpoint}${qs ? '?' + qs : ''}`, {
-    headers: uatBaseHeaders({ Authorization: `Bearer ${uatState.sessionToken}` }),
-  });
-  const text = await res.text();
-  let data: unknown;
-  if (text.trim()) { try { data = JSON.parse(text); } catch { data = { message: text }; } }
-  if (!res.ok) {
-    const d = data as Record<string, unknown>;
-    throw new Error((d?.message || d?.error || `HTTP ${res.status}`) as string);
+class SimBroker {
+  private orders    = new Map<number, SimOrder>();
+  private positions = new Map<number, SimPosition>();
+  private ticks     = new Map<number, number>();     // ref_id → ltp paise
+  private nameMap   = new Map<string, number>();     // normalised name → ref_id
+  private nextId    = 1;
+
+  registerName(nubraName: string, refId: number): void {
+    const norm = nubraName.toLowerCase().replace(/^(nse|bse)_/, '');
+    this.nameMap.set(nubraName.toLowerCase(), refId);
+    if (norm !== nubraName.toLowerCase()) this.nameMap.set(norm, refId);
   }
-  return data;
-}
 
-async function uatDelete(endpoint: string): Promise<Record<string, unknown>> {
-  const res = await fetch(`${UAT_BASE_URL}${endpoint}`, {
-    method: 'DELETE',
-    headers: uatBaseHeaders({ Authorization: `Bearer ${uatState.sessionToken}` }),
-  });
-  const text = await res.text();
-  let data: Record<string, unknown> = {};
-  if (text.trim()) { try { data = JSON.parse(text); } catch { data = { message: text }; } }
-  if (!res.ok) throw new Error((data.message || data.error || `HTTP ${res.status}`) as string);
-  return data;
-}
-
-function requireUatAuth(reply: Parameters<typeof requireAuth>[0]): boolean {
-  if (uatState.status !== 'authenticated' || !uatState.sessionToken) {
-    reply.status(401).send({ error: 'Paper trading not connected. Complete UAT login first.' });
-    return false;
+  // Called for option-chain ticks (have a direct ref_id)
+  onLtp(refId: number, ltpPaise: number): void {
+    if (ltpPaise <= 0) return;
+    const prev = this.ticks.get(refId);
+    this.ticks.set(refId, ltpPaise);
+    const pos = this.positions.get(refId);
+    if (pos) pos.last_traded_price = ltpPaise;
+    if (prev !== ltpPaise) this.checkFills(refId, ltpPaise);
   }
-  return true;
-}
 
-async function buildUatRefMap(): Promise<void> {
-  try {
-    const today = new Date().toISOString().slice(0, 10);
-    const raw   = await uatGet(`/refdata/refdata/${today}`, { exchange: 'NSE' }) as Record<string, unknown>;
-    const arr: Record<string, unknown>[] =
-      Array.isArray(raw.refdata) ? raw.refdata as Record<string, unknown>[] :
-      Array.isArray(raw.data)    ? raw.data    as Record<string, unknown>[] :
-      Array.isArray(raw)         ? raw as unknown as Record<string, unknown>[] : [];
-    uatRefMap.clear();
-    for (const item of arr) {
-      const name  = (item.zanskar_name || item.nubra_name) as string | undefined;
-      const refId = item.ref_id as number | undefined;
-      if (name && refId) uatRefMap.set(name, refId);
+  // Called for index / OHLCV ticks (identified by name string)
+  onNamedLtp(rawName: string, ltpPaise: number): void {
+    if (ltpPaise <= 0) return;
+    const norm  = rawName.toLowerCase().replace(/^(nse|bse)_/, '');
+    const refId = this.nameMap.get(norm) ?? this.nameMap.get(rawName.toLowerCase());
+    if (refId !== undefined) this.onLtp(refId, ltpPaise);
+  }
+
+  private checkFills(refId: number, ltp: number): void {
+    const half = simSpread(ltp);
+    const bid  = ltp - half;
+    const ask  = ltp + half;
+    for (const order of this.orders.values()) {
+      if (order.ref_id !== refId) continue;
+      if (order.order_status !== 'ORDER_STATUS_OPEN') continue;
+      this.tryFill(order, bid, ask);
     }
-    console.log(`UAT ref_id map: ${uatRefMap.size} instruments cached`);
-  } catch (err) {
-    console.error('UAT ref_id map build failed:', (err as Error).message);
+  }
+
+  private tryFill(order: SimOrder, bid: number, ask: number): void {
+    const isBuy = order.order_side === 'ORDER_SIDE_BUY';
+
+    if (order.order_type === 'ORDER_TYPE_MARKET') {
+      this.fill(order, isBuy ? ask : bid);
+
+    } else if (order.order_type === 'ORDER_TYPE_REGULAR') {
+      // Limit: buy when ask crosses down through limit; sell when bid crosses up
+      if (isBuy  && ask <= order.order_price) this.fill(order, Math.min(ask, order.order_price));
+      if (!isBuy && bid >= order.order_price) this.fill(order, Math.max(bid, order.order_price));
+
+    } else if (order.order_type === 'ORDER_TYPE_STOPLOSS') {
+      if (!order.sl_triggered) {
+        // Trigger: BUY SL when ask rises to trigger; SELL SL when bid falls to trigger
+        const hit = isBuy ? ask >= order.trigger_price : bid <= order.trigger_price;
+        if (hit) {
+          order.sl_triggered = true;
+          if (order.order_price > 0) {
+            // SL-Limit: fill only if price is within the limit after trigger
+            if (isBuy  && ask <= order.order_price) this.fill(order, ask);
+            if (!isBuy && bid >= order.order_price) this.fill(order, bid);
+          } else {
+            this.fill(order, isBuy ? ask : bid);   // SL-Market
+          }
+        }
+      } else if (order.order_price > 0) {
+        if (isBuy  && ask <= order.order_price) this.fill(order, ask);
+        if (!isBuy && bid >= order.order_price) this.fill(order, bid);
+      } else {
+        this.fill(order, isBuy ? ask : bid);
+      }
+    }
+  }
+
+  private fill(order: SimOrder, fillPaise: number): void {
+    order.filled_qty       = order.order_qty;
+    order.avg_filled_price = Math.round(fillPaise);
+    order.order_status     = 'ORDER_STATUS_FILLED';
+    order.filled_time      = Date.now() * 1_000_000;
+
+    const isBuy = order.order_side === 'ORDER_SIDE_BUY';
+    const delta = isBuy ? order.order_qty : -order.order_qty;
+    let pos = this.positions.get(order.ref_id);
+
+    if (!pos) {
+      pos = {
+        ref_id:              order.ref_id,
+        nubraName:           order.nubraName,
+        display_name:        order.display_name,
+        qty:                 0,
+        avg_price:           0,
+        realized_pnl:        0,
+        last_traded_price:   this.ticks.get(order.ref_id) ?? Math.round(fillPaise),
+        order_delivery_type: order.order_delivery_type,
+      };
+      this.positions.set(order.ref_id, pos);
+    }
+
+    const prev = pos.qty;
+    const next = prev + delta;
+
+    if (prev === 0) {
+      pos.qty       = delta;
+      pos.avg_price = Math.round(fillPaise);
+    } else if (Math.sign(prev) === Math.sign(delta)) {
+      // Same direction: weighted average price
+      const totalQty = Math.abs(prev) + order.order_qty;
+      pos.avg_price  = Math.round((Math.abs(pos.avg_price) * Math.abs(prev) + fillPaise * order.order_qty) / totalQty);
+      pos.qty        = next;
+    } else {
+      // Closing / reversing: realise P&L on the closed portion
+      const closedQty = Math.min(Math.abs(prev), order.order_qty);
+      pos.realized_pnl += isBuy
+        ? (pos.avg_price - fillPaise) * closedQty    // buying to cover a short
+        : (fillPaise    - pos.avg_price) * closedQty; // selling to close a long
+      pos.qty = next;
+      if (next === 0) {
+        pos.avg_price = 0;
+      } else if (Math.sign(next) !== Math.sign(prev)) {
+        pos.avg_price = Math.round(fillPaise);        // reversed into opposite direction
+      }
+    }
+
+    console.log(`[SimBroker] Filled #${order.order_id}: ${order.order_side} ${order.order_qty} ${order.display_name} @ ₹${(fillPaise / 100).toFixed(2)}`);
+  }
+
+  placeOrder(p: {
+    nubraName:           string;
+    liveRefId:           number;
+    display_name?:       string;
+    order_type:          string;
+    order_side:          string;
+    order_qty:           number;
+    order_price?:        number;
+    trigger_price?:      number;
+    order_delivery_type: string;
+    validity_type:       string;
+    tag?:                string;
+  }): SimOrder {
+    const id    = this.nextId++;
+    const order: SimOrder = {
+      order_id:            id,
+      ref_id:              p.liveRefId,
+      nubraName:           p.nubraName,
+      display_name:        p.display_name || p.nubraName,
+      order_type:          p.order_type,
+      order_side:          p.order_side,
+      order_price:         p.order_price   ?? 0,
+      trigger_price:       p.trigger_price ?? 0,
+      order_qty:           p.order_qty,
+      filled_qty:          0,
+      avg_filled_price:    0,
+      order_status:        'ORDER_STATUS_OPEN',
+      order_time:          Date.now() * 1_000_000,
+      filled_time:         null,
+      order_delivery_type: p.order_delivery_type,
+      validity_type:       p.validity_type || 'DAY',
+      tag:                 p.tag,
+      sl_triggered:        false,
+    };
+    this.orders.set(id, order);
+    this.registerName(p.nubraName, p.liveRefId);
+
+    // Attempt immediate fill if we already have a live tick for this instrument
+    const ltp = this.ticks.get(p.liveRefId);
+    if (ltp) {
+      const half = simSpread(ltp);
+      this.tryFill(order, ltp - half, ltp + half);
+    }
+    return order;
+  }
+
+  cancelOrder(id: number): boolean {
+    const o = this.orders.get(id);
+    if (!o || o.order_status !== 'ORDER_STATUS_OPEN') return false;
+    o.order_status = 'ORDER_STATUS_CANCELLED';
+    return true;
+  }
+
+  modifyOrder(id: number, updates: Record<string, unknown>): boolean {
+    const o = this.orders.get(id);
+    if (!o || o.order_status !== 'ORDER_STATUS_OPEN') return false;
+    if (typeof updates.order_price   === 'number') o.order_price   = updates.order_price;
+    if (typeof updates.trigger_price === 'number') o.trigger_price = updates.trigger_price;
+    if (typeof updates.order_qty     === 'number') o.order_qty     = updates.order_qty;
+    return true;
+  }
+
+  getOrders(filter: 'live' | 'executed' | 'all'): SimOrder[] {
+    const all = Array.from(this.orders.values()).sort((a, b) => b.order_time - a.order_time);
+    if (filter === 'live')     return all.filter(o => o.order_status === 'ORDER_STATUS_OPEN');
+    if (filter === 'executed') return all.filter(o => o.order_status !== 'ORDER_STATUS_OPEN');
+    return all;
+  }
+
+  getPositions(): SimPosition[] {
+    return Array.from(this.positions.values()).filter(p => p.qty !== 0);
   }
 }
 
-// ─── UAT Auth endpoints ───────────────────────────────────────────────────────
-fastify.post('/paper/auth/send-otp', async (_req, reply) => {
-  try {
-    const phone = process.env.PHONE_NO;
-    if (!phone) return reply.status(500).send({ ok: false, error: 'PHONE_NO not set' });
-    const data = await uatPost('/sendphoneotp', { phone, flow: '', skip_totp: false });
-    let tempToken = data.temp_token as string;
-    if (!tempToken) throw new Error('temp_token missing in response');
-    if (data.next === 'VERIFY_TOTP') {
-      const d2  = await uatPost('/sendphoneotp', { phone, flow: '', skip_totp: true }, { 'x-temp-token': tempToken });
-      tempToken = d2.temp_token as string;
-      if (!tempToken) throw new Error('temp_token missing after skip_totp');
+const simBroker   = new SimBroker();
+const simOcSubs   = new Set<string>(); // OC keys already subscribed for SimBroker
+
+// Subscribe instrument to the PROD live feed so SimBroker gets fills.
+// For options: subscribes the option chain WebSocket stream.
+// For stocks/indices: relies on the chart subscription that the browser already manages.
+function subscribeForSim(nubraName: string, refId: number, derivativeType?: string, asset?: string, expiry?: string): void {
+  simBroker.registerName(nubraName, refId);
+  if (!authState.sessionToken || !nubraWs || nubraWs.readyState !== WebSocket.OPEN) return;
+  if (derivativeType === 'OPT' && asset && expiry) {
+    const key = `${asset}:${expiry}`;
+    if (!simOcSubs.has(key)) {
+      simOcSubs.add(key);
+      const payload = JSON.stringify([{ exchange: 'NSE', asset, expiry }]);
+      nubraWs.send(`batch_subscribe ${authState.sessionToken} option ${payload}`);
+      console.log(`[SimBroker] Auto-subscribed option chain: ${asset} ${expiry}`);
     }
-    uatState.tempToken = tempToken;
-    uatState.status    = 'awaiting_otp';
-    return reply.send({ ok: true, message: 'UAT OTP sent to registered mobile number.' });
-  } catch (err: unknown) {
-    return reply.status(500).send({ ok: false, error: (err as Error).message });
   }
-});
+}
 
-fastify.post<{ Body: { otp: string } }>('/paper/auth/verify-otp', async (req, reply) => {
-  try {
-    const { otp } = req.body;
-    if (!otp || !uatState.tempToken) return reply.status(400).send({ ok: false, error: 'Send OTP first.' });
-    const data = await uatPost(
-      '/verifyphoneotp',
-      { phone: process.env.PHONE_NO!, otp: String(otp) },
-      { 'x-temp-token': uatState.tempToken },
-    );
-    const authToken = data.auth_token as string;
-    if (!authToken) throw new Error('auth_token missing in response');
-    uatState.authToken = authToken;
-    uatState.status    = 'awaiting_mpin';
-    saveUatSession();
-    return reply.send({ ok: true, message: 'UAT OTP verified.' });
-  } catch (err: unknown) {
-    return reply.status(500).send({ ok: false, error: (err as Error).message });
+// Route decoded PROD WebSocket ticks into SimBroker for fill evaluation.
+function routeTickToSim(decoded: { type: string; data: unknown }): void {
+  if (decoded.type === 'option_chain') {
+    // Option chain items carry refId directly — most precise path for option fills
+    const d = decoded.data as { ce?: unknown[]; pe?: unknown[] };
+    for (const item of [...(d.ce ?? []), ...(d.pe ?? [])]) {
+      const i = item as { refId?: string; ltp?: string };
+      if (i.refId && i.ltp) simBroker.onLtp(Number(i.refId), Number(i.ltp));
+    }
+  } else if (decoded.type === 'index_tick') {
+    // Real-time index / instrument ticks
+    const d = decoded.data as { indexes?: unknown[]; instruments?: unknown[] };
+    for (const tick of [...(d.indexes ?? []), ...(d.instruments ?? [])]) {
+      const t = tick as { indexname?: string; indexValue?: string };
+      if (t.indexname && t.indexValue) simBroker.onNamedLtp(t.indexname, Number(t.indexValue));
+    }
+  } else if (decoded.type === 'ohlcv') {
+    // OHLCV candle close as a proxy LTP for chart-subscribed instruments
+    const d = decoded.data as { indexes?: unknown[]; instruments?: unknown[] };
+    for (const b of [...(d.indexes ?? []), ...(d.instruments ?? [])]) {
+      const bucket = b as { indexname?: string; close?: string };
+      if (bucket.indexname && bucket.close) simBroker.onNamedLtp(bucket.indexname, Number(bucket.close));
+    }
   }
-});
+}
 
-fastify.post('/paper/auth/verify-pin', async (_req, reply) => {
-  try {
-    const mpin = process.env.MPIN;
-    if (!mpin || !uatState.authToken) return reply.status(400).send({ ok: false, error: 'Verify OTP first.' });
-    const data = await uatPost('/verifypin', { pin: mpin }, { Authorization: `Bearer ${uatState.authToken}` });
-    const sessionToken = (data.session_token || (data.data as Record<string, unknown>)?.token) as string;
-    if (!sessionToken) throw new Error('session_token missing in response');
-    uatState.sessionToken = sessionToken;
-    uatState.status       = 'authenticated';
-    console.log('UAT authenticated.');
-    buildUatRefMap();
-    return reply.send({ ok: true, message: 'UAT authenticated.' });
-  } catch (err: unknown) {
-    return reply.status(500).send({ ok: false, error: (err as Error).message });
-  }
-});
-
+// ─── Paper Trading auth status ────────────────────────────────────────────────
 fastify.get('/paper/auth/status', async (_req, reply) => {
-  return reply.send({ status: uatState.status, authenticated: uatState.status === 'authenticated', refMapSize: uatRefMap.size });
+  return reply.send({ status: authState.status, authenticated: authState.status === 'authenticated' });
 });
 
-// ─── Paper Trading routes ─────────────────────────────────────────────────────
-fastify.get<{ Querystring: { live?: string; executed?: string; tag?: string } }>('/paper/orders', async (req, reply) => {
-  if (!requireUatAuth(reply)) return;
-  try {
-    const params: Record<string, string> = {};
-    if (req.query.live)     params.live     = req.query.live;
-    if (req.query.executed) params.executed = req.query.executed;
-    if (req.query.tag)      params.tag      = req.query.tag;
-    const data = await uatGet('/orders/v2', params);
-    return reply.send(data);
-  } catch (err: unknown) {
-    return reply.status(500).send({ error: (err as Error).message });
-  }
+// ─── Paper Trading routes (SimBroker — local simulation on live PROD data) ────
+
+fastify.get<{ Querystring: { live?: string; executed?: string } }>('/paper/orders', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  const filter = req.query.live ? 'live' : req.query.executed ? 'executed' : 'all';
+  return reply.send(simBroker.getOrders(filter));
 });
 
 interface PaperOrderBody {
-  nubraName: string;
-  liveRefId?: number;
-  order_type: string;
-  order_qty: number;
-  order_side: string;
+  nubraName:           string;
+  liveRefId:           number;
+  display_name?:       string;
+  order_type:          string;
+  order_qty:           number;
+  order_side:          string;
   order_delivery_type: string;
-  validity_type: string;
-  order_price?: number;
-  trigger_price?: number;
-  tag?: string;
+  validity_type:       string;
+  order_price?:        number;
+  trigger_price?:      number;
+  tag?:                string;
+  // For auto-subscription to the live option chain feed
+  asset?:              string;
+  expiry?:             string;
+  derivative_type?:    string;
 }
 
 fastify.post<{ Body: PaperOrderBody }>('/paper/orders', async (req, reply) => {
-  if (!requireUatAuth(reply)) return;
+  if (!requireAuth(reply)) return;
   try {
-    const { nubraName, order_type, order_qty, order_side, order_delivery_type, validity_type, order_price, trigger_price, tag } = req.body;
-    const uatRefId = uatRefMap.get(nubraName);
-    if (!uatRefId) return reply.status(404).send({ error: `Instrument not found in UAT: ${nubraName}. Map has ${uatRefMap.size} entries.` });
-    const payload: Record<string, unknown> = { ref_id: uatRefId, order_type, order_qty, order_side, order_delivery_type, validity_type };
-    if (order_price   != null) payload.order_price   = order_price;
-    if (trigger_price != null) payload.trigger_price = trigger_price;
-    if (tag)                   payload.tag           = tag;
-    const data = await uatPost('/orders/v2', payload, { Authorization: `Bearer ${uatState.sessionToken!}` });
-    return reply.send(data);
+    const { nubraName, liveRefId, display_name, order_type, order_qty, order_side,
+            order_delivery_type, validity_type, order_price, trigger_price, tag,
+            asset, expiry, derivative_type } = req.body;
+    if (!liveRefId) return reply.status(400).send({ error: 'liveRefId is required for live simulation.' });
+
+    // Auto-subscribe option chain so fills happen against real-time prices
+    subscribeForSim(nubraName, liveRefId, derivative_type, asset, expiry);
+
+    const order = simBroker.placeOrder({
+      nubraName, liveRefId, display_name,
+      order_type, order_side, order_qty,
+      order_price, trigger_price,
+      order_delivery_type, validity_type, tag,
+    });
+    return reply.send({ order_id: order.order_id });
   } catch (err: unknown) {
     return reply.status(500).send({ error: (err as Error).message });
   }
 });
 
 interface MultiOrderLeg {
-  nubraName: string;
-  order_type: string;
-  order_qty: number;
-  order_side: string;
+  nubraName:           string;
+  liveRefId:           number;
+  display_name?:       string;
+  order_type:          string;
+  order_qty:           number;
+  order_side:          string;
   order_delivery_type: string;
-  validity_type: string;
-  order_price?: number;
-  trigger_price?: number;
+  validity_type:       string;
+  order_price?:        number;
+  trigger_price?:      number;
+  asset?:              string;
+  expiry?:             string;
+  derivative_type?:    string;
 }
 
 fastify.post<{ Body: { orders: MultiOrderLeg[] } }>('/paper/orders/multi', async (req, reply) => {
-  if (!requireUatAuth(reply)) return;
+  if (!requireAuth(reply)) return;
   try {
-    const resolved = req.body.orders.map((o) => {
-      const uatRefId = uatRefMap.get(o.nubraName);
-      if (!uatRefId) throw new Error(`UAT instrument not found: ${o.nubraName}`);
-      const leg: Record<string, unknown> = {
-        ref_id: uatRefId, order_type: o.order_type, order_qty: o.order_qty,
-        order_side: o.order_side, order_delivery_type: o.order_delivery_type, validity_type: o.validity_type,
-      };
-      if (o.order_price   != null) leg.order_price   = o.order_price;
-      if (o.trigger_price != null) leg.trigger_price = o.trigger_price;
-      return leg;
+    const results = req.body.orders.map((o) => {
+      subscribeForSim(o.nubraName, o.liveRefId, o.derivative_type, o.asset, o.expiry);
+      return simBroker.placeOrder({
+        nubraName:           o.nubraName,
+        liveRefId:           o.liveRefId,
+        display_name:        o.display_name,
+        order_type:          o.order_type,
+        order_side:          o.order_side,
+        order_qty:           o.order_qty,
+        order_price:         o.order_price,
+        trigger_price:       o.trigger_price,
+        order_delivery_type: o.order_delivery_type,
+        validity_type:       o.validity_type,
+      });
     });
-    const data = await uatPost('/orders/v2/multi', { orders: resolved }, { Authorization: `Bearer ${uatState.sessionToken!}` });
-    return reply.send(data);
+    return reply.send({ orders: results.map(o => ({ order_id: o.order_id })) });
   } catch (err: unknown) {
     return reply.status(500).send({ error: (err as Error).message });
   }
 });
 
 fastify.post('/paper/orders/basket', async (req, reply) => {
-  if (!requireUatAuth(reply)) return;
+  if (!requireAuth(reply)) return;
   try {
     const body = req.body as Record<string, unknown>;
-    const legs = (body.orders as Array<Record<string, unknown>>).map((o) => {
-      const uatRefId = uatRefMap.get(o.nubraName as string);
-      if (!uatRefId) throw new Error(`UAT instrument not found: ${o.nubraName}`);
-      const { nubraName: _n, ...rest } = o;
-      return { ref_id: uatRefId, ...rest };
+    const legs  = (body.orders as Array<Record<string, unknown>>);
+    const results = legs.map((o) => {
+      const nubraName  = o.nubraName  as string;
+      const liveRefId  = o.liveRefId  as number;
+      const asset      = o.asset      as string | undefined;
+      const expiry     = o.expiry     as string | undefined;
+      const derivType  = o.derivative_type as string | undefined;
+      subscribeForSim(nubraName, liveRefId, derivType, asset, expiry);
+      return simBroker.placeOrder({
+        nubraName,
+        liveRefId,
+        display_name:        o.display_name as string | undefined,
+        order_type:          o.order_type          as string,
+        order_side:          o.order_side          as string,
+        order_qty:           o.order_qty           as number,
+        order_price:         o.order_price         as number | undefined,
+        trigger_price:       o.trigger_price       as number | undefined,
+        order_delivery_type: o.order_delivery_type as string,
+        validity_type:       o.validity_type       as string,
+        tag:                 o.tag                 as string | undefined,
+      });
     });
-    const data = await uatPost('/orders/v2/basket', { ...body, orders: legs }, { Authorization: `Bearer ${uatState.sessionToken!}` });
-    return reply.send(data);
+    return reply.send({ orders: results.map(o => ({ order_id: o.order_id })) });
   } catch (err: unknown) {
     return reply.status(500).send({ error: (err as Error).message });
   }
 });
 
 fastify.post<{ Params: { id: string }; Body: Record<string, unknown> }>('/paper/orders/modify/:id', async (req, reply) => {
-  if (!requireUatAuth(reply)) return;
-  try {
-    const data = await uatPost(`/orders/v2/modify/${req.params.id}`, req.body, { Authorization: `Bearer ${uatState.sessionToken!}` });
-    return reply.send(data);
-  } catch (err: unknown) {
-    return reply.status(500).send({ error: (err as Error).message });
-  }
+  if (!requireAuth(reply)) return;
+  const ok = simBroker.modifyOrder(Number(req.params.id), req.body);
+  if (!ok) return reply.status(404).send({ error: 'Order not found or already filled/cancelled.' });
+  return reply.send({ ok: true });
 });
 
 fastify.delete<{ Params: { id: string } }>('/paper/orders/:id', async (req, reply) => {
-  if (!requireUatAuth(reply)) return;
-  try {
-    const data = await uatDelete(`/orders/${req.params.id}`);
-    return reply.send(data);
-  } catch (err: unknown) {
-    return reply.status(500).send({ error: (err as Error).message });
-  }
+  if (!requireAuth(reply)) return;
+  const ok = simBroker.cancelOrder(Number(req.params.id));
+  if (!ok) return reply.status(404).send({ error: 'Order not found or cannot be cancelled.' });
+  return reply.send({ ok: true });
 });
 
 fastify.get('/paper/positions', async (_req, reply) => {
-  if (!requireUatAuth(reply)) return;
-  try {
-    return reply.send(await uatGet('/portfolio/positions'));
-  } catch (err: unknown) {
-    return reply.status(500).send({ error: (err as Error).message });
-  }
+  if (!requireAuth(reply)) return;
+  const positions = simBroker.getPositions().map((p) => {
+    const ltp             = p.last_traded_price || p.avg_price;
+    const isLong          = p.qty > 0;
+    // p.qty is signed (negative = short), so this formula is correct for both directions:
+    // Long: (ltp-avg)*qty_positive = profit when price rises ✓
+    // Short: (ltp-avg)*qty_negative = loss when price rises ✓
+    const unrealizedPnl   = (ltp - p.avg_price) * p.qty;
+    const totalPnl        = unrealizedPnl + p.realized_pnl;
+    // pnlChg as % of notional entry value — correctly signed for long/short
+    const pnlChg          = p.avg_price > 0 && p.qty !== 0
+      ? (unrealizedPnl / (p.avg_price * Math.abs(p.qty))) * 100
+      : 0;
+    return {
+      ref_id:             p.ref_id,
+      display_name:       p.display_name,
+      order_side:         isLong ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
+      qty:                Math.abs(p.qty),
+      avg_price:          p.avg_price,
+      last_traded_price:  ltp,
+      pnl:                Math.round(totalPnl),
+      pnl_chg:            parseFloat(pnlChg.toFixed(2)),
+      unrealised_pnl:     Math.round(unrealizedPnl),
+      realised_pnl:       Math.round(p.realized_pnl),
+      product:            p.order_delivery_type === 'ORDER_DELIVERY_TYPE_IDAY' ? 'MIS' : 'NRML',
+    };
+  });
+  return reply.send(positions);
 });
 
 fastify.get('/paper/holdings', async (_req, reply) => {
-  if (!requireUatAuth(reply)) return;
-  try {
-    return reply.send(await uatGet('/portfolio/holdings'));
-  } catch (err: unknown) {
-    return reply.status(500).send({ error: (err as Error).message });
+  if (!requireAuth(reply)) return;
+  // SimBroker is designed for intraday/derivative paper trading; holdings are always empty.
+  return reply.send([]);
+});
+
+fastify.get('/paper/pnl', async (_req, reply) => {
+  if (!requireAuth(reply)) return;
+  let realised = 0, unrealised = 0;
+  for (const p of simBroker.getPositions()) {
+    realised += p.realized_pnl;
+    const ltp = p.last_traded_price || p.avg_price;
+    unrealised += (ltp - p.avg_price) * p.qty;   // signed qty — correct for long/short
   }
+  return reply.send({
+    realised:   Math.round(realised),
+    unrealised: Math.round(unrealised),
+    total:      Math.round(realised + unrealised),
+  });
 });
 
 interface MarginBody {
@@ -774,45 +990,40 @@ interface MarginBody {
   order_type: string;
   order_price?: number;
   order_delivery_type: string;
+  exchange?: string;
 }
 
 fastify.post<{ Body: MarginBody }>('/paper/margin', async (req, reply) => {
   if (!requireAuth(reply)) return;
   try {
-    const { liveRefId, order_qty, order_side, order_type, order_price, order_delivery_type } = req.body;
-    const order: Record<string, unknown> = { ref_id: liveRefId, order_side, order_qty, order_type, order_delivery_type };
-    if (order_price != null) order.order_price = order_price;
+    const { liveRefId, order_qty, order_side, order_type, order_price, order_delivery_type, exchange = 'NSE' } = req.body;
+    // Nubra API: ORDER_TYPE_MARKET is deprecated — use REGULAR + price_type
+    const isMarket  = order_type === 'ORDER_TYPE_MARKET' || !order_price;
+    const priceType = isMarket ? 'MARKET' : 'LIMIT';
+    const order = {
+      ref_id:              liveRefId,
+      order_side,
+      order_qty,
+      order_type:          'ORDER_TYPE_REGULAR',
+      price_type:          priceType,
+      order_price:         order_price ?? 0,
+      order_delivery_type,
+      validity_type:       'IOC',
+      request_type:        'ORDER_REQUEST_NEW',
+    };
+    const payload = { with_portfolio: true, with_legs: false, is_basket: false, order_req: { exchange, orders: [order] } };
+    console.log('[margin] request:', JSON.stringify(payload));
     const data = await nubraPost(
       '/orders/v2/margin_required',
-      { with_portfolio: true, orders: [order] },
+      payload,
       { Authorization: `Bearer ${authState.sessionToken!}` },
     );
+    console.log('[margin] response:', JSON.stringify(data));
     return reply.send(data);
   } catch (err: unknown) {
     return reply.status(500).send({ error: (err as Error).message });
   }
 });
-
-// ─── UAT session restore helper ───────────────────────────────────────────────
-async function tryRestoreUatSession(): Promise<void> {
-  if (!uatState.authToken) return;
-  const mpin = process.env.MPIN;
-  if (!mpin) return;
-  try {
-    console.log('Restoring UAT session…');
-    const data = await uatPost('/verifypin', { pin: mpin }, { Authorization: `Bearer ${uatState.authToken}` });
-    const tok  = (data.session_token || (data.data as Record<string, unknown>)?.token) as string;
-    if (!tok) throw new Error('no session_token');
-    uatState.sessionToken = tok;
-    uatState.status       = 'authenticated';
-    console.log('UAT session restored.');
-    buildUatRefMap();
-  } catch (err) {
-    console.log(`UAT token expired (${(err as Error).message}). Re-login required.`);
-    uatState.authToken = null;
-    uatState.status    = 'idle';
-  }
-}
 
 // ─── Startup session restore ──────────────────────────────────────────────────
 async function tryRestoreSession(): Promise<void> {
@@ -842,5 +1053,4 @@ await fastify.ready();
 httpServer.listen(PORT, async () => {
   console.log(`Nubra Dashboard server → http://localhost:${PORT}`);
   await tryRestoreSession();
-  await tryRestoreUatSession();
 });
