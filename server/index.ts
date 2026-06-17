@@ -8,9 +8,16 @@ import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import dotenv from 'dotenv';
+import {
+  initDb, dbInsertOrder, dbUpdateOrder, dbLoadOrders,
+  dbInsertFill, dbUpsertPosition, dbLoadPositions,
+  dbInsertPnlTick, dbUpsertName, dbLoadNameMap,
+  dbGetMeta, dbSetMeta,
+} from './paperDb.ts';
 import protobuf from 'protobufjs';
 
 dotenv.config();
+initDb();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -549,20 +556,75 @@ class SimBroker {
   private ticks     = new Map<number, number>();     // ref_id → ltp paise
   private nameMap   = new Map<string, number>();     // normalised name → ref_id
   private nextId    = 1;
+  private pnlTickCounter = 0;
+
+  restore(): void {
+    this.nameMap = dbLoadNameMap();
+    const savedNextId = dbGetMeta('nextOrderId');
+    if (savedNextId) this.nextId = Number(savedNextId);
+
+    for (const row of dbLoadOrders()) {
+      const o: SimOrder = {
+        order_id: row.order_id as number, ref_id: row.ref_id as number,
+        nubraName: row.nubra_name as string, display_name: row.display_name as string,
+        order_type: row.order_type as string, order_side: row.order_side as string,
+        order_price: row.order_price as number, trigger_price: row.trigger_price as number,
+        order_qty: row.order_qty as number, filled_qty: row.filled_qty as number,
+        avg_filled_price: row.avg_filled_price as number, order_status: row.order_status as string,
+        order_time: row.order_time as number, filled_time: row.filled_time as number | null,
+        order_delivery_type: row.order_delivery_type as string,
+        validity_type: row.validity_type as string, tag: row.tag as string | undefined,
+        sl_triggered: !!(row.sl_triggered as number),
+      };
+      this.orders.set(o.order_id, o);
+      if (o.order_id >= this.nextId) this.nextId = o.order_id + 1;
+    }
+
+    for (const row of dbLoadPositions()) {
+      const p: SimPosition = {
+        ref_id: row.ref_id as number, nubraName: row.nubra_name as string,
+        display_name: row.display_name as string, qty: row.qty as number,
+        avg_price: row.avg_price as number, realized_pnl: row.realized_pnl as number,
+        last_traded_price: row.last_traded_price as number,
+        order_delivery_type: row.order_delivery_type as string,
+      };
+      this.positions.set(p.ref_id, p);
+      this.ticks.set(p.ref_id, p.last_traded_price);
+    }
+    console.log(`[SimBroker] Restored ${this.orders.size} orders, ${this.positions.size} positions`);
+  }
 
   registerName(nubraName: string, refId: number): void {
     const norm = nubraName.toLowerCase().replace(/^(nse|bse)_/, '');
-    this.nameMap.set(nubraName.toLowerCase(), refId);
-    if (norm !== nubraName.toLowerCase()) this.nameMap.set(norm, refId);
+    const lower = nubraName.toLowerCase();
+    if (!this.nameMap.has(lower)) {
+      this.nameMap.set(lower, refId);
+      dbUpsertName(lower, refId);
+    }
+    if (norm !== lower && !this.nameMap.has(norm)) {
+      this.nameMap.set(norm, refId);
+      dbUpsertName(norm, refId);
+    }
   }
 
-  // Called for option-chain ticks (have a direct ref_id)
   onLtp(refId: number, ltpPaise: number): void {
     if (ltpPaise <= 0) return;
     const prev = this.ticks.get(refId);
     this.ticks.set(refId, ltpPaise);
     const pos = this.positions.get(refId);
-    if (pos) pos.last_traded_price = ltpPaise;
+    if (pos) {
+      pos.last_traded_price = ltpPaise;
+      // Record P&L tick every 5th update to avoid flooding the DB
+      if (pos.qty !== 0 && (++this.pnlTickCounter % 5 === 0)) {
+        const unrealized = (ltpPaise - pos.avg_price) * pos.qty;
+        dbInsertPnlTick({
+          ts: Date.now(), ref_id: refId, ltp: ltpPaise,
+          qty: pos.qty, avg_price: pos.avg_price,
+          unrealized_pnl: unrealized, realized_pnl: pos.realized_pnl,
+          total_pnl: unrealized + pos.realized_pnl,
+        });
+      }
+    }
     if (prev !== ltpPaise) this.checkFills(refId, ltpPaise);
   }
 
@@ -668,6 +730,31 @@ class SimBroker {
       }
     }
 
+    // Persist to SQLite
+    dbUpdateOrder({
+      order_id: order.order_id, filled_qty: order.filled_qty,
+      avg_filled_price: order.avg_filled_price, order_status: order.order_status,
+      filled_time: order.filled_time, sl_triggered: order.sl_triggered,
+    });
+    dbInsertFill({
+      order_id: order.order_id, ref_id: order.ref_id,
+      fill_price: Math.round(fillPaise), fill_qty: order.order_qty,
+      fill_time: order.filled_time!, side: order.order_side,
+    });
+    dbUpsertPosition({
+      ref_id: pos.ref_id, nubraName: pos.nubraName, display_name: pos.display_name,
+      qty: pos.qty, avg_price: pos.avg_price, realized_pnl: pos.realized_pnl,
+      last_traded_price: pos.last_traded_price, order_delivery_type: pos.order_delivery_type,
+    });
+    // Record P&L at fill time
+    const unrealizedAtFill = (pos.last_traded_price - pos.avg_price) * pos.qty;
+    dbInsertPnlTick({
+      ts: Date.now(), ref_id: pos.ref_id, ltp: pos.last_traded_price,
+      qty: pos.qty, avg_price: pos.avg_price,
+      unrealized_pnl: unrealizedAtFill, realized_pnl: pos.realized_pnl,
+      total_pnl: unrealizedAtFill + pos.realized_pnl,
+    });
+
     console.log(`[SimBroker] Filled #${order.order_id}: ${order.order_side} ${order.order_qty} ${order.display_name} @ ₹${(fillPaise / 100).toFixed(2)}`);
   }
 
@@ -707,6 +794,8 @@ class SimBroker {
     };
     this.orders.set(id, order);
     this.registerName(p.nubraName, p.liveRefId);
+    dbInsertOrder(order);
+    dbSetMeta('nextOrderId', String(this.nextId));
 
     // Attempt immediate fill if we already have a live tick for this instrument
     const ltp = this.ticks.get(p.liveRefId);
@@ -721,6 +810,7 @@ class SimBroker {
     const o = this.orders.get(id);
     if (!o || o.order_status !== 'ORDER_STATUS_OPEN') return false;
     o.order_status = 'ORDER_STATUS_CANCELLED';
+    dbUpdateOrder({ order_id: o.order_id, filled_qty: o.filled_qty, avg_filled_price: o.avg_filled_price, order_status: o.order_status, filled_time: o.filled_time, sl_triggered: o.sl_triggered });
     return true;
   }
 
@@ -746,6 +836,7 @@ class SimBroker {
 }
 
 const simBroker   = new SimBroker();
+simBroker.restore();
 const simOcSubs   = new Set<string>(); // OC keys already subscribed for SimBroker
 
 // Subscribe instrument to the PROD live feed so SimBroker gets fills.

@@ -1,0 +1,203 @@
+import Database from 'better-sqlite3';
+import path from 'path';
+
+const DB_PATH = path.join(import.meta.dirname ?? __dirname, '..', 'paper.db');
+
+let db: Database.Database;
+
+export function initDb(): Database.Database {
+  db = new Database(DB_PATH);
+  db.pragma('journal_mode = WAL');
+  db.pragma('synchronous = NORMAL');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS orders (
+      order_id            INTEGER PRIMARY KEY,
+      ref_id              INTEGER NOT NULL,
+      nubra_name          TEXT NOT NULL,
+      display_name        TEXT NOT NULL,
+      order_type          TEXT NOT NULL,
+      order_side          TEXT NOT NULL,
+      order_price         INTEGER NOT NULL DEFAULT 0,
+      trigger_price       INTEGER NOT NULL DEFAULT 0,
+      order_qty           INTEGER NOT NULL,
+      filled_qty          INTEGER NOT NULL DEFAULT 0,
+      avg_filled_price    INTEGER NOT NULL DEFAULT 0,
+      order_status        TEXT NOT NULL,
+      order_time          INTEGER NOT NULL,
+      filled_time         INTEGER,
+      order_delivery_type TEXT NOT NULL,
+      validity_type       TEXT NOT NULL DEFAULT 'DAY',
+      tag                 TEXT,
+      sl_triggered        INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS fills (
+      fill_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id   INTEGER NOT NULL,
+      ref_id     INTEGER NOT NULL,
+      fill_price INTEGER NOT NULL,
+      fill_qty   INTEGER NOT NULL,
+      fill_time  INTEGER NOT NULL,
+      side       TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS positions (
+      ref_id              INTEGER PRIMARY KEY,
+      nubra_name          TEXT NOT NULL,
+      display_name        TEXT NOT NULL,
+      qty                 INTEGER NOT NULL,
+      avg_price           INTEGER NOT NULL,
+      realized_pnl        INTEGER NOT NULL DEFAULT 0,
+      last_traded_price   INTEGER NOT NULL DEFAULT 0,
+      order_delivery_type TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS pnl_ticks (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts               INTEGER NOT NULL,
+      ref_id           INTEGER NOT NULL,
+      ltp              INTEGER NOT NULL,
+      qty              INTEGER NOT NULL,
+      avg_price        INTEGER NOT NULL,
+      unrealized_pnl   INTEGER NOT NULL,
+      realized_pnl     INTEGER NOT NULL,
+      total_pnl        INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS name_map (
+      name   TEXT PRIMARY KEY,
+      ref_id INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pnl_ref_ts ON pnl_ticks(ref_id, ts);
+    CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_id);
+    CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(order_status);
+  `);
+
+  console.log(`[PaperDB] Opened ${DB_PATH}`);
+  return db;
+}
+
+// ── Orders ──────────────────────────────────────────────────────────────────
+
+const _insertOrder = () => db.prepare(`
+  INSERT INTO orders (order_id, ref_id, nubra_name, display_name, order_type, order_side,
+    order_price, trigger_price, order_qty, filled_qty, avg_filled_price, order_status,
+    order_time, filled_time, order_delivery_type, validity_type, tag, sl_triggered)
+  VALUES (@order_id, @ref_id, @nubra_name, @display_name, @order_type, @order_side,
+    @order_price, @trigger_price, @order_qty, @filled_qty, @avg_filled_price, @order_status,
+    @order_time, @filled_time, @order_delivery_type, @validity_type, @tag, @sl_triggered)
+`);
+
+const _updateOrder = () => db.prepare(`
+  UPDATE orders SET filled_qty=@filled_qty, avg_filled_price=@avg_filled_price,
+    order_status=@order_status, filled_time=@filled_time, sl_triggered=@sl_triggered
+  WHERE order_id=@order_id
+`);
+
+export function dbInsertOrder(o: {
+  order_id: number; ref_id: number; nubraName: string; display_name: string;
+  order_type: string; order_side: string; order_price: number; trigger_price: number;
+  order_qty: number; filled_qty: number; avg_filled_price: number; order_status: string;
+  order_time: number; filled_time: number | null; order_delivery_type: string;
+  validity_type: string; tag?: string; sl_triggered: boolean;
+}): void {
+  _insertOrder().run({
+    order_id: o.order_id, ref_id: o.ref_id, nubra_name: o.nubraName,
+    display_name: o.display_name, order_type: o.order_type, order_side: o.order_side,
+    order_price: o.order_price, trigger_price: o.trigger_price, order_qty: o.order_qty,
+    filled_qty: o.filled_qty, avg_filled_price: o.avg_filled_price,
+    order_status: o.order_status, order_time: o.order_time, filled_time: o.filled_time,
+    order_delivery_type: o.order_delivery_type, validity_type: o.validity_type,
+    tag: o.tag ?? null, sl_triggered: o.sl_triggered ? 1 : 0,
+  });
+}
+
+export function dbUpdateOrder(o: {
+  order_id: number; filled_qty: number; avg_filled_price: number;
+  order_status: string; filled_time: number | null; sl_triggered: boolean;
+}): void {
+  _updateOrder().run({
+    order_id: o.order_id, filled_qty: o.filled_qty, avg_filled_price: o.avg_filled_price,
+    order_status: o.order_status, filled_time: o.filled_time, sl_triggered: o.sl_triggered ? 1 : 0,
+  });
+}
+
+export function dbLoadOrders(): Array<Record<string, unknown>> {
+  return db.prepare('SELECT * FROM orders ORDER BY order_time DESC').all() as Array<Record<string, unknown>>;
+}
+
+// ── Fills ───────────────────────────────────────────────────────────────────
+
+export function dbInsertFill(f: {
+  order_id: number; ref_id: number; fill_price: number;
+  fill_qty: number; fill_time: number; side: string;
+}): void {
+  db.prepare(`INSERT INTO fills (order_id, ref_id, fill_price, fill_qty, fill_time, side)
+    VALUES (@order_id, @ref_id, @fill_price, @fill_qty, @fill_time, @side)`).run(f);
+}
+
+// ── Positions ───────────────────────────────────────────────────────────────
+
+export function dbUpsertPosition(p: {
+  ref_id: number; nubraName: string; display_name: string; qty: number;
+  avg_price: number; realized_pnl: number; last_traded_price: number;
+  order_delivery_type: string;
+}): void {
+  db.prepare(`INSERT INTO positions (ref_id, nubra_name, display_name, qty, avg_price,
+      realized_pnl, last_traded_price, order_delivery_type)
+    VALUES (@ref_id, @nubra_name, @display_name, @qty, @avg_price,
+      @realized_pnl, @last_traded_price, @order_delivery_type)
+    ON CONFLICT(ref_id) DO UPDATE SET
+      qty=@qty, avg_price=@avg_price, realized_pnl=@realized_pnl,
+      last_traded_price=@last_traded_price, display_name=@display_name
+  `).run({
+    ref_id: p.ref_id, nubra_name: p.nubraName, display_name: p.display_name,
+    qty: p.qty, avg_price: p.avg_price, realized_pnl: p.realized_pnl,
+    last_traded_price: p.last_traded_price, order_delivery_type: p.order_delivery_type,
+  });
+}
+
+export function dbLoadPositions(): Array<Record<string, unknown>> {
+  return db.prepare('SELECT * FROM positions WHERE qty != 0').all() as Array<Record<string, unknown>>;
+}
+
+// ── PnL Ticks ───────────────────────────────────────────────────────────────
+
+export function dbInsertPnlTick(t: {
+  ts: number; ref_id: number; ltp: number; qty: number;
+  avg_price: number; unrealized_pnl: number; realized_pnl: number; total_pnl: number;
+}): void {
+  db.prepare(`INSERT INTO pnl_ticks (ts, ref_id, ltp, qty, avg_price,
+    unrealized_pnl, realized_pnl, total_pnl)
+    VALUES (@ts, @ref_id, @ltp, @qty, @avg_price,
+    @unrealized_pnl, @realized_pnl, @total_pnl)`).run(t);
+}
+
+// ── Name Map ────────────────────────────────────────────────────────────────
+
+export function dbUpsertName(name: string, refId: number): void {
+  db.prepare('INSERT OR REPLACE INTO name_map (name, ref_id) VALUES (?, ?)').run(name, refId);
+}
+
+export function dbLoadNameMap(): Map<string, number> {
+  const rows = db.prepare('SELECT name, ref_id FROM name_map').all() as Array<{ name: string; ref_id: number }>;
+  return new Map(rows.map(r => [r.name, r.ref_id]));
+}
+
+// ── Meta ────────────────────────────────────────────────────────────────────
+
+export function dbGetMeta(key: string): string | undefined {
+  const row = db.prepare('SELECT value FROM meta WHERE key=?').get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function dbSetMeta(key: string, value: string): void {
+  db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(key, value);
+}

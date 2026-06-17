@@ -6,6 +6,8 @@ export type AuthStatus = 'idle' | 'awaiting_otp' | 'awaiting_mpin' | 'authentica
 export interface OrderTicketConfig {
   instrument: Instrument | null;
   side: 'BUY' | 'SELL';
+  ltp?: number;
+  ltpChg?: number;
 }
 
 interface PaperTradingCtx {

@@ -49,12 +49,18 @@ export default function OrderTicket() {
   const [marginErr,  setMarginErr]  = useState('');
   const [placing,    setPlacing]    = useState(false);
   const [result,     setResult]     = useState<{ ok: boolean; msg: string } | null>(null);
+  const [ltp,        setLtp]        = useState<number | undefined>();
+  const [ltpChg,     setLtpChg]     = useState<number | undefined>();
+  const [pos,        setPos]        = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const marginTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dragRef     = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
 
   useEffect(() => {
     if (ticketOpen) {
       setInstrument(ticketConfig.instrument);
       setSide(ticketConfig.side);
+      setLtp(ticketConfig.ltp);
+      setLtpChg(ticketConfig.ltpChg);
       setLots(1);
       setPrice('');
       setTriggerPx('');
@@ -65,6 +71,7 @@ export default function OrderTicket() {
       setResult(null);
       setMargin(null);
       setMarginErr('');
+      setPos({ x: 0, y: 0 });
     }
   }, [ticketOpen, ticketConfig]);
 
@@ -93,7 +100,7 @@ export default function OrderTicket() {
             exchange:            instrument.exchange ?? 'NSE',
           }),
         });
-        const d = await res.json() as { total_margin?: number; error?: string };
+        const d = await res.json() as { total_margin?: number; message?: string; error?: string };
         if (d.error) throw new Error(d.error);
         setMargin(d.total_margin != null ? d.total_margin / 100 : null);
       } catch (e) {
@@ -104,6 +111,22 @@ export default function OrderTicket() {
   }, [instrument, lots, side, orderType, price, product]);
 
   useEffect(() => { if (ticketOpen) fetchMargin(); }, [ticketOpen, fetchMargin]);
+
+  useEffect(() => {
+    function onMove(e: MouseEvent) {
+      if (!dragRef.current) return;
+      setPos({ x: dragRef.current.origX + e.clientX - dragRef.current.startX, y: dragRef.current.origY + e.clientY - dragRef.current.startY });
+    }
+    function onUp() { dragRef.current = null; }
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
+  }, []);
+
+  function onHeaderMouseDown(e: React.MouseEvent) {
+    if ((e.target as HTMLElement).tagName === 'BUTTON') return;
+    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y };
+  }
 
   async function placeOrder() {
     if (!instrument) { setResult({ ok: false, msg: 'Select an instrument first.' }); return; }
@@ -119,14 +142,14 @@ export default function OrderTicket() {
     setPlacing(true);
     setResult(null);
     try {
-      const label = instrumentLabel(instrument);
+      const lbl = instrumentLabel(instrument);
       const res = await fetch('/paper/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           nubraName,
           liveRefId:           instrument.ref_id,
-          display_name:        label || nubraName,
+          display_name:        lbl || nubraName,
           order_type:          orderTypeToApi(orderType),
           order_qty:           orderQty,
           order_side:          side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
@@ -153,10 +176,18 @@ export default function OrderTicket() {
   if (!ticketOpen) return null;
 
   const isBuy      = side === 'BUY';
-  const accentCls  = isBuy ? 'text-green-400' : 'text-red-400';
-  const accentBg   = isBuy ? 'bg-green-500'   : 'bg-red-500';
   const needsPrice = orderType === 'LIMIT' || orderType === 'SL';
   const label      = instrumentLabel(instrument);
+
+  const ltpRs  = ltp != null ? ltp / 100 : null;
+  const chgRs  = ltpChg != null ? ltpChg / 100 : null;
+  const chgPct = ltpRs && chgRs && (ltpRs - chgRs) !== 0 ? ((chgRs / (ltpRs - chgRs)) * 100) : null;
+  const chgUp  = chgRs != null ? chgRs >= 0 : true;
+
+  const pill = (active: boolean) =>
+    active
+      ? 'bg-[#2f3347] text-white border-[#444a66]'
+      : 'bg-transparent text-[#888] border-[#2a2d3e] hover:text-[#ccc]';
 
   return (
     <div
@@ -165,33 +196,38 @@ export default function OrderTicket() {
     >
       <div className="absolute inset-0 bg-black/60" />
 
-      <div className="relative bg-[var(--bg-card)] rounded-xl shadow-2xl w-[420px] overflow-hidden flex flex-col max-h-[90vh]">
+      <div className="relative overflow-hidden flex flex-col max-h-[90vh]" style={{ width: 420, background: '#1c1f2e', borderRadius: 12, boxShadow: '0 25px 60px rgba(0,0,0,.5)', transform: `translate(${pos.x}px, ${pos.y}px)` }}>
 
-        {/* ── Header (B/S toggle + instrument name) ── */}
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)]">
-          <button
-            onClick={() => setSide('BUY')}
-            className={`text-[10px] font-bold px-2 py-1 rounded transition-colors ${
-              isBuy ? 'bg-green-500 text-white' : 'bg-green-500/10 text-green-600 hover:bg-green-500/20'
-            }`}
+        {/* ── Header ── */}
+        <div className="flex items-center gap-2 px-4 py-3" onMouseDown={onHeaderMouseDown} style={{ borderBottom: '1px solid #2a2d3e', cursor: 'grab', userSelect: 'none' }}>
+          <button onClick={() => setSide('BUY')}
+            style={{ fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 4, background: isBuy ? '#2563eb' : '#252836', color: isBuy ? '#fff' : '#60a5fa', cursor: 'pointer', border: 'none' }}
           >B</button>
-          <button
-            onClick={() => setSide('SELL')}
-            className={`text-[10px] font-bold px-2 py-1 rounded transition-colors ${
-              !isBuy ? 'bg-red-500 text-white' : 'bg-red-500/10 text-red-600 hover:bg-red-500/20'
-            }`}
+          <button onClick={() => setSide('SELL')}
+            style={{ fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 4, background: !isBuy ? '#dc2626' : '#252836', color: !isBuy ? '#fff' : '#f87171', cursor: 'pointer', border: 'none' }}
           >S</button>
-          <span className="flex-1 text-[13px] font-semibold text-[var(--text-primary)] truncate">
+          <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {label || 'New Paper Order'}
           </span>
-          <button
-            onClick={closeTicket}
-            className="w-6 h-6 flex items-center justify-center rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] text-lg leading-none"
+          <button onClick={closeTicket}
+            style={{ width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, color: '#888', fontSize: 18, cursor: 'pointer', background: 'none', border: 'none' }}
           >×</button>
         </div>
 
+        {/* ── LTP sub-header ── */}
+        {instrument && ltpRs != null && (
+          <div className="flex items-center gap-1.5 px-4 py-2" style={{ borderBottom: '1px solid #2a2d3e' }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: '#fff' }}>{ltpRs.toFixed(2)}</span>
+            {chgRs != null && (
+              <span style={{ fontSize: 12, color: chgUp ? '#4ade80' : '#f87171' }}>
+                • {chgUp ? '+' : ''}{chgRs.toFixed(2)} {chgPct != null && `(${chgPct.toFixed(2)}%)`}
+              </span>
+            )}
+            <span style={{ fontSize: 11, color: '#666', marginLeft: 4 }}>• {instrument.exchange ?? 'NSE'}</span>
+          </div>
+        )}
+
         <div className="overflow-y-auto">
-          {/* if no instrument pre-filled, show search */}
           {!instrument && (
             <div className="px-4 pt-4 pb-2">
               <InstrumentSearch placeholder="Search symbol…" onSelect={setInstrument} />
@@ -200,163 +236,123 @@ export default function OrderTicket() {
 
           {instrument && (
             <>
-              {/* ── Delivery / Intraday tabs ── */}
-              <div className="flex border-b border-[var(--border)]">
+              {/* ── Delivery / Intraday pill buttons ── */}
+              <div className="flex gap-2 px-4 py-3" style={{ borderBottom: '1px solid #2a2d3e' }}>
                 {(['NRML', 'MIS'] as const).map((p) => (
                   <button
                     key={p}
                     onClick={() => setProduct(p)}
-                    className={`flex-1 py-2.5 text-[13px] font-semibold transition-colors relative ${
-                      product === p ? accentCls : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-                    }`}
+                    className={`px-5 py-1.5 rounded-md text-[13px] font-semibold border transition-colors ${pill(product === p)}`}
                   >
                     {p === 'NRML' ? 'Delivery' : 'Intraday'}
-                    {product === p && (
-                      <span className={`absolute bottom-0 left-0 right-0 h-0.5 ${accentBg}`} />
-                    )}
                   </button>
                 ))}
               </div>
 
-              {/* ── Qty + Price type ── */}
+              {/* ── Qty + Price ── */}
               <div className="px-4 pt-4 pb-3">
                 <div className="flex gap-3 mb-3">
-                  {/* Qty stepper */}
                   <div className="flex-1">
                     <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-[11px] text-[var(--text-muted)]">Qty</span>
-                      <span className="text-[11px] text-[var(--text-muted)]">Lots: {lots}</span>
+                      <span style={{ fontSize: 11, color: '#888' }}>Qty</span>
+                      <span style={{ fontSize: 11, color: '#888' }}>Lots: {lots}</span>
                     </div>
-                    <div className="flex items-center border border-[var(--border)] rounded overflow-hidden h-9">
-                      <button
-                        onClick={() => setLots(l => Math.max(1, l - 1))}
-                        className="w-9 flex-shrink-0 flex items-center justify-center text-[18px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] border-r border-[var(--border)] h-full leading-none select-none"
+                    <div className="flex items-center h-9 rounded overflow-hidden" style={{ border: '1px solid #2a2d3e' }}>
+                      <button onClick={() => setLots(l => Math.max(1, l - 1))}
+                        style={{ width: 36, height: '100%', fontSize: 18, color: '#888', background: 'none', border: 'none', borderRight: '1px solid #2a2d3e', cursor: 'pointer' }}
                       >−</button>
-                      <span className="flex-1 text-center text-[13px] text-[var(--text-primary)] select-none">{orderQty}</span>
-                      <button
-                        onClick={() => setLots(l => l + 1)}
-                        className="w-9 flex-shrink-0 flex items-center justify-center text-[18px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] border-l border-[var(--border)] h-full leading-none select-none"
+                      <span style={{ flex: 1, textAlign: 'center', fontSize: 13, color: '#fff', fontWeight: 500 }}>{orderQty}</span>
+                      <button onClick={() => setLots(l => l + 1)}
+                        style={{ width: 36, height: '100%', fontSize: 18, color: '#888', background: 'none', border: 'none', borderLeft: '1px solid #2a2d3e', cursor: 'pointer' }}
                       >+</button>
                     </div>
                   </div>
 
-                  {/* Price type */}
                   <div className="flex-1">
-                    <div className="mb-1.5">
-                      <span className="text-[11px] text-[var(--text-muted)]">Price</span>
-                    </div>
+                    <div className="mb-1.5"><span style={{ fontSize: 11, color: '#888' }}>Price</span></div>
                     <div className="flex gap-1 h-9">
                       {(['MKT', 'LIMIT', 'SL'] as const).map((t) => (
-                        <button
-                          key={t}
-                          onClick={() => setOrderType(t)}
-                          className={`flex-1 rounded text-[11px] font-semibold transition-colors border ${
-                            orderType === t
-                              ? isBuy
-                                ? 'bg-green-500/15 text-green-400 border-green-500/30'
-                                : 'bg-red-500/15 text-red-400 border-red-500/30'
-                              : 'bg-[var(--bg-secondary)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text-primary)]'
-                          }`}
-                        >
-                          {t}
-                        </button>
+                        <button key={t} onClick={() => setOrderType(t)}
+                          style={{
+                            flex: 1, borderRadius: 4, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                            background: orderType === t ? 'rgba(59,130,246,.15)' : '#252836',
+                            color: orderType === t ? '#60a5fa' : '#888',
+                            border: `1px solid ${orderType === t ? 'rgba(59,130,246,.4)' : '#2a2d3e'}`,
+                          }}
+                        >{t}</button>
                       ))}
                     </div>
                   </div>
                 </div>
 
-                {/* Limit / SL price input */}
                 {needsPrice && (
-                  <input
-                    type="number" min="0" step="0.05" value={price}
+                  <input type="number" min="0" step="0.05" value={price}
                     onChange={(e) => setPrice(e.target.value)}
                     placeholder="Enter price"
-                    className="w-full px-3 py-2 mb-3 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[var(--text-primary)] text-[13px] focus:outline-none focus:border-[var(--accent)]"
+                    style={{ width: '100%', padding: '8px 12px', marginBottom: 12, background: '#252836', border: '1px solid #2a2d3e', borderRadius: 4, color: '#fff', fontSize: 13, outline: 'none' }}
                   />
                 )}
 
-                {/* At Market / Place button */}
-                <button
-                  onClick={placeOrder}
-                  disabled={placing}
-                  className={`w-full py-2.5 rounded font-semibold text-[13px] text-white transition-colors disabled:opacity-50 mb-1 ${
-                    isBuy ? 'bg-green-600 hover:bg-green-500' : 'bg-red-600 hover:bg-red-500'
-                  }`}
-                >
-                  {placing ? 'Placing…' : orderType === 'MKT' ? 'At Market' : `Place ${side} Order`}
-                </button>
+                {/* At Market display */}
+                <div style={{ width: '100%', padding: '10px 0', borderRadius: 6, background: '#252836', border: '1px solid #2a2d3e', textAlign: 'center', fontSize: 13, color: '#fff', fontWeight: 500, marginBottom: 4 }}>
+                  At Market
+                </div>
                 {orderType === 'MKT' && (
-                  <p className="text-[10px] text-[var(--text-muted)] text-center">Tick size: 0.05</p>
+                  <p style={{ fontSize: 10, color: '#666', textAlign: 'center' }}>Tick size: 0.05</p>
                 )}
               </div>
 
               {/* ── SL / Target toggles ── */}
-              <div className="px-4 pb-3 flex gap-6 border-t border-[var(--border)] pt-3">
+              <div className="px-4 pb-3 flex gap-6 pt-3" style={{ borderTop: '1px dashed #2a2d3e' }}>
                 <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="radio" name="slTgt"
-                    checked={showSl && !showTgt}
-                    onChange={() => { setShowSl(true); setShowTgt(false); }}
-                    className="accent-[var(--accent)]"
-                  />
-                  <span className="text-[12px] text-[var(--text-secondary)]">Stoploss Price</span>
+                  <input type="radio" name="slTgt" checked={showSl && !showTgt} onChange={() => { setShowSl(true); setShowTgt(false); }} className="accent-blue-500" />
+                  <span style={{ fontSize: 12, color: '#ccc' }}>Stoploss Price</span>
                 </label>
                 <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="radio" name="slTgt"
-                    checked={showTgt && !showSl}
-                    onChange={() => { setShowTgt(true); setShowSl(false); }}
-                    className="accent-[var(--accent)]"
-                  />
-                  <span className="text-[12px] text-[var(--text-secondary)]">Target Price</span>
+                  <input type="radio" name="slTgt" checked={showTgt && !showSl} onChange={() => { setShowTgt(true); setShowSl(false); }} className="accent-blue-500" />
+                  <span style={{ fontSize: 12, color: '#ccc' }}>Target Price</span>
                 </label>
               </div>
 
               {(showSl || showTgt) && (
                 <div className="px-4 pb-3">
-                  <input
-                    type="number" min="0" step="0.05" value={triggerPx}
+                  <input type="number" min="0" step="0.05" value={triggerPx}
                     onChange={(e) => setTriggerPx(e.target.value)}
                     placeholder={showSl ? 'Stoploss price' : 'Target price'}
-                    className="w-full px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[var(--text-primary)] text-[13px] focus:outline-none focus:border-[var(--accent)]"
+                    style={{ width: '100%', padding: '8px 12px', background: '#252836', border: '1px solid #2a2d3e', borderRadius: 4, color: '#fff', fontSize: 13, outline: 'none' }}
                   />
                 </div>
               )}
 
-              {/* ── Advanced (collapsible) ── */}
-              <div className="border-t border-[var(--border)]">
-                <button
-                  onClick={() => setShowAdv(v => !v)}
-                  className="w-full flex items-center justify-between px-4 py-2.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+              {/* ── Advanced ── */}
+              <div style={{ borderTop: '1px dashed #2a2d3e' }}>
+                <button onClick={() => setShowAdv(v => !v)}
+                  style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', fontSize: 12, color: '#888', background: 'none', border: 'none', cursor: 'pointer' }}
                 >
-                  <span className="font-semibold">Advanced</span>
-                  <span className="text-[11px]">{showAdv ? '∧' : '∨'}</span>
+                  <span style={{ fontWeight: 600 }}>Advanced</span>
+                  <span style={{ fontSize: 11 }}>{showAdv ? '∧' : '∨'}</span>
                 </button>
-
                 {showAdv && (
                   <div className="px-4 pb-4 flex flex-col gap-3">
                     <div className="flex gap-2">
                       {['SL-Trigger', 'Iceberg', 'Flexi'].map((opt) => (
-                        <button
-                          key={opt}
-                          className="flex-1 py-1.5 rounded border border-[var(--border)] text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--accent)] transition-colors"
-                        >
-                          {opt}
-                        </button>
+                        <button key={opt}
+                          style={{ flex: 1, padding: '6px 0', borderRadius: 6, border: '1px solid #2a2d3e', fontSize: 11, color: '#888', background: 'none', cursor: 'pointer' }}
+                        >{opt}</button>
                       ))}
                     </div>
                     <div className="flex gap-5">
                       <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="radio" name="validity" checked={validity === 'DAY'} onChange={() => setValidity('DAY')} className="accent-[var(--accent)]" />
-                        <span className="text-[12px] text-[var(--text-secondary)]">Regular</span>
+                        <input type="radio" name="validity" checked={validity === 'DAY'} onChange={() => setValidity('DAY')} className="accent-blue-500" />
+                        <span style={{ fontSize: 12, color: '#ccc' }}>Regular</span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer">
-                        <input type="radio" name="validity" checked={validity === 'AMO'} onChange={() => setValidity('AMO')} className="accent-[var(--accent)]" />
-                        <span className="text-[12px] text-[var(--text-secondary)]">AMO</span>
+                        <input type="radio" name="validity" checked={validity === 'AMO'} onChange={() => setValidity('AMO')} className="accent-blue-500" />
+                        <span style={{ fontSize: 12, color: '#ccc' }}>AMO</span>
                       </label>
                     </div>
                     {validity === 'AMO' && (
-                      <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">
+                      <p style={{ fontSize: 11, color: '#666', lineHeight: 1.5 }}>
                         Your order will be placed in the next trading session (AMO validity)
                       </p>
                     )}
@@ -364,40 +360,59 @@ export default function OrderTicket() {
                 )}
               </div>
 
-              {/* ── Result / Margin ── */}
-              <div className="border-t border-[var(--border)] px-4 py-3">
+              {/* ── Margin ── */}
+              <div className="px-4 py-3" style={{ borderTop: '1px solid #2a2d3e' }}>
                 {result ? (
-                  <div className={`text-[12px] px-3 py-2 rounded ${result.ok ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'}`}>
+                  <div style={{ fontSize: 12, padding: '8px 12px', borderRadius: 6, background: result.ok ? 'rgba(34,197,94,.1)' : 'rgba(239,68,68,.1)', color: result.ok ? '#4ade80' : '#f87171' }}>
                     {result.msg}
                   </div>
                 ) : marginErr ? (
-                  <div className="bg-red-500/10 border border-red-500/20 rounded px-3 py-2.5">
-                    <p className="text-[11px] text-red-400">{marginErr.slice(0, 120)}</p>
-                  </div>
-                ) : margin != null ? (
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-[12px] font-semibold text-[var(--text-primary)]">
-                        Margin required: ₹{fmtPrice(margin)}
-                      </p>
-                    </div>
+                  <div style={{ fontSize: 11, padding: '8px 12px', borderRadius: 6, background: 'rgba(239,68,68,.1)', color: '#f87171' }}>
+                    {marginErr.slice(0, 120)}
                   </div>
                 ) : (
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] text-[var(--text-muted)]">Margin Required</span>
-                    <span className="text-[11px] text-[var(--text-muted)]">—</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: 11, color: '#888' }}>Margin required</span>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: '#fff' }}>
+                        {margin != null ? `₹${fmtPrice(margin)}` : '—'}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: 11, color: '#888' }}>Margin available</span>
+                      <span style={{ fontSize: 11, color: '#4ade80' }}>Unlimited (Paper)</span>
+                    </div>
                   </div>
                 )}
               </div>
 
+              {/* ── Execute button (prominent) ── */}
+              <div className="px-4 pb-3">
+                <button
+                  onClick={placeOrder}
+                  disabled={placing}
+                  style={{
+                    width: '100%',
+                    padding: '14px 0',
+                    borderRadius: 8,
+                    border: 'none',
+                    fontSize: 15,
+                    fontWeight: 700,
+                    color: '#fff',
+                    cursor: placing ? 'wait' : 'pointer',
+                    opacity: placing ? 0.5 : 1,
+                    background: isBuy ? '#16a34a' : '#dc2626',
+                  }}
+                >
+                  {placing ? 'Placing…' : isBuy ? 'BUY' : 'SELL'}
+                </button>
+              </div>
+
               {/* ── Cancel ── */}
               <div className="px-4 pb-4">
-                <button
-                  onClick={closeTicket}
-                  className="w-full py-2 rounded text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] border border-[var(--border)] transition-colors"
-                >
-                  Cancel
-                </button>
+                <button onClick={closeTicket}
+                  style={{ width: '100%', padding: '8px 0', borderRadius: 6, border: '1px solid #2a2d3e', fontSize: 12, color: '#888', background: 'none', cursor: 'pointer' }}
+                >Cancel</button>
               </div>
             </>
           )}

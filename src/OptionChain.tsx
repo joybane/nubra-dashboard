@@ -93,6 +93,8 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
         lot_size:        (la.ls as number | undefined) ?? (la.lot_size as number | undefined),
       },
       side,
+      ltp:    g(leg, 'ltp') ?? undefined,
+      ltpChg: g(leg, 'ltpchg') ?? undefined,
     });
   }, [openTicket]);
 

@@ -40,8 +40,9 @@ const STATUS_LABEL: Record<string, string> = {
   ORDER_STATUS_REJECTED:  'REJECTED',
 };
 
-const MIN_H = 120;
+const MIN_H     = 120;
 const DEFAULT_H = 220;
+const HEADER_H  = 40;   // collapsed height = just header bar
 
 // ─── Orders table ─────────────────────────────────────────────────────────────
 function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
@@ -330,8 +331,11 @@ function HoldingsTab({ uatAuth }: { uatAuth: boolean }) {
 // ─── OrderTerminal ────────────────────────────────────────────────────────────
 export default function OrderTerminal() {
   const { authenticated: uatAuth, refreshAuthStatus, openTicket } = usePaperTrading();
-  const [tab,    setTab]    = useState<'orders' | 'positions' | 'holdings'>('orders');
-  const [height, setHeight] = useState(DEFAULT_H);
+  const [tab,        setTab]        = useState<'orders' | 'positions' | 'holdings'>('orders');
+  const [height,     setHeight]     = useState(DEFAULT_H);
+  const [collapsed,  setCollapsed]  = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [preFullH,   setPreFullH]   = useState(DEFAULT_H);
   const dragRef  = useRef<{ startY: number; startH: number } | null>(null);
 
   // ── resize drag ──────────────────────────────────────────────────────────
@@ -355,6 +359,30 @@ export default function OrderTerminal() {
     document.removeEventListener('mouseup',   onMouseUp);
   }
 
+  function toggleCollapse() {
+    if (collapsed) {
+      setCollapsed(false);
+      setHeight(fullscreen ? window.innerHeight * 0.7 : DEFAULT_H);
+    } else {
+      setFullscreen(false);
+      setCollapsed(true);
+    }
+  }
+
+  function toggleFullscreen() {
+    if (fullscreen) {
+      setFullscreen(false);
+      setHeight(preFullH);
+    } else {
+      setPreFullH(height);
+      setFullscreen(true);
+      setCollapsed(false);
+      setHeight(window.innerHeight * 0.7);
+    }
+  }
+
+  const effectiveH = collapsed ? HEADER_H : height;
+
   const TAB_STYLE = (t: string) =>
     `px-4 py-0 h-full flex items-center text-[12px] font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
       tab === t
@@ -362,16 +390,20 @@ export default function OrderTerminal() {
         : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
     }`;
 
+  const iconBtn = 'w-6 h-6 flex items-center justify-center rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] text-[14px] transition-colors';
+
   return (
     <div
-      className="flex flex-col bg-[var(--bg-primary)] border-t border-[var(--border)] shrink-0"
-      style={{ height }}
+      className="flex flex-col bg-[var(--bg-primary)] border-t border-[var(--border)] shrink-0 transition-[height] duration-200"
+      style={{ height: effectiveH }}
     >
-      {/* drag handle */}
-      <div
-        onMouseDown={onHandleMouseDown}
-        className="h-1 bg-[var(--border)] hover:bg-[var(--accent)] cursor-row-resize shrink-0 transition-colors"
-      />
+      {/* drag handle — hidden when collapsed */}
+      {!collapsed && (
+        <div
+          onMouseDown={onHandleMouseDown}
+          className="h-1 bg-[var(--border)] hover:bg-[var(--accent)] cursor-row-resize shrink-0 transition-colors"
+        />
+      )}
 
       {/* header bar */}
       <div className="h-9 shrink-0 flex items-center border-b border-[var(--border)] bg-[var(--bg-secondary)] px-2 gap-1">
@@ -396,12 +428,15 @@ export default function OrderTerminal() {
             </button>
           )}
 
-          <button
-            onClick={refreshAuthStatus}
-            title="Refresh"
-            className="w-6 h-6 flex items-center justify-center rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] text-[14px]"
-          >
-            ↻
+          <button onClick={refreshAuthStatus} title="Refresh" className={iconBtn}>↻</button>
+
+          <span className="w-px h-4 bg-[var(--border)]" />
+
+          <button onClick={toggleCollapse} title={collapsed ? 'Expand' : 'Collapse'} className={iconBtn}>
+            {collapsed ? '▲' : '▼'}
+          </button>
+          <button onClick={toggleFullscreen} title={fullscreen ? 'Restore' : 'Full screen'} className={iconBtn}>
+            {fullscreen ? '⤡' : '⤢'}
           </button>
         </div>
       </div>
