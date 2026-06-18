@@ -12,7 +12,8 @@ import {
 import { useWs } from './hooks/useWsContext';
 import { usePaperTrading } from './hooks/usePaperTrading';
 import { useWatchlist } from './hooks/useWatchlistContext';
-import type { Instrument, OhlcBar, OhlcvData, OptionChainData, VolBar, WsMessage } from './types';
+import { useOIProfile } from './hooks/useOIProfile';
+import type { Instrument, OhlcBar, OhlcvData, VolBar, WsMessage } from './types';
 import { getSymbol } from './types';
 import {
   toChartTime, snapToCandle, sortKey, historyDays, chunkDays,
@@ -44,53 +45,21 @@ export default function CandleChart({ instrument, theme }: Props) {
   const currentInstRef  = useRef<Instrument | null>(null);
   const isLoadingRef    = useRef(false);
   const countdownRef    = useRef<number | null>(null);
-  const oiLoopRef       = useRef<number | null>(null);
-  const oiChainRef      = useRef<{ ce: Record<string,unknown>[]; pe: Record<string,unknown>[] } | null>(null);
-  const oiEnabledRef    = useRef(false);
-  const oiWidthScaleRef = useRef(1.0);
-  const oiDragRef       = useRef({ dragging: false, startX: 0, startScale: 1 });
-  const drawOIRef       = useRef<() => void>(() => {});
-  type OiSnap = { ce: Record<string,unknown>[]; pe: Record<string,unknown>[] };
-  const oiSnapshotsRef   = useRef<Map<number, OiSnap>>(new Map());
-  const oiBaselineRef    = useRef<OiSnap | null>(null);
-  const oiToSnapRef      = useRef<OiSnap | null>(null);
-  const lastOiSnapTimeRef= useRef(0);
-  const oiWsAssetRef     = useRef<string | null>(null);
-  const oiWsExpiryRef    = useRef<string | null>(null);
-  const oiWsExchRef      = useRef<string>('NSE');
-  const oiHistoricalRef  = useRef<Map<string, {ts: number; v: number}[]>>(new Map());
-  const oiHistFetchedRef = useRef(false);
-  const oiHistLoadingRef = useRef(false);
-  const oiFromMsRef      = useRef<number | null>(null);
-  const oiToMsRef        = useRef<number | null>(null);
-  const oiDeltasRef      = useRef<Record<number, { ceDelta: number; peDelta: number }>>({});
-  const oiSymbolMapRef   = useRef<{ ce: Map<number,string>; pe: Map<number,string> }>({ ce: new Map(), pe: new Map() });
-  const oiDrawPendingRef = useRef(false);   // deduplicates concurrent rAF drawOI requests
 
   const [interval,   setInterval]   = useState<Interval>('5m');
   const [loading,    setLoading]    = useState<string | null>('Select a symbol to begin');
   const [showVol,    setShowVol]    = useState(false);
-  const [showOiPopup,setShowOiPopup]= useState(false);
-  const [oiExpiries,  setOiExpiries]  = useState<string[]>([]);
-  const [selExpiries, setSelExpiries] = useState<string[]>([]);
-  const [oiMode,      setOiMode]      = useState<'oi'|'oi_change'>('oi');
-  const [showCalls,   setShowCalls]   = useState(true);
-  const [showPuts,    setShowPuts]    = useState(true);
-  const [oiOn,        setOiOn]        = useState(false);
-  const [oiFromTime,  setOiFromTime]  = useState('');
-  const [oiToTime,    setOiToTime]    = useState('');
   const [ohlc, setOhlc] = useState<{ o:number;h:number;l:number;c:number;vol?:number;chg?:number } | null>(null);
   const [countdown, setCountdown] = useState<string | null>(null);
   const [countdownY, setCountdownY] = useState(0);
   const [priceDisplay, setPriceDisplay] = useState<{ price:number; diff:number; pct:string; up:boolean } | null>(null);
   const [loadMore, setLoadMore] = useState(false);
-  const [oiHover, setOiHover] = useState<{ x: number; y: number; strike: number; ceOi: number; peOi: number } | null>(null);
 
-  const { subscribe, subscribeOC, unsubscribeOC, subscribeChart, unsubscribeChart } = useWs();
+  const { subscribe, subscribeChart, unsubscribeChart } = useWs();
   const intervalRef = useRef(interval);
   intervalRef.current = interval;
-  const oiModeRef = useRef(oiMode);
-  oiModeRef.current = oiMode;
+
+  const oi = useOIProfile({ containerRef, canvasRef, candleRef, currentInstRef });
 
   // ── Chart initialization ──────────────────────────────────────────────────
   useEffect(() => {
@@ -145,10 +114,7 @@ export default function CandleChart({ instrument, theme }: Props) {
 
     chart.subscribeCrosshairMove((param) => {
       updateCountdownPosition();
-      if (oiEnabledRef.current && !oiDrawPendingRef.current) {
-        oiDrawPendingRef.current = true;
-        requestAnimationFrame(() => { drawOIRef.current(); oiDrawPendingRef.current = false; });
-      }
+      oi.requestDraw();
       const bar  = param.seriesData?.get(candle) as OhlcBar | undefined;
       const vBar = param.seriesData?.get(vol) as { value: number } | undefined;
       if (bar) {
@@ -159,10 +125,7 @@ export default function CandleChart({ instrument, theme }: Props) {
     });
 
     chart.timeScale().subscribeVisibleLogicalRangeChange(async (range) => {
-      if (oiEnabledRef.current && !oiDrawPendingRef.current) {
-        oiDrawPendingRef.current = true;
-        requestAnimationFrame(() => { drawOIRef.current(); oiDrawPendingRef.current = false; });
-      }
+      oi.requestDraw();
       if (!range || isLoadingRef.current || !currentInstRef.current || !earliestRef.current) return;
       if (range.from > 10) return;
       await loadMoreHistory();
@@ -202,67 +165,6 @@ export default function CandleChart({ instrument, theme }: Props) {
       candleRef.current.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.05 } });
     }
   }, [showVol]);
-
-  // ── OI WebSocket helpers ──────────────────────────────────────────────────
-  function subscribeOiWs(asset: string, expiry: string, exchange: string) {
-    if (oiWsAssetRef.current === asset && oiWsExpiryRef.current === expiry) return;
-    if (oiWsAssetRef.current && oiWsExpiryRef.current) {
-      unsubscribeOC(oiWsAssetRef.current, oiWsExpiryRef.current, oiWsExchRef.current);
-    }
-    oiWsAssetRef.current  = asset;
-    oiWsExpiryRef.current = expiry;
-    oiWsExchRef.current   = exchange;
-    subscribeOC(asset, expiry, exchange);
-  }
-
-  function unsubscribeOiWs() {
-    if (oiWsAssetRef.current && oiWsExpiryRef.current) {
-      unsubscribeOC(oiWsAssetRef.current, oiWsExpiryRef.current, oiWsExchRef.current);
-    }
-    oiWsAssetRef.current  = null;
-    oiWsExpiryRef.current = null;
-  }
-
-  // ── Live OI updates from WebSocket ───────────────────────────────────────
-  useEffect(() => {
-    const unsub = subscribe('option_chain', (msg: WsMessage) => {
-      if (msg.type !== 'option_chain' || !oiEnabledRef.current || !oiChainRef.current) return;
-      const data = msg.data as OptionChainData;
-      if ((data.asset || '').toUpperCase() !== oiWsAssetRef.current) return;
-      if ((data.expiry || '') !== oiWsExpiryRef.current) return;
-
-      // Build strike(rupees) → oi lookup from WS tick
-      const ceOiMap: Record<number, number> = {};
-      const peOiMap: Record<number, number> = {};
-      for (const leg of (data.ce || [])) {
-        const raw = Number(leg.sp);
-        const sp  = raw > 10000 ? raw / 100 : raw;
-        const oi  = Number(leg.oi ?? (leg as { open_interest?: number }).open_interest) || 0;
-        if (sp > 0 && oi > 0) ceOiMap[sp] = oi;
-      }
-      for (const leg of (data.pe || [])) {
-        const raw = Number(leg.sp);
-        const sp  = raw > 10000 ? raw / 100 : raw;
-        const oi  = Number(leg.oi ?? (leg as { open_interest?: number }).open_interest) || 0;
-        if (sp > 0 && oi > 0) peOiMap[sp] = oi;
-      }
-      if (!Object.keys(ceOiMap).length && !Object.keys(peOiMap).length) return;
-
-      // Patch OI values in the existing structure — preserves the sp format
-      // established by reloadOIExpiries so drawOI coordinates stay correct.
-      oiChainRef.current = {
-        ce: oiChainRef.current.ce.map(leg => {
-          const raw = Number(leg.sp); const spRs = raw > 10000 ? raw / 100 : raw;
-          return spRs in ceOiMap ? { ...leg, oi: ceOiMap[spRs] } : leg;
-        }),
-        pe: oiChainRef.current.pe.map(leg => {
-          const raw = Number(leg.sp); const spRs = raw > 10000 ? raw / 100 : raw;
-          return spRs in peOiMap ? { ...leg, oi: peOiMap[spRs] } : leg;
-        }),
-      };
-    });
-    return unsub;
-  }, [subscribe]);
 
   // ── WebSocket ticks ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -307,7 +209,7 @@ export default function CandleChart({ instrument, theme }: Props) {
       const wasIndex = nubraType(currentInstRef.current) === 'INDEX';
       unsubscribeChart(wasIndex ? { indexes: [oldSym] } : { instruments: [oldSym] }, iv, currentInstRef.current.exchange || 'NSE');
     }
-    unsubscribeOiWs();
+    oi.clearForInstrumentChange();
 
     currentInstRef.current  = inst;
     allBarsRef.current      = [];
@@ -315,14 +217,6 @@ export default function CandleChart({ instrument, theme }: Props) {
     earliestRef.current     = null;
     lastBarRef.current      = null;
     dayOpenRef.current      = null;
-    // Clear OI state so stale previous-instrument bars don't render on the new chart
-    if (oiEnabledRef.current) { oiEnabledRef.current = false; setOiOn(false); }
-    oiChainRef.current       = null;
-    oiHistoricalRef.current  = new Map();
-    oiHistFetchedRef.current = false;
-    oiSnapshotsRef.current   = new Map();
-    oiBaselineRef.current    = null;
-    oiToSnapRef.current      = null;
     stopCountdown();
     setLoading('Loading historical data…');
     setPriceDisplay(null);
@@ -404,8 +298,7 @@ export default function CandleChart({ instrument, theme }: Props) {
   function tickCountdown() {
     if (!intervalRef.current || !currentInstRef.current) { stopCountdown(); return; }
     const nowUtc = Math.floor(Date.now() / 1000);
-    const istSec = (nowUtc + IST_OFFSET) % 86400; // seconds since midnight IST
-    // Hide outside NSE market hours (9:15 AM – 3:30 PM IST)
+    const istSec = (nowUtc + IST_OFFSET) % 86400;
     if (istSec < 9 * 3600 + 15 * 60 || istSec > 15 * 3600 + 30 * 60) {
       setCountdown(null);
       return;
@@ -424,403 +317,11 @@ export default function CandleChart({ instrument, theme }: Props) {
     if (y != null) setCountdownY(Math.round(y) + 13);
   }
 
-  // ── Price display ─────────────────────────────────────────────────────────
   function updatePriceDisplay(price: number, open: number) {
     const diff = price - (open || price);
     const pct  = open ? ((diff / open) * 100).toFixed(2) : '0.00';
     const up   = diff >= 0;
     setPriceDisplay({ price, diff, pct, up });
-  }
-
-  // ── OI Change helpers ────────────────────────────────────────────────────
-  function buildOptionName(asset: string, expiry: string, spPaise: number, type: 'CE' | 'PE'): string {
-    const yy  = expiry.slice(2, 4);
-    const mon = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'][parseInt(expiry.slice(4, 6)) - 1];
-    return `${asset}${yy}${mon}${spPaise / 100}${type}`;
-  }
-
-  function timeToMs(hhmm: string): number {
-    const [h, m] = hhmm.split(':').map(Number);
-    const d = new Date();
-    d.setHours(h, m, 0, 0);
-    return d.getTime();
-  }
-
-  async function fetchOIHistory() {
-    if (!oiChainRef.current || !currentInstRef.current || oiHistLoadingRef.current) return;
-    const symMap = oiSymbolMapRef.current;
-    if (!symMap.ce.size) return;
-    oiHistLoadingRef.current = true;
-
-    const values: string[] = [];
-    const seen = new Set<string>();
-    for (const [sp, ceSym] of symMap.ce.entries()) {
-      const peSym = symMap.pe.get(sp);
-      if (ceSym && !seen.has(ceSym)) { seen.add(ceSym); values.push(ceSym); }
-      if (peSym && !seen.has(peSym)) { seen.add(peSym); values.push(peSym); }
-    }
-    console.log('[OI Hist] fetching', values.slice(0, 4), 'total:', values.length);
-
-    try {
-      const today    = new Date();
-      const startUTC = new Date(today);
-      startUTC.setUTCHours(3, 45, 0, 0); // 9:15 IST
-
-      const res  = await fetch('/api/historical', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: [{ exchange: currentInstRef.current.exchange || 'NSE', type: 'OPT', values, fields: ['cumulative_oi'], startDate: startUTC.toISOString(), endDate: today.toISOString(), interval: '1m', intraDay: true, realTime: false }] }),
-      });
-      if (!res.ok) { console.error('[OI Hist] API error', res.status); oiHistLoadingRef.current = false; return; }
-      const data = await res.json() as { result?: Array<{ values?: Array<Record<string, { cumulative_oi?: Array<{ts: number; v: number}> }>> }> };
-      const map  = new Map<string, {ts: number; v: number}[]>();
-      for (const row of data.result?.[0]?.values ?? []) {
-        for (const [name, series] of Object.entries(row)) {
-          if (series?.cumulative_oi?.length) map.set(name, series.cumulative_oi);
-        }
-      }
-      console.log('[OI Hist] loaded', map.size, 'instruments, sample:', [...map.keys()].slice(0, 3));
-      oiHistoricalRef.current  = map;
-      oiHistFetchedRef.current = true;
-      requestAnimationFrame(drawOI);
-    } catch (e) { console.error('[OI Hist] fetch error', e); }
-    finally { oiHistLoadingRef.current = false; }
-  }
-
-  // ── OI Profile ────────────────────────────────────────────────────────────
-  async function loadOIChain() {
-    if (!currentInstRef.current) return;
-    const sym = getSymbol(currentInstRef.current);
-    try {
-      const res  = await fetch(`/api/optionchain/${encodeURIComponent(sym)}`);
-      const data = await res.json() as { chain?: { all_expiries?: string[]; ce?: Record<string,unknown>[]; pe?: Record<string,unknown>[] } };
-      const chain = data.chain;
-      if (!chain) return;
-      const expiries = chain.all_expiries || [];
-      setOiExpiries(expiries);
-      const first = expiries.slice(0, 1);
-      setSelExpiries(first);
-      // Fetch with the specific nearest expiry so we get correct single-expiry OI,
-      // not the multi-expiry dump returned by the no-expiry endpoint.
-      await reloadOIExpiries(first);
-    } catch { /* ignore */ }
-  }
-
-  async function reloadOIExpiries(expiries: string[]) {
-    if (!currentInstRef.current || expiries.length === 0) return;
-    const sym = getSymbol(currentInstRef.current);
-    const ceMap: Record<number, number> = {};
-    const peMap: Record<number, number> = {};
-    const ceSymMap = new Map<number, string>();
-    const peSymMap = new Map<number, string>();
-    for (const exp of expiries) {
-      try {
-        const res  = await fetch(`/api/optionchain/${encodeURIComponent(sym)}?expiry=${encodeURIComponent(exp)}`);
-        const data = await res.json() as { chain?: { ce?: Record<string,unknown>[]; pe?: Record<string,unknown>[] } };
-        if (!data.chain) continue;
-        for (const ce of (data.chain.ce || [])) {
-          const sp = Number(ce.sp) > 10000 ? Number(ce.sp) / 100 : Number(ce.sp);
-          const oi = Number(ce.oi ?? ce.open_interest) || 0;
-          ceMap[sp] = (ceMap[sp] || 0) + oi;
-          if (ce.symbol && !ceSymMap.has(Number(ce.sp))) ceSymMap.set(Number(ce.sp), String(ce.symbol));
-        }
-        for (const pe of (data.chain.pe || [])) {
-          const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
-          const oi = Number(pe.oi ?? pe.open_interest) || 0;
-          peMap[sp] = (peMap[sp] || 0) + oi;
-          if (pe.symbol && !peSymMap.has(Number(pe.sp))) peSymMap.set(Number(pe.sp), String(pe.symbol));
-        }
-      } catch { /* ignore */ }
-    }
-    oiSymbolMapRef.current = { ce: ceSymMap, pe: peSymMap };
-    const hasData = Object.values(ceMap).some(v => v > 0) || Object.values(peMap).some(v => v > 0);
-    if (hasData) {
-      oiChainRef.current = {
-        ce: Object.entries(ceMap).map(([sp, oi]) => ({ sp: Number(sp) * 100, oi })),
-        pe: Object.entries(peMap).map(([sp, oi]) => ({ sp: Number(sp) * 100, oi })),
-      };
-    }
-    oiHistoricalRef.current  = new Map();
-    oiHistFetchedRef.current = false;
-    oiEnabledRef.current = true;
-    setOiOn(true);
-    if (expiries.length === 1 && currentInstRef.current) {
-      subscribeOiWs(
-        getSymbol(currentInstRef.current).toUpperCase(),
-        expiries[0],
-        currentInstRef.current.exchange || 'NSE',
-      );
-    } else {
-      unsubscribeOiWs();
-    }
-    startOILoop();
-    requestAnimationFrame(drawOI);
-  }
-
-  function startOILoop() {
-    if (oiLoopRef.current) return;
-    const storeSnap = () => {
-      if (!oiChainRef.current) return;
-      const now = Date.now();
-      if (now - lastOiSnapTimeRef.current > 30000) {
-        oiSnapshotsRef.current.set(now, { ce: [...oiChainRef.current.ce], pe: [...oiChainRef.current.pe] });
-        lastOiSnapTimeRef.current = now;
-        // Prune entries older than 8 h (market day) to prevent unbounded memory growth.
-        // Without this a full trading session stores ~960 snapshots × chain size objects.
-        const cutoff = now - 8 * 3_600_000;
-        for (const [ts] of oiSnapshotsRef.current) {
-          if (ts < cutoff) oiSnapshotsRef.current.delete(ts);
-        }
-      }
-    };
-    storeSnap(); // initial snapshot when loop starts
-    function loop() {
-      if (!oiEnabledRef.current) { oiLoopRef.current = null; return; }
-      storeSnap();
-      drawOI();
-      oiLoopRef.current = requestAnimationFrame(() => setTimeout(loop, 100));
-    }
-    oiLoopRef.current = requestAnimationFrame(loop);
-  }
-
-  function drawOI() {
-    const canvas = canvasRef.current;
-    const cont   = containerRef.current;
-    const series = candleRef.current;
-    if (!canvas || !cont || !series || !oiChainRef.current) return;
-
-    const dpr  = window.devicePixelRatio || 1;
-    const w    = cont.clientWidth;
-    const h    = cont.clientHeight;
-    if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-      canvas.width  = w * dpr;
-      canvas.height = h * dpr;
-      canvas.style.width  = `${w}px`;
-      canvas.style.height = `${h}px`;
-    }
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, h);
-    if (!oiEnabledRef.current) return;
-
-    const priceScaleW = 72;
-    const maxBarW     = (w - priceScaleW) * 0.35 * oiWidthScaleRef.current;
-    const barH        = 20;
-
-    if (oiModeRef.current === 'oi_change' && oiHistFetchedRef.current) {
-      // ── OI Change mode ─────────────────────────────────────────────────────
-      const fromMs   = oiFromMsRef.current;
-      const toMs     = oiToMsRef.current;
-      const symMap   = oiSymbolMapRef.current;
-
-      function getHistOI(name: string, targetMs: number | null): number {
-        const s = oiHistoricalRef.current.get(name);
-        if (!s?.length) return 0;
-        if (targetMs === null) return s[s.length - 1].v;
-        let best = s[0];
-        for (const pt of s) { if (pt.ts / 1_000_000 <= targetMs) best = pt; else break; }
-        return best?.v ?? 0;
-      }
-
-      const deltas: Record<number, { ceDelta: number; peDelta: number }> = {};
-      const seen = new Set<number>();
-      for (const ce of oiChainRef.current.ce) {
-        const sp = Number(ce.sp);
-        if (seen.has(sp)) continue;
-        seen.add(sp);
-        const ceName  = symMap.ce.get(sp) || '';
-        const peName  = symMap.pe.get(sp) || '';
-        if (!ceName && !peName) continue;
-        const ceBase  = getHistOI(ceName, fromMs ?? timeToMs('09:15'));
-        const peBase  = getHistOI(peName, fromMs ?? timeToMs('09:15'));
-        const ceEnd   = toMs !== null ? getHistOI(ceName, toMs) : (Number(oiChainRef.current.ce.find(c => Number(c.sp) === sp)?.oi) || getHistOI(ceName, null));
-        const peEnd   = toMs !== null ? getHistOI(peName, toMs) : (Number(oiChainRef.current.pe.find(p => Number(p.sp) === sp)?.oi) || getHistOI(peName, null));
-        deltas[sp] = { ceDelta: ceEnd - ceBase, peDelta: peEnd - peBase };
-      }
-      oiDeltasRef.current = deltas;
-
-      const maxAbs = Math.max(...Object.values(deltas).flatMap(d => [Math.abs(d.ceDelta), Math.abs(d.peDelta)]), 1);
-
-      for (const [spStr, { ceDelta, peDelta }] of Object.entries(deltas)) {
-        const strikeRs = Number(spStr) / 100;
-        const y = series.priceToCoordinate(strikeRs);
-        if (y == null || y < 2 || y > h - 2) continue;
-        const right = w - priceScaleW;
-        if (showCalls && ceDelta !== 0) {
-          const bw = Math.max(3, Math.min((Math.abs(ceDelta) / maxAbs) * maxBarW, maxBarW));
-          ctx.globalAlpha = ceDelta > 0 ? 0.85 : 0.35;
-          ctx.fillStyle   = '#22c55e';
-          ctx.fillRect(right - bw, y - barH / 2, bw, barH / 2);
-        }
-        if (showPuts && peDelta !== 0) {
-          const bw = Math.max(3, Math.min((Math.abs(peDelta) / maxAbs) * maxBarW, maxBarW));
-          ctx.globalAlpha = peDelta > 0 ? 0.85 : 0.35;
-          ctx.fillStyle   = '#ef4444';
-          ctx.fillRect(right - bw, y, bw, barH / 2);
-        }
-      }
-      ctx.globalAlpha = 1;
-      return;
-    }
-
-    // ── Absolute OI mode ───────────────────────────────────────────────────
-    let ceList = oiToSnapRef.current ? oiToSnapRef.current.ce : oiChainRef.current.ce;
-    let peList = oiToSnapRef.current ? oiToSnapRef.current.pe : oiChainRef.current.pe;
-    const baseline = oiBaselineRef.current;
-    if (baseline) {
-      const ceBase: Record<number, number> = {};
-      const peBase: Record<number, number> = {};
-      for (const c of baseline.ce) ceBase[Number(c.sp)] = Number(c.oi) || 0;
-      for (const p of baseline.pe) peBase[Number(p.sp)] = Number(p.oi) || 0;
-      ceList = ceList.map(c => ({ ...c, oi: Math.max(0, (Number(c.oi) || 0) - (ceBase[Number(c.sp)] || 0)) }));
-      peList = peList.map(p => ({ ...p, oi: Math.max(0, (Number(p.oi) || 0) - (peBase[Number(p.sp)] || 0)) }));
-    }
-
-    const map: Record<number, { ceOi: number; peOi: number }> = {};
-    for (const ce of ceList) {
-      const sp = Number(ce.sp) > 10000 ? Number(ce.sp) / 100 : Number(ce.sp);
-      if (!map[sp]) map[sp] = { ceOi: 0, peOi: 0 };
-      map[sp].ceOi += Number(ce.oi ?? ce.open_interest) || 0;
-    }
-    for (const pe of peList) {
-      const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
-      if (!map[sp]) map[sp] = { ceOi: 0, peOi: 0 };
-      map[sp].peOi += Number(pe.oi ?? pe.open_interest) || 0;
-    }
-
-    const allOi = Object.values(map).flatMap((v) => [v.ceOi, v.peOi]).filter((v) => v > 0).sort((a, b) => b - a);
-    const maxOi = allOi[0] || 1;
-
-    for (const [strikeStr, { ceOi, peOi }] of Object.entries(map)) {
-      const strike = Number(strikeStr);
-      const y      = series.priceToCoordinate(strike);
-      if (y == null || y < 2 || y > h - 2) continue;
-      const right = w - priceScaleW;
-
-      if (showCalls && ceOi > 0) {
-        const bw = Math.max(3, Math.min((ceOi / maxOi) * maxBarW, maxBarW));
-        ctx.globalAlpha = 0.75;
-        ctx.fillStyle   = '#22c55e';
-        ctx.fillRect(right - bw, y - barH / 2, bw, barH / 2);
-      }
-      if (showPuts && peOi > 0) {
-        const bw = Math.max(3, Math.min((peOi / maxOi) * maxBarW, maxBarW));
-        ctx.globalAlpha = 0.75;
-        ctx.fillStyle   = '#ef4444';
-        ctx.fillRect(right - bw, y, bw, barH / 2);
-      }
-    }
-    ctx.globalAlpha = 1;
-  }
-  drawOIRef.current = drawOI;
-
-  // OI canvas drag-to-resize — uses document-level listeners so drag survives moving over chart canvas
-  function handleMouseDown(e: React.MouseEvent) {
-    if (!oiEnabledRef.current || !containerRef.current) return;
-    const rect       = containerRef.current.getBoundingClientRect();
-    const x          = e.clientX - rect.left;
-    const priceScaleW= 72;
-    const maxBarW    = (containerRef.current.clientWidth - priceScaleW) * 0.35 * oiWidthScaleRef.current;
-    const handleX    = containerRef.current.clientWidth - priceScaleW - maxBarW;
-    if (Math.abs(x - handleX) > 15) return;
-
-    oiDragRef.current = { dragging: true, startX: x, startScale: oiWidthScaleRef.current };
-    e.preventDefault();
-
-    const onMove = (ev: MouseEvent) => {
-      if (!containerRef.current) return;
-      const rx   = ev.clientX - containerRef.current.getBoundingClientRect().left;
-      const dx   = oiDragRef.current.startX - rx;
-      const base = (containerRef.current.clientWidth - 72) * 0.35;
-      oiWidthScaleRef.current = Math.max(0.2, Math.min(3.0, oiDragRef.current.startScale + dx / base));
-      drawOIRef.current();
-    };
-    const onUp = () => {
-      oiDragRef.current.dragging = false;
-      if (containerRef.current) containerRef.current.style.cursor = '';
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      drawOIRef.current();
-    };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  }
-
-  function handleMouseMove(e: React.MouseEvent) {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const priceScaleW = 72;
-    const w = containerRef.current.clientWidth;
-    const maxBarW = (w - priceScaleW) * 0.35 * oiWidthScaleRef.current;
-    const handleX = w - priceScaleW - maxBarW;
-
-    if (oiEnabledRef.current) {
-      containerRef.current.style.cursor = Math.abs(x - handleX) <= 15 ? 'ew-resize' : '';
-    }
-
-    // OI bar hover tooltip — only when cursor is physically over a rendered bar
-    if (oiEnabledRef.current && oiChainRef.current && candleRef.current && x >= handleX - 5) {
-      const price = candleRef.current.coordinateToPrice(y);
-      if (price != null && price > 0) {
-        const isChangeMode = oiModeRef.current === 'oi_change' && oiHistFetchedRef.current;
-
-        // Build strike map — deltas in change mode, absolute OI otherwise
-        const strikeMap: Record<number, { ceOi: number; peOi: number }> = {};
-        if (isChangeMode) {
-          for (const [spStr, { ceDelta, peDelta }] of Object.entries(oiDeltasRef.current)) {
-            const sp = Number(spStr) / 100;
-            strikeMap[sp] = { ceOi: ceDelta, peOi: peDelta };
-          }
-        } else {
-          for (const ce of oiChainRef.current.ce) {
-            const sp = Number(ce.sp) > 10000 ? Number(ce.sp) / 100 : Number(ce.sp);
-            if (!strikeMap[sp]) strikeMap[sp] = { ceOi: 0, peOi: 0 };
-            strikeMap[sp].ceOi += Number(ce.oi) || 0;
-          }
-          for (const pe of oiChainRef.current.pe) {
-            const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
-            if (!strikeMap[sp]) strikeMap[sp] = { ceOi: 0, peOi: 0 };
-            strikeMap[sp].peOi += Number(pe.oi) || 0;
-          }
-        }
-
-        const strikes = Object.keys(strikeMap).map(Number).sort((a, b) => a - b);
-        if (strikes.length > 1) {
-          const nearest = strikes.reduce((prev, curr) =>
-            Math.abs(curr - price) < Math.abs(prev - price) ? curr : prev, strikes[0]);
-          const interval = strikes[1] - strikes[0];
-          if (Math.abs(nearest - price) <= interval * 0.65) {
-            const d = strikeMap[nearest];
-            const yStrike = candleRef.current.priceToCoordinate(nearest);
-            if (yStrike != null) {
-              const barH  = 20;
-              const right = w - priceScaleW;
-              const allVals = Object.values(strikeMap).flatMap(v => [Math.abs(v.ceOi), Math.abs(v.peOi)]).filter(v => v > 0).sort((a, b) => b - a);
-              const maxVal  = allVals[0] || 1;
-              const bwCe = Math.max(3, Math.min((Math.abs(d.ceOi) / maxVal) * maxBarW, maxBarW));
-              const bwPe = Math.max(3, Math.min((Math.abs(d.peOi) / maxVal) * maxBarW, maxBarW));
-              const overCe = d.ceOi !== 0 && y >= yStrike - barH / 2 && y <= yStrike            && x >= right - bwCe;
-              const overPe = d.peOi !== 0 && y >= yStrike             && y <= yStrike + barH / 2 && x >= right - bwPe;
-              if (overCe || overPe) {
-                setOiHover({ x, y, strike: nearest, ceOi: d.ceOi, peOi: d.peOi });
-                return;
-              }
-            }
-          }
-        }
-      }
-    }
-    setOiHover(null);
-  }
-
-  function handleMouseLeave() {
-    if (containerRef.current && !oiDragRef.current.dragging) {
-      containerRef.current.style.cursor = '';
-    }
-    setOiHover(null);
   }
 
   // ── Toolbar ───────────────────────────────────────────────────────────────
@@ -877,7 +378,7 @@ export default function CandleChart({ instrument, theme }: Props) {
           </div>
         )}
 
-        {/* Indicators dropdown */}
+        {/* Volume toggle */}
         <div className="relative ml-1">
           <button
             onClick={() => setShowVol((v) => !v)}
@@ -889,67 +390,44 @@ export default function CandleChart({ instrument, theme }: Props) {
           </button>
         </div>
 
-        {/* OI Profile — left=toggle, right=settings caret (Upstox style) */}
+        {/* OI Profile — left=toggle, right=settings caret */}
         <div className="relative flex items-stretch">
-          {/* Toggle on/off */}
           <button
-            onClick={() => {
-              if (oiEnabledRef.current) {
-                oiEnabledRef.current = false;
-                setOiOn(false);
-                setShowOiPopup(false);
-                unsubscribeOiWs();
-                drawOI();
-              } else if (oiChainRef.current) {
-                oiEnabledRef.current = true;
-                setOiOn(true);
-                startOILoop();
-              } else if (currentInstRef.current) {
-                loadOIChain();
-              }
-            }}
+            onClick={oi.toggleOI}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-l text-xs font-medium border border-r-0 transition-all ${
-              oiOn ? 'bg-[var(--accent)] border-[var(--accent)] text-white' : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              oi.oiOn ? 'bg-[var(--accent)] border-[var(--accent)] text-white' : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
             }`}
           >
-            <span className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${oiOn ? 'bg-white/30 border-white/60' : 'border-current opacity-60'}`}>
-              {oiOn && <span className="text-[8px] font-bold leading-none">✓</span>}
+            <span className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${oi.oiOn ? 'bg-white/30 border-white/60' : 'border-current opacity-60'}`}>
+              {oi.oiOn && <span className="text-[8px] font-bold leading-none">✓</span>}
             </span>
             OI Profile
           </button>
-          {/* Settings dropdown caret */}
           <button
-            onClick={() => {
-              setShowOiPopup(v => !v);
-              if (!oiExpiries.length && currentInstRef.current) loadOIChain();
-            }}
+            onClick={oi.openSettings}
             className={`px-1.5 py-1 rounded-r text-xs font-medium border border-l-0 transition-all ${
-              oiOn ? 'bg-[var(--accent)] border-[var(--accent)] text-white hover:opacity-80' : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              oi.oiOn ? 'bg-[var(--accent)] border-[var(--accent)] text-white hover:opacity-80' : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
             }`}
           >
             ▾
           </button>
 
-          {showOiPopup && (
+          {oi.showOiPopup && (
             <div className="absolute top-full left-0 mt-1 z-50 w-[290px] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden">
-              {/* Header */}
               <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
                 <span className="text-[13px] font-semibold text-[var(--text-primary)]">OI Profile Settings</span>
-                <button onClick={() => setShowOiPopup(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-lg leading-none">×</button>
+                <button onClick={() => oi.setShowOiPopup(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-lg leading-none">×</button>
               </div>
 
-              {/* Mode tabs */}
               <div className="flex border-b border-[var(--border)]">
                 {(['oi', 'oi_change'] as const).map((mode) => (
                   <button
                     key={mode}
                     onClick={() => {
-                      setOiMode(mode);
-                      if (mode === 'oi_change' && !oiHistFetchedRef.current && !oiHistLoadingRef.current) {
-                        fetchOIHistory();
-                      }
+                      oi.setOiMode(mode);
+                      if (mode === 'oi_change') oi.fetchOIHistory();
                     }}
-                    className={`flex-1 py-2.5 text-[12px] font-medium transition-all border-b-2 -mb-px ${oiMode === mode ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'}`}
+                    className={`flex-1 py-2.5 text-[12px] font-medium transition-all border-b-2 -mb-px ${oi.oiMode === mode ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'}`}
                   >
                     {mode === 'oi' ? 'Open Interest' : 'Change in OI'}
                   </button>
@@ -957,17 +435,16 @@ export default function CandleChart({ instrument, theme }: Props) {
               </div>
 
               <div className="px-4 py-3 flex flex-col gap-4">
-                {/* EXPIRES INCLUDED */}
-                {oiExpiries.length > 0 && (
+                {oi.oiExpiries.length > 0 && (
                   <div>
                     <div className="text-[10px] font-semibold tracking-wider text-[var(--text-muted)] mb-2">EXPIRES INCLUDED</div>
                     <div className="flex flex-col gap-1.5">
-                      {oiExpiries.map((exp) => (
+                      {oi.oiExpiries.map((exp) => (
                         <label key={exp} className="flex items-center gap-2 cursor-pointer select-none">
                           <input
                             type="checkbox"
-                            checked={selExpiries.includes(exp)}
-                            onChange={(e) => setSelExpiries((prev) => e.target.checked ? [...prev, exp] : prev.filter((x) => x !== exp))}
+                            checked={oi.selExpiries.includes(exp)}
+                            onChange={(e) => oi.setSelExpiries((prev) => e.target.checked ? [...prev, exp] : prev.filter((x) => x !== exp))}
                             className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0"
                           />
                           <span className="text-[12px] text-[var(--text-primary)]">{formatExpiry(exp)}</span>
@@ -977,27 +454,25 @@ export default function CandleChart({ instrument, theme }: Props) {
                   </div>
                 )}
 
-                {/* VISUAL SETTINGS */}
                 <div>
                   <div className="text-[10px] font-semibold tracking-wider text-[var(--text-muted)] mb-2">VISUAL SETTINGS</div>
                   <label className="flex items-center gap-2 cursor-pointer select-none mb-2">
-                    <input type="checkbox" checked={showCalls} onChange={(e) => setShowCalls(e.target.checked)} className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0" />
+                    <input type="checkbox" checked={oi.showCalls} onChange={(e) => oi.setShowCalls(e.target.checked)} className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0" />
                     <span className="text-[12px] text-[var(--text-primary)] flex-1">CALLS</span>
                     <span className="w-4 h-4 rounded-sm shrink-0" style={{ backgroundColor: '#22c55e' }} />
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer select-none">
-                    <input type="checkbox" checked={showPuts} onChange={(e) => setShowPuts(e.target.checked)} className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0" />
+                    <input type="checkbox" checked={oi.showPuts} onChange={(e) => oi.setShowPuts(e.target.checked)} className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0" />
                     <span className="text-[12px] text-[var(--text-primary)] flex-1">PUTS</span>
                     <span className="w-4 h-4 rounded-sm shrink-0" style={{ backgroundColor: '#ef4444' }} />
                   </label>
                 </div>
               </div>
 
-              {/* Footer */}
               <div className="flex items-center justify-end gap-2 px-4 py-2.5 border-t border-[var(--border)]">
-                <button onClick={() => setShowOiPopup(false)} className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors">Cancel</button>
+                <button onClick={() => oi.setShowOiPopup(false)} className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors">Cancel</button>
                 <button
-                  onClick={() => { reloadOIExpiries(selExpiries); setShowOiPopup(false); }}
+                  onClick={oi.applyExpiries}
                   className="px-4 py-1.5 rounded-lg bg-[var(--accent)] text-white text-[12px] font-medium hover:bg-[var(--accent-dim)] transition-colors"
                 >
                   Apply
@@ -1029,63 +504,33 @@ export default function CandleChart({ instrument, theme }: Props) {
       <div
         ref={containerRef}
         className="relative flex-1 bg-[var(--bg-primary)]"
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseLeave={handleMouseLeave}
-        onWheel={() => {
-          if (oiEnabledRef.current && !oiDrawPendingRef.current) {
-            oiDrawPendingRef.current = true;
-            requestAnimationFrame(() => { drawOIRef.current(); oiDrawPendingRef.current = false; });
-          }
-        }}
+        onMouseDown={oi.handleMouseDown}
+        onMouseMove={oi.handleMouseMove}
+        onMouseLeave={oi.handleMouseLeave}
+        onWheel={() => oi.requestDraw()}
       >
-        {/* OI canvas overlay */}
         <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none z-[5]" />
 
-        {/* OI time range — floating above OI bars, top-right of chart */}
-        {oiOn && (
+        {/* OI time range */}
+        {oi.oiOn && (
           <div className="absolute top-2 right-[80px] z-10 flex items-center gap-1.5 bg-[var(--bg-secondary)]/90 backdrop-blur-sm border border-[var(--border)] rounded-lg px-2.5 py-1 pointer-events-auto">
             <span className="text-[10px] text-[var(--text-muted)] shrink-0">From</span>
             <input
               type="time"
-              value={oiFromTime}
-              onChange={(e) => {
-                const v = e.target.value;
-                setOiFromTime(v);
-                if (oiModeRef.current === 'oi_change') {
-                  oiFromMsRef.current = v ? timeToMs(v) : null;
-                } else {
-                  const toMs = (t: string) => { const [h, m] = t.split(':').map(Number); const d = new Date(); d.setHours(h, m, 0, 0); return d.getTime(); };
-                  const snaps = Array.from(oiSnapshotsRef.current.entries()).sort((a, b) => a[0] - b[0]);
-                  if (v && snaps.length) { const ms = toMs(v); const s = snaps.find(([ts]) => ts >= ms) ?? snaps[0]; oiBaselineRef.current = s[1]; }
-                  else oiBaselineRef.current = null;
-                }
-                drawOIRef.current();
-              }}
+              value={oi.oiFromTime}
+              onChange={(e) => oi.handleFromTimeChange(e.target.value)}
               className="text-[11px] bg-transparent text-[var(--text-primary)] border-none outline-none w-[62px] [color-scheme:dark]"
             />
             <span className="text-[10px] text-[var(--text-muted)] shrink-0">To</span>
             <input
               type="time"
-              value={oiToTime}
-              onChange={(e) => {
-                const v = e.target.value;
-                setOiToTime(v);
-                if (oiModeRef.current === 'oi_change') {
-                  oiToMsRef.current = v ? timeToMs(v) : null;
-                } else {
-                  const toMs = (t: string) => { const [h, m] = t.split(':').map(Number); const d = new Date(); d.setHours(h, m, 0, 0); return d.getTime(); };
-                  const snaps = Array.from(oiSnapshotsRef.current.entries()).sort((a, b) => a[0] - b[0]);
-                  if (v && snaps.length) { const ms = toMs(v); const candidates = snaps.filter(([ts]) => ts <= ms); const s = candidates[candidates.length - 1] ?? snaps[0]; oiToSnapRef.current = s[1]; }
-                  else oiToSnapRef.current = null;
-                }
-                drawOIRef.current();
-              }}
+              value={oi.oiToTime}
+              onChange={(e) => oi.handleToTimeChange(e.target.value)}
               className="text-[11px] bg-transparent text-[var(--text-primary)] border-none outline-none w-[62px] [color-scheme:dark]"
             />
-            {(oiFromTime || oiToTime) && (
+            {(oi.oiFromTime || oi.oiToTime) && (
               <button
-                onClick={() => { setOiFromTime(''); setOiToTime(''); oiBaselineRef.current = null; oiToSnapRef.current = null; oiFromMsRef.current = null; oiToMsRef.current = null; drawOIRef.current(); }}
+                onClick={oi.resetTimeRange}
                 className="text-[12px] text-[var(--text-muted)] hover:text-[var(--red)] leading-none ml-0.5"
                 title="Reset time range"
               >
@@ -1123,34 +568,34 @@ export default function CandleChart({ instrument, theme }: Props) {
         )}
 
         {/* OI bar hover tooltip */}
-        {oiHover && oiOn && (
+        {oi.oiHover && oi.oiOn && (
           <div
             className="absolute z-20 pointer-events-none"
             style={{
-              left: Math.max(4, oiHover.x - 210),
-              top: Math.max(4, Math.min(oiHover.y - 58, (containerRef.current?.clientHeight ?? 400) - 120)),
+              left: Math.max(4, oi.oiHover.x - 210),
+              top: Math.max(4, Math.min(oi.oiHover.y - 58, (containerRef.current?.clientHeight ?? 400) - 120)),
             }}
           >
             <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-2xl px-4 py-3 min-w-[178px]">
               <div className="text-[14px] font-semibold text-[var(--text-primary)] mb-2 pb-1.5 border-b border-[var(--border)]">
-                Strike {oiHover.strike.toLocaleString('en-IN')}
+                Strike {oi.oiHover.strike.toLocaleString('en-IN')}
               </div>
               <div className="flex items-center justify-between gap-4 text-[13px] mb-1">
                 <div className="flex items-center gap-2">
                   <span className="w-3 h-3 rounded-[2px] bg-[#22c55e] shrink-0" />
-                  <span className="text-[var(--text-muted)]">{oiMode === 'oi_change' ? 'Call Δ' : 'Call'}</span>
+                  <span className="text-[var(--text-muted)]">{oi.oiMode === 'oi_change' ? 'Call Δ' : 'Call'}</span>
                 </div>
-                <span className={`font-medium tabular-nums ${oiMode === 'oi_change' ? (oiHover.ceOi >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]') : 'text-[var(--text-primary)]'}`}>
-                  {oiMode === 'oi_change' ? `${oiHover.ceOi >= 0 ? '+' : ''}${fmtOI(Math.abs(oiHover.ceOi))}` : fmtOI(oiHover.ceOi)}
+                <span className={`font-medium tabular-nums ${oi.oiMode === 'oi_change' ? (oi.oiHover.ceOi >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]') : 'text-[var(--text-primary)]'}`}>
+                  {oi.oiMode === 'oi_change' ? `${oi.oiHover.ceOi >= 0 ? '+' : ''}${fmtOI(Math.abs(oi.oiHover.ceOi))}` : fmtOI(oi.oiHover.ceOi)}
                 </span>
               </div>
               <div className="flex items-center justify-between gap-4 text-[13px]">
                 <div className="flex items-center gap-2">
                   <span className="w-3 h-3 rounded-[2px] bg-[#ef4444] shrink-0" />
-                  <span className="text-[var(--text-muted)]">{oiMode === 'oi_change' ? 'Put Δ' : 'Put'}</span>
+                  <span className="text-[var(--text-muted)]">{oi.oiMode === 'oi_change' ? 'Put Δ' : 'Put'}</span>
                 </div>
-                <span className={`font-medium tabular-nums ${oiMode === 'oi_change' ? (oiHover.peOi >= 0 ? 'text-[#ef4444]' : 'text-[#22c55e]') : 'text-[var(--text-primary)]'}`}>
-                  {oiMode === 'oi_change' ? `${oiHover.peOi >= 0 ? '+' : ''}${fmtOI(Math.abs(oiHover.peOi))}` : fmtOI(oiHover.peOi)}
+                <span className={`font-medium tabular-nums ${oi.oiMode === 'oi_change' ? (oi.oiHover.peOi >= 0 ? 'text-[#ef4444]' : 'text-[#22c55e]') : 'text-[var(--text-primary)]'}`}>
+                  {oi.oiMode === 'oi_change' ? `${oi.oiHover.peOi >= 0 ? '+' : ''}${fmtOI(Math.abs(oi.oiHover.peOi))}` : fmtOI(oi.oiHover.peOi)}
                 </span>
               </div>
             </div>

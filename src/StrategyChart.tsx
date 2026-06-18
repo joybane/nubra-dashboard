@@ -1,8 +1,5 @@
 import { useState, useMemo } from 'react';
-import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ReferenceLine, ResponsiveContainer, Legend,
-} from 'recharts';
+import SvgChart from './components/SvgChart';
 import type { Instrument } from './types';
 import { getSymbol } from './types';
 import { payoffAtExpiry } from './lib/GexService';
@@ -209,28 +206,23 @@ export default function StrategyChart({ instrument }: Props) {
           {chartData.length === 0 ? (
             <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-[13px]">Add strategy legs to see payoff diagram</div>
           ) : (
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData} margin={{ top: 10, right: 30, left: 10, bottom: 20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                <XAxis dataKey="spot" tickFormatter={(v) => v.toLocaleString('en-IN')} tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-                  label={{ value: 'Underlying at Expiry', position: 'insideBottom', offset: -10, fill: 'var(--text-secondary)', fontSize: 11 }} />
-                <YAxis tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-                  label={{ value: 'P&L (₹)', angle: -90, position: 'insideLeft', fill: 'var(--text-secondary)', fontSize: 11 }} />
-                <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
-                  labelFormatter={(v) => `Spot: ₹${v}`} formatter={(v: number) => [`₹${fmtPrice(v)}`, 'P&L']} />
-                <ReferenceLine y={0} stroke="var(--border)" strokeWidth={2} />
-                <ReferenceLine x={spot} stroke="var(--accent)" strokeDasharray="4 4"
-                  label={{ value: 'Current Spot', position: 'top', fill: 'var(--accent)', fontSize: 11 }} />
-                {breakevenPoints.map((bp) => (
-                  <ReferenceLine key={bp} x={bp} stroke="#facc15" strokeDasharray="4 4"
-                    label={{ value: 'BE', position: 'top', fill: '#facc15', fontSize: 10 }} />
-                ))}
-                <Legend wrapperStyle={{ fontSize: 12, color: 'var(--text-secondary)' }} />
-                <Line type="monotone" dataKey="pnl" stroke="#2962ff" dot={false} strokeWidth={2.5} name="Strategy P&L"
-                  strokeOpacity={1}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            <SvgChart
+              data={chartData}
+              xKey="spot"
+              series={[{ dataKey: 'pnl', color: '#2962ff' }]}
+              refLines={[
+                { axis: 'y', value: 0, color: '#2a2d42' },
+                { axis: 'x', value: spot, color: '#5865f2', dashed: true, label: 'Current Spot', labelColor: '#5865f2' },
+                ...breakevenPoints.map(bp => ({ axis: 'x' as const, value: bp, color: '#facc15', dashed: true, label: 'BE', labelColor: '#facc15' })),
+              ]}
+              xFormatter={v => v.toLocaleString('en-IN')}
+              yFormatter={v => `₹${fmtPrice(v)}`}
+              xLabel="Underlying at Expiry"
+              yLabel="P&L (₹)"
+              showLegend
+              legendLabels={{ pnl: 'Strategy P&L' }}
+              tooltipFormatter={d => `Spot: ₹${d.spot.toLocaleString('en-IN')}\nP&L: ₹${fmtPrice(d.pnl)}`}
+            />
           )}
         </div>
       </div>

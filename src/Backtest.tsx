@@ -1,8 +1,5 @@
 import { useState } from 'react';
-import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ReferenceLine, ResponsiveContainer, Legend,
-} from 'recharts';
+import SvgChart from './components/SvgChart';
 import type { Instrument } from './types';
 import { getSymbol } from './types';
 import { fmtPrice, formatExpiry } from './lib/utils';
@@ -324,19 +321,22 @@ export default function Backtest({ instrument }: Props) {
               )}
               {results.length > 0 && (
                 <div className="h-full flex flex-col gap-3">
-                  <ResponsiveContainer width="100%" height="60%">
-                    <LineChart data={results} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                      <XAxis dataKey="date" tick={{ fill: 'var(--text-muted)', fontSize: 10 }} tickFormatter={(v) => v.slice(5)} />
-                      <YAxis tick={{ fill: 'var(--text-muted)', fontSize: 10 }} tickFormatter={(v) => `₹${v.toFixed(0)}`} />
-                      <Tooltip contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 11 }}
-                        formatter={(v: number, k: string) => [`₹${fmtPrice(v)}`, k === 'cumPnl' ? 'Cumulative P&L' : 'Daily P&L']} />
-                      <ReferenceLine y={0} stroke="var(--border)" />
-                      <Legend wrapperStyle={{ fontSize: 11, color: 'var(--text-secondary)' }} />
-                      <Line type="monotone" dataKey="cumPnl" stroke="#2962ff" dot={false} strokeWidth={2} name="Cumulative P&L" />
-                      <Line type="monotone" dataKey="pnl" stroke="#22c55e" dot={false} strokeWidth={1} strokeOpacity={0.6} name="Daily P&L" />
-                    </LineChart>
-                  </ResponsiveContainer>
+                  <div style={{ width: '100%', height: '60%' }}>
+                    <SvgChart
+                      data={results}
+                      xKey="date"
+                      series={[
+                        { dataKey: 'cumPnl', color: '#2962ff' },
+                        { dataKey: 'pnl', color: '#22c55e', strokeWidth: 1 },
+                      ]}
+                      refLines={[{ axis: 'y', value: 0, color: '#2a2d42' }]}
+                      xFormatter={v => String(v).slice(5)}
+                      yFormatter={v => `₹${v.toFixed(0)}`}
+                      showLegend
+                      legendLabels={{ cumPnl: 'Cumulative P&L', pnl: 'Daily P&L' }}
+                      tooltipFormatter={d => `${d.date}\nCumulative: ₹${fmtPrice(d.cumPnl)}\nDaily: ₹${fmtPrice(d.pnl)}`}
+                    />
+                  </div>
 
                   <div className="flex-1 overflow-y-auto">
                     <table className="w-full text-[11px] border-collapse">

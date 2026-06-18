@@ -1,8 +1,5 @@
 import { useEffect, useState } from 'react';
-import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, ReferenceLine,
-} from 'recharts';
+import SvgChart from './components/SvgChart';
 import type { Instrument } from './types';
 import { getSymbol } from './types';
 import { fmtPrice, formatExpiry } from './lib/utils';
@@ -160,33 +157,20 @@ export default function StraddleChart({ instrument }: Props) {
         {loading && <div className="flex items-center justify-center h-full text-[var(--text-secondary)]">Loading…</div>}
         {error   && <div className="flex items-center justify-center h-full text-[var(--red)]">{error}</div>}
         {!loading && !error && chartData.length > 0 && (
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 10, right: 30, left: 10, bottom: 10 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-              <XAxis
-                dataKey="strike"
-                tickFormatter={(v) => v.toLocaleString('en-IN')}
-                tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-                label={{ value: 'Strike', position: 'insideBottom', offset: -5, fill: 'var(--text-secondary)', fontSize: 11 }}
-              />
-              <YAxis
-                tick={{ fill: 'var(--text-muted)', fontSize: 11 }}
-                label={{ value: yLabel, angle: -90, position: 'insideLeft', fill: 'var(--text-secondary)', fontSize: 11 }}
-              />
-              <Tooltip
-                contentStyle={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12 }}
-                labelFormatter={(v) => `Strike: ₹${v}`}
-                formatter={(v: number, name: string) => [v?.toFixed(2), name]}
-              />
-              <Legend wrapperStyle={{ fontSize: 12, color: 'var(--text-secondary)' }} />
-              {spot && <ReferenceLine x={spot} stroke="var(--accent)" strokeDasharray="4 4" label={{ value: 'Spot', fill: 'var(--accent)', fontSize: 11 }} />}
-              {mode === 'straddle' ? (
-                <Line type="monotone" dataKey={dataKey} stroke="#2962ff" dot={false} strokeWidth={2} name="Straddle Premium" connectNulls />
-              ) : (
-                <Line type="monotone" dataKey="IV" stroke="#f59e0b" dot={false} strokeWidth={2} name="IV %" connectNulls />
-              )}
-            </LineChart>
-          </ResponsiveContainer>
+          <SvgChart
+            data={chartData}
+            xKey="strike"
+            series={[mode === 'straddle'
+              ? { dataKey, color: '#2962ff' }
+              : { dataKey: 'IV', color: '#f59e0b' }]}
+            refLines={spot ? [{ axis: 'x', value: spot, color: '#5865f2', dashed: true, label: 'Spot', labelColor: '#5865f2' }] : []}
+            xFormatter={v => v.toLocaleString('en-IN')}
+            xLabel="Strike"
+            yLabel={yLabel}
+            showLegend
+            legendLabels={{ [dataKey]: 'Straddle Premium', IV: 'IV %' }}
+            tooltipFormatter={d => `Strike: ₹${d.strike.toLocaleString('en-IN')}\n${mode === 'straddle' ? 'Premium' : 'IV'}: ${d[dataKey]?.toFixed(2) ?? '—'}`}
+          />
         )}
       </div>
     </div>

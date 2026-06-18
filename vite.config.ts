@@ -26,7 +26,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           react:   ['react', 'react-dom'],
-          charts:  ['lightweight-charts', 'recharts'],
+          charts:  ['lightweight-charts'],
           radix:   ['@radix-ui/react-dialog', '@radix-ui/react-dropdown-menu', '@radix-ui/react-select', '@radix-ui/react-tooltip'],
         },
       },
