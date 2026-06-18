@@ -4,11 +4,18 @@ import type { Instrument, OptionChainData, OptionLeg, ViewType, WsMessage } from
 import { getSymbol } from './types';
 import { useWatchlist } from './hooks/useWatchlistContext';
 import { usePaperTrading } from './hooks/usePaperTrading';
+import { useBasket } from './hooks/useBasketContext';
 import { fmtPrice, fmtLakh, formatExpiry, strikeRs } from './lib/utils';
 
 const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 
 function extractUnderlying(input: string): string {
+  if (input.includes('_')) {
+    const parts = input.split('_');
+    if (['STOCK', 'INDEX', 'FUT', 'OPT'].includes(parts[0].toUpperCase()) && parts.length >= 2) {
+      return parts[1].split('.')[0].toUpperCase();
+    }
+  }
   const m = input.match(/^([A-Za-z]+)/);
   return m ? m[1].toUpperCase() : input.toUpperCase();
 }
@@ -19,7 +26,18 @@ const QUICK_PICKS: { sym: string; exch: string }[] = [
   { sym: 'SENSEX', exch: 'BSE' },
 ];
 
+function orientCePe(ceIn: OptionLeg[], peIn: OptionLeg[]): { ce: OptionLeg[]; pe: OptionLeg[] } {
+  let pos = 0, neg = 0;
+  for (const item of ceIn) {
+    const d = g(item, 'delta');
+    if (d != null && d !== 0) { if (d > 0) pos++; else neg++; }
+  }
+  if (neg > pos && neg > 3) return { ce: peIn, pe: ceIn };
+  return { ce: ceIn, pe: peIn };
+}
+
 function g(row: unknown, field: string): number | null {
+  if (row == null) return null;
   const row_ = row as Record<string, unknown>;
   const aliases: Record<string, string[]> = {
     ltp:    ['ltp', 'last_traded_price'],
@@ -66,6 +84,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
   const currentExpRef     = useRef('');
   const pollRef           = useRef<number | null>(null);
   const sugTimerRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const symInputRef       = useRef<HTMLInputElement>(null);
   const tableContainerRef = useRef<HTMLDivElement>(null);
   const atmRowRef         = useRef<HTMLTableRowElement | null>(null);
   const scrollDoneRef     = useRef(false); // true only after a successful scroll-to-ATM
@@ -73,6 +92,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
   const { subscribe, subscribeOC, unsubscribeOC } = useWs();
   const { addItem: watchlistAdd } = useWatchlist();
   const { openTicket } = usePaperTrading();
+  const { basketMode, setBasketMode, addLegFromChain, legCount } = useBasket();
 
   const openOrderTicket = useCallback((
     sp: number, optType: 'CE' | 'PE', side: 'BUY' | 'SELL', leg: OptionLeg | null,
@@ -114,6 +134,29 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       ltpAtAdd:    ltp != null ? ltp / 100 : 0,
     });
   }, [watchlistAdd]);
+
+  const addToBasketLeg = useCallback((
+    sp: number, optType: 'CE' | 'PE', side: 'BUY' | 'SELL', leg: OptionLeg | null,
+  ) => {
+    if (!leg) return;
+    const la = leg as Record<string, unknown>;
+    addLegFromChain({
+      strike:     sp,
+      optionType: optType,
+      side,
+      ltp:        (g(leg, 'ltp') ?? 0) / 100,
+      refId:      (la.ref_id as number | undefined) ?? null,
+      nubraName:  String(la.zanskar_name || la.nubra_name || la.symbol || ''),
+      lotSize:    Number(la.ls || la.lot_size || 1),
+      asset:      currentSymRef.current,
+      expiry:     currentExpRef.current,
+      iv:         g(leg, 'iv'),
+      delta:      g(leg, 'delta'),
+      gamma:      g(leg, 'gamma'),
+      theta:      g(leg, 'theta'),
+      vega:       g(leg, 'vega'),
+    });
+  }, [addLegFromChain]);
 
   const addToBasketFn = useCallback(() => {
     onChangeView?.('basket');
@@ -288,8 +331,10 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
 
   // ── DOM cell updates (no full re-render) ───────────────────────────────────
   function updateCells(data: OptionChainData) {
-    const ceList = data.ce || [];
-    const peList = data.pe || [];
+    const oriented = orientCePe(data.ce || [], data.pe || []);
+    const ceList = oriented.ce;
+    const peList = oriented.pe;
+
     const cp = data.cp ?? data.currentprice;
     if (cp) setSpot(Number(cp) / 100);
 
@@ -424,8 +469,9 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
   // All other state changes (search input, scroll buttons, etc.) no longer rebuild the table.
   const tableRows = useMemo(() => {
     if (!chain) return null;
-    const ceList = chain.ce || [];
-    const peList = chain.pe || [];
+    const oriented = orientCePe(chain.ce || [], chain.pe || []);
+    const ceList = oriented.ce;
+    const peList = oriented.pe;
     const map: Record<number, { ce: OptionLeg | null; pe: OptionLeg | null }> = {};
     for (const ce of ceList) {
       const sp = strikeRs(ce);
@@ -463,21 +509,21 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       const peOi   = g(pe, 'oi') || 0;
       const iv     = g(ce, 'iv') ?? g(pe, 'iv');
 
-      if (isAtm && spot) {
-        rows.push(
-          <tr key={`${sp}-spot-line`} className="pointer-events-none select-none">
-            <td colSpan={16} className="p-0" style={{ height: '18px' }}>
-              <div className="flex items-center h-full px-1">
-                <div className="flex-1 h-px bg-[var(--accent)] opacity-50" />
-                <span className="mx-2 px-2 py-[2px] rounded text-[9px] font-bold bg-[var(--accent)] text-white leading-none whitespace-nowrap">
-                  Spot: {fmtPrice(spot)}
-                </span>
-                <div className="flex-1 h-px bg-[var(--accent)] opacity-50" />
-              </div>
-            </td>
-          </tr>
-        );
-      }
+      const spotLine = isAtm && spot ? (
+        <tr key={`${sp}-spot-line`} className="pointer-events-none select-none">
+          <td colSpan={16} className="p-0" style={{ height: '18px' }}>
+            <div className="flex items-center h-full px-1">
+              <div className="flex-1 h-px bg-[var(--accent)] opacity-50" />
+              <span className="mx-2 px-2 py-[2px] rounded text-[9px] font-bold bg-[var(--accent)] text-white leading-none whitespace-nowrap">
+                Spot: {fmtPrice(spot)}
+              </span>
+              <div className="flex-1 h-px bg-[var(--accent)] opacity-50" />
+            </div>
+          </td>
+        </tr>
+      ) : null;
+
+      if (spotLine && spot <= sp) rows.push(spotLine);
 
       rows.push(
         <tr
@@ -504,9 +550,9 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
               {ce && (
                 <div className="invisible group-hover:visible flex items-center gap-0.5 shrink-0">
                   <button className="px-1 py-0.5 rounded text-[9px] font-bold text-[var(--green)] bg-[var(--green)]/15 hover:bg-[var(--green)]/40 border border-[var(--green)]/30 leading-none"
-                    onClick={(e) => { e.stopPropagation(); openOrderTicket(sp, 'CE', 'BUY', ce); }}>B</button>
+                    onClick={(e) => { e.stopPropagation(); basketMode ? addToBasketLeg(sp, 'CE', 'BUY', ce) : openOrderTicket(sp, 'CE', 'BUY', ce); }}>B</button>
                   <button className="px-1 py-0.5 rounded text-[9px] font-bold text-[var(--red)] bg-[var(--red)]/15 hover:bg-[var(--red)]/40 border border-[var(--red)]/30 leading-none"
-                    onClick={(e) => { e.stopPropagation(); openOrderTicket(sp, 'CE', 'SELL', ce); }}>S</button>
+                    onClick={(e) => { e.stopPropagation(); basketMode ? addToBasketLeg(sp, 'CE', 'SELL', ce) : openOrderTicket(sp, 'CE', 'SELL', ce); }}>S</button>
                 </div>
               )}
               <div
@@ -525,8 +571,20 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
               <div className="invisible group-hover:visible absolute inset-0 flex items-center justify-center gap-0.5">
                 <button className="px-1 py-0.5 rounded text-[9px] font-bold text-amber-400 bg-amber-500/15 hover:bg-amber-500/40 border border-amber-500/30 leading-none"
                   onClick={(e) => { e.stopPropagation(); addToWatchlistFn(sp, 'CE', ce); }}>★CE</button>
-                <button className="px-1 py-0.5 rounded text-[9px] font-bold text-[var(--accent)] bg-[var(--accent)]/15 hover:bg-[var(--accent)]/40 border border-[var(--accent)]/30 leading-none"
-                  onClick={(e) => { e.stopPropagation(); addToBasketFn(); }}>+</button>
+                <button className={`px-1 py-0.5 rounded text-[9px] font-bold leading-none ${
+                    basketMode
+                      ? 'text-amber-400 bg-amber-500/15 hover:bg-amber-500/40 border border-amber-500/30'
+                      : 'text-[var(--accent)] bg-[var(--accent)]/15 hover:bg-[var(--accent)]/40 border border-[var(--accent)]/30'
+                  }`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (basketMode) {
+                      if (ce) addToBasketLeg(sp, 'CE', 'BUY', ce);
+                      if (pe) addToBasketLeg(sp, 'PE', 'BUY', pe);
+                    } else {
+                      addToBasketFn();
+                    }
+                  }}>+</button>
                 <button className="px-1 py-0.5 rounded text-[9px] font-bold text-amber-400 bg-amber-500/15 hover:bg-amber-500/40 border border-amber-500/30 leading-none"
                   onClick={(e) => { e.stopPropagation(); addToWatchlistFn(sp, 'PE', pe); }}>★PE</button>
               </div>
@@ -549,9 +607,9 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
               {pe && (
                 <div className="invisible group-hover:visible flex items-center gap-0.5 shrink-0">
                   <button className="px-1 py-0.5 rounded text-[9px] font-bold text-[var(--green)] bg-[var(--green)]/15 hover:bg-[var(--green)]/40 border border-[var(--green)]/30 leading-none"
-                    onClick={(e) => { e.stopPropagation(); openOrderTicket(sp, 'PE', 'BUY', pe); }}>B</button>
+                    onClick={(e) => { e.stopPropagation(); basketMode ? addToBasketLeg(sp, 'PE', 'BUY', pe) : openOrderTicket(sp, 'PE', 'BUY', pe); }}>B</button>
                   <button className="px-1 py-0.5 rounded text-[9px] font-bold text-[var(--red)] bg-[var(--red)]/15 hover:bg-[var(--red)]/40 border border-[var(--red)]/30 leading-none"
-                    onClick={(e) => { e.stopPropagation(); openOrderTicket(sp, 'PE', 'SELL', pe); }}>S</button>
+                    onClick={(e) => { e.stopPropagation(); basketMode ? addToBasketLeg(sp, 'PE', 'SELL', pe) : openOrderTicket(sp, 'PE', 'SELL', pe); }}>S</button>
                 </div>
               )}
             </div>
@@ -570,6 +628,8 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
           <td ref={registerCell(sp,'pe-vega')}  className="pe-side text-right px-2 py-1.5 text-[12px]">{pe ? fmtDec(g(pe, 'vega'), 4) : '—'}</td>
         </tr>
       );
+
+      if (spotLine && spot > sp) rows.push(spotLine);
     }
     return rows;
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -606,6 +666,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
         {/* Symbol input */}
         <div className="relative shrink-0">
           <input
+            ref={symInputRef}
             type="text"
             value={symInput}
             onChange={onSymInput}
@@ -616,20 +677,35 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
             placeholder="Symbol"
             className="w-[110px] px-2 py-1 bg-[var(--bg-card)] border border-[var(--border)] rounded text-[var(--text-primary)] text-[12px] focus:outline-none focus:border-[var(--accent)]"
           />
-          {showSug && suggestions.length > 0 && (
-            <div className="absolute top-full left-0 mt-1 w-[200px] bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-2xl z-50 max-h-[240px] overflow-y-auto">
-              {suggestions.map((it, i) => (
-                <div
-                  key={i}
-                  onMouseDown={(e) => { e.preventDefault(); selectSuggestion(it); }}
-                  className="flex justify-between items-center px-3 py-2 cursor-pointer hover:bg-[var(--bg-hover)] text-[13px] border-b border-[var(--border)]/50 last:border-0"
-                >
-                  <span className="font-semibold text-[var(--text-primary)]">{getSymbol(it).toUpperCase()}</span>
-                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400">{it.exchange}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          {showSug && suggestions.length > 0 && (() => {
+            const rect = symInputRef.current?.getBoundingClientRect();
+            return (
+              <div style={{
+                position: 'fixed',
+                top: rect ? rect.bottom + 4 : 0,
+                left: rect ? rect.left : 0,
+                width: 240,
+                maxHeight: 280,
+                overflowY: 'auto',
+                zIndex: 9999,
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+              }}>
+                {suggestions.map((it, i) => (
+                  <div
+                    key={i}
+                    onMouseDown={(e) => { e.preventDefault(); selectSuggestion(it); }}
+                    className="flex justify-between items-center px-3 py-2 cursor-pointer hover:bg-[var(--bg-hover)] text-[13px] border-b border-[var(--border)]/50 last:border-0"
+                  >
+                    <span className="font-semibold text-[var(--text-primary)]">{getSymbol(it).toUpperCase()}</span>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400">{it.exchange}</span>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
         </div>
 
         <select
@@ -654,6 +730,27 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
           className="px-3 py-1 rounded bg-[var(--accent)] text-white text-[12px] font-semibold hover:bg-[var(--accent-dim)] transition-colors shrink-0"
         >
           Load
+        </button>
+
+        <div className="w-px h-5 bg-[var(--border)] shrink-0 mx-1" />
+
+        {/* Basket mode toggle */}
+        <button
+          onClick={() => setBasketMode(!basketMode)}
+          className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all shrink-0 flex items-center gap-1 ${
+            basketMode
+              ? 'bg-amber-500/20 border-amber-500/40 text-amber-400'
+              : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+          }`}
+          title="Basket mode: B/S buttons add to basket instead of placing orders"
+        >
+          <span className="text-[13px]">🧺</span>
+          Basket
+          {basketMode && legCount > 0 && (
+            <span className="ml-0.5 px-1.5 py-0 rounded-full bg-amber-500/30 text-amber-300 text-[9px] font-bold">
+              {legCount}
+            </span>
+          )}
         </button>
 
         {spot && (

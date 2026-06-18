@@ -45,6 +45,7 @@ export default function InstrumentSearch({ placeholder = 'Search symbol…', onS
   const timerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef   = useRef<HTMLInputElement>(null);
   const dropRef    = useRef<HTMLDivElement>(null);
+  const queryRef   = useRef('');
 
   // Boot Web Worker and pre-load refdata
   useEffect(() => {
@@ -55,8 +56,8 @@ export default function InstrumentSearch({ placeholder = 'Search symbol…', onS
       if (e.data.type === 'loaded') setWorkerReady(true);
       if (e.data.type === 'results') {
         const res = e.data.results || [];
-        // Prepend matching popular indices
-        const q2      = query.toLowerCase();
+        const q2  = queryRef.current.toLowerCase();
+        if (q2.length < 2) { setResults(res); return; }
         const matched = POPULAR_INDICES.filter((p) =>
           (p.stock_name || '').toLowerCase().includes(q2) ||
           (p.nubra_name || '').toLowerCase().includes(q2),
@@ -95,6 +96,7 @@ export default function InstrumentSearch({ placeholder = 'Search symbol…', onS
   function handleInput(e: React.ChangeEvent<HTMLInputElement>) {
     const q = e.target.value;
     setQuery(q);
+    queryRef.current = q;
     if (timerRef.current) clearTimeout(timerRef.current);
     if (q.length < 2) {
       setResults(POPULAR_INDICES);
@@ -112,6 +114,7 @@ export default function InstrumentSearch({ placeholder = 'Search symbol…', onS
 
   function handleSelect(item: Instrument) {
     setQuery('');
+    queryRef.current = '';
     setOpen(false);
     onSelect(item);
   }

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { WsProvider } from './hooks/useWsContext';
 import { PaperTradingProvider } from './hooks/usePaperTrading';
 import { WatchlistProvider } from './hooks/useWatchlistContext';
+import { BasketProvider } from './hooks/useBasketContext';
 import Navbar from './components/Navbar';
 import LoginOverlay from './components/LoginOverlay';
 import OrderTerminal from './components/OrderTerminal';
@@ -69,7 +70,9 @@ export default function App() {
       <WsProvider>
         <PaperTradingProvider>
           <WatchlistProvider>
-            <AppInner />
+            <BasketProvider>
+              <AppInner />
+            </BasketProvider>
           </WatchlistProvider>
         </PaperTradingProvider>
       </WsProvider>

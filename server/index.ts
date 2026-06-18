@@ -10,9 +10,11 @@ import path from 'path';
 import dotenv from 'dotenv';
 import {
   initDb, dbInsertOrder, dbUpdateOrder, dbLoadOrders,
-  dbInsertFill, dbUpsertPosition, dbLoadPositions,
+  dbInsertFill, dbUpsertPosition, dbLoadPositions, dbLoadClosedPositions,
   dbInsertPnlTick, dbUpsertName, dbLoadNameMap,
   dbGetMeta, dbSetMeta,
+  dbInsertBasket, dbLoadBaskets, dbDeleteBasket, dbUpdateBasket,
+  dbUpsertOcSub, dbLoadOcSubs,
 } from './paperDb.ts';
 import protobuf from 'protobufjs';
 
@@ -292,6 +294,23 @@ fastify.get<{ Querystring: { q?: string; exchange?: string; type?: string; limit
   },
 );
 
+// ─── Instrument lookup by ref_id ──────────────────────────────────────────────
+fastify.get<{ Querystring: { ref_id?: string; exchange?: string } }>(
+  '/api/instruments/lookup',
+  async (req, reply) => {
+    if (!requireAuth(reply)) return;
+    try {
+      const refId = Number(req.query.ref_id);
+      if (!refId) return reply.status(400).send({ error: 'ref_id required' });
+      const arr = await getRefdata(req.query.exchange || 'NSE');
+      const match = arr.find((item) => (item as Record<string, unknown>).ref_id === refId);
+      return reply.send({ instrument: match || null });
+    } catch (err: unknown) {
+      return reply.status(500).send({ error: (err as Error).message });
+    }
+  },
+);
+
 // ─── Historical data ──────────────────────────────────────────────────────────
 fastify.post('/api/historical', async (req, reply) => {
   if (!requireAuth(reply)) return;
@@ -413,6 +432,7 @@ function connectNubraWs(): void {
     broadcast({ type: 'ws_status', connected: true });
     for (const cmd of pendingSubs) nubraWs!.send(cmd);
     pendingSubs.length = 0;
+    bootstrapPositionSubs().then(() => sendAllOcSubs()).catch(e => console.error('[Bootstrap]', e));
   });
 
   nubraWs.on('message', (data: Buffer, isBinary: boolean) => {
@@ -467,7 +487,8 @@ wss.on('connection', (ws) => {
       if (msg.action === 'subscribe' || msg.action === 'unsubscribe') {
         const verb     = msg.action === 'subscribe' ? 'batch_subscribe' : 'batch_unsubscribe';
         const token    = authState.sessionToken!;
-        const payload  = JSON.stringify(msg.payload || { instruments: [], indexes: [] });
+        const userPayload = (msg.payload || {}) as Record<string, unknown>;
+        const payload  = JSON.stringify({ instruments: [], indexes: [], ...userPayload });
         const interval = msg.interval || '1m';
         const exchange = msg.exchange  || 'NSE';
         const cmd      = `${verb} ${token} index_bucket ${payload} ${interval} ${exchange}`;
@@ -482,8 +503,14 @@ wss.on('connection', (ws) => {
       if (msg.action === 'subscribe_oc' || msg.action === 'unsubscribe_oc') {
         const verb    = msg.action === 'subscribe_oc' ? 'batch_subscribe' : 'batch_unsubscribe';
         const token   = authState.sessionToken!;
-        const payload = JSON.stringify([{ exchange: msg.exchange || 'NSE', asset: msg.asset, expiry: msg.expiry }]);
+        const asset   = msg.asset || '';
+        const expiry  = msg.expiry || '';
+        const payload = JSON.stringify([{ exchange: msg.exchange || 'NSE', asset, expiry }]);
         const cmd     = `${verb} ${token} option ${payload}`;
+        if (msg.action === 'subscribe_oc' && asset && expiry) {
+          const key = `${asset}:${expiry}`;
+          if (!simOcSubs.has(key)) { simOcSubs.add(key); dbUpsertOcSub(key); }
+        }
         if (nubraWs && nubraWs.readyState === WebSocket.OPEN) {
           nubraWs.send(cmd);
         } else if (msg.action === 'subscribe_oc') {
@@ -580,7 +607,7 @@ class SimBroker {
       if (o.order_id >= this.nextId) this.nextId = o.order_id + 1;
     }
 
-    for (const row of dbLoadPositions()) {
+    for (const row of [...dbLoadPositions(), ...dbLoadClosedPositions()]) {
       const p: SimPosition = {
         ref_id: row.ref_id as number, nubraName: row.nubra_name as string,
         display_name: row.display_name as string, qty: row.qty as number,
@@ -589,7 +616,7 @@ class SimBroker {
         order_delivery_type: row.order_delivery_type as string,
       };
       this.positions.set(p.ref_id, p);
-      this.ticks.set(p.ref_id, p.last_traded_price);
+      if (p.qty !== 0) this.ticks.set(p.ref_id, p.last_traded_price);
     }
     console.log(`[SimBroker] Restored ${this.orders.size} orders, ${this.positions.size} positions`);
   }
@@ -833,51 +860,109 @@ class SimBroker {
   getPositions(): SimPosition[] {
     return Array.from(this.positions.values()).filter(p => p.qty !== 0);
   }
+
+  getClosedPositions(): SimPosition[] {
+    return Array.from(this.positions.values()).filter(p => p.qty === 0 && p.realized_pnl !== 0);
+  }
 }
 
 const simBroker   = new SimBroker();
 simBroker.restore();
-const simOcSubs   = new Set<string>(); // OC keys already subscribed for SimBroker
+const simOcSubs   = new Set<string>(dbLoadOcSubs());
 
 // Subscribe instrument to the PROD live feed so SimBroker gets fills.
 // For options: subscribes the option chain WebSocket stream.
 // For stocks/indices: relies on the chart subscription that the browser already manages.
 function subscribeForSim(nubraName: string, refId: number, derivativeType?: string, asset?: string, expiry?: string): void {
   simBroker.registerName(nubraName, refId);
-  if (!authState.sessionToken || !nubraWs || nubraWs.readyState !== WebSocket.OPEN) return;
-  if (derivativeType === 'OPT' && asset && expiry) {
+  if (asset && expiry) {
     const key = `${asset}:${expiry}`;
     if (!simOcSubs.has(key)) {
       simOcSubs.add(key);
-      const payload = JSON.stringify([{ exchange: 'NSE', asset, expiry }]);
-      nubraWs.send(`batch_subscribe ${authState.sessionToken} option ${payload}`);
-      console.log(`[SimBroker] Auto-subscribed option chain: ${asset} ${expiry}`);
+      dbUpsertOcSub(key);
+      if (nubraWs && nubraWs.readyState === WebSocket.OPEN && authState.sessionToken) {
+        const payload = JSON.stringify([{ exchange: 'NSE', asset, expiry }]);
+        nubraWs.send(`batch_subscribe ${authState.sessionToken} option ${payload}`);
+        console.log(`[SimBroker] Auto-subscribed option chain: ${asset} ${expiry}`);
+      }
     }
   }
 }
 
+function sendAllOcSubs(): void {
+  if (!nubraWs || nubraWs.readyState !== WebSocket.OPEN || !authState.sessionToken) return;
+  for (const key of simOcSubs) {
+    const [asset, expiry] = key.split(':');
+    const payload = JSON.stringify([{ exchange: 'NSE', asset, expiry }]);
+    nubraWs.send(`batch_subscribe ${authState.sessionToken} option ${payload}`);
+  }
+  if (simOcSubs.size > 0) console.log(`[WS] Subscribed ${simOcSubs.size} OC feeds`);
+}
+
+async function bootstrapPositionSubs(): Promise<void> {
+  const positions = simBroker.getPositions();
+  if (positions.length === 0) return;
+  const assets = new Set<string>();
+  for (const p of positions) {
+    const m = p.display_name.match(/^([A-Z]+)/);
+    if (m) assets.add(m[1]);
+  }
+  for (const asset of assets) {
+    try {
+      const data = await nubraGet(`/optionchains/${asset}`, { exchange: 'NSE' });
+      const chain = (data.chain || data) as Record<string, unknown>;
+      const allExp = (chain.all_expiries || []) as string[];
+      const today  = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      const future = allExp.filter(e => e >= today).sort();
+      const toSub  = future.slice(0, 4);
+      for (const exp of toSub) {
+        const key = `${asset}:${exp}`;
+        if (!simOcSubs.has(key)) {
+          simOcSubs.add(key);
+          dbUpsertOcSub(key);
+          console.log(`[Bootstrap] Added OC sub: ${key}`);
+        }
+      }
+    } catch (err) {
+      console.error(`[Bootstrap] Failed to fetch expiries for ${asset}:`, (err as Error).message);
+    }
+  }
+  sendAllOcSubs();
+}
+
 // Route decoded PROD WebSocket ticks into SimBroker for fill evaluation.
+let _ocFieldLogDone = false;
 function routeTickToSim(decoded: { type: string; data: unknown }): void {
   if (decoded.type === 'option_chain') {
-    // Option chain items carry refId directly — most precise path for option fills
     const d = decoded.data as { ce?: unknown[]; pe?: unknown[] };
-    for (const item of [...(d.ce ?? []), ...(d.pe ?? [])]) {
-      const i = item as { refId?: string; ltp?: string };
-      if (i.refId && i.ltp) simBroker.onLtp(Number(i.refId), Number(i.ltp));
+    const allItems = [...(d.ce ?? []), ...(d.pe ?? [])];
+    if (!_ocFieldLogDone && allItems.length > 0) {
+      const sample = allItems[0] as Record<string, unknown>;
+      console.log('[SimBroker] OC item field names:', Object.keys(sample).join(', '));
+      console.log('[SimBroker] OC item sample:', JSON.stringify(sample).slice(0, 200));
+      _ocFieldLogDone = true;
+    }
+    for (const item of allItems) {
+      const i = item as Record<string, unknown>;
+      const refId = i.refId ?? i.ref_id;
+      const ltp   = i.ltp;
+      if (refId && ltp) simBroker.onLtp(Number(refId), Number(ltp));
     }
   } else if (decoded.type === 'index_tick') {
-    // Real-time index / instrument ticks
     const d = decoded.data as { indexes?: unknown[]; instruments?: unknown[] };
     for (const tick of [...(d.indexes ?? []), ...(d.instruments ?? [])]) {
-      const t = tick as { indexname?: string; indexValue?: string };
-      if (t.indexname && t.indexValue) simBroker.onNamedLtp(t.indexname, Number(t.indexValue));
+      const t = tick as Record<string, unknown>;
+      const name = t.indexname as string | undefined;
+      const val  = t.indexValue ?? t.index_value;
+      if (name && val) simBroker.onNamedLtp(name, Number(val));
     }
   } else if (decoded.type === 'ohlcv') {
-    // OHLCV candle close as a proxy LTP for chart-subscribed instruments
     const d = decoded.data as { indexes?: unknown[]; instruments?: unknown[] };
     for (const b of [...(d.indexes ?? []), ...(d.instruments ?? [])]) {
-      const bucket = b as { indexname?: string; close?: string };
-      if (bucket.indexname && bucket.close) simBroker.onNamedLtp(bucket.indexname, Number(bucket.close));
+      const bucket = b as Record<string, unknown>;
+      const name  = bucket.indexname as string | undefined;
+      const close = bucket.close;
+      if (name && close) simBroker.onNamedLtp(name, Number(close));
     }
   }
 }
@@ -1039,6 +1124,7 @@ fastify.get('/paper/positions', async (_req, reply) => {
     return {
       ref_id:             p.ref_id,
       display_name:       p.display_name,
+      zanskar_name:       p.nubraName,
       order_side:         isLong ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
       qty:                Math.abs(p.qty),
       avg_price:          p.avg_price,
@@ -1051,6 +1137,33 @@ fastify.get('/paper/positions', async (_req, reply) => {
     };
   });
   return reply.send(positions);
+});
+
+fastify.get('/paper/positions/closed', async (_req, reply) => {
+  if (!requireAuth(reply)) return;
+  const closed = simBroker.getClosedPositions().map((p) => ({
+    ref_id:        p.ref_id,
+    display_name:  p.display_name,
+    zanskar_name:  p.nubraName,
+    order_side:    'ORDER_SIDE_SELL',
+    qty:           0,
+    avg_price:     p.avg_price,
+    last_traded_price: p.last_traded_price,
+    pnl:           Math.round(p.realized_pnl),
+    realised_pnl:  Math.round(p.realized_pnl),
+    product:       p.order_delivery_type === 'ORDER_DELIVERY_TYPE_IDAY' ? 'MIS' : 'NRML',
+  }));
+  return reply.send(closed);
+});
+
+fastify.get('/paper/debug', async (_req, reply) => {
+  const posRefIds = simBroker.getPositions().map(p => p.ref_id);
+  return reply.send({
+    ocSubs: [...simOcSubs],
+    positionRefIds: posRefIds,
+    wsConnected: nubraWs?.readyState === WebSocket.OPEN,
+    ocFieldLogDone: _ocFieldLogDone,
+  });
 });
 
 fastify.get('/paper/holdings', async (_req, reply) => {
@@ -1083,6 +1196,100 @@ interface MarginBody {
   order_delivery_type: string;
   exchange?: string;
 }
+
+interface BasketMarginBody {
+  exchange?: string;
+  orders: Array<{
+    ref_id: number;
+    order_qty: number;
+    order_side: string;
+    order_type: string;
+    order_price?: number;
+    order_delivery_type: string;
+  }>;
+}
+
+fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  try {
+    const { exchange = 'NSE', orders, multiplier = 1 } = req.body as BasketMarginBody & { multiplier?: number };
+
+    const apiOrders = orders.map(o => ({
+      ref_id:              o.ref_id,
+      order_qty:           o.order_qty,
+      order_side:          o.order_side,
+      order_delivery_type: o.order_delivery_type,
+    }));
+
+    // Determine dominant side/delivery from first order
+    const firstOrder = orders[0];
+    const payload = {
+      with_portfolio: true,
+      with_legs: true,
+      is_basket: true,
+      order_req: {
+        exchange,
+        orders: apiOrders,
+        basket_params: {
+          order_side:          firstOrder?.order_side || 'ORDER_SIDE_BUY',
+          order_delivery_type: firstOrder?.order_delivery_type || 'ORDER_DELIVERY_TYPE_IDAY',
+          price_type:          'MARKET',
+          multiplier:          multiplier,
+        },
+      },
+    };
+    console.log('[basket-margin] request:', JSON.stringify(payload));
+    const data = await nubraPost(
+      '/orders/v2/margin_required',
+      payload,
+      { Authorization: `Bearer ${authState.sessionToken!}` },
+    );
+    console.log('[basket-margin] response:', JSON.stringify(data));
+    return reply.send(data);
+  } catch (err: unknown) {
+    return reply.status(500).send({ error: (err as Error).message });
+  }
+});
+
+// ─── Saved Baskets CRUD ─────────────────────────────────────────────────────
+
+fastify.get('/paper/baskets', async (_req, reply) => {
+  if (!requireAuth(reply)) return;
+  const baskets = dbLoadBaskets().map(b => ({
+    ...b,
+    legs: JSON.parse(b.legs_json),
+    legs_json: undefined,
+  }));
+  return reply.send({ baskets });
+});
+
+fastify.post<{ Body: { name: string; symbol: string; expiry: string; legs: unknown[] } }>('/paper/baskets', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  const { name, symbol, expiry, legs } = req.body;
+  const basketId = `bsk_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const now = Date.now();
+  dbInsertBasket({
+    basket_id: basketId, name, symbol, expiry,
+    legs_json: JSON.stringify(legs),
+    created_at: now, updated_at: now,
+  });
+  return reply.send({ basket_id: basketId });
+});
+
+fastify.delete<{ Params: { id: string } }>('/paper/baskets/:id', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  const ok = dbDeleteBasket(req.params.id);
+  if (!ok) return reply.status(404).send({ error: 'Basket not found' });
+  return reply.send({ ok: true });
+});
+
+fastify.put<{ Params: { id: string }; Body: { name?: string; legs?: unknown[] } }>('/paper/baskets/:id', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  const { name, legs } = req.body;
+  const ok = dbUpdateBasket(req.params.id, name ?? '', JSON.stringify(legs ?? []));
+  if (!ok) return reply.status(404).send({ error: 'Basket not found' });
+  return reply.send({ ok: true });
+});
 
 fastify.post<{ Body: MarginBody }>('/paper/margin', async (req, reply) => {
   if (!requireAuth(reply)) return;

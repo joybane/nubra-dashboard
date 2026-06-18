@@ -45,7 +45,7 @@ export default function PaneShell({
       case 'backtest':
         return <Backtest instrument={pane.instrument} />;
       case 'watchlist':
-        return <Watchlist />;
+        return <Watchlist onNavigateToChart={onNavigateToChart} />;
     }
   })();
 

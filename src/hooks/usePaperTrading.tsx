@@ -8,6 +8,7 @@ export interface OrderTicketConfig {
   side: 'BUY' | 'SELL';
   ltp?: number;
   ltpChg?: number;
+  qty?: number;
 }
 
 interface PaperTradingCtx {

@@ -1,14 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import { useWatchlist } from './hooks/useWatchlistContext';
 import { useWs } from './hooks/useWsContext';
-import type { IndexTickData, OptionChainData, WatchlistItem, WsMessage } from './types';
+import { usePaperTrading } from './hooks/usePaperTrading';
+import type { IndexTickData, Instrument, OptionChainData, OptionLeg, WatchlistItem, WsMessage } from './types';
 import { fmtPrice } from './lib/utils';
 
 interface LivePrice { ltp: number; chg?: number }
 
-export default function Watchlist() {
+interface WatchlistProps {
+  onNavigateToChart?: (inst: Instrument) => void;
+}
+
+export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
   const { items, removeItem } = useWatchlist();
   const { subscribe }         = useWs();
+  const { openTicket }        = usePaperTrading();
   const [prices, setPrices]   = useState<Record<string, LivePrice>>({});
   const pollRef               = useRef<number | null>(null);
 
@@ -77,6 +83,48 @@ export default function Watchlist() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subscribe, JSON.stringify(items.filter(i => !i.optionType).map(i => i.id))]);
 
+  // Subscribe OC feeds for option watchlist items and update LTPs from WS
+  const { subscribeOC } = useWs();
+  useEffect(() => {
+    const optItems = items.filter(i => i.optionType && i.strike != null && i.expiry && i.underlying);
+    if (!optItems.length) return;
+    const seen = new Set<string>();
+    for (const item of optItems) {
+      const key = `${item.underlying}:${item.expiry}`;
+      if (!seen.has(key)) { seen.add(key); subscribeOC(item.underlying, item.expiry!, item.exchange); }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subscribeOC, JSON.stringify(items.filter(i => i.optionType).map(i => `${i.underlying}:${i.expiry}`).filter((v,i,a) => a.indexOf(v)===i))]);
+
+  useEffect(() => {
+    const optItems = items.filter(i => i.optionType && i.strike != null);
+    if (!optItems.length) return;
+    return subscribe('option_chain', (msg: WsMessage) => {
+      if (msg.type !== 'option_chain') return;
+      const data = msg.data as OptionChainData;
+      const asset = (data.asset || '').toUpperCase();
+      const allLegs = [...(data.ce || []), ...(data.pe || [])];
+      for (const item of optItems) {
+        if (item.underlying.toUpperCase() !== asset) continue;
+        const leg = allLegs.find(l => {
+          const leg_ = l as OptionLeg & Record<string, unknown>;
+          const refId = Number(leg_.ref_id ?? leg_.refId ?? 0);
+          if (item.ref_id && refId === item.ref_id) return true;
+          const sp = l.sp > 10000 ? l.sp / 100 : l.sp;
+          return sp === item.strike;
+        }) as (OptionLeg & Record<string, unknown>) | undefined;
+        if (leg?.ltp != null && Number(leg.ltp) > 0) {
+          const ltp = Number(leg.ltp) / 100;
+          setPrices(prev => {
+            if (prev[item.id]?.ltp === ltp) return prev;
+            return { ...prev, [item.id]: { ltp, chg: (leg.ltpchg as number) ?? undefined } };
+          });
+        }
+      }
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subscribe, JSON.stringify(items.filter(i => i.optionType).map(i => i.id))]);
+
   if (items.length === 0) {
     return (
       <div className="flex flex-col h-full items-center justify-center gap-2 text-[var(--text-muted)]">
@@ -137,13 +185,71 @@ export default function Watchlist() {
                 )}
               </div>
 
-              {/* Remove button */}
-              <button
-                onClick={() => removeItem(item.id)}
-                className="w-5 text-[var(--text-muted)] hover:text-[var(--red)] opacity-0 group-hover:opacity-100 transition-opacity text-[12px]"
-              >
-                ✕
-              </button>
+              {/* Action buttons — visible on hover */}
+              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                  onClick={() => {
+                    const inst: Instrument = {
+                      stock_name: item.displayName,
+                      nubra_name: item.nubraName || '',
+                      exchange: item.exchange,
+                      ref_id: item.ref_id,
+                      derivative_type: item.optionType ? 'OPT' : undefined,
+                      option_type: item.optionType,
+                      strike_price: item.strike ? item.strike * 100 : undefined,
+                      expiry: item.expiry,
+                      asset: item.underlying,
+                    };
+                    openTicket({ instrument: inst, side: 'BUY', ltp: ltp });
+                  }}
+                  className="px-1.5 py-0.5 rounded text-[9px] font-bold text-white bg-[var(--green)] hover:brightness-110"
+                >
+                  B
+                </button>
+                <button
+                  onClick={() => {
+                    const inst: Instrument = {
+                      stock_name: item.displayName,
+                      nubra_name: item.nubraName || '',
+                      exchange: item.exchange,
+                      ref_id: item.ref_id,
+                      derivative_type: item.optionType ? 'OPT' : undefined,
+                      option_type: item.optionType,
+                      strike_price: item.strike ? item.strike * 100 : undefined,
+                      expiry: item.expiry,
+                      asset: item.underlying,
+                    };
+                    openTicket({ instrument: inst, side: 'SELL', ltp: ltp });
+                  }}
+                  className="px-1.5 py-0.5 rounded text-[9px] font-bold text-white bg-[var(--red)] hover:brightness-110"
+                >
+                  S
+                </button>
+                {onNavigateToChart && (
+                  <button
+                    onClick={() => onNavigateToChart({
+                      stock_name: item.displayName,
+                      nubra_name: item.nubraName || '',
+                      exchange: item.exchange,
+                      ref_id: item.ref_id,
+                      derivative_type: item.optionType ? 'OPT' : undefined,
+                      option_type: item.optionType,
+                      strike_price: item.strike ? item.strike * 100 : undefined,
+                      expiry: item.expiry,
+                      asset: item.underlying,
+                    })}
+                    className="px-1.5 py-0.5 rounded text-[9px] font-bold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30"
+                  >
+                    C
+                  </button>
+                )}
+                <button
+                  onClick={() => removeItem(item.id)}
+                  className="px-1 py-0.5 text-[var(--text-muted)] hover:text-[var(--red)] text-[10px]"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
           );
         })}

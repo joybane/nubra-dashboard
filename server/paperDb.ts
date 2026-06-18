@@ -75,6 +75,20 @@ export function initDb(): Database.Database {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS saved_baskets (
+      basket_id   TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      symbol      TEXT NOT NULL,
+      expiry      TEXT NOT NULL,
+      legs_json   TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS oc_subs (
+      key TEXT PRIMARY KEY
+    );
+
     CREATE INDEX IF NOT EXISTS idx_pnl_ref_ts ON pnl_ticks(ref_id, ts);
     CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_id);
     CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(order_status);
@@ -168,6 +182,10 @@ export function dbLoadPositions(): Array<Record<string, unknown>> {
   return db.prepare('SELECT * FROM positions WHERE qty != 0').all() as Array<Record<string, unknown>>;
 }
 
+export function dbLoadClosedPositions(): Array<Record<string, unknown>> {
+  return db.prepare('SELECT * FROM positions WHERE qty = 0 AND realized_pnl != 0').all() as Array<Record<string, unknown>>;
+}
+
 // ── PnL Ticks ───────────────────────────────────────────────────────────────
 
 export function dbInsertPnlTick(t: {
@@ -191,6 +209,16 @@ export function dbLoadNameMap(): Map<string, number> {
   return new Map(rows.map(r => [r.name, r.ref_id]));
 }
 
+// ── OC Subscriptions ───────────────────────────────────────────────────────
+
+export function dbUpsertOcSub(key: string): void {
+  db.prepare('INSERT OR IGNORE INTO oc_subs (key) VALUES (?)').run(key);
+}
+
+export function dbLoadOcSubs(): string[] {
+  return (db.prepare('SELECT key FROM oc_subs').all() as Array<{ key: string }>).map(r => r.key);
+}
+
 // ── Meta ────────────────────────────────────────────────────────────────────
 
 export function dbGetMeta(key: string): string | undefined {
@@ -200,4 +228,35 @@ export function dbGetMeta(key: string): string | undefined {
 
 export function dbSetMeta(key: string, value: string): void {
   db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(key, value);
+}
+
+// ── Saved Baskets ──────────────────────────────────────────────────────────
+
+export function dbInsertBasket(b: {
+  basket_id: string; name: string; symbol: string; expiry: string;
+  legs_json: string; created_at: number; updated_at: number;
+}): void {
+  db.prepare(`INSERT INTO saved_baskets (basket_id, name, symbol, expiry, legs_json, created_at, updated_at)
+    VALUES (@basket_id, @name, @symbol, @expiry, @legs_json, @created_at, @updated_at)`).run(b);
+}
+
+export function dbLoadBaskets(): Array<{
+  basket_id: string; name: string; symbol: string; expiry: string;
+  legs_json: string; created_at: number; updated_at: number;
+}> {
+  return db.prepare('SELECT * FROM saved_baskets ORDER BY updated_at DESC').all() as Array<{
+    basket_id: string; name: string; symbol: string; expiry: string;
+    legs_json: string; created_at: number; updated_at: number;
+  }>;
+}
+
+export function dbDeleteBasket(basketId: string): boolean {
+  const info = db.prepare('DELETE FROM saved_baskets WHERE basket_id = ?').run(basketId);
+  return info.changes > 0;
+}
+
+export function dbUpdateBasket(basketId: string, name: string, legsJson: string): boolean {
+  const info = db.prepare(`UPDATE saved_baskets SET name = ?, legs_json = ?, updated_at = ? WHERE basket_id = ?`)
+    .run(name, legsJson, Date.now(), basketId);
+  return info.changes > 0;
 }

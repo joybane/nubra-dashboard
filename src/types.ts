@@ -29,7 +29,7 @@ export function getInstrumentType(item: Instrument): InstrumentType {
 }
 
 export function getSymbol(item: Instrument): string {
-  return item.nubra_name || item.zanskar_name || item.stock_name || item.asset || item.symbol || '';
+  return item.nubra_name || item.stock_name || item.asset || item.zanskar_name || item.symbol || '';
 }
 
 // ─── Chart / OHLCV ───────────────────────────────────────────────────────────

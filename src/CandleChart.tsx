@@ -10,6 +10,8 @@ import {
   type HistogramSeriesOptions,
 } from 'lightweight-charts';
 import { useWs } from './hooks/useWsContext';
+import { usePaperTrading } from './hooks/usePaperTrading';
+import { useWatchlist } from './hooks/useWatchlistContext';
 import type { Instrument, OhlcBar, OhlcvData, OptionChainData, VolBar, WsMessage } from './types';
 import { getSymbol } from './types';
 import {
@@ -26,6 +28,8 @@ interface Props {
 }
 
 export default function CandleChart({ instrument, theme }: Props) {
+  const { openTicket } = usePaperTrading();
+  const { addItem: addToWatchlist } = useWatchlist();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const chartRef     = useRef<IChartApi | null>(null);
@@ -299,8 +303,9 @@ export default function CandleChart({ instrument, theme }: Props) {
     if (!candleRef.current || !volRef.current || !chartRef.current) return;
 
     if (currentInstRef.current) {
-      const oldSym = getSymbol(currentInstRef.current);
-      unsubscribeChart({ indexes: [oldSym] }, iv, currentInstRef.current.exchange || 'NSE');
+      const oldSym   = getSymbol(currentInstRef.current);
+      const wasIndex = nubraType(currentInstRef.current) === 'INDEX';
+      unsubscribeChart(wasIndex ? { indexes: [oldSym] } : { instruments: [oldSym] }, iv, currentInstRef.current.exchange || 'NSE');
     }
     unsubscribeOiWs();
 
@@ -345,7 +350,9 @@ export default function CandleChart({ instrument, theme }: Props) {
       updatePriceDisplay(lastBarRef.current.close, dayOpenRef.current);
       setOhlc({ o: lastBarRef.current.open, h: lastBarRef.current.high, l: lastBarRef.current.low, c: lastBarRef.current.close });
 
-      subscribeChart({ indexes: [getSymbol(inst)] }, iv, inst.exchange || 'NSE');
+      const chartSym = getSymbol(inst);
+      const isIndex  = nubraType(inst) === 'INDEX';
+      subscribeChart(isIndex ? { indexes: [chartSym] } : { instruments: [chartSym] }, iv, inst.exchange || 'NSE');
     } catch (err: unknown) {
       setLoading(`Error: ${(err as Error).message}`);
     }
@@ -833,6 +840,41 @@ export default function CandleChart({ instrument, theme }: Props) {
               {priceDisplay.up ? '+' : ''}{priceDisplay.diff.toFixed(2)} ({priceDisplay.up ? '+' : ''}{priceDisplay.pct}%)
             </span>
           </>
+        )}
+
+        {/* Buy / Sell / Watchlist */}
+        {instrument && (
+          <div className="flex items-center gap-1 ml-1">
+            <button
+              onClick={() => openTicket({ instrument, side: 'BUY', ltp: priceDisplay?.price })}
+              className="px-2.5 py-1 rounded text-[11px] font-bold text-white bg-[var(--green)] hover:brightness-110 transition-all"
+            >
+              BUY
+            </button>
+            <button
+              onClick={() => openTicket({ instrument, side: 'SELL', ltp: priceDisplay?.price })}
+              className="px-2.5 py-1 rounded text-[11px] font-bold text-white bg-[var(--red)] hover:brightness-110 transition-all"
+            >
+              SELL
+            </button>
+            <button
+              onClick={() => addToWatchlist({
+                displayName: sym,
+                underlying: instrument.asset || sym,
+                exchange: instrument.exchange || 'NSE',
+                ref_id: instrument.ref_id,
+                nubraName: getSymbol(instrument),
+                optionType: (instrument.option_type as 'CE' | 'PE' | undefined),
+                strike: instrument.strike_price ? instrument.strike_price / 100 : undefined,
+                expiry: instrument.expiry ? String(instrument.expiry) : undefined,
+                ltpAtAdd: priceDisplay?.price ?? 0,
+              })}
+              className="px-1.5 py-1 rounded text-[11px] font-semibold text-amber-400 bg-amber-500/15 hover:bg-amber-500/30 border border-amber-500/30 transition-all"
+              title="Add to watchlist"
+            >
+              ★
+            </button>
+          </div>
         )}
 
         {/* Indicators dropdown */}

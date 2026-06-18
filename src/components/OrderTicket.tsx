@@ -61,7 +61,7 @@ export default function OrderTicket() {
       setSide(ticketConfig.side);
       setLtp(ticketConfig.ltp);
       setLtpChg(ticketConfig.ltpChg);
-      setLots(1);
+      setLots(ticketConfig.qty ?? 1);
       setPrice('');
       setTriggerPx('');
       setShowSl(false);
@@ -130,7 +130,21 @@ export default function OrderTicket() {
 
   async function placeOrder() {
     if (!instrument) { setResult({ ok: false, msg: 'Select an instrument first.' }); return; }
-    const nubraName = instrument.zanskar_name || instrument.nubra_name;
+    let nubraName = instrument.zanskar_name || instrument.nubra_name || '';
+    if (!nubraName && instrument.ref_id) {
+      try {
+        const res = await fetch(`/api/instruments/lookup?ref_id=${instrument.ref_id}`);
+        const data = await res.json() as { instrument: Instrument | null };
+        if (data.instrument) {
+          const m = data.instrument;
+          nubraName = m.zanskar_name || m.nubra_name || '';
+          if (m.asset && !instrument.asset) instrument.asset = m.asset;
+          if (m.expiry && !instrument.expiry) instrument.expiry = String(m.expiry);
+          if (m.derivative_type && !instrument.derivative_type) instrument.derivative_type = m.derivative_type;
+          if (m.lot_size) instrument.lot_size = m.lot_size;
+        }
+      } catch { /* fallback */ }
+    }
     if (!nubraName) { setResult({ ok: false, msg: 'Instrument has no canonical name. Re-search and select.' }); return; }
     if (lots < 1) { setResult({ ok: false, msg: 'Enter a valid quantity.' }); return; }
 
