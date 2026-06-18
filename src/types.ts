@@ -252,6 +252,9 @@ export interface PaperPosition {
   expiry?:            string;
   basket_group_id?:   string;
   strategy_name?:     string;
+  entry_time?:        number;
+  exit_time?:         number;
+  exit_price?:        number;
 }
 
 export interface PaperHolding {

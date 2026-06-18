@@ -458,6 +458,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
         <td className={`px-3 py-1.5 ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
           {pnl >= 0 ? '+' : ''}{((p.avg_price || 0) > 0 ? (((p.last_traded_price || 0) - (p.avg_price || 0)) / (p.avg_price || 1) * 100 * (side === 'BUY' ? 1 : -1)) : 0).toFixed(2)}%
         </td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(p.entry_time)}</td>
         <td className="px-3 py-1.5">
           <div className="flex items-center gap-1">
             {onViewChart && (
@@ -495,9 +496,13 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
       <tr key={ek} className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`}>
         <td className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] ${indent ? 'pl-8' : ''}`}>{p.display_name || p.zanskar_name || p.ref_id}</td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.product || 'NRML'}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(p.avg_price)}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.exit_price ? paise(p.exit_price) : '—'}</td>
         <td className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
           {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
         </td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(p.entry_time)}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(p.exit_time)}</td>
       </tr>
     );
   }
@@ -536,8 +541,8 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
           <thead className="sticky top-0 bg-[var(--bg-secondary)] z-10">
             <tr className="text-[var(--text-muted)]">
               {(subTab === 'open'
-                ? ['Symbol', 'Product', 'Side', 'Qty', 'Avg Price', 'LTP', 'P&L', 'P&L %', '']
-                : ['Symbol', 'Product', 'P&L']
+                ? ['Symbol', 'Product', 'Side', 'Qty', 'Entry Price', 'LTP', 'P&L', 'P&L %', 'Entry Time', '']
+                : ['Symbol', 'Product', 'Entry Price', 'Exit Price', 'P&L', 'Entry Time', 'Exit Time']
               ).map((h) => (
                 <th key={h} className="px-3 py-1.5 text-left font-medium whitespace-nowrap border-b border-[var(--border)]">{h}</th>
               ))}
@@ -545,7 +550,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
           </thead>
           <tbody>
             {subTab === 'open' && groupedOpen.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-8 text-[var(--text-muted)]">No open positions</td></tr>
+              <tr><td colSpan={10} className="text-center py-8 text-[var(--text-muted)]">No open positions</td></tr>
             )}
             {subTab === 'open' && groupedOpen.map((item) => {
               if (!isPositionGroup(item)) return renderPositionRow(item);
@@ -575,6 +580,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
                       {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
                     </td>
                     <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
                     <td className="px-3 py-1.5" onClick={e => e.stopPropagation()}>
                       <button
                         onClick={() => exitAllInGroup(g.positions)}
@@ -591,7 +597,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
               );
             })}
             {subTab === 'closed' && groupedClosed.length === 0 && (
-              <tr><td colSpan={3} className="text-center py-8 text-[var(--text-muted)]">No closed positions</td></tr>
+              <tr><td colSpan={7} className="text-center py-8 text-[var(--text-muted)]">No closed positions</td></tr>
             )}
             {subTab === 'closed' && groupedClosed.map((item) => {
               if (!isPositionGroup(item)) return renderClosedPositionRow(item);
@@ -612,9 +618,13 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
                       </span>
                     </td>
                     <td className="px-3 py-1.5 text-[var(--text-secondary)]">{g.positions[0].product || 'NRML'}</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
                     <td className={`px-3 py-1.5 font-semibold ${groupPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
                       {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
                     </td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
                   </tr>
                   {isOpen && g.positions.map(p => renderClosedPositionRow(p, true))}
                 </React.Fragment>

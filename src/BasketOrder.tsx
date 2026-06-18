@@ -526,6 +526,14 @@ export default function BasketOrder({ instrument }: Props) {
                     </button>
                   </div>
                 ))}
+                <div style={{ background: '#181a25', borderRadius: 10, border: '1px dashed #2a2d42', padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 100 }}>
+                  <span style={{ fontSize: 24, color: '#5865f2' }}>+</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: '#8b8fa3' }}>Build New Strategy</span>
+                  <button onClick={() => setViewMode('builder')}
+                    style={{ padding: '7px 20px', borderRadius: 8, border: 'none', background: '#5865f2', color: '#fff', fontWeight: 600, fontSize: 12, cursor: 'pointer' }}>
+                    Build
+                  </button>
+                </div>
               </div>
             )}
           </div>

@@ -579,6 +579,9 @@ interface SimPosition {
   order_delivery_type: string;
   basket_group_id?:    string;
   strategy_name?:      string;
+  entry_time?:         number;          // nanoseconds epoch
+  exit_time?:          number;          // nanoseconds epoch
+  exit_price?:         number;          // paise
 }
 
 class SimBroker {
@@ -626,6 +629,9 @@ class SimBroker {
         order_delivery_type: row.order_delivery_type as string,
         basket_group_id: (row.basket_group_id as string) || '',
         strategy_name: row.strategy_name as string | undefined,
+        entry_time: row.entry_time as number | undefined,
+        exit_time: row.exit_time as number | undefined,
+        exit_price: row.exit_price as number | undefined,
       };
       this.positions.set(this.posKey(p.ref_id, p.basket_group_id), p);
       if (p.qty !== 0) this.ticks.set(p.ref_id, p.last_traded_price);
@@ -752,6 +758,9 @@ class SimBroker {
     if (prev === 0) {
       pos.qty       = delta;
       pos.avg_price = Math.round(fillPaise);
+      pos.entry_time = order.filled_time ?? Date.now() * 1_000_000;
+      pos.exit_time  = undefined;
+      pos.exit_price = undefined;
     } else if (Math.sign(prev) === Math.sign(delta)) {
       // Same direction: weighted average price
       const totalQty = Math.abs(prev) + order.order_qty;
@@ -765,7 +774,9 @@ class SimBroker {
         : (fillPaise    - pos.avg_price) * closedQty; // selling to close a long
       pos.qty = next;
       if (next === 0) {
-        pos.avg_price = 0;
+        pos.avg_price  = 0;
+        pos.exit_time  = order.filled_time ?? Date.now() * 1_000_000;
+        pos.exit_price = Math.round(fillPaise);
       } else if (Math.sign(next) !== Math.sign(prev)) {
         pos.avg_price = Math.round(fillPaise);        // reversed into opposite direction
       }
@@ -787,6 +798,7 @@ class SimBroker {
       qty: pos.qty, avg_price: pos.avg_price, realized_pnl: pos.realized_pnl,
       last_traded_price: pos.last_traded_price, order_delivery_type: pos.order_delivery_type,
       basket_group_id: pos.basket_group_id, strategy_name: pos.strategy_name,
+      entry_time: pos.entry_time, exit_time: pos.exit_time, exit_price: pos.exit_price,
     });
     // Record P&L at fill time
     const unrealizedAtFill = (pos.last_traded_price - pos.avg_price) * pos.qty;
@@ -1162,6 +1174,7 @@ fastify.get('/paper/positions', async (_req, reply) => {
       product:            p.order_delivery_type === 'ORDER_DELIVERY_TYPE_IDAY' ? 'MIS' : 'NRML',
       basket_group_id:    p.basket_group_id || undefined,
       strategy_name:      p.strategy_name || undefined,
+      entry_time:         p.entry_time || undefined,
     };
   });
   return reply.send(positions);
@@ -1182,6 +1195,9 @@ fastify.get('/paper/positions/closed', async (_req, reply) => {
     product:       p.order_delivery_type === 'ORDER_DELIVERY_TYPE_IDAY' ? 'MIS' : 'NRML',
     basket_group_id: p.basket_group_id || undefined,
     strategy_name:   p.strategy_name || undefined,
+    entry_time:      p.entry_time || undefined,
+    exit_time:       p.exit_time || undefined,
+    exit_price:      p.exit_price || undefined,
   }));
   return reply.send(closed);
 });

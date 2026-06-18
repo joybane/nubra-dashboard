@@ -55,6 +55,9 @@ export function initDb(): Database.Database {
       order_delivery_type TEXT NOT NULL,
       basket_group_id     TEXT NOT NULL DEFAULT '',
       strategy_name       TEXT,
+      entry_time          INTEGER,
+      exit_time           INTEGER,
+      exit_price          INTEGER,
       PRIMARY KEY (ref_id, basket_group_id)
     );
 
@@ -133,6 +136,12 @@ export function initDb(): Database.Database {
     `);
   }
 
+  // Add entry_time, exit_time, exit_price columns to positions if missing
+  const posCols2 = cols('positions');
+  if (!posCols2.has('entry_time')) db.exec(`ALTER TABLE positions ADD COLUMN entry_time INTEGER`);
+  if (!posCols2.has('exit_time'))  db.exec(`ALTER TABLE positions ADD COLUMN exit_time INTEGER`);
+  if (!posCols2.has('exit_price')) db.exec(`ALTER TABLE positions ADD COLUMN exit_price INTEGER`);
+
   console.log(`[PaperDB] Opened ${DB_PATH}`);
   return db;
 }
@@ -206,19 +215,24 @@ export function dbUpsertPosition(p: {
   ref_id: number; nubraName: string; display_name: string; qty: number;
   avg_price: number; realized_pnl: number; last_traded_price: number;
   order_delivery_type: string; basket_group_id?: string; strategy_name?: string;
+  entry_time?: number; exit_time?: number; exit_price?: number;
 }): void {
   db.prepare(`INSERT INTO positions (ref_id, nubra_name, display_name, qty, avg_price,
-      realized_pnl, last_traded_price, order_delivery_type, basket_group_id, strategy_name)
+      realized_pnl, last_traded_price, order_delivery_type, basket_group_id, strategy_name,
+      entry_time, exit_time, exit_price)
     VALUES (@ref_id, @nubra_name, @display_name, @qty, @avg_price,
-      @realized_pnl, @last_traded_price, @order_delivery_type, @basket_group_id, @strategy_name)
+      @realized_pnl, @last_traded_price, @order_delivery_type, @basket_group_id, @strategy_name,
+      @entry_time, @exit_time, @exit_price)
     ON CONFLICT(ref_id, basket_group_id) DO UPDATE SET
       qty=@qty, avg_price=@avg_price, realized_pnl=@realized_pnl,
-      last_traded_price=@last_traded_price, display_name=@display_name
+      last_traded_price=@last_traded_price, display_name=@display_name,
+      exit_time=@exit_time, exit_price=@exit_price
   `).run({
     ref_id: p.ref_id, nubra_name: p.nubraName, display_name: p.display_name,
     qty: p.qty, avg_price: p.avg_price, realized_pnl: p.realized_pnl,
     last_traded_price: p.last_traded_price, order_delivery_type: p.order_delivery_type,
     basket_group_id: p.basket_group_id ?? '', strategy_name: p.strategy_name ?? null,
+    entry_time: p.entry_time ?? null, exit_time: p.exit_time ?? null, exit_price: p.exit_price ?? null,
   });
 }
 
