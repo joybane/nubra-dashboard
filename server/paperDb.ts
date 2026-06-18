@@ -29,7 +29,9 @@ export function initDb(): Database.Database {
       order_delivery_type TEXT NOT NULL,
       validity_type       TEXT NOT NULL DEFAULT 'DAY',
       tag                 TEXT,
-      sl_triggered        INTEGER NOT NULL DEFAULT 0
+      sl_triggered        INTEGER NOT NULL DEFAULT 0,
+      basket_group_id     TEXT,
+      strategy_name       TEXT
     );
 
     CREATE TABLE IF NOT EXISTS fills (
@@ -43,14 +45,17 @@ export function initDb(): Database.Database {
     );
 
     CREATE TABLE IF NOT EXISTS positions (
-      ref_id              INTEGER PRIMARY KEY,
+      ref_id              INTEGER NOT NULL,
       nubra_name          TEXT NOT NULL,
       display_name        TEXT NOT NULL,
       qty                 INTEGER NOT NULL,
       avg_price           INTEGER NOT NULL,
       realized_pnl        INTEGER NOT NULL DEFAULT 0,
       last_traded_price   INTEGER NOT NULL DEFAULT 0,
-      order_delivery_type TEXT NOT NULL
+      order_delivery_type TEXT NOT NULL,
+      basket_group_id     TEXT NOT NULL DEFAULT '',
+      strategy_name       TEXT,
+      PRIMARY KEY (ref_id, basket_group_id)
     );
 
     CREATE TABLE IF NOT EXISTS pnl_ticks (
@@ -94,6 +99,40 @@ export function initDb(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(order_status);
   `);
 
+  // ── Migrations: add basket_group_id / strategy_name to existing tables ───
+  const cols = (table: string) => {
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    return new Set(rows.map(r => r.name));
+  };
+  const orderCols = cols('orders');
+  if (!orderCols.has('basket_group_id')) db.exec(`ALTER TABLE orders ADD COLUMN basket_group_id TEXT`);
+  if (!orderCols.has('strategy_name'))   db.exec(`ALTER TABLE orders ADD COLUMN strategy_name TEXT`);
+
+  // Positions table migration: old schema had PRIMARY KEY (ref_id) only.
+  // If basket_group_id column is missing, recreate the table with composite key.
+  const posCols = cols('positions');
+  if (!posCols.has('basket_group_id')) {
+    db.exec(`
+      ALTER TABLE positions RENAME TO positions_old;
+      CREATE TABLE positions (
+        ref_id              INTEGER NOT NULL,
+        nubra_name          TEXT NOT NULL,
+        display_name        TEXT NOT NULL,
+        qty                 INTEGER NOT NULL,
+        avg_price           INTEGER NOT NULL,
+        realized_pnl        INTEGER NOT NULL DEFAULT 0,
+        last_traded_price   INTEGER NOT NULL DEFAULT 0,
+        order_delivery_type TEXT NOT NULL,
+        basket_group_id     TEXT NOT NULL DEFAULT '',
+        strategy_name       TEXT,
+        PRIMARY KEY (ref_id, basket_group_id)
+      );
+      INSERT INTO positions SELECT ref_id, nubra_name, display_name, qty, avg_price,
+        realized_pnl, last_traded_price, order_delivery_type, '', NULL FROM positions_old;
+      DROP TABLE positions_old;
+    `);
+  }
+
   console.log(`[PaperDB] Opened ${DB_PATH}`);
   return db;
 }
@@ -103,10 +142,12 @@ export function initDb(): Database.Database {
 const _insertOrder = () => db.prepare(`
   INSERT INTO orders (order_id, ref_id, nubra_name, display_name, order_type, order_side,
     order_price, trigger_price, order_qty, filled_qty, avg_filled_price, order_status,
-    order_time, filled_time, order_delivery_type, validity_type, tag, sl_triggered)
+    order_time, filled_time, order_delivery_type, validity_type, tag, sl_triggered,
+    basket_group_id, strategy_name)
   VALUES (@order_id, @ref_id, @nubra_name, @display_name, @order_type, @order_side,
     @order_price, @trigger_price, @order_qty, @filled_qty, @avg_filled_price, @order_status,
-    @order_time, @filled_time, @order_delivery_type, @validity_type, @tag, @sl_triggered)
+    @order_time, @filled_time, @order_delivery_type, @validity_type, @tag, @sl_triggered,
+    @basket_group_id, @strategy_name)
 `);
 
 const _updateOrder = () => db.prepare(`
@@ -121,6 +162,7 @@ export function dbInsertOrder(o: {
   order_qty: number; filled_qty: number; avg_filled_price: number; order_status: string;
   order_time: number; filled_time: number | null; order_delivery_type: string;
   validity_type: string; tag?: string; sl_triggered: boolean;
+  basket_group_id?: string; strategy_name?: string;
 }): void {
   _insertOrder().run({
     order_id: o.order_id, ref_id: o.ref_id, nubra_name: o.nubraName,
@@ -130,6 +172,7 @@ export function dbInsertOrder(o: {
     order_status: o.order_status, order_time: o.order_time, filled_time: o.filled_time,
     order_delivery_type: o.order_delivery_type, validity_type: o.validity_type,
     tag: o.tag ?? null, sl_triggered: o.sl_triggered ? 1 : 0,
+    basket_group_id: o.basket_group_id ?? null, strategy_name: o.strategy_name ?? null,
   });
 }
 
@@ -162,19 +205,20 @@ export function dbInsertFill(f: {
 export function dbUpsertPosition(p: {
   ref_id: number; nubraName: string; display_name: string; qty: number;
   avg_price: number; realized_pnl: number; last_traded_price: number;
-  order_delivery_type: string;
+  order_delivery_type: string; basket_group_id?: string; strategy_name?: string;
 }): void {
   db.prepare(`INSERT INTO positions (ref_id, nubra_name, display_name, qty, avg_price,
-      realized_pnl, last_traded_price, order_delivery_type)
+      realized_pnl, last_traded_price, order_delivery_type, basket_group_id, strategy_name)
     VALUES (@ref_id, @nubra_name, @display_name, @qty, @avg_price,
-      @realized_pnl, @last_traded_price, @order_delivery_type)
-    ON CONFLICT(ref_id) DO UPDATE SET
+      @realized_pnl, @last_traded_price, @order_delivery_type, @basket_group_id, @strategy_name)
+    ON CONFLICT(ref_id, basket_group_id) DO UPDATE SET
       qty=@qty, avg_price=@avg_price, realized_pnl=@realized_pnl,
       last_traded_price=@last_traded_price, display_name=@display_name
   `).run({
     ref_id: p.ref_id, nubra_name: p.nubraName, display_name: p.display_name,
     qty: p.qty, avg_price: p.avg_price, realized_pnl: p.realized_pnl,
     last_traded_price: p.last_traded_price, order_delivery_type: p.order_delivery_type,
+    basket_group_id: p.basket_group_id ?? '', strategy_name: p.strategy_name ?? null,
   });
 }
 

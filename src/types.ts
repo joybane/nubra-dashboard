@@ -229,6 +229,8 @@ export interface PaperOrder {
   LTP?:               number | null;
   tag?:               string;
   ref_data?:          PaperRefData;
+  basket_group_id?:   string;
+  strategy_name?:     string;
 }
 
 export interface PaperPosition {
@@ -248,6 +250,8 @@ export interface PaperPosition {
   option_type?:       string;
   strike_price?:      number;
   expiry?:            string;
+  basket_group_id?:   string;
+  strategy_name?:     string;
 }
 
 export interface PaperHolding {

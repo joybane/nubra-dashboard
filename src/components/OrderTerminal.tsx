@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { Instrument, PaperHolding, PaperOrder, PaperPosition, WsMessage, OptionChainData, OptionLeg } from '../types';
 import { fmtPrice } from '../lib/utils';
 import { usePaperTrading } from '../hooks/usePaperTrading';
@@ -46,6 +46,45 @@ const MIN_H     = 120;
 const DEFAULT_H = 220;
 const HEADER_H  = 40;   // collapsed height = just header bar
 
+// ─── Grouping helpers ─────────────────────────────────────────────────────────
+interface OrderGroup {
+  basket_group_id: string;
+  strategy_name: string;
+  orders: PaperOrder[];
+}
+
+function groupOrders(orders: PaperOrder[]): (PaperOrder | OrderGroup)[] {
+  const groups = new Map<string, PaperOrder[]>();
+  const ungrouped: PaperOrder[] = [];
+  for (const o of orders) {
+    if (o.basket_group_id) {
+      const arr = groups.get(o.basket_group_id) || [];
+      arr.push(o);
+      groups.set(o.basket_group_id, arr);
+    } else {
+      ungrouped.push(o);
+    }
+  }
+  const result: (PaperOrder | OrderGroup)[] = [];
+  for (const [gid, gOrders] of groups) {
+    result.push({ basket_group_id: gid, strategy_name: gOrders[0].strategy_name || 'Basket', orders: gOrders });
+  }
+  result.push(...ungrouped);
+  return result;
+}
+
+function isOrderGroup(item: PaperOrder | OrderGroup): item is OrderGroup {
+  return 'orders' in item && Array.isArray((item as OrderGroup).orders);
+}
+
+function groupStatus(orders: PaperOrder[]): string {
+  if (orders.every(o => o.order_status === 'ORDER_STATUS_FILLED')) return 'ORDER_STATUS_FILLED';
+  if (orders.some(o => o.order_status === 'ORDER_STATUS_OPEN')) return 'ORDER_STATUS_OPEN';
+  if (orders.some(o => o.order_status === 'ORDER_STATUS_PENDING')) return 'ORDER_STATUS_PENDING';
+  if (orders.every(o => o.order_status === 'ORDER_STATUS_CANCELLED')) return 'ORDER_STATUS_CANCELLED';
+  return orders[0].order_status;
+}
+
 // ─── Orders table ─────────────────────────────────────────────────────────────
 function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
   const [openOrders,   setOpenOrders]   = useState<PaperOrder[]>([]);
@@ -54,7 +93,16 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
   const [loading,      setLoading]      = useState(false);
   const [cancelling,   setCancelling]   = useState<number | null>(null);
   const [dayPnl,       setDayPnl]       = useState<number | null>(null);
+  const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const toggleExpand = useCallback((gid: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(gid)) next.delete(gid); else next.add(gid);
+      return next;
+    });
+  }, []);
 
   const fetchOrders = useCallback(async () => {
     if (!uatAuth) return;
@@ -97,11 +145,45 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
   }
 
   const rows = subTab === 'open' ? openOrders : closedOrders;
-  // dayPnl is fetched from /paper/pnl (realised + unrealised across all positions).
-  // The old approach of summing signed order cash flows was wrong: a BUY-only position
-  // would show a large negative "P&L" equal to the cash outflow, not the actual profit.
+  const grouped = groupOrders(rows);
   const pnlPaise = dayPnl ?? 0;
   const pnlRs    = pnlPaise / 100;
+
+  function renderOrderRow(o: PaperOrder, indent = false) {
+    const isBuy    = o.order_side === 'ORDER_SIDE_BUY';
+    const canCancel = o.order_status === 'ORDER_STATUS_PENDING' || o.order_status === 'ORDER_STATUS_OPEN';
+    return (
+      <tr key={o.order_id} className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`}>
+        <td className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] whitespace-nowrap ${indent ? 'pl-8' : ''}`}>{displayName(o)}</td>
+        <td className="px-3 py-1.5">
+          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${STATUS_STYLE[o.order_status] || ''}`}>
+            {STATUS_LABEL[o.order_status] || o.order_status}
+          </span>
+        </td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(o.order_time)}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{productLabel(o.order_delivery_type)}</td>
+        <td className={`px-3 py-1.5 font-semibold ${isBuy ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+          {isBuy ? 'BUY' : 'SELL'}
+        </td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{o.filled_qty}/{o.order_qty}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(o.order_price)}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{o.trigger_price ? paise(o.trigger_price) : '—'}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{o.avg_filled_price ? paise(o.avg_filled_price) : '—'}</td>
+        <td className="px-3 py-1.5">
+          {canCancel && (
+            <button
+              onClick={() => cancelOrder(o.order_id)}
+              disabled={cancelling === o.order_id}
+              className="w-5 h-5 rounded flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--red)] hover:bg-red-500/10 disabled:opacity-40 transition-colors"
+              title="Cancel order"
+            >
+              {cancelling === o.order_id ? '…' : '×'}
+            </button>
+          )}
+        </td>
+      </tr>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -135,46 +217,49 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 && (
+            {grouped.length === 0 && (
               <tr>
                 <td colSpan={10} className="text-center py-8 text-[var(--text-muted)]">
                   {subTab === 'open' ? 'No open orders' : 'No closed orders'}
                 </td>
               </tr>
             )}
-            {rows.map((o) => {
-              const isBuy   = o.order_side === 'ORDER_SIDE_BUY';
-              const canCancel = o.order_status === 'ORDER_STATUS_PENDING' || o.order_status === 'ORDER_STATUS_OPEN';
+            {grouped.map((item) => {
+              if (!isOrderGroup(item)) return renderOrderRow(item);
+              const g = item;
+              const isOpen = expanded.has(g.basket_group_id);
+              const status = groupStatus(g.orders);
+              const totalQty = g.orders.reduce((s, o) => s + o.order_qty, 0);
+              const filledQty = g.orders.reduce((s, o) => s + o.filled_qty, 0);
               return (
-                <tr key={o.order_id} className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)]">
-                  <td className="px-3 py-1.5 font-semibold text-[var(--text-primary)] whitespace-nowrap">{displayName(o)}</td>
-                  <td className="px-3 py-1.5">
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${STATUS_STYLE[o.order_status] || ''}`}>
-                      {STATUS_LABEL[o.order_status] || o.order_status}
-                    </span>
-                  </td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(o.order_time)}</td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">{productLabel(o.order_delivery_type)}</td>
-                  <td className={`px-3 py-1.5 font-semibold ${isBuy ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                    {isBuy ? 'BUY' : 'SELL'}
-                  </td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">{o.filled_qty}/{o.order_qty}</td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(o.order_price)}</td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">{o.trigger_price ? paise(o.trigger_price) : '—'}</td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">{o.avg_filled_price ? paise(o.avg_filled_price) : '—'}</td>
-                  <td className="px-3 py-1.5">
-                    {canCancel && (
-                      <button
-                        onClick={() => cancelOrder(o.order_id)}
-                        disabled={cancelling === o.order_id}
-                        className="w-5 h-5 rounded flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--red)] hover:bg-red-500/10 disabled:opacity-40 transition-colors"
-                        title="Cancel order"
-                      >
-                        {cancelling === o.order_id ? '…' : '×'}
-                      </button>
-                    )}
-                  </td>
-                </tr>
+                <React.Fragment key={g.basket_group_id}>
+                  <tr
+                    className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
+                    onClick={() => toggleExpand(g.basket_group_id)}
+                  >
+                    <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">{isOpen ? '▾' : '▸'}</span>
+                        {g.strategy_name}
+                        <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.orders.length} legs)</span>
+                      </span>
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${STATUS_STYLE[status] || ''}`}>
+                        {STATUS_LABEL[status] || status}
+                      </span>
+                    </td>
+                    <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(g.orders[0].order_time)}</td>
+                    <td className="px-3 py-1.5 text-[var(--text-secondary)]">{productLabel(g.orders[0].order_delivery_type)}</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className="px-3 py-1.5 text-[var(--text-secondary)]">{filledQty}/{totalQty}</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className="px-3 py-1.5" />
+                  </tr>
+                  {isOpen && g.orders.map(o => renderOrderRow(o, true))}
+                </React.Fragment>
               );
             })}
           </tbody>
@@ -182,6 +267,37 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
       </div>
     </div>
   );
+}
+
+// ─── Position grouping ───────────────────────────────────────────────────────
+interface PositionGroup {
+  basket_group_id: string;
+  strategy_name: string;
+  positions: PaperPosition[];
+}
+
+function groupPositions(positions: PaperPosition[]): (PaperPosition | PositionGroup)[] {
+  const groups = new Map<string, PaperPosition[]>();
+  const ungrouped: PaperPosition[] = [];
+  for (const p of positions) {
+    if (p.basket_group_id) {
+      const arr = groups.get(p.basket_group_id) || [];
+      arr.push(p);
+      groups.set(p.basket_group_id, arr);
+    } else {
+      ungrouped.push(p);
+    }
+  }
+  const result: (PaperPosition | PositionGroup)[] = [];
+  for (const [gid, gPos] of groups) {
+    result.push({ basket_group_id: gid, strategy_name: gPos[0].strategy_name || 'Basket', positions: gPos });
+  }
+  result.push(...ungrouped);
+  return result;
+}
+
+function isPositionGroup(item: PaperPosition | PositionGroup): item is PositionGroup {
+  return 'positions' in item && Array.isArray((item as PositionGroup).positions);
 }
 
 // ─── Positions tab ────────────────────────────────────────────────────────────
@@ -196,8 +312,19 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
   const [closedPositions, setClosedPositions] = useState<PaperPosition[]>([]);
   const [subTab,          setSubTab]          = useState<'open' | 'closed'>('open');
   const [loading,   setLoading]   = useState(false);
-  const [exiting,   setExiting]   = useState<Set<number>>(new Set());
+  const [exiting,   setExiting]   = useState<Set<string>>(new Set());
+  const [expanded,  setExpanded]  = useState<Set<string>>(new Set());
   const { subscribe } = useWs();
+
+  const posExitKey = (p: PaperPosition) => `${p.ref_id}:${p.basket_group_id || ''}`;
+
+  const toggleExpand = useCallback((gid: string) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      if (next.has(gid)) next.delete(gid); else next.add(gid);
+      return next;
+    });
+  }, []);
 
   const fetch_ = useCallback(async () => {
     if (!uatAuth) return;
@@ -255,8 +382,9 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
   }, [subscribe]);
 
   const exitDirect = useCallback(async (p: PaperPosition) => {
-    if (exiting.has(p.ref_id)) return;
-    setExiting(prev => new Set(prev).add(p.ref_id));
+    const ek = posExitKey(p);
+    if (exiting.has(ek)) return;
+    setExiting(prev => new Set(prev).add(ek));
     const exitSide = (p.order_side || '').includes('BUY') ? 'ORDER_SIDE_SELL' : 'ORDER_SIDE_BUY';
     try {
       let nubraName = p.zanskar_name || '';
@@ -265,7 +393,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
         const d = await res.json() as { instrument: Record<string, unknown> | null };
         if (d.instrument) nubraName = (d.instrument.zanskar_name || d.instrument.nubra_name || '') as string;
       }
-      if (!nubraName) { setExiting(prev => { const s = new Set(prev); s.delete(p.ref_id); return s; }); return; }
+      if (!nubraName) { setExiting(prev => { const s = new Set(prev); s.delete(ek); return s; }); return; }
       await fetch('/paper/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -278,15 +406,23 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
           order_side: exitSide,
           order_delivery_type: p.product === 'MIS' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
           validity_type: 'DAY',
+          basket_group_id: p.basket_group_id || undefined,
+          strategy_name: p.strategy_name || undefined,
         }),
       });
       setTimeout(fetch_, 500);
     } catch { /* ignore */ }
   }, [exiting, fetch_]);
 
+  const exitAllInGroup = useCallback(async (gPositions: PaperPosition[]) => {
+    for (const p of gPositions) {
+      if (!exiting.has(posExitKey(p))) exitDirect(p);
+    }
+  }, [exiting, exitDirect]);
+
   const exitAll = useCallback(async () => {
     for (const p of positions) {
-      if (!exiting.has(p.ref_id)) exitDirect(p);
+      if (!exiting.has(posExitKey(p))) exitDirect(p);
     }
   }, [positions, exiting, exitDirect]);
 
@@ -296,6 +432,75 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
   }, 0);
 
   const rows = subTab === 'open' ? positions : closedPositions;
+  const groupedOpen = groupPositions(positions);
+  const groupedClosed = groupPositions(closedPositions);
+
+  function calcPnl(p: PaperPosition): number {
+    const side = (p.order_side || '').includes('BUY') ? 1 : -1;
+    return side * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0) / 100;
+  }
+
+  function renderPositionRow(p: PaperPosition, indent = false) {
+    const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
+    const pnl  = calcPnl(p);
+    const ek   = posExitKey(p);
+    return (
+      <tr key={ek} className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`}>
+        <td className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] ${indent ? 'pl-8' : ''}`}>{p.display_name || p.zanskar_name || p.ref_id}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.product || 'NRML'}</td>
+        <td className={`px-3 py-1.5 font-semibold ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{side}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.qty}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(p.avg_price)}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(p.last_traded_price)}</td>
+        <td className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+          {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
+        </td>
+        <td className={`px-3 py-1.5 ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+          {pnl >= 0 ? '+' : ''}{((p.avg_price || 0) > 0 ? (((p.last_traded_price || 0) - (p.avg_price || 0)) / (p.avg_price || 1) * 100 * (side === 'BUY' ? 1 : -1)) : 0).toFixed(2)}%
+        </td>
+        <td className="px-3 py-1.5">
+          <div className="flex items-center gap-1">
+            {onViewChart && (
+              <button
+                onClick={() => onViewChart({
+                  stock_name: p.display_name || p.zanskar_name || String(p.ref_id),
+                  ref_id: p.ref_id, exchange: 'NSE',
+                  derivative_type: p.derivative_type, option_type: p.option_type,
+                  strike_price: p.strike_price, expiry: p.expiry,
+                })}
+                className="px-1.5 py-0.5 rounded text-[10px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors"
+                title="View chart"
+              >
+                Chart
+              </button>
+            )}
+            <button
+              onClick={() => exitDirect(p)}
+              disabled={exiting.has(ek)}
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${exiting.has(ek) ? 'text-[var(--text-muted)] bg-[var(--bg-hover)] border border-[var(--border)] cursor-not-allowed' : 'text-[var(--red)] bg-[var(--red)]/10 hover:bg-[var(--red)]/25 border border-[var(--red)]/30'}`}
+              title={exiting.has(ek) ? 'Exit order placed' : 'Exit position'}
+            >
+              Exit
+            </button>
+          </div>
+        </td>
+      </tr>
+    );
+  }
+
+  function renderClosedPositionRow(p: PaperPosition, indent = false) {
+    const pnl = (p.realised_pnl || p.pnl || 0) / 100;
+    const ek = posExitKey(p);
+    return (
+      <tr key={ek} className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`}>
+        <td className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] ${indent ? 'pl-8' : ''}`}>{p.display_name || p.zanskar_name || p.ref_id}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.product || 'NRML'}</td>
+        <td className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+          {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
+        </td>
+      </tr>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -318,7 +523,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
         {subTab === 'open' && positions.length > 0 && (
           <button
             onClick={exitAll}
-            disabled={positions.every(p => exiting.has(p.ref_id))}
+            disabled={positions.every(p => exiting.has(posExitKey(p)))}
             className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--red)] bg-[var(--red)]/10 hover:bg-[var(--red)]/25 border border-[var(--red)]/30 transition-colors"
           >
             Exit All
@@ -339,71 +544,80 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
             </tr>
           </thead>
           <tbody>
-            {rows.length === 0 && (
-              <tr><td colSpan={9} className="text-center py-8 text-[var(--text-muted)]">{subTab === 'open' ? 'No open positions' : 'No closed positions'}</td></tr>
+            {subTab === 'open' && groupedOpen.length === 0 && (
+              <tr><td colSpan={9} className="text-center py-8 text-[var(--text-muted)]">No open positions</td></tr>
             )}
-            {subTab === 'open' && positions.map((p) => {
-              const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
-              const sign = side === 'BUY' ? 1 : -1;
-              const pnl  = sign * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0) / 100;
+            {subTab === 'open' && groupedOpen.map((item) => {
+              if (!isPositionGroup(item)) return renderPositionRow(item);
+              const g = item;
+              const isOpen = expanded.has(g.basket_group_id);
+              const groupPnl = g.positions.reduce((s, p) => s + calcPnl(p), 0);
+              const allExiting = g.positions.every(p => exiting.has(posExitKey(p)));
               return (
-                <tr key={p.ref_id} className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)]">
-                  <td className="px-3 py-1.5 font-semibold text-[var(--text-primary)]">{p.display_name || p.zanskar_name || p.ref_id}</td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.product || 'NRML'}</td>
-                  <td className={`px-3 py-1.5 font-semibold ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{side}</td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.qty}</td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(p.avg_price)}</td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(p.last_traded_price)}</td>
-                  <td className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                    {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
-                  </td>
-                  <td className={`px-3 py-1.5 ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                    {pnl >= 0 ? '+' : ''}{((p.avg_price || 0) > 0 ? (((p.last_traded_price || 0) - (p.avg_price || 0)) / (p.avg_price || 1) * 100 * (side === 'BUY' ? 1 : -1)) : 0).toFixed(2)}%
-                  </td>
-                  <td className="px-3 py-1.5">
-                    <div className="flex items-center gap-1">
-                      {onViewChart && (
-                        <button
-                          onClick={() => onViewChart({
-                            stock_name: p.display_name || p.zanskar_name || String(p.ref_id),
-                            ref_id: p.ref_id,
-                            exchange: 'NSE',
-                            derivative_type: p.derivative_type,
-                            option_type: p.option_type,
-                            strike_price: p.strike_price,
-                            expiry: p.expiry,
-                          })}
-                          className="px-1.5 py-0.5 rounded text-[10px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors"
-                          title="View chart"
-                        >
-                          Chart
-                        </button>
-                      )}
-                      {(
-                        <button
-                          onClick={() => exitDirect(p)}
-                          disabled={exiting.has(p.ref_id)}
-                          className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${exiting.has(p.ref_id) ? 'text-[var(--text-muted)] bg-[var(--bg-hover)] border border-[var(--border)] cursor-not-allowed' : 'text-[var(--red)] bg-[var(--red)]/10 hover:bg-[var(--red)]/25 border border-[var(--red)]/30'}`}
-                          title={exiting.has(p.ref_id) ? 'Exit order placed' : 'Exit position'}
-                        >
-                          Exit
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
+                <React.Fragment key={g.basket_group_id}>
+                  <tr
+                    className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
+                    onClick={() => toggleExpand(g.basket_group_id)}
+                  >
+                    <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">{isOpen ? '▾' : '▸'}</span>
+                        {g.strategy_name}
+                        <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.positions.length} legs)</span>
+                      </span>
+                    </td>
+                    <td className="px-3 py-1.5 text-[var(--text-secondary)]">{g.positions[0].product || 'NRML'}</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className={`px-3 py-1.5 font-semibold ${groupPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                      {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
+                    </td>
+                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                    <td className="px-3 py-1.5" onClick={e => e.stopPropagation()}>
+                      <button
+                        onClick={() => exitAllInGroup(g.positions)}
+                        disabled={allExiting}
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${allExiting ? 'text-[var(--text-muted)] bg-[var(--bg-hover)] border border-[var(--border)] cursor-not-allowed' : 'text-[var(--red)] bg-[var(--red)]/10 hover:bg-[var(--red)]/25 border border-[var(--red)]/30'}`}
+                        title="Exit all legs"
+                      >
+                        Exit All
+                      </button>
+                    </td>
+                  </tr>
+                  {isOpen && g.positions.map(p => renderPositionRow(p, true))}
+                </React.Fragment>
               );
             })}
-            {subTab === 'closed' && closedPositions.map((p) => {
-              const pnl = (p.realised_pnl || p.pnl || 0) / 100;
+            {subTab === 'closed' && groupedClosed.length === 0 && (
+              <tr><td colSpan={3} className="text-center py-8 text-[var(--text-muted)]">No closed positions</td></tr>
+            )}
+            {subTab === 'closed' && groupedClosed.map((item) => {
+              if (!isPositionGroup(item)) return renderClosedPositionRow(item);
+              const g = item;
+              const isOpen = expanded.has(g.basket_group_id);
+              const groupPnl = g.positions.reduce((s, p) => s + (p.realised_pnl || p.pnl || 0) / 100, 0);
               return (
-                <tr key={p.ref_id} className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)]">
-                  <td className="px-3 py-1.5 font-semibold text-[var(--text-primary)]">{p.display_name || p.zanskar_name || p.ref_id}</td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.product || 'NRML'}</td>
-                  <td className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                    {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
-                  </td>
-                </tr>
+                <React.Fragment key={g.basket_group_id}>
+                  <tr
+                    className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
+                    onClick={() => toggleExpand(g.basket_group_id)}
+                  >
+                    <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">{isOpen ? '▾' : '▸'}</span>
+                        {g.strategy_name}
+                        <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.positions.length} legs)</span>
+                      </span>
+                    </td>
+                    <td className="px-3 py-1.5 text-[var(--text-secondary)]">{g.positions[0].product || 'NRML'}</td>
+                    <td className={`px-3 py-1.5 font-semibold ${groupPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                      {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
+                    </td>
+                  </tr>
+                  {isOpen && g.positions.map(p => renderClosedPositionRow(p, true))}
+                </React.Fragment>
               );
             })}
           </tbody>

@@ -564,6 +564,8 @@ interface SimOrder {
   validity_type:       string;
   tag?:                string;
   sl_triggered:        boolean;
+  basket_group_id?:    string;
+  strategy_name?:      string;
 }
 
 interface SimPosition {
@@ -575,15 +577,21 @@ interface SimPosition {
   realized_pnl:        number;          // paise
   last_traded_price:   number;          // paise, kept current by tick feed
   order_delivery_type: string;
+  basket_group_id?:    string;
+  strategy_name?:      string;
 }
 
 class SimBroker {
   private orders    = new Map<number, SimOrder>();
-  private positions = new Map<number, SimPosition>();
+  private positions = new Map<string, SimPosition>();  // key: "ref_id:basket_group_id"
   private ticks     = new Map<number, number>();     // ref_id → ltp paise
   private nameMap   = new Map<string, number>();     // normalised name → ref_id
   private nextId    = 1;
   private pnlTickCounter = 0;
+
+  private posKey(refId: number, basketGroupId?: string): string {
+    return `${refId}:${basketGroupId || ''}`;
+  }
 
   restore(): void {
     this.nameMap = dbLoadNameMap();
@@ -602,6 +610,8 @@ class SimBroker {
         order_delivery_type: row.order_delivery_type as string,
         validity_type: row.validity_type as string, tag: row.tag as string | undefined,
         sl_triggered: !!(row.sl_triggered as number),
+        basket_group_id: row.basket_group_id as string | undefined,
+        strategy_name: row.strategy_name as string | undefined,
       };
       this.orders.set(o.order_id, o);
       if (o.order_id >= this.nextId) this.nextId = o.order_id + 1;
@@ -614,8 +624,10 @@ class SimBroker {
         avg_price: row.avg_price as number, realized_pnl: row.realized_pnl as number,
         last_traded_price: row.last_traded_price as number,
         order_delivery_type: row.order_delivery_type as string,
+        basket_group_id: (row.basket_group_id as string) || '',
+        strategy_name: row.strategy_name as string | undefined,
       };
-      this.positions.set(p.ref_id, p);
+      this.positions.set(this.posKey(p.ref_id, p.basket_group_id), p);
       if (p.qty !== 0) this.ticks.set(p.ref_id, p.last_traded_price);
     }
     console.log(`[SimBroker] Restored ${this.orders.size} orders, ${this.positions.size} positions`);
@@ -638,10 +650,9 @@ class SimBroker {
     if (ltpPaise <= 0) return;
     const prev = this.ticks.get(refId);
     this.ticks.set(refId, ltpPaise);
-    const pos = this.positions.get(refId);
-    if (pos) {
+    for (const pos of this.positions.values()) {
+      if (pos.ref_id !== refId) continue;
       pos.last_traded_price = ltpPaise;
-      // Record P&L tick every 5th update to avoid flooding the DB
       if (pos.qty !== 0 && (++this.pnlTickCounter % 5 === 0)) {
         const unrealized = (ltpPaise - pos.avg_price) * pos.qty;
         dbInsertPnlTick({
@@ -716,7 +727,8 @@ class SimBroker {
 
     const isBuy = order.order_side === 'ORDER_SIDE_BUY';
     const delta = isBuy ? order.order_qty : -order.order_qty;
-    let pos = this.positions.get(order.ref_id);
+    const key = this.posKey(order.ref_id, order.basket_group_id);
+    let pos = this.positions.get(key);
 
     if (!pos) {
       pos = {
@@ -728,8 +740,10 @@ class SimBroker {
         realized_pnl:        0,
         last_traded_price:   this.ticks.get(order.ref_id) ?? Math.round(fillPaise),
         order_delivery_type: order.order_delivery_type,
+        basket_group_id:     order.basket_group_id || '',
+        strategy_name:       order.strategy_name,
       };
-      this.positions.set(order.ref_id, pos);
+      this.positions.set(key, pos);
     }
 
     const prev = pos.qty;
@@ -772,6 +786,7 @@ class SimBroker {
       ref_id: pos.ref_id, nubraName: pos.nubraName, display_name: pos.display_name,
       qty: pos.qty, avg_price: pos.avg_price, realized_pnl: pos.realized_pnl,
       last_traded_price: pos.last_traded_price, order_delivery_type: pos.order_delivery_type,
+      basket_group_id: pos.basket_group_id, strategy_name: pos.strategy_name,
     });
     // Record P&L at fill time
     const unrealizedAtFill = (pos.last_traded_price - pos.avg_price) * pos.qty;
@@ -797,6 +812,8 @@ class SimBroker {
     order_delivery_type: string;
     validity_type:       string;
     tag?:                string;
+    basket_group_id?:    string;
+    strategy_name?:      string;
   }): SimOrder {
     const id    = this.nextId++;
     const order: SimOrder = {
@@ -818,6 +835,8 @@ class SimBroker {
       validity_type:       p.validity_type || 'DAY',
       tag:                 p.tag,
       sl_triggered:        false,
+      basket_group_id:     p.basket_group_id,
+      strategy_name:       p.strategy_name,
     };
     this.orders.set(id, order);
     this.registerName(p.nubraName, p.liveRefId);
@@ -996,6 +1015,8 @@ interface PaperOrderBody {
   asset?:              string;
   expiry?:             string;
   derivative_type?:    string;
+  basket_group_id?:    string;
+  strategy_name?:      string;
 }
 
 fastify.post<{ Body: PaperOrderBody }>('/paper/orders', async (req, reply) => {
@@ -1003,7 +1024,7 @@ fastify.post<{ Body: PaperOrderBody }>('/paper/orders', async (req, reply) => {
   try {
     const { nubraName, liveRefId, display_name, order_type, order_qty, order_side,
             order_delivery_type, validity_type, order_price, trigger_price, tag,
-            asset, expiry, derivative_type } = req.body;
+            asset, expiry, derivative_type, basket_group_id, strategy_name } = req.body;
     if (!liveRefId) return reply.status(400).send({ error: 'liveRefId is required for live simulation.' });
 
     // Auto-subscribe option chain so fills happen against real-time prices
@@ -1014,6 +1035,7 @@ fastify.post<{ Body: PaperOrderBody }>('/paper/orders', async (req, reply) => {
       order_type, order_side, order_qty,
       order_price, trigger_price,
       order_delivery_type, validity_type, tag,
+      basket_group_id, strategy_name,
     });
     return reply.send({ order_id: order.order_id });
   } catch (err: unknown) {
@@ -1066,6 +1088,8 @@ fastify.post('/paper/orders/basket', async (req, reply) => {
   try {
     const body = req.body as Record<string, unknown>;
     const legs  = (body.orders as Array<Record<string, unknown>>);
+    const strategyName = (body.strategy_name as string) || undefined;
+    const basketGroupId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const results = legs.map((o) => {
       const nubraName  = o.nubraName  as string;
       const liveRefId  = o.liveRefId  as number;
@@ -1085,9 +1109,11 @@ fastify.post('/paper/orders/basket', async (req, reply) => {
         order_delivery_type: o.order_delivery_type as string,
         validity_type:       o.validity_type       as string,
         tag:                 o.tag                 as string | undefined,
+        basket_group_id:     basketGroupId,
+        strategy_name:       strategyName,
       });
     });
-    return reply.send({ orders: results.map(o => ({ order_id: o.order_id })) });
+    return reply.send({ orders: results.map(o => ({ order_id: o.order_id })), basket_group_id: basketGroupId });
   } catch (err: unknown) {
     return reply.status(500).send({ error: (err as Error).message });
   }
@@ -1134,6 +1160,8 @@ fastify.get('/paper/positions', async (_req, reply) => {
       unrealised_pnl:     Math.round(unrealizedPnl),
       realised_pnl:       Math.round(p.realized_pnl),
       product:            p.order_delivery_type === 'ORDER_DELIVERY_TYPE_IDAY' ? 'MIS' : 'NRML',
+      basket_group_id:    p.basket_group_id || undefined,
+      strategy_name:      p.strategy_name || undefined,
     };
   });
   return reply.send(positions);
@@ -1152,6 +1180,8 @@ fastify.get('/paper/positions/closed', async (_req, reply) => {
     pnl:           Math.round(p.realized_pnl),
     realised_pnl:  Math.round(p.realized_pnl),
     product:       p.order_delivery_type === 'ORDER_DELIVERY_TYPE_IDAY' ? 'MIS' : 'NRML',
+    basket_group_id: p.basket_group_id || undefined,
+    strategy_name:   p.strategy_name || undefined,
   }));
   return reply.send(closed);
 });

@@ -88,6 +88,7 @@ export default function BasketOrder({ instrument }: Props) {
   const [viewMode, setViewMode] = useState<ViewMode>('prebuilt');
   const [sentimentFilter, setSentimentFilter] = useState<Sentiment | 'All'>('All');
   const [saveName, setSaveName] = useState('');
+  const [strategyName, setStrategyName] = useState<string>('Custom Strategy');
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [targetDays, setTargetDays] = useState(5);
   const [addScripQuery, setAddScripQuery] = useState('');
@@ -293,6 +294,7 @@ export default function BasketOrder({ instrument }: Props) {
       };
     });
     setLegs(newLegs);
+    setStrategyName(tmpl.label);
     setViewMode('builder');
   }
 
@@ -303,9 +305,10 @@ export default function BasketOrder({ instrument }: Props) {
     setMultiplier(newMult);
   }
 
-  function loadSavedBasket(basket: { legs: Array<Record<string, unknown>>; expiry: string }) {
+  function loadSavedBasket(basket: { name?: string; legs: Array<Record<string, unknown>>; expiry: string }) {
     setLegs((basket.legs as unknown as Leg[]).map(l => ({ ...l, id: generateId(), entryLtp: l.entryLtp ?? l.ltp })));
     if (basket.expiry && basket.expiry !== chain.expiry) chain.changeExpiry(basket.expiry);
+    setStrategyName(basket.name || 'Custom Strategy');
     setViewMode('builder');
   }
 
@@ -357,7 +360,7 @@ export default function BasketOrder({ instrument }: Props) {
     setPlaced(null);
     try {
       const res = await fetch('/paper/orders/basket', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orders: sorted.map(l => ({
+        body: JSON.stringify({ strategy_name: strategyName || 'Custom Strategy', orders: sorted.map(l => ({
           nubraName: l.nubraName || `${l.symbol}${l.strike}${l.optionType}`, liveRefId: l.refId,
           display_name: `${l.symbol} ${l.strike} ${l.optionType}`, order_type: ORDER_TYPE_MAP[l.orderType],
           order_side: l.side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL', order_qty: l.lots * l.lotSize,
