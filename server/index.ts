@@ -605,6 +605,7 @@ interface SimPosition {
   exit_time?:          number;          // nanoseconds epoch
   exit_price?:         number;          // paise
   margin_required?:    number;          // paise, snapshot at entry
+  entry_qty?:          number;          // original entry qty (positive=long, negative=short), preserved after close
 }
 
 class SimBroker {
@@ -792,6 +793,7 @@ class SimBroker {
       pos.entry_time = order.filled_time ?? Date.now() * 1_000_000;
       pos.exit_time  = undefined;
       pos.exit_price = undefined;
+      pos.entry_qty  = delta;
     } else if (Math.sign(prev) === Math.sign(delta)) {
       // Same direction: weighted average price
       const totalQty = Math.abs(prev) + order.order_qty;
@@ -1252,24 +1254,30 @@ fastify.get('/paper/positions', async (_req, reply) => {
 
 fastify.get('/paper/positions/closed', async (_req, reply) => {
   if (!requireAuth(reply)) return;
-  const closed = simBroker.getClosedPositions().map((p) => ({
-    ref_id:        p.ref_id,
-    display_name:  p.display_name,
-    zanskar_name:  p.nubraName,
-    order_side:    'ORDER_SIDE_SELL',
-    qty:           0,
-    avg_price:     p.avg_price,
-    last_traded_price: p.last_traded_price,
-    pnl:           Math.round(p.realized_pnl),
-    realised_pnl:  Math.round(p.realized_pnl),
-    product:       p.order_delivery_type === 'ORDER_DELIVERY_TYPE_IDAY' ? 'MIS' : 'NRML',
-    basket_group_id: p.basket_group_id || undefined,
-    strategy_name:   p.strategy_name || undefined,
-    entry_time:      p.entry_time || undefined,
-    exit_time:       p.exit_time || undefined,
-    exit_price:      p.exit_price || undefined,
-    margin_required: p.margin_required || undefined,
-  }));
+  const closed = simBroker.getClosedPositions().map((p) => {
+    const entryQty = p.entry_qty ?? 0;
+    const priceDiff = Math.abs((p.exit_price || 0) - p.avg_price);
+    const derivedQty = entryQty !== 0 ? Math.abs(entryQty) : (priceDiff > 0 ? Math.round(Math.abs(p.realized_pnl) / priceDiff) : 0);
+    const isLong = entryQty > 0 || (entryQty === 0 && p.realized_pnl > 0 && (p.exit_price || 0) > p.avg_price);
+    return {
+      ref_id:        p.ref_id,
+      display_name:  p.display_name,
+      zanskar_name:  p.nubraName,
+      order_side:    isLong ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
+      qty:           derivedQty,
+      avg_price:     p.avg_price,
+      last_traded_price: p.last_traded_price,
+      pnl:           Math.round(p.realized_pnl),
+      realised_pnl:  Math.round(p.realized_pnl),
+      product:       p.order_delivery_type === 'ORDER_DELIVERY_TYPE_IDAY' ? 'MIS' : 'NRML',
+      basket_group_id: p.basket_group_id || undefined,
+      strategy_name:   p.strategy_name || undefined,
+      entry_time:      p.entry_time || undefined,
+      exit_time:       p.exit_time || undefined,
+      exit_price:      p.exit_price || undefined,
+      margin_required: p.margin_required || undefined,
+    };
+  });
   return reply.send(closed);
 });
 

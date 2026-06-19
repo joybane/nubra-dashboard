@@ -32,7 +32,7 @@ export function PaperTradingProvider({ children }: { children: React.ReactNode }
       const res = await fetch('/paper/auth/status');
       const d   = await res.json() as { authenticated: boolean };
       setAuthenticated(d.authenticated);
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[Auth] refreshAuthStatus failed:', e); }
   }, []);
 
   useEffect(() => { refreshAuthStatus(); }, [refreshAuthStatus]);

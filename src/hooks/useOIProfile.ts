@@ -151,6 +151,7 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
           return spRs in peOiMap ? { ...leg, oi: peOiMap[spRs] } : leg;
         }),
       };
+      requestDraw();
     });
     return unsub;
   }, [subscribe]);
@@ -208,7 +209,7 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
       const first = expiries.slice(0, 1);
       setSelExpiries(first);
       await reloadOIExpiries(first);
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[OI] loadOIChain failed:', e); }
   }
 
   async function reloadOIExpiries(expiries: string[]) {
@@ -218,24 +219,28 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     const peMap: Record<number, number> = {};
     const ceSymMap = new Map<number, string>();
     const peSymMap = new Map<number, string>();
-    for (const exp of expiries) {
+
+    const results = await Promise.all(expiries.map(async (exp) => {
       try {
         const res = await fetch(`/api/optionchain/${encodeURIComponent(sym)}?expiry=${encodeURIComponent(exp)}`);
-        const data = await res.json() as { chain?: { ce?: OiLeg[]; pe?: OiLeg[] } };
-        if (!data.chain) continue;
-        for (const ce of (data.chain.ce || [])) {
-          const sp = normalizeStrike(Number(ce.sp));
-          const oi = Number(ce.oi ?? ce.open_interest) || 0;
-          ceMap[sp] = (ceMap[sp] || 0) + oi;
-          if (ce.symbol && !ceSymMap.has(Number(ce.sp))) ceSymMap.set(Number(ce.sp), String(ce.symbol));
-        }
-        for (const pe of (data.chain.pe || [])) {
-          const sp = normalizeStrike(Number(pe.sp));
-          const oi = Number(pe.oi ?? pe.open_interest) || 0;
-          peMap[sp] = (peMap[sp] || 0) + oi;
-          if (pe.symbol && !peSymMap.has(Number(pe.sp))) peSymMap.set(Number(pe.sp), String(pe.symbol));
-        }
-      } catch { /* ignore */ }
+        return await res.json() as { chain?: { ce?: OiLeg[]; pe?: OiLeg[] } };
+      } catch (e) { console.warn('[OI] Expiry fetch failed:', exp, e); return null; }
+    }));
+
+    for (const data of results) {
+      if (!data?.chain) continue;
+      for (const ce of (data.chain.ce || [])) {
+        const sp = normalizeStrike(Number(ce.sp));
+        const oi = Number(ce.oi ?? ce.open_interest) || 0;
+        ceMap[sp] = (ceMap[sp] || 0) + oi;
+        if (ce.symbol && !ceSymMap.has(Number(ce.sp))) ceSymMap.set(Number(ce.sp), String(ce.symbol));
+      }
+      for (const pe of (data.chain.pe || [])) {
+        const sp = normalizeStrike(Number(pe.sp));
+        const oi = Number(pe.oi ?? pe.open_interest) || 0;
+        peMap[sp] = (peMap[sp] || 0) + oi;
+        if (pe.symbol && !peSymMap.has(Number(pe.sp))) peSymMap.set(Number(pe.sp), String(pe.symbol));
+      }
     }
     oiSymbolMapRef.current = { ce: ceSymMap, pe: peSymMap };
     const hasData = Object.values(ceMap).some(v => v > 0) || Object.values(peMap).some(v => v > 0);
@@ -258,8 +263,8 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     } else {
       unsubscribeOiWs();
     }
-    startOILoop();
-    requestAnimationFrame(drawOI);
+    startSnapshotTimer();
+    requestDraw();
   }
 
   function getChartDate(): Date {
@@ -328,7 +333,7 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
       oiHistoricalRef.current = map;
       oiHistFetchedRef.current = true;
       oiHistDateRef.current = chartDate.toISOString().slice(0, 10);
-      requestAnimationFrame(drawOI);
+      requestDraw();
     } catch (e) {
       console.error('[OI] Historical fetch failed:', e);
       oiHistFailedRef.current = true;
@@ -336,11 +341,11 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     finally { oiHistLoadingRef.current = false; }
   }
 
-  // ── OI Loop ──────────────────────────────────────────────────────────────
-  function startOILoop() {
+  // ── Snapshot timer (replaces the old 10fps OI loop) ──────────────────────
+  function startSnapshotTimer() {
     if (oiLoopRef.current) return;
-    const storeSnap = () => {
-      if (!oiChainRef.current) return;
+    function storeSnap() {
+      if (!oiChainRef.current || !oiEnabledRef.current) return;
       const now = Date.now();
       if (now - lastOiSnapTimeRef.current > 30000) {
         oiSnapshotsRef.current.set(now, { ce: [...oiChainRef.current.ce], pe: [...oiChainRef.current.pe] });
@@ -350,15 +355,13 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
           if (ts < cutoff) oiSnapshotsRef.current.delete(ts);
         }
       }
-    };
-    storeSnap();
-    function loop() {
-      if (!oiEnabledRef.current) { oiLoopRef.current = null; return; }
-      storeSnap();
-      drawOI();
-      oiLoopRef.current = requestAnimationFrame(() => setTimeout(loop, 100));
     }
-    oiLoopRef.current = requestAnimationFrame(loop);
+    storeSnap();
+    oiLoopRef.current = window.setInterval(storeSnap, 30000) as unknown as number;
+  }
+
+  function stopSnapshotTimer() {
+    if (oiLoopRef.current) { clearInterval(oiLoopRef.current); oiLoopRef.current = null; }
   }
 
   // ── Mouse handlers ──────────────────────────────────────────────────────
@@ -500,12 +503,14 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
       oiEnabledRef.current = false;
       setOiOn(false);
       setShowOiPopup(false);
+      stopSnapshotTimer();
       unsubscribeOiWs();
       drawOI();
     } else if (oiChainRef.current) {
       oiEnabledRef.current = true;
       setOiOn(true);
-      startOILoop();
+      startSnapshotTimer();
+      requestDraw();
     } else if (currentInstRef.current) {
       loadOIChain();
     }
@@ -523,6 +528,7 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
 
   function clearForInstrumentChange() {
     if (oiEnabledRef.current) { oiEnabledRef.current = false; setOiOn(false); }
+    stopSnapshotTimer();
     oiChainRef.current = null;
     oiHistoricalRef.current = new Map();
     oiHistFetchedRef.current = false;

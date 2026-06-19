@@ -111,7 +111,7 @@ function groupStatus(orders: PaperOrder[]): string {
 }
 
 // ─── Orders table ─────────────────────────────────────────────────────────────
-function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
+function OrdersTab({ uatAuth, onOpenStrategyChart }: { uatAuth: boolean; onOpenStrategyChart?: (basketGroupId: string, strategyName: string) => void }) {
   const [openOrders,   setOpenOrders]   = useState<PaperOrder[]>([]);
   const [closedOrders, setClosedOrders] = useState<PaperOrder[]>([]);
   const [subTab,       setSubTab]       = useState<'open' | 'closed'>('open');
@@ -148,7 +148,7 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
         const d = await doneRes.json() as PaperOrder[] | { orders?: PaperOrder[] };
         setClosedOrders(Array.isArray(d) ? d : (d.orders ?? []));
       }
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[Orders] fetchOrders failed:', e); }
   }, [uatAuth]);
 
   useEffect(() => {
@@ -167,7 +167,7 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
       await fetch('/paper/strategy/rename', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ basket_group_id: basketGroupId, name }) });
       fetchOrders();
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[Orders] commitRename failed:', e); }
   }, [editingName, fetchOrders]);
 
   async function cancelOrder(id: number) {
@@ -175,7 +175,7 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
     try {
       await fetch(`/paper/orders/${id}`, { method: 'DELETE' });
       await fetchOrders();
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[Orders] cancelOrder failed:', e); }
     finally { setCancelling(null); }
   }
 
@@ -319,6 +319,13 @@ function OrdersTab({ uatAuth }: { uatAuth: boolean }) {
                               className="w-3.5 h-3.5 rounded flex items-center justify-center text-[8px] font-semibold text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border border-white/30 transition-colors ml-1"
                               title="Rename strategy"
                             >R</button>
+                            {onOpenStrategyChart && (
+                              <button
+                                onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
+                                className="px-1.5 py-0.5 rounded text-[9px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
+                                title="Strategy P&L chart"
+                              >Chart</button>
+                            )}
                           </>
                         )}
                         <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.orders.length} legs)</span>
@@ -385,9 +392,10 @@ interface PositionsTabProps {
   uatAuth: boolean;
   onViewChart?: (inst: Instrument) => void;
   onExit?: (p: PaperPosition, side: 'BUY' | 'SELL') => void;
+  onOpenStrategyChart?: (basketGroupId: string, strategyName: string) => void;
 }
 
-function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
+function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: PositionsTabProps) {
   const [positions,       setPositions]       = useState<PaperPosition[]>([]);
   const [closedPositions, setClosedPositions] = useState<PaperPosition[]>([]);
   const [subTab,          setSubTab]          = useState<'open' | 'closed'>('open');
@@ -428,7 +436,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
         const d = await closedRes.json() as PaperPosition[];
         setClosedPositions(Array.isArray(d) ? d : []);
       }
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[Positions] fetch failed:', e); }
   }, [uatAuth]);
 
   const commitRename = useCallback(async (basketGroupId: string) => {
@@ -439,7 +447,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
       await fetch('/paper/strategy/rename', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ basket_group_id: basketGroupId, name }) });
       fetch_();
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[Positions] commitRename failed:', e); }
   }, [editingName, fetch_]);
 
   useEffect(() => {
@@ -529,7 +537,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
         }),
       });
       setTimeout(fetch_, 500);
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[Positions] exitDirect failed:', e); }
   }, [exiting, fetch_]);
 
   const exitAllInGroup = useCallback(async (gPositions: PaperPosition[]) => {
@@ -722,6 +730,13 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
                       <span className="inline-flex items-center gap-1.5">
                         <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">{isExp ? '▾' : '▸'}</span>
                         {g.strategy_name}
+                        {onOpenStrategyChart && (
+                          <button
+                            onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
+                            className="px-1.5 py-0.5 rounded text-[9px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
+                            title="Strategy P&L chart"
+                          >Chart</button>
+                        )}
                         <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.positions.length} legs)</span>
                       </span>
                     </td>
@@ -781,6 +796,13 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
                               className="w-3.5 h-3.5 rounded flex items-center justify-center text-[8px] font-semibold text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border border-white/30 transition-colors ml-1"
                               title="Rename strategy"
                             >R</button>
+                            {onOpenStrategyChart && (
+                              <button
+                                onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
+                                className="px-1.5 py-0.5 rounded text-[9px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
+                                title="Strategy P&L chart"
+                              >Chart</button>
+                            )}
                           </>
                         )}
                         <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.positions.length} legs)</span>
@@ -853,6 +875,13 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
                               className="w-3.5 h-3.5 rounded flex items-center justify-center text-[8px] font-semibold text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border border-white/30 transition-colors ml-1"
                               title="Rename strategy"
                             >R</button>
+                            {onOpenStrategyChart && (
+                              <button
+                                onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
+                                className="px-1.5 py-0.5 rounded text-[9px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
+                                title="Strategy P&L chart"
+                              >Chart</button>
+                            )}
                           </>
                         )}
                         <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.positions.length} legs)</span>
@@ -957,7 +986,7 @@ function HoldingsTab({ uatAuth }: { uatAuth: boolean }) {
       const d = await res.json() as { portfolio?: { holdings?: PaperHolding[] } } | PaperHolding[];
       if (Array.isArray(d)) setHoldings(d);
       else setHoldings(d.portfolio?.holdings ?? []);
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[Holdings] fetch failed:', e); }
   }, [uatAuth]);
 
   useEffect(() => {
@@ -1017,7 +1046,7 @@ function HoldingsTab({ uatAuth }: { uatAuth: boolean }) {
 }
 
 // ─── OrderTerminal ────────────────────────────────────────────────────────────
-export default function OrderTerminal() {
+export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyChart?: (basketGroupId: string, strategyName: string) => void }) {
   const { authenticated: uatAuth, refreshAuthStatus, openTicket } = usePaperTrading();
   const { state: wsState, setPaneView, setActivePane, loadInstrumentInActivePane } = useWorkspaceState();
   const [tab,        setTab]        = useState<'orders' | 'positions' | 'holdings'>('orders');
@@ -1025,27 +1054,32 @@ export default function OrderTerminal() {
   const [collapsed,  setCollapsed]  = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [preFullH,   setPreFullH]   = useState(DEFAULT_H);
-  const dragRef  = useRef<{ startY: number; startH: number } | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  // ── resize drag ──────────────────────────────────────────────────────────
+  // ── resize drag (direct DOM for smoothness, sync state on mouseup) ────
   function onHandleMouseDown(e: React.MouseEvent) {
     e.preventDefault();
-    dragRef.current = { startY: e.clientY, startH: height };
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup',   onMouseUp);
-  }
+    const startY = e.clientY;
+    const el = containerRef.current;
+    if (!el) return;
+    const startH = el.getBoundingClientRect().height;
+    el.style.transition = 'none';
 
-  function onMouseMove(e: MouseEvent) {
-    if (!dragRef.current) return;
-    const delta  = dragRef.current.startY - e.clientY;
-    const newH   = Math.max(MIN_H, dragRef.current.startH + delta);
-    setHeight(newH);
-  }
+    const onMove = (ev: MouseEvent) => {
+      const newH = Math.max(MIN_H, startH + (startY - ev.clientY));
+      el.style.height = `${newH}px`;
+    };
 
-  function onMouseUp() {
-    dragRef.current = null;
-    document.removeEventListener('mousemove', onMouseMove);
-    document.removeEventListener('mouseup',   onMouseUp);
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      const final = parseInt(el.style.height, 10);
+      el.style.transition = '';
+      if (!isNaN(final)) setHeight(final);
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
   }
 
   function toggleCollapse() {
@@ -1113,6 +1147,7 @@ export default function OrderTerminal() {
 
   return (
     <div
+      ref={containerRef}
       className="flex flex-col bg-[var(--bg-primary)] border-t border-[var(--border)] shrink-0 transition-[height] duration-200"
       style={{ height: effectiveH }}
     >
@@ -1120,7 +1155,7 @@ export default function OrderTerminal() {
       {!collapsed && (
         <div
           onMouseDown={onHandleMouseDown}
-          className="h-1 bg-[var(--border)] hover:bg-[var(--accent)] cursor-row-resize shrink-0 transition-colors"
+          className="h-1.5 bg-[var(--border)] hover:bg-[var(--accent)] cursor-row-resize shrink-0 transition-colors"
         />
       )}
 
@@ -1168,8 +1203,8 @@ export default function OrderTerminal() {
           </div>
         ) : (
           <>
-            {tab === 'orders'    && <OrdersTab    uatAuth={uatAuth} />}
-            {tab === 'positions' && <PositionsTab uatAuth={uatAuth} onViewChart={handleViewChart} onExit={handleExit} />}
+            {tab === 'orders'    && <OrdersTab    uatAuth={uatAuth} onOpenStrategyChart={onOpenStrategyChart} />}
+            {tab === 'positions' && <PositionsTab uatAuth={uatAuth} onViewChart={handleViewChart} onExit={handleExit} onOpenStrategyChart={onOpenStrategyChart} />}
             {tab === 'holdings'  && <HoldingsTab  uatAuth={uatAuth} />}
           </>
         )}

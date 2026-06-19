@@ -54,7 +54,7 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
               setPrices(prev => ({ ...prev, [item.id]: { ltp, chg: leg.ltpchg ?? undefined } }));
             }
           }
-        } catch { /* ignore */ }
+        } catch (e) { console.warn('[Watchlist] fetchPrices failed:', e); }
       }
     }
 

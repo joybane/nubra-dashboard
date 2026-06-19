@@ -135,7 +135,7 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
         if (data.chain.cp) setSpot(data.chain.cp > 10000 ? data.chain.cp / 100 : data.chain.cp);
         setChainRows(buildChainRows(data.chain.ce || [], data.chain.pe || []));
       }
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[BasketChain] loadChain failed:', e); }
     setLoading(false);
   }
 
@@ -155,7 +155,7 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
         if (data.chain.cp) setSpot(data.chain.cp > 10000 ? data.chain.cp / 100 : data.chain.cp);
         setChainRows(buildChainRows(data.chain.ce || [], data.chain.pe || []));
       }
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[BasketChain] loadChainForSymbol failed:', e); }
     setLoading(false);
   }
 

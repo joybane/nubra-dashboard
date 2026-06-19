@@ -394,7 +394,7 @@ export default function BasketOrder({ instrument }: Props) {
       const d = await res.json() as { orders?: Array<{ order_id: number }>; basket_group_id?: string; error?: string };
       if (!res.ok || d.error) throw new Error(d.error || 'Basket placement failed');
       persistence.saveBasket(finalName, sym, chain.expiry, legs, d.basket_group_id);
-      setStrategyName(finalName);
+      setStrategyName('Custom Strategy');
       setPlaced({ ok: true, msg: `${d.orders?.length ?? legs.length} order(s) placed & saved as "${finalName}"` });
       setTimeout(() => setPlaced(null), 5000);
     } catch (e) { setPlaced({ ok: false, msg: (e as Error).message }); }

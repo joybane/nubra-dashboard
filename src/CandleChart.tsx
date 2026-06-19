@@ -207,7 +207,7 @@ export default function CandleChart({ instrument, theme }: Props) {
       },
       handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
       handleScale:  { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
-      kineticScroll: { mouse: true, touch: true },
+      kineticScroll: { mouse: false, touch: false },
     });
     chartRef.current = chart;
 
@@ -335,7 +335,7 @@ export default function CandleChart({ instrument, theme }: Props) {
   function applyBucket(b: Record<string,string>) {
     try {
       const tsStr = (b.bucket_timestamp && b.bucket_timestamp !== '0') ? b.bucket_timestamp : b.timestamp;
-      if (!tsStr || tsStr === '0') return;
+      if (!tsStr || tsStr === '0' || !/^\d+$/.test(tsStr)) return;
       const utcSec  = Number(BigInt(tsStr) / 1_000_000_000n);
       const barTime = snapToCandle(utcSec, intervalRef.current);
       const candle  = { time: barTime, open: Number(b.open)/100, high: Number(b.high)/100, low: Number(b.low)/100, close: Number(b.close)/100 };
@@ -345,7 +345,7 @@ export default function CandleChart({ instrument, theme }: Props) {
       updatePriceDisplay(candle.close, dayOpenRef.current || candle.open);
       setOhlc({ o: candle.open, h: candle.high, l: candle.low, c: candle.close, vol: Number(b.cumulative_volume) || undefined });
       updateCountdownPosition();
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[Chart] applyBucket error:', e); }
   }
 
   // ── Load instrument ───────────────────────────────────────────────────────
@@ -404,13 +404,7 @@ export default function CandleChart({ instrument, theme }: Props) {
     if (!instrument) return;
     loadInstrument(instrument, interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instrument]);
-
-  useEffect(() => {
-    if (!instrument) return;
-    loadInstrument(instrument, interval);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [interval]);
+  }, [instrument, interval]);
 
   useEffect(() => {
     const restore = () => {
@@ -435,14 +429,16 @@ export default function CandleChart({ instrument, theme }: Props) {
       const start = new Date(end.getTime() - chunkDays(intervalRef.current) * 86400000);
       const { bars, volBars } = await fetchRange(currentInstRef.current, intervalRef.current, start, end);
       if (bars.length) {
-        allBarsRef.current    = [...bars, ...allBarsRef.current];
-        allVolBarsRef.current = [...volBars, ...allVolBarsRef.current];
+        bars.push(...allBarsRef.current);
+        allBarsRef.current = bars;
+        volBars.push(...allVolBarsRef.current);
+        allVolBarsRef.current = volBars;
         earliestRef.current   = start;
         dayOpenRef.current    = allBarsRef.current[0].open;
         candleRef.current?.setData(allBarsRef.current as Parameters<typeof candleRef.current.setData>[0]);
         volRef.current?.setData(allVolBarsRef.current as Parameters<typeof volRef.current.setData>[0]);
       }
-    } catch { /* ignore */ }
+    } catch (e) { console.warn('[Chart] loadMoreHistory failed:', e); }
     isLoadingRef.current = false;
     setLoadMore(false);
   }

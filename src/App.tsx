@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { WsProvider } from './hooks/useWsContext';
 import { PaperTradingProvider } from './hooks/usePaperTrading';
 import { WatchlistProvider } from './hooks/useWatchlistContext';
@@ -8,8 +8,14 @@ import LoginOverlay from './components/LoginOverlay';
 import OrderTerminal from './components/OrderTerminal';
 import OrderTicket from './components/OrderTicket';
 import WorkspaceRoot from './workspace/WorkspaceRoot';
+import StrategyAnalysisView from './components/StrategyAnalysisView';
 import { WorkspaceProvider } from './workspace/WorkspaceProvider';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
+
+export interface StrategyChartTarget {
+  basketGroupId: string;
+  strategyName: string;
+}
 
 type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
 
@@ -18,8 +24,13 @@ function AppInner() {
     return (localStorage.getItem('nubra-theme') as 'dark' | 'light') || 'dark';
   });
   const [auth, setAuth] = useState<AuthStatus>('unknown');
+  const [strategyChart, setStrategyChart] = useState<StrategyChartTarget | null>(null);
 
   const { loadInstrumentInActivePane } = useWorkspaceState();
+
+  const openStrategyChart = useCallback((basketGroupId: string, strategyName: string) => {
+    setStrategyChart({ basketGroupId, strategyName });
+  }, []);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -41,6 +52,22 @@ function AppInner() {
     );
   }
 
+  if (strategyChart) {
+    return (
+      <div className="h-screen flex flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
+        <StrategyAnalysisView
+          basketGroupId={strategyChart.basketGroupId}
+          strategyName={strategyChart.strategyName}
+          theme={theme}
+          onBack={() => setStrategyChart(null)}
+        />
+        {auth === 'unauthenticated' && (
+          <LoginOverlay onAuthenticated={() => setAuth('authenticated')} />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       <Navbar
@@ -53,7 +80,7 @@ function AppInner() {
           <div className="flex-1 min-h-0 overflow-hidden">
             <WorkspaceRoot theme={theme} />
           </div>
-          <OrderTerminal />
+          <OrderTerminal onOpenStrategyChart={openStrategyChart} />
         </div>
       </main>
       <OrderTicket />

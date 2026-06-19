@@ -47,6 +47,8 @@ export interface DrawOIParams {
 const PRICE_SCALE_W = 72;
 const BAR_H = 20;
 
+let _lastDrawMaxVal = 1;
+
 function getHistOI(
   historicalMap: Map<string, { ts: number; v: number }[]>,
   name: string,
@@ -86,6 +88,11 @@ export function drawOI(p: DrawOIParams): void {
   const maxBarW = (w - PRICE_SCALE_W) * 0.35 * p.widthScale;
 
   if (p.mode === 'oi_change' && p.histFetched) {
+    const ceOiBysp = new Map<number, number>();
+    for (const c of p.oiChain.ce) ceOiBysp.set(Number(c.sp), Number(c.oi) || 0);
+    const peOiBysp = new Map<number, number>();
+    for (const pe of p.oiChain.pe) peOiBysp.set(Number(pe.sp), Number(pe.oi) || 0);
+
     const deltas: Record<number, { ceDelta: number; peDelta: number }> = {};
     const seen = new Set<number>();
     for (const ce of p.oiChain.ce) {
@@ -101,18 +108,24 @@ export function drawOI(p: DrawOIParams): void {
       const ceEnd = p.toMs !== null
         ? getHistOI(p.historicalMap, ceName, p.toMs)
         : p.isToday
-          ? (Number(p.oiChain.ce.find(c => Number(c.sp) === sp)?.oi) || getHistOI(p.historicalMap, ceName, null))
+          ? (ceOiBysp.get(sp) || getHistOI(p.historicalMap, ceName, null))
           : getHistOI(p.historicalMap, ceName, null);
       const peEnd = p.toMs !== null
         ? getHistOI(p.historicalMap, peName, p.toMs)
         : p.isToday
-          ? (Number(p.oiChain.pe.find(pe => Number(pe.sp) === sp)?.oi) || getHistOI(p.historicalMap, peName, null))
+          ? (peOiBysp.get(sp) || getHistOI(p.historicalMap, peName, null))
           : getHistOI(p.historicalMap, peName, null);
       deltas[sp] = { ceDelta: ceEnd - ceBase, peDelta: peEnd - peBase };
     }
     Object.assign(p.deltasOut, deltas);
 
-    const maxAbs = Math.max(...Object.values(deltas).flatMap(d => [Math.abs(d.ceDelta), Math.abs(d.peDelta)]), 1);
+    let maxAbs = 1;
+    for (const d of Object.values(deltas)) {
+      const ca = Math.abs(d.ceDelta), pa = Math.abs(d.peDelta);
+      if (ca > maxAbs) maxAbs = ca;
+      if (pa > maxAbs) maxAbs = pa;
+    }
+    _lastDrawMaxVal = maxAbs;
     const right = w - PRICE_SCALE_W;
 
     for (const [spStr, { ceDelta, peDelta }] of Object.entries(deltas)) {
@@ -149,8 +162,12 @@ export function drawOI(p: DrawOIParams): void {
   }
 
   const map = buildStrikeMap(ceList, peList);
-  const allOi = Object.values(map).flatMap(v => [v.ceOi, v.peOi]).filter(v => v > 0).sort((a, b) => b - a);
-  const maxOi = allOi[0] || 1;
+  let maxOi = 1;
+  for (const v of Object.values(map)) {
+    if (v.ceOi > maxOi) maxOi = v.ceOi;
+    if (v.peOi > maxOi) maxOi = v.peOi;
+  }
+  _lastDrawMaxVal = maxOi;
   const right = w - PRICE_SCALE_W;
 
   for (const [strikeStr, { ceOi, peOi }] of Object.entries(map)) {
@@ -218,8 +235,7 @@ export function hitTestOIBar(p: HoverHitParams): { strike: number; ceOi: number;
   if (yStrike == null) return null;
 
   const right = p.containerW - PRICE_SCALE_W;
-  const allVals = Object.values(strikeMap).flatMap(v => [Math.abs(v.ceOi), Math.abs(v.peOi)]).filter(v => v > 0).sort((a, b) => b - a);
-  const maxVal = allVals[0] || 1;
+  const maxVal = _lastDrawMaxVal;
   const bwCe = Math.max(3, Math.min((Math.abs(d.ceOi) / maxVal) * maxBarW, maxBarW));
   const bwPe = Math.max(3, Math.min((Math.abs(d.peOi) / maxVal) * maxBarW, maxBarW));
   const overCe = d.ceOi !== 0 && p.y >= yStrike - BAR_H / 2 && p.y <= yStrike && p.x >= right - bwCe;

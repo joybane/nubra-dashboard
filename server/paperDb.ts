@@ -152,7 +152,8 @@ export function initDb(): Database.Database {
 
 // ── Orders ──────────────────────────────────────────────────────────────────
 
-const _insertOrder = () => db.prepare(`
+let _stmtInsertOrder: ReturnType<typeof db.prepare> | null = null;
+const _insertOrder = () => _stmtInsertOrder ??= db.prepare(`
   INSERT INTO orders (order_id, ref_id, nubra_name, display_name, order_type, order_side,
     order_price, trigger_price, order_qty, filled_qty, avg_filled_price, order_status,
     order_time, filled_time, order_delivery_type, validity_type, tag, sl_triggered,
@@ -163,7 +164,8 @@ const _insertOrder = () => db.prepare(`
     @basket_group_id, @strategy_name)
 `);
 
-const _updateOrder = () => db.prepare(`
+let _stmtUpdateOrder: ReturnType<typeof db.prepare> | null = null;
+const _updateOrder = () => _stmtUpdateOrder ??= db.prepare(`
   UPDATE orders SET filled_qty=@filled_qty, avg_filled_price=@avg_filled_price,
     order_status=@order_status, filled_time=@filled_time, sl_triggered=@sl_triggered
   WHERE order_id=@order_id

@@ -235,6 +235,9 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instrument]);
 
+  const wsActiveRef = useRef(false);
+  const wsActiveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // WS subscription for live updates
   useEffect(() => {
     const unsub = subscribe('option_chain', (msg: WsMessage) => {
@@ -243,6 +246,9 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       const asset = (data.asset || '').toUpperCase();
       const exp   = data.expiry || '';
       if (asset !== currentSymRef.current || exp !== currentExpRef.current) return;
+      wsActiveRef.current = true;
+      if (wsActiveTimerRef.current) clearTimeout(wsActiveTimerRef.current);
+      wsActiveTimerRef.current = setTimeout(() => { wsActiveRef.current = false; }, 10000);
       updateCells(data);
     });
     return unsub;
@@ -251,12 +257,12 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
   function startPoll(sym: string, exch: string, exp: string) {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = window.setInterval(async () => {
-      if (!sym || !exp) return;
+      if (!sym || !exp || wsActiveRef.current) return;
       try {
         const data = await fetchChainApi(sym, exch, exp);
         if (data.chain) updateCells(data.chain);
-      } catch { /* ignore */ }
-    }, 3000);
+      } catch (e) { console.warn('[OC] Poll failed:', e); }
+    }, 5000);
   }
 
   function stopPoll() {
@@ -427,7 +433,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
         });
         setSuggestions(items.slice(0, 8));
         setShowSug(true);
-      } catch { /* ignore */ }
+      } catch (e) { console.warn('[OC] Search failed:', e); }
     }, 200);
   }
 
@@ -456,7 +462,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
         return sp === strike || sp === strike * 100 || Math.round(sp / 100) === strike;
       });
       if (match) { onNavigateToChart(match); return; }
-    } catch { /* fallback */ }
+    } catch (e) { console.warn('[OC] navigateToChart lookup failed:', e); }
     const exp  = currentExpRef.current;
     const yr   = exp.slice(2, 4);
     const mo   = exp.length >= 6 ? MONTHS[parseInt(exp.slice(4, 6)) - 1] : '';
