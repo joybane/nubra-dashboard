@@ -336,10 +336,31 @@ fastify.get<{ Params: { instrument: string }; Querystring: { exchange?: string; 
       const params: Record<string, string> = { exchange };
       if (expiry) params.expiry = expiry;
       const data = await nubraGet(`/optionchains/${instrument}`, params);
-      // Debug: log response shape to help diagnose field-name issues
       const chain = (data.chain || data) as Record<string, unknown>;
-      const ce0 = Array.isArray(chain.ce) ? (chain.ce as unknown[])[0] : undefined;
-      console.log(`[OC] ${instrument} keys=${Object.keys(chain).join(',')} exps=${(chain.all_expiries as string[]|undefined)?.slice(0,3).join(',')} ce[0]=${JSON.stringify(ce0)?.slice(0,120)}`);
+
+      // Enrich legs with stock_name from refdata so frontend can call historical timeseries
+      try {
+        const refdata = await getRefdata(exchange);
+        const refById = new Map<number, string>();
+        for (const r of refdata) {
+          if (r.ref_id != null && r.stock_name) refById.set(Number(r.ref_id), String(r.stock_name));
+        }
+        for (const side of ['ce', 'pe'] as const) {
+          const legs = chain[side];
+          if (!Array.isArray(legs)) continue;
+          for (const leg of legs as Record<string, unknown>[]) {
+            const rid = Number(leg.ref_id);
+            if (rid && refById.has(rid)) leg.symbol = refById.get(rid);
+          }
+        }
+        let enriched = 0;
+        for (const side of ['ce', 'pe'] as const) {
+          const legs = chain[side];
+          if (Array.isArray(legs)) enriched += (legs as Record<string, unknown>[]).filter(l => l.symbol).length;
+        }
+        console.log(`[OC] Enriched ${enriched} legs with symbol from refdata (${refById.size} ref entries)`);
+      } catch (e) { console.warn('[OC] refdata enrichment failed:', e); }
+
       return reply.send(data);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -652,12 +673,16 @@ class SimBroker {
     }
   }
 
-  onLtp(refId: number, ltpPaise: number): void {
-    if (ltpPaise <= 0) return;
+  onLtp(refId: number, ltpPaise: number): { ref_id: number; ltp: number }[] {
+    if (ltpPaise <= 0) return [];
     const prev = this.ticks.get(refId);
     this.ticks.set(refId, ltpPaise);
+    const changed: { ref_id: number; ltp: number }[] = [];
     for (const pos of this.positions.values()) {
       if (pos.ref_id !== refId) continue;
+      if (pos.qty !== 0 && pos.last_traded_price !== ltpPaise) {
+        changed.push({ ref_id: pos.ref_id, ltp: ltpPaise });
+      }
       pos.last_traded_price = ltpPaise;
       if (pos.qty !== 0 && (++this.pnlTickCounter % 5 === 0)) {
         const unrealized = (ltpPaise - pos.avg_price) * pos.qty;
@@ -670,14 +695,16 @@ class SimBroker {
       }
     }
     if (prev !== ltpPaise) this.checkFills(refId, ltpPaise);
+    return changed;
   }
 
   // Called for index / OHLCV ticks (identified by name string)
-  onNamedLtp(rawName: string, ltpPaise: number): void {
-    if (ltpPaise <= 0) return;
+  onNamedLtp(rawName: string, ltpPaise: number): { ref_id: number; ltp: number }[] {
+    if (ltpPaise <= 0) return [];
     const norm  = rawName.toLowerCase().replace(/^(nse|bse)_/, '');
     const refId = this.nameMap.get(norm) ?? this.nameMap.get(rawName.toLowerCase());
-    if (refId !== undefined) this.onLtp(refId, ltpPaise);
+    if (refId !== undefined) return this.onLtp(refId, ltpPaise);
+    return [];
   }
 
   private checkFills(refId: number, ltp: number): void {
@@ -962,7 +989,26 @@ async function bootstrapPositionSubs(): Promise<void> {
 }
 
 // Route decoded PROD WebSocket ticks into SimBroker for fill evaluation.
+// Broadcasts position LTP changes to browser clients for tick-by-tick P&L.
 let _ocFieldLogDone = false;
+let _posLtpBuffer: { ref_id: number; ltp: number }[] = [];
+let _posLtpTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushPosLtp(): void {
+  _posLtpTimer = null;
+  if (_posLtpBuffer.length === 0) return;
+  const deduped = new Map<number, number>();
+  for (const u of _posLtpBuffer) deduped.set(u.ref_id, u.ltp);
+  _posLtpBuffer = [];
+  broadcast({ type: 'position_ltp', data: Array.from(deduped, ([ref_id, ltp]) => ({ ref_id, ltp })) });
+}
+
+function queuePosLtp(changes: { ref_id: number; ltp: number }[]): void {
+  if (changes.length === 0) return;
+  _posLtpBuffer.push(...changes);
+  if (!_posLtpTimer) _posLtpTimer = setTimeout(flushPosLtp, 200);
+}
+
 function routeTickToSim(decoded: { type: string; data: unknown }): void {
   if (decoded.type === 'option_chain') {
     const d = decoded.data as { ce?: unknown[]; pe?: unknown[] };
@@ -977,7 +1023,10 @@ function routeTickToSim(decoded: { type: string; data: unknown }): void {
       const i = item as Record<string, unknown>;
       const refId = i.refId ?? i.ref_id;
       const ltp   = i.ltp;
-      if (refId && ltp) simBroker.onLtp(Number(refId), Number(ltp));
+      if (refId && ltp) {
+        const changes = simBroker.onLtp(Number(refId), Number(ltp));
+        queuePosLtp(changes);
+      }
     }
   } else if (decoded.type === 'index_tick') {
     const d = decoded.data as { indexes?: unknown[]; instruments?: unknown[] };
@@ -985,7 +1034,7 @@ function routeTickToSim(decoded: { type: string; data: unknown }): void {
       const t = tick as Record<string, unknown>;
       const name = t.indexname as string | undefined;
       const val  = t.indexValue ?? t.index_value;
-      if (name && val) simBroker.onNamedLtp(name, Number(val));
+      if (name && val) queuePosLtp(simBroker.onNamedLtp(name, Number(val)));
     }
   } else if (decoded.type === 'ohlcv') {
     const d = decoded.data as { indexes?: unknown[]; instruments?: unknown[] };
@@ -993,7 +1042,7 @@ function routeTickToSim(decoded: { type: string; data: unknown }): void {
       const bucket = b as Record<string, unknown>;
       const name  = bucket.indexname as string | undefined;
       const close = bucket.close;
-      if (name && close) simBroker.onNamedLtp(name, Number(close));
+      if (name && close) queuePosLtp(simBroker.onNamedLtp(name, Number(close)));
     }
   }
 }

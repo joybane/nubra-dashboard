@@ -354,7 +354,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
   }, [uatAuth, fetch_]);
 
   useEffect(() => {
-    const unsub = subscribe('option_chain', (msg: WsMessage) => {
+    const unsub1 = subscribe('option_chain', (msg: WsMessage) => {
       if (msg.type !== 'option_chain') return;
       const data = msg.data as OptionChainData;
       const ltpMap = new Map<number, number>();
@@ -378,7 +378,28 @@ function PositionsTab({ uatAuth, onViewChart, onExit }: PositionsTabProps) {
         return changed ? next : prev;
       });
     });
-    return unsub;
+
+    const unsub2 = subscribe('position_ltp', (msg: WsMessage) => {
+      if (msg.type !== 'position_ltp') return;
+      const updates = msg.data as { ref_id: number; ltp: number }[];
+      if (!updates || updates.length === 0) return;
+      const ltpMap = new Map<number, number>();
+      for (const u of updates) ltpMap.set(u.ref_id, u.ltp);
+      setPositions(prev => {
+        let changed = false;
+        const next = prev.map(p => {
+          const newLtp = ltpMap.get(p.ref_id);
+          if (newLtp != null && newLtp !== p.last_traded_price) {
+            changed = true;
+            return { ...p, last_traded_price: newLtp };
+          }
+          return p;
+        });
+        return changed ? next : prev;
+      });
+    });
+
+    return () => { unsub1(); unsub2(); };
   }, [subscribe]);
 
   const exitDirect = useCallback(async (p: PaperPosition) => {

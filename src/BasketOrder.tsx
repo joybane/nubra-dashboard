@@ -142,10 +142,10 @@ export default function BasketOrder({ instrument }: Props) {
     return unsub;
   }, [onLegAdded]);
 
-  // WS leg LTP updates
+  // WS leg LTP updates — option chain (primary) + position_ltp (secondary for traded legs)
   useEffect(() => {
     if (!sym) return;
-    const unsub = subscribe('option_chain', (msg) => {
+    const unsub1 = subscribe('option_chain', (msg) => {
       const d = msg.data as Record<string, unknown> | undefined;
       if (!d || String(d.asset || '').toUpperCase() !== sym.toUpperCase()) return;
       const msgExpiry = String(d.expiry || '');
@@ -175,7 +175,26 @@ export default function BasketOrder({ instrument }: Props) {
           vega: (leg.optionType === 'CE' ? u.ceVega : u.peVega) ?? leg.vega };
       }));
     });
-    return unsub;
+
+    const unsub2 = subscribe('position_ltp', (msg) => {
+      if (msg.type !== 'position_ltp') return;
+      const updates = msg.data as { ref_id: number; ltp: number }[];
+      if (!updates || updates.length === 0) return;
+      const ltpMap = new Map<number, number>();
+      for (const u of updates) ltpMap.set(u.ref_id, u.ltp / 100);
+      setLegs(prev => {
+        let changed = false;
+        const next = prev.map(leg => {
+          if (!leg.refId) return leg;
+          const newLtp = ltpMap.get(leg.refId);
+          if (newLtp != null && newLtp !== leg.ltp) { changed = true; return { ...leg, ltp: newLtp }; }
+          return leg;
+        });
+        return changed ? next : prev;
+      });
+    });
+
+    return () => { unsub1(); unsub2(); };
   }, [subscribe, sym, chain.expiry]);
 
   // ── Leg CRUD ───────────────────────────────────────────────────────────────

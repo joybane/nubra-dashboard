@@ -172,7 +172,8 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sym]);
 
-  // WS subscription
+  // WS subscription — stabilize legExpiries dependency to avoid churn on every LTP tick
+  const legExpKey = JSON.stringify(legExpiries);
   useEffect(() => {
     if (!sym) return;
     const allExpiries = new Set<string>();
@@ -180,7 +181,8 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
     for (const e of legExpiries) allExpiries.add(e);
     for (const exp of allExpiries) subscribeOC(sym, exp, exch);
     return () => { for (const exp of allExpiries) unsubscribeOC(sym, exp, exch); };
-  }, [sym, expiry, exch, legExpiries, subscribeOC, unsubscribeOC]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sym, expiry, exch, legExpKey, subscribeOC, unsubscribeOC]);
 
   // WS live updates
   useEffect(() => {

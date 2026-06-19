@@ -41,6 +41,7 @@ export interface DrawOIParams {
   baseline: OiSnap | null;
   toSnap: OiSnap | null;
   deltasOut: Record<number, { ceDelta: number; peDelta: number }>;
+  isToday: boolean;
 }
 
 const PRICE_SCALE_W = 72;
@@ -59,11 +60,11 @@ function getHistOI(
   return best?.v ?? 0;
 }
 
-function timeToMs(hhmm: string): number {
-  const [h, m] = hhmm.split(':').map(Number);
-  const d = new Date();
-  d.setHours(h, m, 0, 0);
-  return d.getTime();
+function firstHistTs(historicalMap: Map<string, { ts: number; v: number }[]>): number | null {
+  for (const series of historicalMap.values()) {
+    if (series.length) return series[0].ts / 1_000_000;
+  }
+  return null;
 }
 
 export function drawOI(p: DrawOIParams): void {
@@ -94,14 +95,19 @@ export function drawOI(p: DrawOIParams): void {
       const ceName = p.symbolMap.ce.get(sp) || '';
       const peName = p.symbolMap.pe.get(sp) || '';
       if (!ceName && !peName) continue;
-      const ceBase = getHistOI(p.historicalMap, ceName, p.fromMs ?? timeToMs('09:15'));
-      const peBase = getHistOI(p.historicalMap, peName, p.fromMs ?? timeToMs('09:15'));
+      const defaultFrom = p.fromMs ?? firstHistTs(p.historicalMap);
+      const ceBase = getHistOI(p.historicalMap, ceName, defaultFrom);
+      const peBase = getHistOI(p.historicalMap, peName, defaultFrom);
       const ceEnd = p.toMs !== null
         ? getHistOI(p.historicalMap, ceName, p.toMs)
-        : (Number(p.oiChain.ce.find(c => Number(c.sp) === sp)?.oi) || getHistOI(p.historicalMap, ceName, null));
+        : p.isToday
+          ? (Number(p.oiChain.ce.find(c => Number(c.sp) === sp)?.oi) || getHistOI(p.historicalMap, ceName, null))
+          : getHistOI(p.historicalMap, ceName, null);
       const peEnd = p.toMs !== null
         ? getHistOI(p.historicalMap, peName, p.toMs)
-        : (Number(p.oiChain.pe.find(pe => Number(pe.sp) === sp)?.oi) || getHistOI(p.historicalMap, peName, null));
+        : p.isToday
+          ? (Number(p.oiChain.pe.find(pe => Number(pe.sp) === sp)?.oi) || getHistOI(p.historicalMap, peName, null))
+          : getHistOI(p.historicalMap, peName, null);
       deltas[sp] = { ceDelta: ceEnd - ceBase, peDelta: peEnd - peBase };
     }
     Object.assign(p.deltasOut, deltas);

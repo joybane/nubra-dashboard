@@ -23,6 +23,122 @@ import {
 const INTERVALS = ['1m','2m','3m','5m','10m','15m','30m','1h','1d','1w','1mt'] as const;
 type Interval = typeof INTERVALS[number];
 
+const MARKET_OPEN = 9 * 60 + 15;  // 9:15 in minutes
+const MARKET_CLOSE = 15 * 60 + 30; // 15:30 in minutes
+const TOTAL_MINUTES = MARKET_CLOSE - MARKET_OPEN; // 375
+
+function minToLabel(min: number): string {
+  const t = min + MARKET_OPEN;
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+}
+
+function timeStrToMin(t: string): number {
+  if (!t) return 0;
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m - MARKET_OPEN;
+}
+
+function nowMin(): number {
+  const n = new Date();
+  return Math.min(TOTAL_MINUTES, Math.max(0, n.getHours() * 60 + n.getMinutes() - MARKET_OPEN));
+}
+
+function OiTimeSlider({ fromTime, toTime, onChange, onReset, isChangeMode }: {
+  fromTime: string;
+  toTime: string;
+  onChange: (fromMin: number, toMin: number, sliderMax: number) => void;
+  onReset: () => void;
+  isChangeMode: boolean;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const draggingRef = useRef<'from' | 'to' | null>(null);
+  const fromRef = useRef(0);
+  const toRef = useRef(0);
+  const max = nowMin();
+  const fromVal = isChangeMode ? timeStrToMin(fromTime) : 0;
+  const toVal = isChangeMode ? Math.min(timeStrToMin(toTime), max) : max;
+  fromRef.current = fromVal;
+  toRef.current = toVal;
+
+  const posToMin = useCallback((clientX: number) => {
+    if (!trackRef.current) return 0;
+    const rect = trackRef.current.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return Math.round(pct * max);
+  }, [max]);
+
+  const onMove = useCallback((e: React.PointerEvent) => {
+    if (!draggingRef.current) return;
+    const min = posToMin(e.clientX);
+    if (draggingRef.current === 'from') {
+      const clamped = Math.min(min, toRef.current - 1);
+      fromRef.current = clamped;
+      onChange(clamped, toRef.current, max);
+    } else {
+      const clamped = Math.max(min, fromRef.current + 1);
+      toRef.current = clamped;
+      onChange(fromRef.current, clamped, max);
+    }
+  }, [posToMin, onChange]);
+
+  const onUp = useCallback((e: React.PointerEvent) => {
+    draggingRef.current = null;
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+  }, []);
+
+  const onDown = useCallback((handle: 'from' | 'to') => (e: React.PointerEvent) => {
+    draggingRef.current = handle;
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  }, []);
+
+  const leftPct = max > 0 ? (fromVal / max) * 100 : 0;
+  const rightPct = max > 0 ? (toVal / max) * 100 : 100;
+
+  return (
+    <div className="absolute top-2 right-[80px] z-10 pointer-events-auto">
+      <div className="bg-[var(--bg-secondary)]/90 backdrop-blur-sm border border-[var(--border)] rounded-lg px-3 py-1.5 min-w-[280px]">
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[10px] text-[var(--text-muted)]">
+            {isChangeMode ? `${minToLabel(fromVal)} → ${minToLabel(toVal)}` : 'OI Time Range'}
+          </span>
+          {isChangeMode && (
+            <button onClick={onReset} className="text-[10px] text-[var(--text-muted)] hover:text-[var(--red)] ml-2" title="Reset">R</button>
+          )}
+        </div>
+        <div ref={trackRef} className="relative h-[14px] cursor-pointer select-none touch-none">
+          {/* Track background */}
+          <div className="absolute top-[5px] left-0 right-0 h-[4px] rounded-full bg-[var(--border)]" />
+          {/* Active range */}
+          <div
+            className="absolute top-[5px] h-[4px] rounded-full bg-[var(--accent)]"
+            style={{ left: `${leftPct}%`, width: `${rightPct - leftPct}%` }}
+          />
+          {/* From handle */}
+          <div
+            className="absolute top-0 w-[14px] h-[14px] rounded-full bg-[var(--accent)] border-2 border-white shadow cursor-grab active:cursor-grabbing"
+            style={{ left: `calc(${leftPct}% - 7px)` }}
+            onPointerDown={onDown('from')}
+            onPointerMove={onMove}
+            onPointerUp={onUp}
+          />
+          {/* To handle */}
+          <div
+            className="absolute top-0 w-[14px] h-[14px] rounded-full bg-[var(--accent)] border-2 border-white shadow cursor-grab active:cursor-grabbing"
+            style={{ left: `calc(${rightPct}% - 7px)` }}
+            onPointerDown={onDown('to')}
+            onPointerMove={onMove}
+            onPointerUp={onUp}
+          />
+        </div>
+        <div className="flex justify-between text-[9px] text-[var(--text-muted)] mt-0.5">
+          <span>9:15</span>
+          <span>{minToLabel(max)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 interface Props {
   instrument: Instrument | null;
   theme: 'dark' | 'light';
@@ -59,7 +175,7 @@ export default function CandleChart({ instrument, theme }: Props) {
   const intervalRef = useRef(interval);
   intervalRef.current = interval;
 
-  const oi = useOIProfile({ containerRef, canvasRef, candleRef, currentInstRef });
+  const oi = useOIProfile({ containerRef, canvasRef, candleRef, currentInstRef, allBarsRef });
 
   // ── Chart initialization ──────────────────────────────────────────────────
   useEffect(() => {
@@ -324,6 +440,13 @@ export default function CandleChart({ instrument, theme }: Props) {
     setPriceDisplay({ price, diff, pct, up });
   }
 
+  function resetZoom() {
+    if (!chartRef.current || !allBarsRef.current.length) return;
+    const len = allBarsRef.current.length;
+    chartRef.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 200), to: len + 5 });
+    candleRef.current?.priceScale().applyOptions({ autoScale: true });
+  }
+
   // ── Toolbar ───────────────────────────────────────────────────────────────
   const sym = instrument ? getSymbol(instrument) : '—';
 
@@ -419,21 +542,6 @@ export default function CandleChart({ instrument, theme }: Props) {
                 <button onClick={() => oi.setShowOiPopup(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-lg leading-none">×</button>
               </div>
 
-              <div className="flex border-b border-[var(--border)]">
-                {(['oi', 'oi_change'] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    onClick={() => {
-                      oi.setOiMode(mode);
-                      if (mode === 'oi_change') oi.fetchOIHistory();
-                    }}
-                    className={`flex-1 py-2.5 text-[12px] font-medium transition-all border-b-2 -mb-px ${oi.oiMode === mode ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'}`}
-                  >
-                    {mode === 'oi' ? 'Open Interest' : 'Change in OI'}
-                  </button>
-                ))}
-              </div>
-
               <div className="px-4 py-3 flex flex-col gap-4">
                 {oi.oiExpiries.length > 0 && (
                   <div>
@@ -482,6 +590,15 @@ export default function CandleChart({ instrument, theme }: Props) {
           )}
         </div>
 
+        {/* Reset zoom */}
+        <button
+          onClick={resetZoom}
+          className="px-2 py-1 rounded text-[11px] font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all ml-1"
+          title="Reset zoom to latest candles"
+        >
+          ⊞
+        </button>
+
         {/* Interval buttons */}
         <div className="flex gap-0.5 ml-auto">
           {INTERVALS.map((iv) => (
@@ -508,36 +625,19 @@ export default function CandleChart({ instrument, theme }: Props) {
         onMouseMove={oi.handleMouseMove}
         onMouseLeave={oi.handleMouseLeave}
         onWheel={() => oi.requestDraw()}
+        onDoubleClick={resetZoom}
       >
         <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none z-[5]" />
 
-        {/* OI time range */}
+        {/* OI time range slider */}
         {oi.oiOn && (
-          <div className="absolute top-2 right-[80px] z-10 flex items-center gap-1.5 bg-[var(--bg-secondary)]/90 backdrop-blur-sm border border-[var(--border)] rounded-lg px-2.5 py-1 pointer-events-auto">
-            <span className="text-[10px] text-[var(--text-muted)] shrink-0">From</span>
-            <input
-              type="time"
-              value={oi.oiFromTime}
-              onChange={(e) => oi.handleFromTimeChange(e.target.value)}
-              className="text-[11px] bg-transparent text-[var(--text-primary)] border-none outline-none w-[62px] [color-scheme:dark]"
-            />
-            <span className="text-[10px] text-[var(--text-muted)] shrink-0">To</span>
-            <input
-              type="time"
-              value={oi.oiToTime}
-              onChange={(e) => oi.handleToTimeChange(e.target.value)}
-              className="text-[11px] bg-transparent text-[var(--text-primary)] border-none outline-none w-[62px] [color-scheme:dark]"
-            />
-            {(oi.oiFromTime || oi.oiToTime) && (
-              <button
-                onClick={oi.resetTimeRange}
-                className="text-[12px] text-[var(--text-muted)] hover:text-[var(--red)] leading-none ml-0.5"
-                title="Reset time range"
-              >
-                ×
-              </button>
-            )}
-          </div>
+          <OiTimeSlider
+            fromTime={oi.oiFromTime}
+            toTime={oi.oiToTime}
+            onChange={oi.handleSliderChange}
+            onReset={oi.resetTimeRange}
+            isChangeMode={oi.oiMode === 'oi_change'}
+          />
         )}
 
         {/* OHLC overlay */}
@@ -583,7 +683,7 @@ export default function CandleChart({ instrument, theme }: Props) {
               <div className="flex items-center justify-between gap-4 text-[13px] mb-1">
                 <div className="flex items-center gap-2">
                   <span className="w-3 h-3 rounded-[2px] bg-[#22c55e] shrink-0" />
-                  <span className="text-[var(--text-muted)]">{oi.oiMode === 'oi_change' ? 'Call Δ' : 'Call'}</span>
+                  <span className="text-[var(--text-muted)]">{oi.oiMode === 'oi_change' ? 'Call Δ' : 'Call OI'}</span>
                 </div>
                 <span className={`font-medium tabular-nums ${oi.oiMode === 'oi_change' ? (oi.oiHover.ceOi >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]') : 'text-[var(--text-primary)]'}`}>
                   {oi.oiMode === 'oi_change' ? `${oi.oiHover.ceOi >= 0 ? '+' : ''}${fmtOI(Math.abs(oi.oiHover.ceOi))}` : fmtOI(oi.oiHover.ceOi)}
@@ -592,7 +692,7 @@ export default function CandleChart({ instrument, theme }: Props) {
               <div className="flex items-center justify-between gap-4 text-[13px]">
                 <div className="flex items-center gap-2">
                   <span className="w-3 h-3 rounded-[2px] bg-[#ef4444] shrink-0" />
-                  <span className="text-[var(--text-muted)]">{oi.oiMode === 'oi_change' ? 'Put Δ' : 'Put'}</span>
+                  <span className="text-[var(--text-muted)]">{oi.oiMode === 'oi_change' ? 'Put Δ' : 'Put OI'}</span>
                 </div>
                 <span className={`font-medium tabular-nums ${oi.oiMode === 'oi_change' ? (oi.oiHover.peOi >= 0 ? 'text-[#ef4444]' : 'text-[#22c55e]') : 'text-[var(--text-primary)]'}`}>
                   {oi.oiMode === 'oi_change' ? `${oi.oiHover.peOi >= 0 ? '+' : ''}${fmtOI(Math.abs(oi.oiHover.peOi))}` : fmtOI(oi.oiHover.peOi)}

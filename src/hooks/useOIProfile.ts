@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ISeriesApi } from 'lightweight-charts';
-import type { Instrument, OptionChainData, WsMessage } from '../types';
+import type { Instrument, OhlcBar, OptionChainData, WsMessage } from '../types';
 import { getSymbol } from '../types';
-import { formatExpiry } from '../lib/utils';
+import { formatExpiry, IST_OFFSET } from '../lib/utils';
 import { drawOI as renderOI, hitTestOIBar, normalizeStrike, type OiLeg, type OiSnap } from '../lib/oiRenderer';
 import { useWs } from './useWsContext';
 
@@ -37,6 +37,7 @@ export interface OIProfileApi {
   handleMouseDown: (e: React.MouseEvent) => void;
   handleMouseMove: (e: React.MouseEvent) => void;
   handleMouseLeave: () => void;
+  handleSliderChange: (fromMin: number, toMin: number, sliderMax: number) => void;
   handleFromTimeChange: (v: string) => void;
   handleToTimeChange: (v: string) => void;
   resetTimeRange: () => void;
@@ -52,9 +53,10 @@ interface Deps {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>;
   currentInstRef: React.RefObject<Instrument | null>;
+  allBarsRef: React.RefObject<OhlcBar[]>;
 }
 
-export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRef }: Deps): OIProfileApi {
+export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRef, allBarsRef }: Deps): OIProfileApi {
   const { subscribe, subscribeOC, unsubscribeOC } = useWs();
 
   // ── Refs ──────────────────────────────────────────────────────────────────
@@ -79,6 +81,8 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
   const oiDeltasRef = useRef<Record<number, { ceDelta: number; peDelta: number }>>({});
   const oiSymbolMapRef = useRef<{ ce: Map<number, string>; pe: Map<number, string> }>({ ce: new Map(), pe: new Map() });
   const oiDrawPendingRef = useRef(false);
+  const oiHistDateRef = useRef<string>('');
+  const oiHistFailedRef = useRef(false);
 
   // ── State ────────────────────────────────────────────────────────────────
   const [oiOn, setOiOn] = useState(false);
@@ -158,6 +162,9 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     const series = candleRef.current;
     if (!canvas || !cont || !series || !oiChainRef.current) return;
 
+    const today = new Date().toISOString().slice(0, 10);
+    const isToday = !oiHistDateRef.current || oiHistDateRef.current === today;
+
     renderOI({
       canvas,
       containerW: cont.clientWidth,
@@ -177,6 +184,7 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
       baseline: oiBaselineRef.current,
       toSnap: oiToSnapRef.current,
       deltasOut: oiDeltasRef.current,
+      isToday,
     });
   }
   drawOIRef.current = drawOI;
@@ -254,11 +262,25 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     requestAnimationFrame(drawOI);
   }
 
+  function getChartDate(): Date {
+    const bars = allBarsRef.current;
+    if (bars.length) {
+      const last = bars[bars.length - 1];
+      if (typeof last.time === 'number') {
+        return new Date((last.time - IST_OFFSET) * 1000);
+      }
+      const t = last.time as { year: number; month: number; day: number };
+      return new Date(Date.UTC(t.year, t.month - 1, t.day));
+    }
+    return new Date();
+  }
+
   async function fetchOIHistory() {
     if (!oiChainRef.current || !currentInstRef.current || oiHistLoadingRef.current) return;
     const symMap = oiSymbolMapRef.current;
     if (!symMap.ce.size) return;
     oiHistLoadingRef.current = true;
+    oiHistFailedRef.current = false;
 
     const values: string[] = [];
     const seen = new Set<string>();
@@ -269,27 +291,48 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     }
 
     try {
-      const today = new Date();
-      const startUTC = new Date(today);
-      startUTC.setUTCHours(3, 45, 0, 0);
+      const chartDate = getChartDate();
+      const startDate = new Date(chartDate);
+      startDate.setUTCHours(3, 45, 0, 0);
+      const endDate = new Date(chartDate);
+      endDate.setUTCHours(10, 0, 0, 0);
+      const exchange = currentInstRef.current.exchange || 'NSE';
 
-      const res = await fetch('/api/historical', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: [{ exchange: currentInstRef.current.exchange || 'NSE', type: 'OPT', values, fields: ['cumulative_oi'], startDate: startUTC.toISOString(), endDate: today.toISOString(), interval: '1m', intraDay: true, realTime: false }] }),
-      });
-      if (!res.ok) { oiHistLoadingRef.current = false; return; }
-      const data = await res.json() as { result?: Array<{ values?: Array<Record<string, { cumulative_oi?: Array<{ ts: number; v: number }> }>> }> };
+      const BATCH = 10;
+      const chunks: string[][] = [];
+      for (let i = 0; i < values.length; i += BATCH) chunks.push(values.slice(i, i + BATCH));
+
+      console.log(`[OI] Fetching ${values.length} instruments in ${chunks.length} batches`);
+
       const map = new Map<string, { ts: number; v: number }[]>();
-      for (const row of data.result?.[0]?.values ?? []) {
-        for (const [name, series] of Object.entries(row)) {
-          if (series?.cumulative_oi?.length) map.set(name, series.cumulative_oi);
+      const results = await Promise.all(chunks.map(async (chunk) => {
+        const res = await fetch('/api/historical', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: [{ exchange, type: 'OPT', values: chunk, fields: ['cumulative_oi'], startDate: startDate.toISOString(), endDate: endDate.toISOString(), interval: '1m', intraDay: true, realTime: false }] }),
+        });
+        if (!res.ok) return null;
+        return res.json();
+      }));
+
+      for (const data of results) {
+        if (!data?.result?.[0]?.values) continue;
+        for (const row of data.result[0].values) {
+          for (const [name, series] of Object.entries(row) as [string, { cumulative_oi?: { ts: number; v: number }[] }][]) {
+            if (series?.cumulative_oi?.length) map.set(name, series.cumulative_oi);
+          }
         }
       }
+
+      console.log(`[OI] Fetched ${map.size}/${values.length} instruments`);
       oiHistoricalRef.current = map;
       oiHistFetchedRef.current = true;
+      oiHistDateRef.current = chartDate.toISOString().slice(0, 10);
       requestAnimationFrame(drawOI);
-    } catch { /* ignore */ }
+    } catch (e) {
+      console.error('[OI] Historical fetch failed:', e);
+      oiHistFailedRef.current = true;
+    }
     finally { oiHistLoadingRef.current = false; }
   }
 
@@ -390,49 +433,60 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
   // ── Time range handlers ─────────────────────────────────────────────────
   function timeToMs(hhmm: string): number {
     const [h, m] = hhmm.split(':').map(Number);
-    const d = new Date();
+    const d = getChartDate();
     d.setHours(h, m, 0, 0);
     return d.getTime();
   }
 
+  function minToTimeStr(min: number): string {
+    const totalMin = min + 9 * 60 + 15;
+    return `${String(Math.floor(totalMin / 60)).padStart(2, '0')}:${String(totalMin % 60).padStart(2, '0')}`;
+  }
+
+  function handleSliderChange(fromMin: number, toMin: number, sliderMax: number) {
+    const atStart = fromMin <= 0;
+    const atEnd = toMin >= sliderMax;
+
+    const fromTime = minToTimeStr(fromMin);
+    const toTime = minToTimeStr(toMin);
+    setOiFromTime(fromTime);
+    setOiToTime(toTime);
+
+    setOiMode('oi_change');
+    oiModeRef.current = 'oi_change';
+    oiFromMsRef.current = atStart ? null : timeToMs(fromTime);
+    oiToMsRef.current = atEnd ? null : timeToMs(toTime);
+
+    if (!oiHistFetchedRef.current && !oiHistLoadingRef.current && !oiHistFailedRef.current) {
+      console.log('[OI] Slider triggered fetch, from:', fromTime, 'to:', toTime);
+      fetchOIHistory();
+    }
+    drawOIRef.current();
+  }
+
   function handleFromTimeChange(v: string) {
     setOiFromTime(v);
-    if (oiModeRef.current === 'oi_change') {
-      oiFromMsRef.current = v ? timeToMs(v) : null;
-    } else {
-      const snaps = Array.from(oiSnapshotsRef.current.entries()).sort((a, b) => a[0] - b[0]);
-      if (v && snaps.length) {
-        const ms = timeToMs(v);
-        const s = snaps.find(([ts]) => ts >= ms) ?? snaps[0];
-        oiBaselineRef.current = s[1];
-      } else {
-        oiBaselineRef.current = null;
-      }
-    }
+    setOiMode('oi_change');
+    oiModeRef.current = 'oi_change';
+    oiFromMsRef.current = v ? timeToMs(v) : null;
+    if (!oiHistFetchedRef.current && !oiHistLoadingRef.current) fetchOIHistory();
     drawOIRef.current();
   }
 
   function handleToTimeChange(v: string) {
     setOiToTime(v);
-    if (oiModeRef.current === 'oi_change') {
-      oiToMsRef.current = v ? timeToMs(v) : null;
-    } else {
-      const snaps = Array.from(oiSnapshotsRef.current.entries()).sort((a, b) => a[0] - b[0]);
-      if (v && snaps.length) {
-        const ms = timeToMs(v);
-        const candidates = snaps.filter(([ts]) => ts <= ms);
-        const s = candidates[candidates.length - 1] ?? snaps[0];
-        oiToSnapRef.current = s[1];
-      } else {
-        oiToSnapRef.current = null;
-      }
-    }
+    setOiMode('oi_change');
+    oiModeRef.current = 'oi_change';
+    oiToMsRef.current = v ? timeToMs(v) : null;
+    if (!oiHistFetchedRef.current && !oiHistLoadingRef.current) fetchOIHistory();
     drawOIRef.current();
   }
 
   function resetTimeRange() {
     setOiFromTime('');
     setOiToTime('');
+    setOiMode('oi');
+    oiModeRef.current = 'oi';
     oiBaselineRef.current = null;
     oiToSnapRef.current = null;
     oiFromMsRef.current = null;
@@ -472,6 +526,8 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     oiChainRef.current = null;
     oiHistoricalRef.current = new Map();
     oiHistFetchedRef.current = false;
+    oiHistFailedRef.current = false;
+    oiHistDateRef.current = '';
     oiSnapshotsRef.current = new Map();
     oiBaselineRef.current = null;
     oiToSnapRef.current = null;
@@ -485,7 +541,7 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     setOiFromTime, setOiToTime, setOiHover,
     toggleOI, openSettings, applyExpiries, fetchOIHistory, drawOI, requestDraw,
     handleMouseDown, handleMouseMove, handleMouseLeave,
-    handleFromTimeChange, handleToTimeChange, resetTimeRange,
+    handleSliderChange, handleFromTimeChange, handleToTimeChange, resetTimeRange,
     clearForInstrumentChange,
     oiEnabledRef, drawOIRef, oiDrawPendingRef,
   };

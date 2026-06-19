@@ -80,8 +80,9 @@ export interface WsTickMsg   { type: 'index_tick';   data: IndexTickData }
 export interface WsOcMsg     { type: 'option_chain'; data: OptionChainData }
 export interface WsStatusMsg { type: 'ws_status';    connected: boolean }
 export interface WsAuthMsg   { type: 'auth_status';  status: string }
+export interface WsPosLtpMsg { type: 'position_ltp'; data: { ref_id: number; ltp: number }[] }
 
-export type WsMessage = WsOhlcvMsg | WsTickMsg | WsOcMsg | WsStatusMsg | WsAuthMsg;
+export type WsMessage = WsOhlcvMsg | WsTickMsg | WsOcMsg | WsStatusMsg | WsAuthMsg | WsPosLtpMsg;
 
 export interface OhlcvData {
   indexes?:     OhlcvBucket[];

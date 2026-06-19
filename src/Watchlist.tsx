@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { useWatchlist } from './hooks/useWatchlistContext';
 import { useWs } from './hooks/useWsContext';
 import { usePaperTrading } from './hooks/usePaperTrading';
-import type { IndexTickData, Instrument, OptionChainData, OptionLeg, WatchlistItem, WsMessage } from './types';
+import type { IndexTickData, Instrument, OhlcvData, OptionChainData, OptionLeg, WatchlistItem, WsMessage } from './types';
 import { fmtPrice } from './lib/utils';
+
+const KNOWN_INDICES = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX', 'NIFTY50']);
 
 interface LivePrice { ltp: number; chg?: number }
 
@@ -57,34 +59,77 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
     }
 
     fetchPrices();
-    pollRef.current = window.setInterval(fetchPrices, 5000);
+    pollRef.current = window.setInterval(fetchPrices, 2000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(items.filter(i => i.optionType).map(i => i.id))]);
 
-  // Subscribe to index_tick for spot/index watchlist items
+  // Subscribe OHLCV feeds + listen for index_tick & ohlcv for non-option watchlist items
+  const { subscribeOC, subscribeChart, unsubscribeChart } = useWs();
   useEffect(() => {
-    const indexItems = items.filter(i => !i.optionType);
-    if (!indexItems.length) return;
-    return subscribe('index_tick', (msg: WsMessage) => {
+    const spotItems = items.filter(i => !i.optionType);
+    if (!spotItems.length) return;
+
+    // Subscribe each item to the OHLCV feed so ticks flow
+    for (const item of spotItems) {
+      const sym = (item.nubraName || item.underlying).toUpperCase();
+      const isIdx = KNOWN_INDICES.has(item.underlying.toUpperCase());
+      const payload = isIdx ? { indexes: [sym] } : { instruments: [sym] };
+      subscribeChart(payload, '1m', item.exchange);
+    }
+
+    const unsub1 = subscribe('index_tick', (msg: WsMessage) => {
       if (msg.type !== 'index_tick') return;
       const data  = msg.data as IndexTickData;
       const ticks = [...(data.indexes || []), ...(data.instruments || [])];
       for (const tick of ticks) {
         const name = (tick.indexname || '').toUpperCase();
-        for (const item of indexItems) {
+        for (const item of spotItems) {
           if (item.underlying.toUpperCase() === name && tick.index_value) {
             const ltp = parseFloat(tick.index_value);
-            setPrices(prev => ({ ...prev, [item.id]: { ltp, chg: tick.changepercent ?? undefined } }));
+            setPrices(prev => {
+              if (prev[item.id]?.ltp === ltp) return prev;
+              return { ...prev, [item.id]: { ltp, chg: tick.changepercent ?? undefined } };
+            });
           }
         }
       }
     });
+
+    const unsub2 = subscribe('ohlcv', (msg: WsMessage) => {
+      if (msg.type !== 'ohlcv') return;
+      const data = msg.data as OhlcvData;
+      const buckets = [...(data.indexes || []), ...(data.instruments || [])];
+      for (const b of buckets) {
+        const name = (b.indexname || '').toUpperCase();
+        if (!b.close) continue;
+        for (const item of spotItems) {
+          const sym = (item.nubraName || item.underlying).toUpperCase();
+          if (sym === name || item.underlying.toUpperCase() === name) {
+            const ltp = Number(b.close) / 100;
+            setPrices(prev => {
+              if (prev[item.id]?.ltp === ltp) return prev;
+              return { ...prev, [item.id]: { ltp, chg: prev[item.id]?.chg } };
+            });
+          }
+        }
+      }
+    });
+
+    return () => {
+      unsub1();
+      unsub2();
+      for (const item of spotItems) {
+        const sym = (item.nubraName || item.underlying).toUpperCase();
+        const isIdx = KNOWN_INDICES.has(item.underlying.toUpperCase());
+        const payload = isIdx ? { indexes: [sym] } : { instruments: [sym] };
+        unsubscribeChart(payload, '1m', item.exchange);
+      }
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subscribe, JSON.stringify(items.filter(i => !i.optionType).map(i => i.id))]);
+  }, [subscribe, subscribeChart, unsubscribeChart, JSON.stringify(items.filter(i => !i.optionType).map(i => i.id))]);
 
   // Subscribe OC feeds for option watchlist items and update LTPs from WS
-  const { subscribeOC } = useWs();
   useEffect(() => {
     const optItems = items.filter(i => i.optionType && i.strike != null && i.expiry && i.underlying);
     if (!optItems.length) return;
@@ -99,7 +144,7 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
   useEffect(() => {
     const optItems = items.filter(i => i.optionType && i.strike != null);
     if (!optItems.length) return;
-    return subscribe('option_chain', (msg: WsMessage) => {
+    const unsub1 = subscribe('option_chain', (msg: WsMessage) => {
       if (msg.type !== 'option_chain') return;
       const data = msg.data as OptionChainData;
       const asset = (data.asset || '').toUpperCase();
@@ -122,6 +167,26 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
         }
       }
     });
+
+    const unsub2 = subscribe('position_ltp', (msg: WsMessage) => {
+      if (msg.type !== 'position_ltp') return;
+      const updates = (msg as { data: { ref_id: number; ltp: number }[] }).data;
+      if (!updates?.length) return;
+      const ltpMap = new Map<number, number>();
+      for (const u of updates) ltpMap.set(u.ref_id, u.ltp / 100);
+      for (const item of optItems) {
+        if (!item.ref_id) continue;
+        const newLtp = ltpMap.get(item.ref_id);
+        if (newLtp != null) {
+          setPrices(prev => {
+            if (prev[item.id]?.ltp === newLtp) return prev;
+            return { ...prev, [item.id]: { ltp: newLtp, chg: prev[item.id]?.chg } };
+          });
+        }
+      }
+    });
+
+    return () => { unsub1(); unsub2(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subscribe, JSON.stringify(items.filter(i => i.optionType).map(i => i.id))]);
 
