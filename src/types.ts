@@ -256,6 +256,7 @@ export interface PaperPosition {
   entry_time?:        number;
   exit_time?:         number;
   exit_price?:        number;
+  margin_required?:   number;
 }
 
 export interface PaperHolding {

@@ -138,9 +138,13 @@ export function initDb(): Database.Database {
 
   // Add entry_time, exit_time, exit_price columns to positions if missing
   const posCols2 = cols('positions');
-  if (!posCols2.has('entry_time')) db.exec(`ALTER TABLE positions ADD COLUMN entry_time INTEGER`);
-  if (!posCols2.has('exit_time'))  db.exec(`ALTER TABLE positions ADD COLUMN exit_time INTEGER`);
-  if (!posCols2.has('exit_price')) db.exec(`ALTER TABLE positions ADD COLUMN exit_price INTEGER`);
+  if (!posCols2.has('entry_time'))       db.exec(`ALTER TABLE positions ADD COLUMN entry_time INTEGER`);
+  if (!posCols2.has('exit_time'))        db.exec(`ALTER TABLE positions ADD COLUMN exit_time INTEGER`);
+  if (!posCols2.has('exit_price'))       db.exec(`ALTER TABLE positions ADD COLUMN exit_price INTEGER`);
+  if (!posCols2.has('margin_required'))  db.exec(`ALTER TABLE positions ADD COLUMN margin_required INTEGER`);
+
+  const basketCols = cols('saved_baskets');
+  if (!basketCols.has('basket_group_id')) db.exec(`ALTER TABLE saved_baskets ADD COLUMN basket_group_id TEXT`);
 
   console.log(`[PaperDB] Opened ${DB_PATH}`);
   return db;
@@ -215,14 +219,14 @@ export function dbUpsertPosition(p: {
   ref_id: number; nubraName: string; display_name: string; qty: number;
   avg_price: number; realized_pnl: number; last_traded_price: number;
   order_delivery_type: string; basket_group_id?: string; strategy_name?: string;
-  entry_time?: number; exit_time?: number; exit_price?: number;
+  entry_time?: number; exit_time?: number; exit_price?: number; margin_required?: number;
 }): void {
   db.prepare(`INSERT INTO positions (ref_id, nubra_name, display_name, qty, avg_price,
       realized_pnl, last_traded_price, order_delivery_type, basket_group_id, strategy_name,
-      entry_time, exit_time, exit_price)
+      entry_time, exit_time, exit_price, margin_required)
     VALUES (@ref_id, @nubra_name, @display_name, @qty, @avg_price,
       @realized_pnl, @last_traded_price, @order_delivery_type, @basket_group_id, @strategy_name,
-      @entry_time, @exit_time, @exit_price)
+      @entry_time, @exit_time, @exit_price, @margin_required)
     ON CONFLICT(ref_id, basket_group_id) DO UPDATE SET
       qty=@qty, avg_price=@avg_price, realized_pnl=@realized_pnl,
       last_traded_price=@last_traded_price, display_name=@display_name,
@@ -233,6 +237,7 @@ export function dbUpsertPosition(p: {
     last_traded_price: p.last_traded_price, order_delivery_type: p.order_delivery_type,
     basket_group_id: p.basket_group_id ?? '', strategy_name: p.strategy_name ?? null,
     entry_time: p.entry_time ?? null, exit_time: p.exit_time ?? null, exit_price: p.exit_price ?? null,
+    margin_required: p.margin_required ?? null,
   });
 }
 
@@ -292,19 +297,21 @@ export function dbSetMeta(key: string, value: string): void {
 
 export function dbInsertBasket(b: {
   basket_id: string; name: string; symbol: string; expiry: string;
-  legs_json: string; created_at: number; updated_at: number;
+  legs_json: string; created_at: number; updated_at: number; basket_group_id?: string;
 }): void {
-  db.prepare(`INSERT INTO saved_baskets (basket_id, name, symbol, expiry, legs_json, created_at, updated_at)
-    VALUES (@basket_id, @name, @symbol, @expiry, @legs_json, @created_at, @updated_at)`).run(b);
+  db.prepare(`INSERT INTO saved_baskets (basket_id, name, symbol, expiry, legs_json, created_at, updated_at, basket_group_id)
+    VALUES (@basket_id, @name, @symbol, @expiry, @legs_json, @created_at, @updated_at, @basket_group_id)`).run({
+    ...b, basket_group_id: b.basket_group_id ?? null,
+  });
 }
 
 export function dbLoadBaskets(): Array<{
   basket_id: string; name: string; symbol: string; expiry: string;
-  legs_json: string; created_at: number; updated_at: number;
+  legs_json: string; created_at: number; updated_at: number; basket_group_id: string | null;
 }> {
   return db.prepare('SELECT * FROM saved_baskets ORDER BY updated_at DESC').all() as Array<{
     basket_id: string; name: string; symbol: string; expiry: string;
-    legs_json: string; created_at: number; updated_at: number;
+    legs_json: string; created_at: number; updated_at: number; basket_group_id: string | null;
   }>;
 }
 
@@ -317,4 +324,21 @@ export function dbUpdateBasket(basketId: string, name: string, legsJson: string)
   const info = db.prepare(`UPDATE saved_baskets SET name = ?, legs_json = ?, updated_at = ? WHERE basket_id = ?`)
     .run(name, legsJson, Date.now(), basketId);
   return info.changes > 0;
+}
+
+export function dbRenameStrategy(basketGroupId: string, newName: string): void {
+  db.prepare('UPDATE orders SET strategy_name = ? WHERE basket_group_id = ?').run(newName, basketGroupId);
+  db.prepare('UPDATE positions SET strategy_name = ? WHERE basket_group_id = ?').run(newName, basketGroupId);
+  db.prepare('UPDATE saved_baskets SET name = ?, updated_at = ? WHERE basket_group_id = ?').run(newName, Date.now(), basketGroupId);
+}
+
+export function dbRenameSavedBasket(basketId: string, newName: string): { basket_group_id: string | null } {
+  const row = db.prepare('SELECT basket_group_id FROM saved_baskets WHERE basket_id = ?').get(basketId) as { basket_group_id: string | null } | undefined;
+  db.prepare('UPDATE saved_baskets SET name = ?, updated_at = ? WHERE basket_id = ?').run(newName, Date.now(), basketId);
+  const bgId = row?.basket_group_id || null;
+  if (bgId) {
+    db.prepare('UPDATE orders SET strategy_name = ? WHERE basket_group_id = ?').run(newName, bgId);
+    db.prepare('UPDATE positions SET strategy_name = ? WHERE basket_group_id = ?').run(newName, bgId);
+  }
+  return { basket_group_id: bgId };
 }

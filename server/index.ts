@@ -13,7 +13,7 @@ import {
   dbInsertFill, dbUpsertPosition, dbLoadPositions, dbLoadClosedPositions,
   dbInsertPnlTick, dbUpsertName, dbLoadNameMap,
   dbGetMeta, dbSetMeta,
-  dbInsertBasket, dbLoadBaskets, dbDeleteBasket, dbUpdateBasket,
+  dbInsertBasket, dbLoadBaskets, dbDeleteBasket, dbUpdateBasket, dbRenameStrategy, dbRenameSavedBasket,
   dbUpsertOcSub, dbLoadOcSubs,
 } from './paperDb.ts';
 import protobuf from 'protobufjs';
@@ -587,6 +587,7 @@ interface SimOrder {
   sl_triggered:        boolean;
   basket_group_id?:    string;
   strategy_name?:      string;
+  margin_required?:    number;          // paise, basket-level margin snapshot
 }
 
 interface SimPosition {
@@ -603,6 +604,7 @@ interface SimPosition {
   entry_time?:         number;          // nanoseconds epoch
   exit_time?:          number;          // nanoseconds epoch
   exit_price?:         number;          // paise
+  margin_required?:    number;          // paise, snapshot at entry
 }
 
 class SimBroker {
@@ -653,6 +655,7 @@ class SimBroker {
         entry_time: row.entry_time as number | undefined,
         exit_time: row.exit_time as number | undefined,
         exit_price: row.exit_price as number | undefined,
+        margin_required: row.margin_required as number | undefined,
       };
       this.positions.set(this.posKey(p.ref_id, p.basket_group_id), p);
       if (p.qty !== 0) this.ticks.set(p.ref_id, p.last_traded_price);
@@ -775,6 +778,7 @@ class SimBroker {
         order_delivery_type: order.order_delivery_type,
         basket_group_id:     order.basket_group_id || '',
         strategy_name:       order.strategy_name,
+        margin_required:     order.margin_required,
       };
       this.positions.set(key, pos);
     }
@@ -801,7 +805,6 @@ class SimBroker {
         : (fillPaise    - pos.avg_price) * closedQty; // selling to close a long
       pos.qty = next;
       if (next === 0) {
-        pos.avg_price  = 0;
         pos.exit_time  = order.filled_time ?? Date.now() * 1_000_000;
         pos.exit_price = Math.round(fillPaise);
       } else if (Math.sign(next) !== Math.sign(prev)) {
@@ -826,6 +829,7 @@ class SimBroker {
       last_traded_price: pos.last_traded_price, order_delivery_type: pos.order_delivery_type,
       basket_group_id: pos.basket_group_id, strategy_name: pos.strategy_name,
       entry_time: pos.entry_time, exit_time: pos.exit_time, exit_price: pos.exit_price,
+      margin_required: pos.margin_required,
     });
     // Record P&L at fill time
     const unrealizedAtFill = (pos.last_traded_price - pos.avg_price) * pos.qty;
@@ -853,6 +857,7 @@ class SimBroker {
     tag?:                string;
     basket_group_id?:    string;
     strategy_name?:      string;
+    margin_required?:    number;
   }): SimOrder {
     const id    = this.nextId++;
     const order: SimOrder = {
@@ -876,6 +881,7 @@ class SimBroker {
       sl_triggered:        false,
       basket_group_id:     p.basket_group_id,
       strategy_name:       p.strategy_name,
+      margin_required:     p.margin_required,
     };
     this.orders.set(id, order);
     this.registerName(p.nubraName, p.liveRefId);
@@ -921,6 +927,18 @@ class SimBroker {
 
   getClosedPositions(): SimPosition[] {
     return Array.from(this.positions.values()).filter(p => p.qty === 0 && p.realized_pnl !== 0);
+  }
+
+  renameStrategy(basketGroupId: string, newName: string): boolean {
+    let found = false;
+    for (const o of this.orders.values()) {
+      if (o.basket_group_id === basketGroupId) { o.strategy_name = newName; found = true; }
+    }
+    for (const p of this.positions.values()) {
+      if (p.basket_group_id === basketGroupId) { p.strategy_name = newName; found = true; }
+    }
+    if (found) dbRenameStrategy(basketGroupId, newName);
+    return found;
   }
 }
 
@@ -1150,6 +1168,7 @@ fastify.post('/paper/orders/basket', async (req, reply) => {
     const body = req.body as Record<string, unknown>;
     const legs  = (body.orders as Array<Record<string, unknown>>);
     const strategyName = (body.strategy_name as string) || undefined;
+    const marginRequired = typeof body.margin_required === 'number' ? body.margin_required : undefined;
     const basketGroupId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const results = legs.map((o) => {
       const nubraName  = o.nubraName  as string;
@@ -1172,6 +1191,7 @@ fastify.post('/paper/orders/basket', async (req, reply) => {
         tag:                 o.tag                 as string | undefined,
         basket_group_id:     basketGroupId,
         strategy_name:       strategyName,
+        margin_required:     marginRequired,
       });
     });
     return reply.send({ orders: results.map(o => ({ order_id: o.order_id })), basket_group_id: basketGroupId });
@@ -1224,6 +1244,7 @@ fastify.get('/paper/positions', async (_req, reply) => {
       basket_group_id:    p.basket_group_id || undefined,
       strategy_name:      p.strategy_name || undefined,
       entry_time:         p.entry_time || undefined,
+      margin_required:    p.margin_required || undefined,
     };
   });
   return reply.send(positions);
@@ -1247,6 +1268,7 @@ fastify.get('/paper/positions/closed', async (_req, reply) => {
     entry_time:      p.entry_time || undefined,
     exit_time:       p.exit_time || undefined,
     exit_price:      p.exit_price || undefined,
+    margin_required: p.margin_required || undefined,
   }));
   return reply.send(closed);
 });
@@ -1273,7 +1295,10 @@ fastify.get('/paper/pnl', async (_req, reply) => {
   for (const p of simBroker.getPositions()) {
     realised += p.realized_pnl;
     const ltp = p.last_traded_price || p.avg_price;
-    unrealised += (ltp - p.avg_price) * p.qty;   // signed qty — correct for long/short
+    unrealised += (ltp - p.avg_price) * p.qty;
+  }
+  for (const p of simBroker.getClosedPositions()) {
+    realised += p.realized_pnl;
   }
   return reply.send({
     realised:   Math.round(realised),
@@ -1358,15 +1383,16 @@ fastify.get('/paper/baskets', async (_req, reply) => {
   return reply.send({ baskets });
 });
 
-fastify.post<{ Body: { name: string; symbol: string; expiry: string; legs: unknown[] } }>('/paper/baskets', async (req, reply) => {
+fastify.post<{ Body: { name: string; symbol: string; expiry: string; legs: unknown[]; basket_group_id?: string } }>('/paper/baskets', async (req, reply) => {
   if (!requireAuth(reply)) return;
-  const { name, symbol, expiry, legs } = req.body;
+  const { name, symbol, expiry, legs, basket_group_id } = req.body;
   const basketId = `bsk_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const now = Date.now();
   dbInsertBasket({
     basket_id: basketId, name, symbol, expiry,
     legs_json: JSON.stringify(legs),
     created_at: now, updated_at: now,
+    basket_group_id: basket_group_id || undefined,
   });
   return reply.send({ basket_id: basketId });
 });
@@ -1381,8 +1407,23 @@ fastify.delete<{ Params: { id: string } }>('/paper/baskets/:id', async (req, rep
 fastify.put<{ Params: { id: string }; Body: { name?: string; legs?: unknown[] } }>('/paper/baskets/:id', async (req, reply) => {
   if (!requireAuth(reply)) return;
   const { name, legs } = req.body;
-  const ok = dbUpdateBasket(req.params.id, name ?? '', JSON.stringify(legs ?? []));
-  if (!ok) return reply.status(404).send({ error: 'Basket not found' });
+  if (name?.trim()) {
+    const result = dbRenameSavedBasket(req.params.id, name.trim());
+    if (result.basket_group_id) simBroker.renameStrategy(result.basket_group_id, name.trim());
+  }
+  if (legs) {
+    const existing = dbLoadBaskets().find(b => b.basket_id === req.params.id);
+    if (existing) dbUpdateBasket(req.params.id, existing.name, JSON.stringify(legs));
+  }
+  return reply.send({ ok: true });
+});
+
+fastify.put<{ Body: { basket_group_id: string; name: string } }>('/paper/strategy/rename', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  const { basket_group_id, name } = req.body;
+  if (!basket_group_id || !name?.trim()) return reply.status(400).send({ error: 'basket_group_id and name required' });
+  const ok = simBroker.renameStrategy(basket_group_id, name.trim());
+  if (!ok) return reply.status(404).send({ error: 'No orders/positions found for this group' });
   return reply.send({ ok: true });
 });
 

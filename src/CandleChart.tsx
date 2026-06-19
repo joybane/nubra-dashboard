@@ -205,8 +205,9 @@ export default function CandleChart({ instrument, theme }: Props) {
         secondsVisible: false,
         shiftVisibleRangeOnNewBar: true,
       },
-      handleScroll: true,
-      handleScale:  true,
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+      handleScale:  { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+      kineticScroll: { mouse: true, touch: true },
     });
     chartRef.current = chart;
 
@@ -252,11 +253,42 @@ export default function CandleChart({ instrument, theme }: Props) {
     });
     observer.observe(containerRef.current);
 
+    const onDblClick = () => {
+      const len = allBarsRef.current.length;
+      if (len) chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 60), to: len + 5 });
+      candle.priceScale().applyOptions({ autoScale: true });
+    };
+    containerRef.current.addEventListener('dblclick', onDblClick);
+
     return () => {
+      containerRef.current?.removeEventListener('dblclick', onDblClick);
       observer.disconnect();
       chart.remove();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Keyboard navigation ───────────────────────────────────────────────────
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.tabIndex = 0;
+    el.style.outline = 'none';
+    const onKey = (e: KeyboardEvent) => {
+      const ts = chartRef.current?.timeScale();
+      if (!ts) return;
+      const range = ts.getVisibleLogicalRange();
+      if (!range) return;
+      const span = range.to - range.from;
+      const step = Math.max(1, Math.round(span * 0.1));
+      if (e.key === 'ArrowLeft')  { ts.setVisibleLogicalRange({ from: range.from - step, to: range.to - step }); e.preventDefault(); }
+      if (e.key === 'ArrowRight') { ts.setVisibleLogicalRange({ from: range.from + step, to: range.to + step }); e.preventDefault(); }
+      if (e.key === '+' || e.key === '=') { ts.setVisibleLogicalRange({ from: range.from + step, to: range.to - step }); e.preventDefault(); }
+      if (e.key === '-')  { ts.setVisibleLogicalRange({ from: range.from - step, to: range.to + step }); e.preventDefault(); }
+      if (e.key === 'Home' || e.key === 'End') { resetZoom(); e.preventDefault(); }
+    };
+    el.addEventListener('keydown', onKey);
+    return () => el.removeEventListener('keydown', onKey);
   }, []);
 
   // ── Theme sync ────────────────────────────────────────────────────────────
@@ -354,7 +386,7 @@ export default function CandleChart({ instrument, theme }: Props) {
       volRef.current.setData(volBars as Parameters<typeof volRef.current.setData>[0]);
 
       const len = bars.length;
-      chartRef.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 200), to: len + 5 });
+      chartRef.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 60), to: len + 5 });
       setLoading(null);
       startCountdown();
       updatePriceDisplay(lastBarRef.current.close, dayOpenRef.current);
@@ -379,6 +411,20 @@ export default function CandleChart({ instrument, theme }: Props) {
     loadInstrument(instrument, interval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interval]);
+
+  useEffect(() => {
+    const restore = () => {
+      if (!chartRef.current || !candleRef.current || !allBarsRef.current.length) return;
+      candleRef.current.setData(allBarsRef.current as Parameters<typeof candleRef.current.setData>[0]);
+      if (volRef.current && allVolBarsRef.current.length) {
+        volRef.current.setData(allVolBarsRef.current as Parameters<typeof volRef.current.setData>[0]);
+      }
+    };
+    const onVisChange = () => { if (document.visibilityState === 'visible') restore(); };
+    document.addEventListener('visibilitychange', onVisChange);
+    const guard = window.setInterval(restore, 60000);
+    return () => { document.removeEventListener('visibilitychange', onVisChange); clearInterval(guard); };
+  }, []);
 
   async function loadMoreHistory() {
     if (isLoadingRef.current || !earliestRef.current || !currentInstRef.current) return;
@@ -443,7 +489,7 @@ export default function CandleChart({ instrument, theme }: Props) {
   function resetZoom() {
     if (!chartRef.current || !allBarsRef.current.length) return;
     const len = allBarsRef.current.length;
-    chartRef.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 200), to: len + 5 });
+    chartRef.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 60), to: len + 5 });
     candleRef.current?.priceScale().applyOptions({ autoScale: true });
   }
 

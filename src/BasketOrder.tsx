@@ -95,6 +95,8 @@ export default function BasketOrder({ instrument }: Props) {
   const [addScripResults, setAddScripResults] = useState<Array<Record<string, unknown>>>([]);
   const [showAddScrip, setShowAddScrip] = useState(false);
   const [rightTab, setRightTab] = useState<'payoff' | 'optionchain'>('payoff');
+  const [editingBasketId, setEditingBasketId] = useState<string | null>(null);
+  const [editingBasketName, setEditingBasketName] = useState('');
   const [symSearch, setSymSearch] = useState('');
   const [symResults, setSymResults] = useState<Array<Record<string, unknown>>>([]);
   const [showSymSearch, setShowSymSearch] = useState(false);
@@ -377,9 +379,10 @@ export default function BasketOrder({ instrument }: Props) {
     if (missing.length) { setPlaced({ ok: false, msg: `${missing.length} leg(s) missing instrument IDs.` }); return; }
     const sorted = [...legs].sort((a, b) => { if (a.side === 'BUY' && b.side === 'SELL') return -1; if (a.side === 'SELL' && b.side === 'BUY') return 1; return 0; });
     setPlaced(null);
+    const finalName = strategyName === 'Custom Strategy' ? persistence.getNextCustomName() : (strategyName || persistence.getNextCustomName());
     try {
       const res = await fetch('/paper/orders/basket', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ strategy_name: strategyName || 'Custom Strategy', orders: sorted.map(l => ({
+        body: JSON.stringify({ strategy_name: finalName, margin_required: margin ? Math.round(margin.total * 100) : undefined, orders: sorted.map(l => ({
           nubraName: l.nubraName || `${l.symbol}${l.strike}${l.optionType}`, liveRefId: l.refId,
           display_name: `${l.symbol} ${l.strike} ${l.optionType}`, order_type: ORDER_TYPE_MAP[l.orderType],
           order_side: l.side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL', order_qty: l.lots * l.lotSize,
@@ -388,9 +391,11 @@ export default function BasketOrder({ instrument }: Props) {
           order_delivery_type: l.deliveryType === 'IDAY' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
           validity_type: 'DAY', asset: l.asset, expiry: l.expiry, derivative_type: 'OPT',
         })) }) });
-      const d = await res.json() as { orders?: Array<{ order_id: number }>; error?: string };
+      const d = await res.json() as { orders?: Array<{ order_id: number }>; basket_group_id?: string; error?: string };
       if (!res.ok || d.error) throw new Error(d.error || 'Basket placement failed');
-      setPlaced({ ok: true, msg: `${d.orders?.length ?? legs.length} order(s) placed!` });
+      persistence.saveBasket(finalName, sym, chain.expiry, legs, d.basket_group_id);
+      setStrategyName(finalName);
+      setPlaced({ ok: true, msg: `${d.orders?.length ?? legs.length} order(s) placed & saved as "${finalName}"` });
       setTimeout(() => setPlaced(null), 5000);
     } catch (e) { setPlaced({ ok: false, msg: (e as Error).message }); }
   }
@@ -533,10 +538,24 @@ export default function BasketOrder({ instrument }: Props) {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 12 }}>
                 {persistence.savedBaskets.map(b => (
                   <div key={b.basket_id} style={{ background: '#181a25', borderRadius: 10, border: '1px solid #1e2030', padding: 14 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-                      <span style={{ fontWeight: 700, fontSize: 14, color: '#e2e4f0' }}>{b.name}</span>
-                      <button onClick={() => persistence.deleteSavedBasket(b.basket_id)}
-                        style={{ background: 'none', border: 'none', color: '#8b8fa3', cursor: 'pointer', fontSize: 14 }}>✕</button>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                      {editingBasketId === b.basket_id ? (
+                        <input type="text" value={editingBasketName} autoFocus
+                          onChange={e => setEditingBasketName(e.target.value)}
+                          onBlur={() => { if (editingBasketName.trim()) persistence.updateBasketName(b.basket_id, editingBasketName); setEditingBasketId(null); }}
+                          onKeyDown={e => { if (e.key === 'Enter') { if (editingBasketName.trim()) persistence.updateBasketName(b.basket_id, editingBasketName); setEditingBasketId(null); } if (e.key === 'Escape') setEditingBasketId(null); }}
+                          style={{ fontWeight: 700, fontSize: 14, color: '#e2e4f0', background: '#1a1c28', border: '1px solid #5865f2', borderRadius: 4, padding: '2px 6px', outline: 'none', flex: 1, marginRight: 6 }} />
+                      ) : (
+                        <span style={{ fontWeight: 700, fontSize: 14, color: '#e2e4f0', cursor: 'pointer' }}
+                          onDoubleClick={() => { setEditingBasketId(b.basket_id); setEditingBasketName(b.name); }}
+                          title="Double-click to rename">{b.name}</span>
+                      )}
+                      <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                        <button onClick={() => { setEditingBasketId(b.basket_id); setEditingBasketName(b.name); }}
+                          style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.3)', color: '#e2e4f0', cursor: 'pointer', fontSize: 8, fontWeight: 600, padding: '1px 3px', borderRadius: 3, lineHeight: 1, width: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }} title="Rename">R</button>
+                        <button onClick={() => persistence.deleteSavedBasket(b.basket_id)}
+                          style={{ background: 'none', border: 'none', color: '#8b8fa3', cursor: 'pointer', fontSize: 14 }}>✕</button>
+                      </div>
                     </div>
                     <div style={{ fontSize: 11, color: '#8b8fa3', marginBottom: 10 }}>{b.symbol} · {formatExpiry(b.expiry)} · {b.legs.length} legs</div>
                     <button onClick={() => loadSavedBasket(b)}

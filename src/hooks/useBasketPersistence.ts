@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { formatExpiry } from '../lib/utils';
 
 export interface SavedBasket {
   basket_id: string;
@@ -13,8 +12,11 @@ export interface SavedBasket {
 export interface BasketPersistenceApi {
   savedBaskets: SavedBasket[];
   loadSavedBaskets: () => Promise<void>;
-  saveBasket: (name: string, sym: string | null, expiry: string, legs: unknown[]) => Promise<{ ok: boolean; msg: string }>;
+  saveBasket: (name: string, sym: string | null, expiry: string, legs: unknown[], basketGroupId?: string) => Promise<{ ok: boolean; msg: string }>;
   deleteSavedBasket: (id: string) => Promise<void>;
+  updateBasketName: (id: string, name: string) => Promise<void>;
+  renameStrategy: (basketGroupId: string, name: string) => Promise<boolean>;
+  getNextCustomName: () => string;
 }
 
 export function useBasketPersistence(): BasketPersistenceApi {
@@ -30,11 +32,25 @@ export function useBasketPersistence(): BasketPersistenceApi {
 
   useEffect(() => { loadSavedBaskets(); }, []);
 
-  async function saveBasket(name: string, sym: string | null, expiry: string, legs: unknown[]): Promise<{ ok: boolean; msg: string }> {
+  function getNextCustomName(): string {
+    const prefix = 'Custom Strategy';
+    const existing = savedBaskets
+      .map(b => b.name)
+      .filter(n => n.startsWith(prefix))
+      .map(n => {
+        const suffix = n.slice(prefix.length).trim();
+        return suffix === '' ? 0 : parseInt(suffix, 10);
+      })
+      .filter(n => !isNaN(n));
+    const next = existing.length === 0 ? 1 : Math.max(...existing) + 1;
+    return `${prefix} ${next}`;
+  }
+
+  async function saveBasket(name: string, sym: string | null, expiry: string, legs: unknown[], basketGroupId?: string): Promise<{ ok: boolean; msg: string }> {
     if (!legs.length || !name.trim()) return { ok: false, msg: 'Name and legs required' };
     try {
       await fetch('/paper/baskets', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), symbol: sym, expiry, legs }) });
+        body: JSON.stringify({ name: name.trim(), symbol: sym, expiry, legs, basket_group_id: basketGroupId }) });
       loadSavedBaskets();
       return { ok: true, msg: 'Strategy saved!' };
     } catch (e) {
@@ -46,5 +62,21 @@ export function useBasketPersistence(): BasketPersistenceApi {
     try { await fetch(`/paper/baskets/${id}`, { method: 'DELETE' }); loadSavedBaskets(); } catch { /* ignore */ }
   }
 
-  return { savedBaskets, loadSavedBaskets, saveBasket, deleteSavedBasket };
+  async function updateBasketName(id: string, name: string) {
+    try {
+      await fetch(`/paper/baskets/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim() }) });
+      loadSavedBaskets();
+    } catch { /* ignore */ }
+  }
+
+  async function renameStrategy(basketGroupId: string, name: string): Promise<boolean> {
+    try {
+      const res = await fetch('/paper/strategy/rename', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ basket_group_id: basketGroupId, name: name.trim() }) });
+      return res.ok;
+    } catch { return false; }
+  }
+
+  return { savedBaskets, loadSavedBaskets, saveBasket, deleteSavedBasket, updateBasketName, renameStrategy, getNextCustomName };
 }
