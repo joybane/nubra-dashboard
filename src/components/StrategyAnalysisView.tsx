@@ -132,10 +132,13 @@ interface ChartDataCache {
   legPriceData: Map<number, Array<{ time: any; value: number }>>;
   legPnlData: Map<number, Array<{ time: any; value: number }>>;
   basketPnlData: Array<{ time: any; value: number }>;
+  legGreeksHist: Map<number, Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }>>;
   chartFrom: number;
   chartTo: number;
   marketClose: number;
 }
+
+const GREEK_COLORS: Record<string, string> = { delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' };
 
 export default function StrategyAnalysisView({ basketGroupId, strategyName, theme, onBack }: StrategyAnalysisViewProps) {
   const { subscribe, subscribeChart, unsubscribeChart } = useWs();
@@ -177,6 +180,15 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const [editingLotSize, setEditingLotSize] = useState(false);
 
   const DEFAULT_LOT_SIZES: Record<string, number> = { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60, MIDCPNIFTY: 120, SENSEX: 20 };
+
+  // ── Greeks chart refs ──
+  const greeksChartContainerRef = useRef<HTMLDivElement>(null);
+  const greeksChartRef = useRef<IChartApi | null>(null);
+  const greeksSeriesRef = useRef<Record<string, ISeriesApi<'Line'> | null>>({ delta: null, gamma: null, theta: null, vega: null });
+  const [greeksChartHeight, setGreeksChartHeight] = useState(150);
+  const [greeksTooltipPos, setGreeksTooltipPos] = useState<{ x: number; y: number } | null>(null);
+  const [greeksTooltipValues, setGreeksTooltipValues] = useState<Record<string, number> | null>(null);
+  const [greeksCrosshairTime, setGreeksCrosshairTime] = useState('');
 
   // ── Chart display state ──
   const [pnlHeight, setPnlHeight] = useState(200);
@@ -270,8 +282,20 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         const ul = deriveUnderlying(allPos);
         if (!ul) return;
 
+        // Parse expiry/strike/optType from zanskar_name: {UL}{YY}{M}{DD}{STRIKE}{CE|PE}
+        const monthCodes: Record<string, string> = { '1':'01','2':'02','3':'03','4':'04','5':'05','6':'06','7':'07','8':'08','9':'09','O':'10','N':'11','D':'12' };
+        const parsedInfo = new Map<number, { expiry: string; strike: number; optType: string }>();
         const expiries = new Set<string>();
-        for (const p of allPos) { if (p.expiry) expiries.add(String(p.expiry)); }
+        for (const p of allPos) {
+          if (p.expiry) { expiries.add(String(p.expiry)); continue; }
+          const m = (p.zanskar_name || '').match(/^[A-Z]+(\d{2})([0-9OND])(\d{2})(\d+)(CE|PE)$/i);
+          if (m) {
+            const mm = monthCodes[m[2].toUpperCase()] || '01';
+            const expiry = `20${m[1]}${mm}${m[3]}`;
+            expiries.add(expiry);
+            parsedInfo.set(p.ref_id, { expiry, strike: Number(m[4]), optType: m[5].toUpperCase() });
+          }
+        }
         const refIds = new Set(allPos.map(p => p.ref_id));
         const greekUpdates = new Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>();
 
@@ -288,12 +312,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           for (const item of [...(chain.ce || []), ...(chain.pe || [])]) {
             const refId = Number(item.ref_id ?? 0);
             if (!refId || !refIds.has(refId)) continue;
-            const delta = Number(item.delta ?? 0);
-            const gamma = Number(item.gamma ?? 0);
-            const theta = Number(item.theta ?? 0);
-            const vega = Number(item.vega ?? 0);
-            const iv = Number(item.iv ?? 0);
-            greekUpdates.set(refId, { delta, gamma, theta, vega, iv });
+            greekUpdates.set(refId, {
+              delta: Number(item.delta ?? 0), gamma: Number(item.gamma ?? 0),
+              theta: Number(item.theta ?? 0), vega: Number(item.vega ?? 0), iv: Number(item.iv ?? 0),
+            });
           }
         }
 
@@ -312,16 +334,20 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           if (spotPrice > 0) {
             for (const p of allPos) {
               if (greekUpdates.has(p.ref_id)) continue;
-              let strike = p.strike_price ? (p.strike_price > 10000 ? p.strike_price / 100 : p.strike_price) : 0;
-              let optType = (p.option_type || '').toUpperCase();
-              if ((!strike || (optType !== 'CE' && optType !== 'PE'))) {
-                const m = (p.display_name || '').match(/(\d+)\s*(CE|PE)/i);
-                if (m) { strike = strike || Number(m[1]); optType = optType || m[2].toUpperCase(); }
+              const parsed = parsedInfo.get(p.ref_id);
+              let strike = parsed?.strike || 0;
+              let optType = parsed?.optType || '';
+              if (!strike || (optType !== 'CE' && optType !== 'PE')) {
+                const dm = (p.display_name || '').match(/(\d+)\s*(CE|PE)/i);
+                if (dm) { strike = strike || Number(dm[1]); optType = optType || dm[2].toUpperCase(); }
               }
               if (!strike || (optType !== 'CE' && optType !== 'PE')) continue;
-              const ltp = (p.last_traded_price || p.avg_price || 0) / 100;
-              const daysToExpiry = p.expiry ? Math.max(0, (new Date(String(p.expiry)).getTime() - Date.now()) / (1000 * 86400)) : 1;
+              const expiryStr = parsed?.expiry;
+              const daysToExpiry = expiryStr
+                ? Math.max(0, (new Date(expiryStr.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')).getTime() - Date.now()) / (1000 * 86400))
+                : 1;
               const T = Math.max(daysToExpiry / 365, 1 / (365 * 24));
+              const ltp = (p.last_traded_price || p.avg_price || 0) / 100;
               let iv = ltp > 0 ? impliedVolatility(ltp, spotPrice, strike, T, 0.07, optType as 'CE' | 'PE') : 0;
               if (iv <= 0 || !isFinite(iv)) iv = 0.2;
               const g = blackScholes(spotPrice, strike, T, 0.07, iv, optType as 'CE' | 'PE');
@@ -559,9 +585,39 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         }
       }
 
-      if (!cancelled) {
+      // Fetch historical Greeks for each leg
+      const legGreeksHist = new Map<number, Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }>>();
+      const greekSymbols = metas.filter(l => l.zanskarName && l.derivativeType === 'OPT').map(l => l.zanskarName);
+      if (greekSymbols.length > 0) {
+        try {
+          const gRes = await fetch('/api/historical', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: [{ exchange: 'NSE', type: 'OPT', values: greekSymbols, fields: ['delta', 'gamma', 'theta', 'vega'], startDate: startDate.toISOString(), endDate: endDate.toISOString(), interval: '1m', intraDay: false, realTime: false }] }),
+          });
+          if (gRes.ok) {
+            const gData = await gRes.json() as { result?: Array<{ values: Array<Record<string, Record<string, Array<{ ts: number | string; v: number }>>>> }> };
+            for (const group of gData.result || []) {
+              for (const symbolMap of group.values || []) {
+                for (const [symName, fields] of Object.entries(symbolMap)) {
+                  const meta = metas.find(l => l.zanskarName === symName);
+                  if (!meta || !fields.delta?.length) continue;
+                  const points: Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }> = [];
+                  const dArr = fields.delta || [], gArr = fields.gamma || [], tArr = fields.theta || [], vArr = fields.vega || [];
+                  for (let i = 0; i < dArr.length; i++) {
+                    const t = toChartTime(BigInt(String(dArr[i].ts)), '1m') as number;
+                    if (t < chartFrom || t > chartTo) continue;
+                    points.push({ time: t, delta: dArr[i].v, gamma: gArr[i]?.v || 0, theta: tArr[i]?.v || 0, vega: vArr[i]?.v || 0 });
+                  }
+                  if (points.length > 0) legGreeksHist.set(meta.refId, points);
+                }
+              }
+            }
+          }
+        } catch (e) { console.warn('[StrategyAnalysis] Greeks historical fetch failed:', e); }
+      }
 
-        setChartData({ underlyingBars, legPriceData, legPnlData, basketPnlData, chartFrom, chartTo, marketClose });
+      if (!cancelled) {
+        setChartData({ underlyingBars, legPriceData, legPnlData, basketPnlData, legGreeksHist, chartFrom, chartTo, marketClose });
       }
     })();
     return () => { cancelled = true; };
@@ -616,26 +672,21 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     const pc = priceChartRef.current;
     const pnl = pnlChartRef.current;
     if (!pc || !pnl) return;
-    let syncing = false;
-    const handler1 = (range: any) => {
-      if (syncing || !range) return;
-      syncing = true;
-      try { pnl.timeScale().setVisibleLogicalRange(range); } catch {}
-      syncing = false;
-    };
-    const handler2 = (range: any) => {
-      if (syncing || !range) return;
-      syncing = true;
-      try { pc.timeScale().setVisibleLogicalRange(range); } catch {}
-      syncing = false;
-    };
-    pc.timeScale().subscribeVisibleLogicalRangeChange(handler1);
-    pnl.timeScale().subscribeVisibleLogicalRangeChange(handler2);
-    return () => {
-      try { pc.timeScale().unsubscribeVisibleLogicalRangeChange(handler1); } catch {}
-      try { pnl.timeScale().unsubscribeVisibleLogicalRangeChange(handler2); } catch {}
-    };
-  }, [pnlVisible]);
+    const charts = [pc, pnl, greeksChartRef.current].filter(Boolean) as IChartApi[];
+    const unsubs: (() => void)[] = [];
+    for (let i = 0; i < charts.length; i++) {
+      for (let j = i + 1; j < charts.length; j++) {
+        const a = charts[i], b = charts[j];
+        let syncing = false;
+        const h1 = (range: any) => { if (syncing || !range) return; syncing = true; try { b.timeScale().setVisibleLogicalRange(range); } catch {} syncing = false; };
+        const h2 = (range: any) => { if (syncing || !range) return; syncing = true; try { a.timeScale().setVisibleLogicalRange(range); } catch {} syncing = false; };
+        a.timeScale().subscribeVisibleLogicalRangeChange(h1);
+        b.timeScale().subscribeVisibleLogicalRangeChange(h2);
+        unsubs.push(() => { try { a.timeScale().unsubscribeVisibleLogicalRangeChange(h1); } catch {} try { b.timeScale().unsubscribeVisibleLogicalRangeChange(h2); } catch {} });
+      }
+    }
+    return () => unsubs.forEach(u => u());
+  }, [pnlVisible, greeksVisible]);
 
   // ── 5. Resize observer ──
   useEffect(() => {
@@ -648,11 +699,16 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         const { width, height } = pnlChartContainerRef.current.getBoundingClientRect();
         pnlChartRef.current.resize(width, height);
       }
+      if (greeksChartContainerRef.current && greeksChartRef.current) {
+        const { width, height } = greeksChartContainerRef.current.getBoundingClientRect();
+        greeksChartRef.current.resize(width, height);
+      }
     });
     if (priceChartContainerRef.current) ro.observe(priceChartContainerRef.current);
     if (pnlChartContainerRef.current) ro.observe(pnlChartContainerRef.current);
+    if (greeksChartContainerRef.current) ro.observe(greeksChartContainerRef.current);
     return () => ro.disconnect();
-  }, [pnlVisible]);
+  }, [pnlVisible, greeksVisible]);
 
   // ── 6. Live WebSocket updates (charts) ──
   useEffect(() => {
@@ -825,6 +881,88 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     return () => unsub();
   }, [subscribe]);
 
+  // ── 10. Greeks chart ──
+  useEffect(() => {
+    if (!greeksChartContainerRef.current || !greeksVisible) return;
+    const isDark = theme === 'dark';
+    const chart = createChart(greeksChartContainerRef.current, chartOpts(isDark));
+    greeksChartRef.current = chart;
+    const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
+    for (const k of greekKeys) {
+      const s = chart.addSeries(LineSeries, {
+        color: GREEK_COLORS[k], lineWidth: 2, priceScaleId: k,
+        title: k.charAt(0).toUpperCase() + k.slice(1), lastValueVisible: true, priceLineVisible: false,
+        visible: selectedGreeks.has(k),
+      });
+      greeksSeriesRef.current[k] = s;
+      chart.priceScale(k).applyOptions({ visible: k === greekKeys.find(g => selectedGreeks.has(g)), scaleMargins: { top: 0.1, bottom: 0.1 } });
+    }
+    chart.subscribeCrosshairMove((param) => {
+      if (param.point) {
+        setGreeksTooltipPos({ x: param.point.x, y: param.point.y });
+        if (param.time != null) setGreeksCrosshairTime(fmtChartTime(param.time as number));
+      } else { setGreeksTooltipPos(null); }
+      const vals: Record<string, number> = {};
+      for (const k of greekKeys) {
+        const s = greeksSeriesRef.current[k];
+        if (!s) continue;
+        const d = param.seriesData?.get(s) as any;
+        if (d?.value != null) vals[k] = d.value;
+      }
+      setGreeksTooltipValues(Object.keys(vals).length > 0 ? vals : null);
+    });
+    const cached = chartDataRef.current;
+    if (cached && cached.legGreeksHist.size > 0) {
+      const activeLotSize = lotSizeOverride ?? (underlying ? DEFAULT_LOT_SIZES[underlying] ?? 65 : 65);
+      const multiplier = greeksMode === 'lot' ? activeLotSize : 1;
+      const netByTime = new Map<number, { delta: number; gamma: number; theta: number; vega: number }>();
+      for (const p of allPositionsRef.current) {
+        const data = cached.legGreeksHist.get(p.ref_id);
+        if (!data) continue;
+        const sign = (p.order_side || '').includes('BUY') ? 1 : -1;
+        for (const pt of data) {
+          const ex = netByTime.get(pt.time) || { delta: 0, gamma: 0, theta: 0, vega: 0 };
+          ex.delta += pt.delta * sign * multiplier; ex.gamma += pt.gamma * sign * multiplier;
+          ex.theta += pt.theta * sign * multiplier; ex.vega += pt.vega * sign * multiplier;
+          netByTime.set(pt.time, ex);
+        }
+      }
+      const times = [...netByTime.keys()].sort((a, b) => a - b);
+      for (const k of greekKeys) {
+        greeksSeriesRef.current[k]?.setData(times.map(t => ({ time: t as any, value: netByTime.get(t)![k] })));
+      }
+      requestAnimationFrame(() => chart.timeScale().fitContent());
+    }
+    return () => { for (const k of greekKeys) greeksSeriesRef.current[k] = null; chart.remove(); greeksChartRef.current = null; };
+  }, [theme, greeksVisible]);
+
+  // ── 10b. Apply Greeks data / recompute on mode or selection change ──
+  useEffect(() => {
+    if (!chartData || !greeksChartRef.current || !greeksVisible) return;
+    const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
+    const activeLotSize = lotSizeOverride ?? (underlying ? DEFAULT_LOT_SIZES[underlying] ?? 65 : 65);
+    const multiplier = greeksMode === 'lot' ? activeLotSize : 1;
+    const netByTime = new Map<number, { delta: number; gamma: number; theta: number; vega: number }>();
+    for (const p of allPositionsRef.current) {
+      const data = chartData.legGreeksHist.get(p.ref_id);
+      if (!data) continue;
+      const sign = (p.order_side || '').includes('BUY') ? 1 : -1;
+      for (const pt of data) {
+        const ex = netByTime.get(pt.time) || { delta: 0, gamma: 0, theta: 0, vega: 0 };
+        ex.delta += pt.delta * sign * multiplier; ex.gamma += pt.gamma * sign * multiplier;
+        ex.theta += pt.theta * sign * multiplier; ex.vega += pt.vega * sign * multiplier;
+        netByTime.set(pt.time, ex);
+      }
+    }
+    const times = [...netByTime.keys()].sort((a, b) => a - b);
+    for (const k of greekKeys) {
+      greeksSeriesRef.current[k]?.setData(times.map(t => ({ time: t as any, value: netByTime.get(t)![k] })));
+      greeksSeriesRef.current[k]?.applyOptions({ visible: selectedGreeks.has(k) });
+      try { greeksChartRef.current!.priceScale(k).applyOptions({ visible: k === greekKeys.find(g => selectedGreeks.has(g)) }); } catch {}
+    }
+    requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
+  }, [chartData, greeksMode, lotSizeOverride, selectedGreeks, greeksVisible, underlying]);
+
   const toggleVis = useCallback((key: string) => { setVisibility(prev => ({ ...prev, [key]: !prev[key] })); }, []);
   const toggleLeg = useCallback((refId: number) => { setLegVisibility(prev => ({ ...prev, [refId]: !(prev[refId] !== false) })); }, []);
 
@@ -836,6 +974,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
     document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
   }, [pnlHeight]);
+
+  const onGreeksDividerDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY; const startH = greeksChartHeight;
+    const onMove = (ev: MouseEvent) => { setGreeksChartHeight(Math.max(80, startH - (ev.clientY - startY))); };
+    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
+  }, [greeksChartHeight]);
 
   const onObDividerDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1124,6 +1270,50 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
                         </div>
                       </>
                     )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {greeksVisible && (
+          <>
+            <div onMouseDown={onGreeksDividerDown} className="h-1 shrink-0 bg-[var(--border)] hover:bg-[#a78bfa] cursor-row-resize transition-colors" />
+            <div ref={greeksChartContainerRef} className="relative shrink-0 bg-[var(--bg-primary)]" style={{ height: greeksChartHeight }}>
+              <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
+                {greeksTooltipValues
+                  ? <span>{(['delta', 'gamma', 'theta', 'vega'] as const).filter(k => selectedGreeks.has(k) && greeksTooltipValues[k] != null).map(k => (
+                      <span key={k} className="mr-3">
+                        <span className="inline-block w-2 h-2 rounded-full align-middle mr-1" style={{ backgroundColor: GREEK_COLORS[k] }} />
+                        <span className="text-[var(--text-muted)]">{k.charAt(0).toUpperCase() + k.slice(1)}</span>{' '}
+                        <span className={`font-medium ${(greeksTooltipValues[k] ?? 0) >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                          {(greeksTooltipValues[k] ?? 0) >= 0 ? '+' : ''}{k === 'gamma' ? (greeksTooltipValues[k] ?? 0).toFixed(4) : (greeksTooltipValues[k] ?? 0).toFixed(2)}
+                        </span>
+                      </span>
+                    ))}</span>
+                  : <span className="text-[var(--text-muted)]">Greeks over time</span>
+                }
+              </div>
+              {greeksTooltipPos && greeksTooltipValues && (
+                <div className="absolute z-50 pointer-events-none"
+                  style={{
+                    left: greeksTooltipPos.x > (greeksChartContainerRef.current?.clientWidth ?? 800) * 0.6 ? greeksTooltipPos.x - 200 : greeksTooltipPos.x + 20,
+                    top: Math.max(8, Math.min(greeksTooltipPos.y - 30, greeksChartHeight - 100)),
+                  }}>
+                  <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[150px]">
+                    {greeksCrosshairTime && <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">{greeksCrosshairTime}</div>}
+                    {(['delta', 'gamma', 'theta', 'vega'] as const).filter(k => selectedGreeks.has(k) && greeksTooltipValues[k] != null).map(k => (
+                      <div key={k} className="flex items-center justify-between gap-4 text-[11px] py-0.5">
+                        <span className="flex items-center gap-1.5 text-[var(--text-secondary)]">
+                          <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: GREEK_COLORS[k] }} />
+                          {k.charAt(0).toUpperCase() + k.slice(1)}
+                        </span>
+                        <span className={`font-medium tabular-nums ${(greeksTooltipValues[k] ?? 0) >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                          {(greeksTooltipValues[k] ?? 0) >= 0 ? '+' : ''}{k === 'gamma' ? (greeksTooltipValues[k] ?? 0).toFixed(4) : (greeksTooltipValues[k] ?? 0).toFixed(2)}
+                        </span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
