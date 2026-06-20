@@ -185,6 +185,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const [chartEpoch, setChartEpoch] = useState(0);
   const positionsRef = useRef<PaperPosition[]>([]);
   positionsRef.current = positions;
+  const closedPositionsRef = useRef<PaperPosition[]>([]);
+  closedPositionsRef.current = closedPositions;
   const allPositionsRef = useRef<PaperPosition[]>([]);
   const legMetasRef = useRef<LegMeta[]>([]);
   const markersRef = useRef<Array<{ detach: () => void }>>([]);
@@ -623,13 +625,19 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           const side = (pos.order_side || '').includes('BUY') ? 1 : -1;
           const avgPrice = (pos.avg_price || 0) / 100;
           const qty = pos.qty || 0;
+          // For a leg closed during the session, freeze P&L at its realized value after exit instead of
+          // continuing to mark it to market (keeps the curve + basket total consistent with the live tip).
+          const exitChartTime = pos.exit_time ? Math.floor(pos.exit_time / 1_000_000_000 / 60) * 60 + IST_OFFSET : 0;
+          const realizedPnl = pos.exit_price != null ? side * (pos.exit_price / 100 - avgPrice) * qty : 0;
           const pnlBars = sessionBars.filter(b => b.time >= pnlFrom && b.time <= pnlTo);
-          legPnlData.set(leg.refId, pnlBars.map(b => ({
-            time: b.time as any, value: side * (b.close - avgPrice) * qty,
-          })));
-          for (const b of pnlBars) {
-            if (!pnlByTime.has(b.time)) pnlByTime.set(b.time, new Map());
-            pnlByTime.get(b.time)!.set(leg.refId, side * (b.close - avgPrice) * qty);
+          const legPnlPoints = pnlBars.map(b => ({
+            time: b.time as any,
+            value: exitChartTime > 0 && b.time > exitChartTime ? realizedPnl : side * (b.close - avgPrice) * qty,
+          }));
+          legPnlData.set(leg.refId, legPnlPoints);
+          for (const pt of legPnlPoints) {
+            if (!pnlByTime.has(pt.time)) pnlByTime.set(pt.time, new Map());
+            pnlByTime.get(pt.time)!.set(leg.refId, pt.value);
           }
         }
       }
@@ -792,7 +800,13 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       const t = nowChartTime();
       const cached = chartDataRef.current;
       if (cached && (t < cached.sessionOpen || t > cached.sessionClose)) return;
+      // Seed the live total with realized P&L of legs already closed this session, so the basket tip =
+      // realized (closed) + unrealized (open) — matching the frozen historical curve at the handoff.
       let totalPnl = 0;
+      for (const p of closedPositionsRef.current) {
+        const side = (p.order_side || '').includes('BUY') ? 1 : -1;
+        if (p.exit_price != null) totalPnl += side * (p.exit_price - (p.avg_price || 0)) * (p.qty || 0) / 100;
+      }
       for (const p of positionsRef.current) {
         const ltp = ltpMap.get(p.ref_id);
         if (ltp == null) continue;
