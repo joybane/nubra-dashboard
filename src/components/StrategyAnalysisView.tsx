@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
+  createSeriesMarkers,
   LineSeries,
   CandlestickSeries,
   CrosshairMode,
   type IChartApi,
   type ISeriesApi,
-  type IPriceLine,
   type CandlestickSeriesOptions,
 } from 'lightweight-charts';
 import type { PaperPosition, PaperOrder, WsMessage, OptionChainData, OptionLeg } from '../types';
@@ -165,7 +165,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   positionsRef.current = positions;
   const allPositionsRef = useRef<PaperPosition[]>([]);
   const legMetasRef = useRef<LegMeta[]>([]);
-  const priceLinesRef = useRef<Array<{ series: ISeriesApi<'Line'>; line: IPriceLine }>>([]);
+  const markersRef = useRef<Array<{ detach: () => void }>>([]);
 
   // ── Greeks state ──
   const [greeksVisible, setGreeksVisible] = useState(false);
@@ -275,6 +275,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         const refIds = new Set(allPos.map(p => p.ref_id));
         const greekUpdates = new Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>();
 
+        let chainSpotPrice = 0;
         const ocFetches = [...expiries].map(expiry =>
           fetch(`/api/optionchain/${ul}?expiry=${expiry}`).then(r => r.ok ? r.json() : null).catch(() => null)
         );
@@ -282,6 +283,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         for (const data of ocResults) {
           if (!data) continue;
           const chain = (data as any).chain || data;
+          const cp = Number(chain.cp ?? chain.currentprice ?? 0);
+          if (cp > 0 && chainSpotPrice === 0) chainSpotPrice = cp / 100;
           for (const item of [...(chain.ce || []), ...(chain.pe || [])]) {
             const refId = Number(item.ref_id ?? 0);
             if (!refId || !refIds.has(refId)) continue;
@@ -290,36 +293,39 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
             const theta = Number(item.theta ?? 0);
             const vega = Number(item.vega ?? 0);
             const iv = Number(item.iv ?? 0);
-            if (delta !== 0 || gamma !== 0 || theta !== 0 || vega !== 0) {
-              greekUpdates.set(refId, { delta, gamma, theta, vega, iv });
-            }
+            greekUpdates.set(refId, { delta, gamma, theta, vega, iv });
           }
         }
 
         // Fallback: Black-Scholes for positions not in the option chain
         if (greekUpdates.size < refIds.size) {
-          let spotPrice = 0;
-          try {
-            const priceRes = await fetch(`/api/optionchain/${ul}/price`);
-            if (priceRes.ok) {
-              const priceData = await priceRes.json() as { ltp?: number; last_traded_price?: number; currentprice?: number };
-              spotPrice = Number(priceData.ltp ?? priceData.last_traded_price ?? priceData.currentprice ?? 0) / 100;
-            }
-          } catch {}
+          let spotPrice = chainSpotPrice;
+          if (spotPrice <= 0) {
+            try {
+              const priceRes = await fetch(`/api/optionchain/${ul}/price`);
+              if (priceRes.ok) {
+                const priceData = await priceRes.json() as Record<string, unknown>;
+                spotPrice = Number(priceData.ltp ?? priceData.last_traded_price ?? priceData.currentprice ?? priceData.cp ?? 0) / 100;
+              }
+            } catch {}
+          }
           if (spotPrice > 0) {
             for (const p of allPos) {
               if (greekUpdates.has(p.ref_id)) continue;
-              const strike = p.strike_price ? (p.strike_price > 10000 ? p.strike_price / 100 : p.strike_price) : 0;
-              const optType = (p.option_type || '').toUpperCase() as 'CE' | 'PE';
+              let strike = p.strike_price ? (p.strike_price > 10000 ? p.strike_price / 100 : p.strike_price) : 0;
+              let optType = (p.option_type || '').toUpperCase();
+              if ((!strike || (optType !== 'CE' && optType !== 'PE'))) {
+                const m = (p.display_name || '').match(/(\d+)\s*(CE|PE)/i);
+                if (m) { strike = strike || Number(m[1]); optType = optType || m[2].toUpperCase(); }
+              }
               if (!strike || (optType !== 'CE' && optType !== 'PE')) continue;
               const ltp = (p.last_traded_price || p.avg_price || 0) / 100;
               const daysToExpiry = p.expiry ? Math.max(0, (new Date(String(p.expiry)).getTime() - Date.now()) / (1000 * 86400)) : 1;
               const T = Math.max(daysToExpiry / 365, 1 / (365 * 24));
-              const iv = ltp > 0 ? impliedVolatility(ltp, spotPrice, strike, T, 0.07, optType) : 0.2;
-              if (iv > 0) {
-                const g = blackScholes(spotPrice, strike, T, 0.07, iv, optType);
-                greekUpdates.set(p.ref_id, { delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega, iv });
-              }
+              let iv = ltp > 0 ? impliedVolatility(ltp, spotPrice, strike, T, 0.07, optType as 'CE' | 'PE') : 0;
+              if (iv <= 0 || !isFinite(iv)) iv = 0.2;
+              const g = blackScholes(spotPrice, strike, T, 0.07, iv, optType as 'CE' | 'PE');
+              greekUpdates.set(p.ref_id, { delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega, iv });
             }
           }
         }
@@ -582,30 +588,6 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
       try { priceChart.priceScale('legs').applyOptions({ scaleMargins: { top: 0.6, bottom: 0.05 } }); } catch {}
 
-      priceLinesRef.current.forEach(pl => { try { pl.series.removePriceLine(pl.line); } catch {} });
-      priceLinesRef.current = [];
-      for (const p of allPositionsRef.current) {
-        const series = seriesRef.current.legPrice.get(p.ref_id);
-        if (!series) continue;
-        const entryPrice = (p.avg_price || 0) / 100;
-        if (entryPrice > 0) {
-          const line = series.createPriceLine({
-            price: entryPrice,
-            color: (p.order_side || '').includes('BUY') ? '#22c55e' : '#ef4444',
-            lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
-            title: `Entry ${(p.order_side || '').includes('BUY') ? '▲' : '▼'}`,
-          });
-          priceLinesRef.current.push({ series, line });
-        }
-        if (p.exit_price) {
-          const line = series.createPriceLine({
-            price: p.exit_price / 100,
-            color: '#9ca3af', lineWidth: 1, lineStyle: 2,
-            axisLabelVisible: true, title: 'Exit',
-          });
-          priceLinesRef.current.push({ series, line });
-        }
-      }
       requestAnimationFrame(() => priceChart.timeScale().fitContent());
     }
 
@@ -782,36 +764,29 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   useEffect(() => { seriesRef.current.underlying?.applyOptions({ visible: visibility.underlying }); }, [visibility.underlying]);
   useEffect(() => { seriesRef.current.basketPnl?.applyOptions({ visible: visibility.basketPnl }); }, [visibility.basketPnl]);
   useEffect(() => {
-    if (visibility.entryMarkers) {
-      priceLinesRef.current.forEach(pl => { try { pl.series.removePriceLine(pl.line); } catch {} });
-      priceLinesRef.current = [];
-      for (const p of allPositionsRef.current) {
-        const series = seriesRef.current.legPrice.get(p.ref_id);
-        if (!series) continue;
-        const entryPrice = (p.avg_price || 0) / 100;
-        if (entryPrice > 0) {
-          const line = series.createPriceLine({
-            price: entryPrice,
-            color: (p.order_side || '').includes('BUY') ? '#22c55e' : '#ef4444',
-            lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
-            title: `Entry ${(p.order_side || '').includes('BUY') ? '▲' : '▼'}`,
-          });
-          priceLinesRef.current.push({ series, line });
-        }
-        if (p.exit_price) {
-          const line = series.createPriceLine({
-            price: p.exit_price / 100,
-            color: '#9ca3af', lineWidth: 1, lineStyle: 2,
-            axisLabelVisible: true, title: 'Exit',
-          });
-          priceLinesRef.current.push({ series, line });
-        }
+    markersRef.current.forEach(m => { try { m.detach(); } catch {} });
+    markersRef.current = [];
+    if (!chartData || !visibility.entryMarkers) return;
+    for (const p of allPositionsRef.current) {
+      const series = seriesRef.current.legPrice.get(p.ref_id);
+      if (!series) continue;
+      const markers: Array<{ time: any; position: 'aboveBar' | 'belowBar'; color: string; shape: 'circle'; text: string; size: number }> = [];
+      const entryPrice = (p.avg_price || 0) / 100;
+      const entryTime = p.entry_time ? Math.floor(p.entry_time / 1_000_000_000 / 60) * 60 + IST_OFFSET : 0;
+      const isBuy = (p.order_side || '').includes('BUY');
+      if (entryPrice > 0 && entryTime > 0) {
+        markers.push({ time: entryTime, position: 'aboveBar', color: isBuy ? '#22c55e' : '#ef4444', shape: 'circle', text: 'e', size: 1 });
       }
-    } else {
-      priceLinesRef.current.forEach(pl => { try { pl.series.removePriceLine(pl.line); } catch {} });
-      priceLinesRef.current = [];
+      if (p.exit_price && p.exit_time) {
+        const exitTime = Math.floor(p.exit_time / 1_000_000_000 / 60) * 60 + IST_OFFSET;
+        markers.push({ time: exitTime, position: 'belowBar', color: '#9ca3af', shape: 'circle', text: 'x', size: 1 });
+      }
+      if (markers.length > 0) {
+        markers.sort((a, b) => (a.time as number) - (b.time as number));
+        markersRef.current.push(createSeriesMarkers(series, markers as any));
+      }
     }
-  }, [visibility.entryMarkers]);
+  }, [chartData, theme, visibility.entryMarkers]);
   useEffect(() => {
     for (const leg of legMetas) {
       const vis = legVisibility[leg.refId] !== false;
@@ -879,6 +854,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const openPnl = positions.reduce((s, p) => s + calcPnl(p), 0);
   const closedPnl = closedPositions.reduce((s, p) => s + (p.realised_pnl || p.pnl || 0) / 100, 0);
   const strategyPnl = openPnl + closedPnl;
+  const strategyMargin = useMemo(() => {
+    const first = allPositions.find(p => p.margin_required && p.margin_required > 0);
+    return first ? first.margin_required! / 100 : 0;
+  }, [allPositions]);
   const displayPositions = posSubTab === 'open' ? positions : closedPositions;
   const effectiveObHeight = orderBookCollapsed ? 32 : orderBookHeight;
 
@@ -1131,6 +1110,20 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
                         {pnlValues.total >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnlValues.total))}
                       </span>
                     </div>
+                    {strategyMargin > 0 && (
+                      <>
+                        <div className="flex items-center justify-between gap-4 text-[11px] pt-0.5">
+                          <span className="text-[var(--text-muted)]">Margin</span>
+                          <span className="text-[var(--text-secondary)] tabular-nums">₹{fmtPrice(strategyMargin)}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-4 text-[11px] pt-0.5">
+                          <span className="text-[var(--text-muted)]">ROI</span>
+                          <span className={`font-medium tabular-nums ${pnlValues.total >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                            {(pnlValues.total / strategyMargin * 100).toFixed(2)}%
+                          </span>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               )}
