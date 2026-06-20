@@ -322,9 +322,9 @@ function OrdersTab({ uatAuth, onOpenStrategyChart }: { uatAuth: boolean; onOpenS
                             {onOpenStrategyChart && (
                               <button
                                 onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
-                                className="px-1.5 py-0.5 rounded text-[9px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
+                                className="p-0.5 rounded text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
                                 title="Strategy P&L chart"
-                              >Chart</button>
+                              >📈</button>
                             )}
                           </>
                         )}
@@ -733,9 +733,9 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                         {onOpenStrategyChart && (
                           <button
                             onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
-                            className="px-1.5 py-0.5 rounded text-[9px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
+                            className="p-0.5 rounded text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
                             title="Strategy P&L chart"
-                          >Chart</button>
+                          >📈</button>
                         )}
                         <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.positions.length} legs)</span>
                       </span>
@@ -799,9 +799,9 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                             {onOpenStrategyChart && (
                               <button
                                 onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
-                                className="px-1.5 py-0.5 rounded text-[9px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
+                                className="p-0.5 rounded text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
                                 title="Strategy P&L chart"
-                              >Chart</button>
+                              >📈</button>
                             )}
                           </>
                         )}
@@ -878,9 +878,9 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                             {onOpenStrategyChart && (
                               <button
                                 onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
-                                className="px-1.5 py-0.5 rounded text-[9px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
+                                className="p-0.5 rounded text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
                                 title="Strategy P&L chart"
-                              >Chart</button>
+                              >📈</button>
                             )}
                           </>
                         )}
