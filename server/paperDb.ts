@@ -97,6 +97,24 @@ export function initDb(): Database.Database {
       key TEXT PRIMARY KEY
     );
 
+    -- Frozen snapshots of a strategy's day: everything needed to re-render the Strategy
+    -- Analysis chart (underlying candles, leg prices, P&L curves, greeks) as JSON, so the
+    -- chart survives after the option historical API rolls those contracts off.
+    CREATE TABLE IF NOT EXISTS saved_strategies (
+      snapshot_id      TEXT PRIMARY KEY,
+      basket_group_id  TEXT NOT NULL,
+      strategy_name    TEXT,
+      underlying       TEXT,
+      trade_date       TEXT NOT NULL,
+      total_pnl        INTEGER NOT NULL DEFAULT 0,
+      leg_count        INTEGER NOT NULL DEFAULT 0,
+      source           TEXT NOT NULL DEFAULT 'manual',
+      created_at       INTEGER NOT NULL,
+      updated_at       INTEGER NOT NULL,
+      data_json        TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_snap_basket_date ON saved_strategies(basket_group_id, trade_date);
+
     CREATE INDEX IF NOT EXISTS idx_pnl_ref_ts ON pnl_ticks(ref_id, ts);
     CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_id);
     CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(order_status);
@@ -332,6 +350,59 @@ export function dbRenameStrategy(basketGroupId: string, newName: string): void {
   db.prepare('UPDATE orders SET strategy_name = ? WHERE basket_group_id = ?').run(newName, basketGroupId);
   db.prepare('UPDATE positions SET strategy_name = ? WHERE basket_group_id = ?').run(newName, basketGroupId);
   db.prepare('UPDATE saved_baskets SET name = ?, updated_at = ? WHERE basket_group_id = ?').run(newName, Date.now(), basketGroupId);
+}
+
+// ── Saved Strategy Snapshots ─────────────────────────────────────────────────
+
+export interface SnapshotMeta {
+  snapshot_id: string; basket_group_id: string; strategy_name: string | null;
+  underlying: string | null; trade_date: string; total_pnl: number;
+  leg_count: number; source: string; created_at: number; updated_at: number;
+}
+
+// Upsert keyed on snapshot_id (deterministic = basket_group_id + trade_date), so re-saving the
+// same strategy-day overwrites in place and preserves the original created_at.
+export function dbUpsertSnapshot(s: {
+  snapshot_id: string; basket_group_id: string; strategy_name?: string | null;
+  underlying?: string | null; trade_date: string; total_pnl: number;
+  leg_count: number; source: string; data_json: string;
+}): void {
+  const now = Date.now();
+  db.prepare(`INSERT INTO saved_strategies
+      (snapshot_id, basket_group_id, strategy_name, underlying, trade_date,
+       total_pnl, leg_count, source, created_at, updated_at, data_json)
+    VALUES (@snapshot_id, @basket_group_id, @strategy_name, @underlying, @trade_date,
+       @total_pnl, @leg_count, @source, @now, @now, @data_json)
+    ON CONFLICT(snapshot_id) DO UPDATE SET
+      strategy_name=@strategy_name, underlying=@underlying, total_pnl=@total_pnl,
+      leg_count=@leg_count, source=@source, updated_at=@now, data_json=@data_json
+  `).run({
+    snapshot_id: s.snapshot_id, basket_group_id: s.basket_group_id,
+    strategy_name: s.strategy_name ?? null, underlying: s.underlying ?? null,
+    trade_date: s.trade_date, total_pnl: Math.round(s.total_pnl), leg_count: s.leg_count,
+    source: s.source, now, data_json: s.data_json,
+  });
+}
+
+export function dbListSnapshots(): SnapshotMeta[] {
+  return db.prepare(`SELECT snapshot_id, basket_group_id, strategy_name, underlying, trade_date,
+    total_pnl, leg_count, source, created_at, updated_at
+    FROM saved_strategies ORDER BY trade_date DESC, updated_at DESC`).all() as SnapshotMeta[];
+}
+
+export function dbGetSnapshot(id: string): (SnapshotMeta & { data_json: string }) | undefined {
+  return db.prepare('SELECT * FROM saved_strategies WHERE snapshot_id = ?').get(id) as
+    (SnapshotMeta & { data_json: string }) | undefined;
+}
+
+export function dbDeleteSnapshot(id: string): boolean {
+  return db.prepare('DELETE FROM saved_strategies WHERE snapshot_id = ?').run(id).changes > 0;
+}
+
+export function dbSnapshotExists(basketGroupId: string, tradeDate: string): boolean {
+  const row = db.prepare('SELECT 1 FROM saved_strategies WHERE basket_group_id = ? AND trade_date = ?')
+    .get(basketGroupId, tradeDate);
+  return row != null;
 }
 
 export function dbRenameSavedBasket(basketId: string, newName: string): { basket_group_id: string | null } {

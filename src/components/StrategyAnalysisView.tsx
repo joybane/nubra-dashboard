@@ -19,6 +19,8 @@ interface StrategyAnalysisViewProps {
   strategyName: string;
   theme: 'dark' | 'light';
   onBack: () => void;
+  // When set, render a frozen saved snapshot instead of fetching/streaming live data.
+  snapshotId?: string;
 }
 
 interface LegMeta {
@@ -51,6 +53,38 @@ function fmtChartTime(chartTime: number): string {
 
 function nowChartTime(): number {
   return Math.floor(Date.now() / 1000) + IST_OFFSET;
+}
+
+// Append/replace the trailing cache point, mirroring lightweight-charts' series.update() (same time →
+// overwrite, newer → append, older → ignore). Keeps the chartData cache complete with live ticks so a
+// snapshot saved mid-session captures everything on screen, not just the initial historical backfill.
+function upsertPoint(arr: Array<{ time: any; value: number }>, time: number, value: number): void {
+  const last = arr[arr.length - 1];
+  if (last && last.time === time) last.value = value;
+  else if (!last || time > last.time) arr.push({ time, value });
+}
+function upsertBar(arr: HistBar[], bar: HistBar): void {
+  const last = arr[arr.length - 1];
+  if (last && last.time === bar.time) { last.open = bar.open; last.high = bar.high; last.low = bar.low; last.close = bar.close; }
+  else if (!last || bar.time > last.time) arr.push(bar);
+}
+
+// Pad a value series with whitespace ({time} with no value) so it spans the full underlying time grid.
+// The P&L and greeks panes only have data from entry→exit, while the underlying candle pane spans the
+// whole session; each chart fitContent()s its own range and the cross-pane sync is logical (bar-index),
+// so without a shared grid the same x-position means different times in each pane. Padding gives every
+// pane one identical bar-index↔time mapping → the logical sync becomes a true time alignment, while the
+// whitespace stays invisible so the P&L line still only draws entry→exit.
+function padToGrid(
+  grid: number[],
+  data: Array<{ time: any; value: number }>,
+): Array<{ time: any; value: number } | { time: any }> {
+  if (grid.length === 0) return data;
+  const valByTime = new Map<number, number>();
+  for (const d of data) valByTime.set(d.time as number, d.value);
+  const times = new Set<number>(grid);
+  for (const d of data) times.add(d.time as number);
+  return [...times].sort((a, b) => a - b).map(t => valByTime.has(t) ? { time: t as any, value: valByTime.get(t)! } : { time: t as any });
 }
 
 const LEG_COLORS = ['#22c55e', '#ef4444', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
@@ -139,6 +173,28 @@ interface ChartDataCache {
   sessionClose: number;
 }
 
+// Serializable snapshot payload (Maps → entries arrays). Must match server/snapshotBuilder.ts.
+interface SnapshotData {
+  version: 1;
+  underlying: string | null;
+  positions: PaperPosition[];
+  closedPositions: PaperPosition[];
+  chart: {
+    underlyingBars: HistBar[];
+    legPriceData: Array<[number, Array<{ time: number; value: number }>]>;
+    legPnlData: Array<[number, Array<{ time: number; value: number }>]>;
+    basketPnlData: Array<{ time: number; value: number }>;
+    legGreeksHist: Array<[number, Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }>]>;
+    pnlFrom: number; pnlTo: number; sessionOpen: number; sessionClose: number;
+  };
+}
+
+// IST calendar date (YYYY-MM-DD) of an epoch-ns timestamp — must match server istDateString().
+function istDateFromNs(ns: number): string {
+  const d = new Date(ns / 1_000_000 + IST_OFFSET * 1000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
 const GREEK_COLORS: Record<string, string> = { delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' };
 
 // Min-max normalization factor: maps a series' [min,max] to [-1,1]. True value = plotted × half + mid.
@@ -150,8 +206,9 @@ function minMaxFactor(values: number[]): { mid: number; half: number } {
   return { mid, half: half > 0 ? half : 1 };
 }
 
-export default function StrategyAnalysisView({ basketGroupId, strategyName, theme, onBack }: StrategyAnalysisViewProps) {
+export default function StrategyAnalysisView({ basketGroupId, strategyName, theme, onBack, snapshotId }: StrategyAnalysisViewProps) {
   const { subscribe, subscribeChart, unsubscribeChart } = useWs();
+  const isSnapshot = !!snapshotId;
 
   // ── Position / order state ──
   const [positions, setPositions] = useState<PaperPosition[]>([]);
@@ -404,17 +461,18 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   }, [basketGroupId]);
 
   useEffect(() => {
+    if (isSnapshot) return;            // frozen snapshot → no live polling
     fetchData();
     const t = setInterval(fetchData, 3000);
     return () => clearInterval(t);
-  }, [fetchData]);
+  }, [fetchData, isSnapshot]);
 
   // ── Subscribe for live underlying ticks ──
   useEffect(() => {
-    if (!underlying) return;
+    if (isSnapshot || !underlying) return;
     subscribeChart({ indexes: [underlying] }, '1m', 'NSE');
     return () => { unsubscribeChart({ indexes: [underlying] }, '1m', 'NSE'); };
-  }, [underlying, subscribeChart, unsubscribeChart]);
+  }, [underlying, subscribeChart, unsubscribeChart, isSnapshot]);
 
   // ════════════════════════════════════════════════════════════════════════════
   // CHART SECTION — rebuilt from scratch
@@ -574,7 +632,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   // ── 3a. Fetch historical data (stores in state — decoupled from chart refs) ──
   useEffect(() => {
 
-    if (!dataLoaded || !underlying) return;
+    if (isSnapshot || !dataLoaded || !underlying) return;
     const positions = allPositionsRef.current;
     const metas = legMetasRef.current;
 
@@ -688,7 +746,44 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
     })();
     return () => { cancelled = true; };
-  }, [dataLoaded, underlying]);
+  }, [dataLoaded, underlying, isSnapshot]);
+
+  // ── 3a-snapshot. Load a frozen saved snapshot instead of fetching live ──
+  useEffect(() => {
+    if (!snapshotId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/paper/strategy/snapshot/${snapshotId}`);
+        if (!res.ok) return;
+        const snap = await res.json() as { data?: SnapshotData };
+        const d = snap?.data;
+        if (cancelled || !d?.chart) return;
+        setPositions(d.positions || []);
+        setClosedPositions(d.closedPositions || []);
+        const c = d.chart;
+        const cache: ChartDataCache = {
+          underlyingBars: c.underlyingBars || [],
+          legPriceData: new Map(c.legPriceData || []),
+          legPnlData: new Map(c.legPnlData || []),
+          basketPnlData: c.basketPnlData || [],
+          legGreeksHist: new Map(c.legGreeksHist || []),
+          pnlFrom: c.pnlFrom, pnlTo: c.pnlTo, sessionOpen: c.sessionOpen, sessionClose: c.sessionClose,
+        };
+        // Seed greeks badges from the last historical point of each leg.
+        const g = new Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>();
+        for (const [refId, pts] of cache.legGreeksHist) {
+          const last = pts[pts.length - 1];
+          if (last) g.set(refId, { delta: last.delta, gamma: last.gamma, theta: last.theta, vega: last.vega, iv: 0 });
+        }
+        if (g.size > 0) setLegGreeks(g);
+        greeksFetchedRef.current = true;
+        setDataLoaded(true);
+        setChartData(cache);
+      } catch (e) { console.warn('[StrategyAnalysis] snapshot load failed:', e); }
+    })();
+    return () => { cancelled = true; };
+  }, [snapshotId]);
 
   // ── 3b. Apply fetched data to existing charts ──
   useEffect(() => {
@@ -716,6 +811,9 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       requestAnimationFrame(() => priceChart.timeScale().fitContent());
     }
 
+    // Shared full-session grid (from the underlying candles) used to time-align the P&L and greeks panes.
+    const grid = chartData.underlyingBars.map(b => b.time as number);
+
     const pnlChart = pnlChartRef.current;
     if (pnlChart) {
       for (const leg of legMetasRef.current) {
@@ -727,10 +825,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           seriesRef.current.legPnl.set(leg.refId, s);
         }
         const data = chartData.legPnlData.get(leg.refId);
-        if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(data);
+        if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(padToGrid(grid, data) as any);
       }
       if (chartData.basketPnlData.length > 0) {
-        seriesRef.current.basketPnl?.setData(chartData.basketPnlData);
+        seriesRef.current.basketPnl?.setData(padToGrid(grid, chartData.basketPnlData) as any);
       }
       requestAnimationFrame(() => pnlChart.timeScale().fitContent());
     }
@@ -779,6 +877,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
   // ── 6. Live WebSocket updates (charts) ──
   useEffect(() => {
+    if (isSnapshot) return;
     const unsub1 = subscribe('ohlcv', (msg: WsMessage) => {
       if (msg.type !== 'ohlcv' || !underlying || !seriesRef.current.underlying) return;
       const data = msg.data as { indexes?: Array<{ indexname?: string; timestamp?: string; open?: string; high?: string; low?: string; close?: string }> };
@@ -787,13 +886,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       const t = Number(BigInt(idx.timestamp)) / 1e9 + IST_OFFSET;
       const cached = chartDataRef.current;
       if (cached && (t < cached.sessionOpen || t > cached.sessionClose)) return;
-      seriesRef.current.underlying.update({
-        time: t as any,
-        open: normU(parseFloat(idx.open || '0') / 100),
-        high: normU(parseFloat(idx.high || '0') / 100),
-        low: normU(parseFloat(idx.low || '0') / 100),
-        close: normU(parseFloat(idx.close || '0') / 100),
-      });
+      const o = parseFloat(idx.open || '0') / 100, h = parseFloat(idx.high || '0') / 100;
+      const l = parseFloat(idx.low || '0') / 100, c = parseFloat(idx.close || '0') / 100;
+      seriesRef.current.underlying.update({ time: t as any, open: normU(o), high: normU(h), low: normU(l), close: normU(c) });
+      if (cached) upsertBar(cached.underlyingBars, { time: t, open: o, high: h, low: l, close: c }); // keep cache complete for snapshots
     });
 
     const processLtp = (ltpMap: Map<number, number>) => {
@@ -815,9 +911,16 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         const pnl = side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
         seriesRef.current.legPnl.get(p.ref_id)?.update({ time: t as any, value: pnl });
         totalPnl += pnl;
+        if (cached) { // keep cache complete with live ticks (raw values, as effect 3a stores them)
+          let pa = cached.legPriceData.get(p.ref_id); if (!pa) { pa = []; cached.legPriceData.set(p.ref_id, pa); }
+          upsertPoint(pa, t, ltp / 100);
+          let na = cached.legPnlData.get(p.ref_id); if (!na) { na = []; cached.legPnlData.set(p.ref_id, na); }
+          upsertPoint(na, t, pnl);
+        }
       }
       if (positionsRef.current.length > 0 && seriesRef.current.basketPnl) {
         seriesRef.current.basketPnl.update({ time: t as any, value: totalPnl });
+        if (cached) upsertPoint(cached.basketPnlData, t, totalPnl);
       }
     };
 
@@ -845,10 +948,11 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     });
 
     return () => { unsub1(); unsub2(); unsub3(); };
-  }, [subscribe, underlying]);
+  }, [subscribe, underlying, isSnapshot]);
 
   // ── 7. Live LTP for position table (unchanged) ──
   useEffect(() => {
+    if (isSnapshot) return;
     const unsub1 = subscribe('position_ltp', (msg: WsMessage) => {
       if (msg.type !== 'position_ltp') return;
       const updates = msg.data as { ref_id: number; ltp: number }[];
@@ -887,7 +991,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       });
     });
     return () => { unsub1(); unsub2(); };
-  }, [subscribe]);
+  }, [subscribe, isSnapshot]);
 
   // ── 8. Visibility toggles ──
   useEffect(() => { seriesRef.current.underlying?.applyOptions({ visible: visibility.underlying }); }, [visibility.underlying, priceVisible]);
@@ -929,6 +1033,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
   // ── 9. Live Greeks from option_chain WS ──
   useEffect(() => {
+    if (isSnapshot) return;
     const unsub = subscribe('option_chain', (msg: WsMessage) => {
       if (msg.type !== 'option_chain') return;
       const data = (msg as any).data as { ce?: Array<Record<string, unknown>>; pe?: Array<Record<string, unknown>> };
@@ -955,7 +1060,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
     });
     return () => unsub();
-  }, [subscribe]);
+  }, [subscribe, isSnapshot]);
 
   // ── 10. Greeks chart ──
   const GREEK_SOURCES = ['net', 'CE', 'PE'] as const;
@@ -1061,6 +1166,9 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     }
     greekFactorsRef.current = factors;
 
+    // Same full-session grid as the P&L pane so greeks time-align with the other charts (whitespace pad).
+    const grid = chartData.underlyingBars.map(b => b.time as number);
+
     for (const src of GREEK_SOURCES) {
       const byTime = sourceData[src];
       const times = [...byTime.keys()].sort((a, b) => a - b);
@@ -1071,7 +1179,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (!s) continue;
         if (isActive && selectedGreeks.has(k) && times.length > 0) {
           const f = factors[k];
-          s.setData(times.map(t => ({ time: t as any, value: (byTime.get(t)![k] - f.mid) / f.half })));
+          s.setData(padToGrid(grid, times.map(t => ({ time: t as any, value: (byTime.get(t)![k] - f.mid) / f.half }))) as any);
           s.applyOptions({ visible: true });
         } else {
           s.setData([]);
@@ -1086,6 +1194,56 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const toggleVis = useCallback((key: string) => { setVisibility(prev => ({ ...prev, [key]: !prev[key] })); }, []);
   const toggleLegPrice = useCallback((refId: number) => { setLegPriceVisibility(prev => ({ ...prev, [refId]: !(prev[refId] !== false) })); }, []);
   const toggleLegPnl = useCallback((refId: number) => { setLegPnlVisibility(prev => ({ ...prev, [refId]: !(prev[refId] !== false) })); }, []);
+
+  // ── Snapshot save (freeze this day's chart so it survives the historical API rolling off) ──
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const buildSnapshotPayload = useCallback((source: 'manual' | 'auto') => {
+    const cd = chartDataRef.current;
+    if (!cd) return null;
+    // Nothing reconstructable (e.g. API already rolled the contracts off) → don't overwrite a good snapshot.
+    if (cd.underlyingBars.length === 0 && cd.legPriceData.size === 0) return null;
+    const open = positionsRef.current, closed = closedPositionsRef.current;
+    const entryTimes = [...open, ...closed].map(p => p.entry_time || 0).filter(t => t > 0);
+    if (entryTimes.length === 0) return null;
+    const tradeDate = istDateFromNs(Math.min(...entryTimes));
+    const lastBasket = cd.basketPnlData.length > 0 ? cd.basketPnlData[cd.basketPnlData.length - 1].value : 0;
+    return {
+      basket_group_id: basketGroupId, trade_date: tradeDate, strategy_name: strategyName,
+      underlying, total_pnl: Math.round(lastBasket * 100), leg_count: legMetasRef.current.length, source,
+      data: {
+        version: 1, underlying, positions: open, closedPositions: closed,
+        chart: {
+          underlyingBars: cd.underlyingBars,
+          legPriceData: [...cd.legPriceData.entries()],
+          legPnlData: [...cd.legPnlData.entries()],
+          basketPnlData: cd.basketPnlData,
+          legGreeksHist: [...cd.legGreeksHist.entries()],
+          pnlFrom: cd.pnlFrom, pnlTo: cd.pnlTo, sessionOpen: cd.sessionOpen, sessionClose: cd.sessionClose,
+        },
+      },
+    };
+  }, [basketGroupId, strategyName, underlying]);
+
+  const saveSnapshot = useCallback(async (source: 'manual' | 'auto') => {
+    const payload = buildSnapshotPayload(source);
+    if (!payload) { if (source === 'manual') setSaveState('error'); return false; }
+    if (source === 'manual') setSaveState('saving');
+    try {
+      const res = await fetch('/paper/strategy/snapshot', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+      });
+      if (source === 'manual') { setSaveState(res.ok ? 'saved' : 'error'); setTimeout(() => setSaveState('idle'), 2500); }
+      return res.ok;
+    } catch { if (source === 'manual') { setSaveState('error'); setTimeout(() => setSaveState('idle'), 2500); } return false; }
+  }, [buildSnapshotPayload]);
+
+  // Auto-upsert once when a live (non-snapshot) chart finishes building, so viewing a strategy persists it.
+  const autoSavedRef = useRef(false);
+  useEffect(() => {
+    if (isSnapshot || !chartData || autoSavedRef.current) return;
+    autoSavedRef.current = true;
+    saveSnapshot('auto');
+  }, [chartData, isSnapshot, saveSnapshot]);
 
   // ── Close panel-toggle popups on outside click ──
   const chartsPopupRef = useRef<HTMLDivElement>(null);
@@ -1381,9 +1539,28 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           })()}
         </div>
 
-        <span className={`ml-auto text-[12px] font-semibold ${strategyPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-          P&L: {strategyPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(strategyPnl))}
-        </span>
+        <div className="ml-auto flex items-center gap-3">
+          {isSnapshot ? (
+            <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-[#3b82f6]/15 text-[#3b82f6] border border-[#3b82f6]/40">
+              Saved snapshot
+            </span>
+          ) : (
+            <button
+              onClick={() => saveSnapshot('manual')}
+              disabled={saveState === 'saving'}
+              title="Freeze this day's chart so it stays viewable after the historical data rolls off"
+              className={`flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-semibold border transition-colors ${
+                saveState === 'saved' ? 'border-[var(--green)]/50 bg-[var(--green)]/15 text-[var(--green)]'
+                  : saveState === 'error' ? 'border-[var(--red)]/50 bg-[var(--red)]/15 text-[var(--red)]'
+                  : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+              }`}>
+              {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved ✓' : saveState === 'error' ? 'Save failed' : '⭳ Save'}
+            </button>
+          )}
+          <span className={`text-[12px] font-semibold ${strategyPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+            P&L: {strategyPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(strategyPnl))}
+          </span>
+        </div>
       </div>
 
       {/* Charts + order book */}

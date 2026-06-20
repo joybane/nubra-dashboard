@@ -4,6 +4,7 @@ import { fmtPrice } from '../lib/utils';
 import { usePaperTrading } from '../hooks/usePaperTrading';
 import { useWorkspaceState } from '../workspace/useWorkspaceState';
 import { useWs } from '../hooks/useWsContext';
+import SavedStrategiesTab from './SavedStrategiesTab';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 function paise(v: number | undefined | null): string {
@@ -1046,10 +1047,10 @@ function HoldingsTab({ uatAuth }: { uatAuth: boolean }) {
 }
 
 // ─── OrderTerminal ────────────────────────────────────────────────────────────
-export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyChart?: (basketGroupId: string, strategyName: string) => void }) {
+export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyChart?: (basketGroupId: string, strategyName: string, snapshotId?: string) => void }) {
   const { authenticated: uatAuth, refreshAuthStatus, openTicket } = usePaperTrading();
   const { state: wsState, setPaneView, setActivePane, loadInstrumentInActivePane } = useWorkspaceState();
-  const [tab,        setTab]        = useState<'orders' | 'positions' | 'holdings'>('orders');
+  const [tab,        setTab]        = useState<'orders' | 'positions' | 'holdings' | 'saved'>('orders');
   const [height,     setHeight]     = useState(DEFAULT_H);
   const [collapsed,  setCollapsed]  = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
@@ -1164,6 +1165,7 @@ export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyC
         <button onClick={() => setTab('orders')}    className={TAB_STYLE('orders')}>Regular Orders</button>
         <button onClick={() => setTab('positions')} className={TAB_STYLE('positions')}>Positions</button>
         <button onClick={() => setTab('holdings')}  className={TAB_STYLE('holdings')}>Holdings</button>
+        <button onClick={() => setTab('saved')}     className={TAB_STYLE('saved')}>Saved</button>
 
         <div className="ml-auto flex items-center gap-2 pr-1">
           <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
@@ -1206,6 +1208,7 @@ export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyC
             {tab === 'orders'    && <OrdersTab    uatAuth={uatAuth} onOpenStrategyChart={onOpenStrategyChart} />}
             {tab === 'positions' && <PositionsTab uatAuth={uatAuth} onViewChart={handleViewChart} onExit={handleExit} onOpenStrategyChart={onOpenStrategyChart} />}
             {tab === 'holdings'  && <HoldingsTab  uatAuth={uatAuth} />}
+            {tab === 'saved'     && <SavedStrategiesTab onOpen={(bg, name, id) => onOpenStrategyChart?.(bg, name, id)} />}
           </>
         )}
       </div>

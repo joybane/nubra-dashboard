@@ -15,6 +15,7 @@ import { useWorkspaceState } from './workspace/useWorkspaceState';
 export interface StrategyChartTarget {
   basketGroupId: string;
   strategyName: string;
+  snapshotId?: string;
 }
 
 type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
@@ -28,8 +29,8 @@ function AppInner() {
 
   const { loadInstrumentInActivePane } = useWorkspaceState();
 
-  const openStrategyChart = useCallback((basketGroupId: string, strategyName: string) => {
-    setStrategyChart({ basketGroupId, strategyName });
+  const openStrategyChart = useCallback((basketGroupId: string, strategyName: string, snapshotId?: string) => {
+    setStrategyChart({ basketGroupId, strategyName, snapshotId });
   }, []);
 
   useEffect(() => {
@@ -58,6 +59,7 @@ function AppInner() {
         <StrategyAnalysisView
           basketGroupId={strategyChart.basketGroupId}
           strategyName={strategyChart.strategyName}
+          snapshotId={strategyChart.snapshotId}
           theme={theme}
           onBack={() => setStrategyChart(null)}
         />

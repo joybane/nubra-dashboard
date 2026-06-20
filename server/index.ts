@@ -15,7 +15,9 @@ import {
   dbGetMeta, dbSetMeta,
   dbInsertBasket, dbLoadBaskets, dbDeleteBasket, dbUpdateBasket, dbRenameStrategy, dbRenameSavedBasket,
   dbUpsertOcSub, dbLoadOcSubs,
+  dbUpsertSnapshot, dbListSnapshots, dbGetSnapshot, dbDeleteSnapshot,
 } from './paperDb.ts';
+import { buildBasketSnapshot, istDateString, type SnapPosition } from './snapshotBuilder.ts';
 import protobuf from 'protobufjs';
 
 dotenv.config();
@@ -946,6 +948,83 @@ class SimBroker {
 
 const simBroker   = new SimBroker();
 simBroker.restore();
+
+// ─── End-of-day auto-snapshot ────────────────────────────────────────────────
+// After market close, freeze a chart snapshot for every basket that traded today and doesn't already
+// have one (manual saves take precedence via dbSnapshotExists). The server holds the WS connection and
+// the simulated book, so this works even with no browser open.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+function simToSnapPosition(p: SimPosition): SnapPosition {
+  const closed = p.qty === 0;
+  if (!closed) {
+    return {
+      ref_id: p.ref_id, display_name: p.display_name, zanskar_name: p.nubraName,
+      order_side: p.qty > 0 ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL', qty: Math.abs(p.qty),
+      avg_price: p.avg_price, realised_pnl: Math.round(p.realized_pnl),
+      entry_time: p.entry_time, derivative_type: 'OPT',
+    };
+  }
+  // Closed: mirror the /paper/positions/closed mapping for qty/side.
+  const entryQty = p.entry_qty ?? 0;
+  const priceDiff = Math.abs((p.exit_price || 0) - p.avg_price);
+  const derivedQty = entryQty !== 0 ? Math.abs(entryQty) : (priceDiff > 0 ? Math.round(Math.abs(p.realized_pnl) / priceDiff) : 0);
+  const isLong = entryQty > 0 || (entryQty === 0 && p.realized_pnl > 0 && (p.exit_price || 0) > p.avg_price);
+  return {
+    ref_id: p.ref_id, display_name: p.display_name, zanskar_name: p.nubraName,
+    order_side: isLong ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL', qty: derivedQty,
+    avg_price: p.avg_price, realised_pnl: Math.round(p.realized_pnl),
+    entry_time: p.entry_time, exit_time: p.exit_time, exit_price: p.exit_price, derivative_type: 'OPT',
+  };
+}
+
+async function runEodSnapshots(): Promise<void> {
+  if (authState.status !== 'authenticated' || !authState.sessionToken) return;
+  const byBasket = new Map<string, SimPosition[]>();
+  for (const p of [...simBroker.getPositions(), ...simBroker.getClosedPositions()]) {
+    if (!p.basket_group_id) continue;
+    if (!byBasket.has(p.basket_group_id)) byBasket.set(p.basket_group_id, []);
+    byBasket.get(p.basket_group_id)!.push(p);
+  }
+  const fetchTs = (body: object) => nubraPost('/charts/timeseries', body, { Authorization: `Bearer ${authState.sessionToken!}` });
+  const today = istDateString(Date.now() * 1_000_000);
+  let saved = 0;
+  for (const [basketId, group] of byBasket) {
+    const entryTimes = group.map(p => p.entry_time || 0).filter(t => t > 0);
+    if (entryTimes.length === 0) continue;
+    const tradeDate = istDateString(Math.min(...entryTimes));
+    if (tradeDate !== today) continue;                          // only finalize today's trades
+    const existing = dbGetSnapshot(`${basketId}__${tradeDate}`);
+    if (existing?.source === 'manual') continue;                // preserve explicit manual saves
+    const strategyName = group.find(p => p.strategy_name)?.strategy_name || null;
+    try {
+      const built = await buildBasketSnapshot(group.map(simToSnapPosition), fetchTs);
+      if (!built) continue;
+      dbUpsertSnapshot({
+        snapshot_id: `${basketId}__${built.tradeDate}`, basket_group_id: basketId,
+        strategy_name: strategyName, underlying: built.underlying, trade_date: built.tradeDate,
+        total_pnl: built.totalPnl, leg_count: built.legCount, source: 'eod',
+        data_json: JSON.stringify(built.data),
+      });
+      saved++;
+    } catch (e) {
+      console.warn(`[EOD] snapshot failed for ${basketId}:`, (e as Error).message);
+    }
+  }
+  if (saved > 0) console.log(`[EOD] Auto-saved ${saved} strategy snapshot(s)`);
+}
+
+let _lastEodDate = '';
+setInterval(() => {
+  const ist = new Date(Date.now() + IST_OFFSET_MS);
+  const dow = ist.getUTCDay();                       // 0=Sun .. 6=Sat
+  const afterClose = ist.getUTCHours() > 15 || (ist.getUTCHours() === 15 && ist.getUTCMinutes() >= 35);
+  const istDate = istDateString(Date.now() * 1_000_000);
+  if (afterClose && dow >= 1 && dow <= 5 && _lastEodDate !== istDate) {
+    _lastEodDate = istDate;
+    runEodSnapshots().catch(e => console.warn('[EOD] run failed:', (e as Error).message));
+  }
+}, 60_000);
 const simOcSubs   = new Set<string>(dbLoadOcSubs());
 
 // Subscribe instrument to the PROD live feed so SimBroker gets fills.
@@ -1432,6 +1511,50 @@ fastify.put<{ Body: { basket_group_id: string; name: string } }>('/paper/strateg
   if (!basket_group_id || !name?.trim()) return reply.status(400).send({ error: 'basket_group_id and name required' });
   const ok = simBroker.renameStrategy(basket_group_id, name.trim());
   if (!ok) return reply.status(404).send({ error: 'No orders/positions found for this group' });
+  return reply.send({ ok: true });
+});
+
+// ─── Strategy snapshots (frozen day-charts) ───────────────────────────────────
+interface SnapshotBody {
+  basket_group_id: string; trade_date: string; strategy_name?: string;
+  underlying?: string; total_pnl?: number; leg_count?: number; source?: string;
+  data: unknown;
+}
+
+fastify.post<{ Body: SnapshotBody }>('/paper/strategy/snapshot', async (req, reply) => {
+  const b = req.body;
+  if (!b?.basket_group_id || !b?.trade_date || b.data == null) {
+    return reply.status(400).send({ error: 'basket_group_id, trade_date and data required' });
+  }
+  const snapshot_id = `${b.basket_group_id}__${b.trade_date}`;
+  try {
+    dbUpsertSnapshot({
+      snapshot_id, basket_group_id: b.basket_group_id, strategy_name: b.strategy_name ?? null,
+      underlying: b.underlying ?? null, trade_date: b.trade_date, total_pnl: b.total_pnl ?? 0,
+      leg_count: b.leg_count ?? 0, source: b.source ?? 'manual', data_json: JSON.stringify(b.data),
+    });
+    return reply.send({ ok: true, snapshot_id });
+  } catch (err: unknown) {
+    return reply.status(500).send({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+fastify.get('/paper/strategy/snapshots', async (_req, reply) => {
+  return reply.send({ snapshots: dbListSnapshots() });
+});
+
+fastify.get<{ Params: { id: string } }>('/paper/strategy/snapshot/:id', async (req, reply) => {
+  const row = dbGetSnapshot(req.params.id);
+  if (!row) return reply.status(404).send({ error: 'snapshot not found' });
+  let data: unknown = null;
+  try { data = JSON.parse(row.data_json); } catch { /* corrupt blob → null */ }
+  const { data_json: _omit, ...meta } = row;
+  return reply.send({ ...meta, data });
+});
+
+fastify.delete<{ Params: { id: string } }>('/paper/strategy/snapshot/:id', async (req, reply) => {
+  const ok = dbDeleteSnapshot(req.params.id);
+  if (!ok) return reply.status(404).send({ error: 'snapshot not found' });
   return reply.send({ ok: true });
 });
 
