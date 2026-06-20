@@ -76,7 +76,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
   const [showGoToAtm, setShowGoToAtm] = useState(false);
   const [atmDir,      setAtmDir]      = useState<'up' | 'down'>('up');
 
-  const cellMapRef        = useRef(new Map<string, HTMLTableCellElement>());
+  const cellMapRef        = useRef(new Map<string, HTMLElement>());
   const maxCeOiRef        = useRef(1);
   const maxPeOiRef        = useRef(1);
   const currentSymRef     = useRef('');
@@ -98,7 +98,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
     sp: number, optType: 'CE' | 'PE', side: 'BUY' | 'SELL', leg: OptionLeg | null,
   ) => {
     if (!leg) return;
-    const la = leg as Record<string, unknown>;
+    const la = leg as unknown as Record<string, unknown>;
     openTicket({
       instrument: {
         zanskar_name:    String(la.zanskar_name || la.nubra_name || la.symbol || ''),
@@ -120,7 +120,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
 
   const addToWatchlistFn = useCallback((sp: number, optType: 'CE' | 'PE', leg: OptionLeg | null) => {
     if (!leg) return;
-    const la  = leg as Record<string, unknown>;
+    const la  = leg as unknown as Record<string, unknown>;
     const ltp = g(leg, 'ltp');
     watchlistAdd({
       displayName: `${currentSymRef.current} ${sp} ${optType}`,
@@ -139,7 +139,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
     sp: number, optType: 'CE' | 'PE', side: 'BUY' | 'SELL', leg: OptionLeg | null,
   ) => {
     if (!leg) return;
-    const la = leg as Record<string, unknown>;
+    const la = leg as unknown as Record<string, unknown>;
     addLegFromChain({
       strike:     sp,
       optionType: optType,
@@ -503,7 +503,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       ? strikes.reduce((b, s) => Math.abs(s - refPrice) < Math.abs(b - refPrice) ? s : b, strikes[0])
       : null;
 
-    const registerCell = (sp: number, key: string) => (el: HTMLTableCellElement | null) => {
+    const registerCell = (sp: number, key: string) => (el: HTMLElement | null) => {
       if (el) cellMapRef.current.set(`${sp}-${key}`, el);
     };
 
@@ -529,7 +529,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
         </tr>
       ) : null;
 
-      if (spotLine && spot <= sp) rows.push(spotLine);
+      if (spotLine && spot != null && spot <= sp) rows.push(spotLine);
 
       rows.push(
         <tr
@@ -635,7 +635,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
         </tr>
       );
 
-      if (spotLine && spot > sp) rows.push(spotLine);
+      if (spotLine && spot != null && spot > sp) rows.push(spotLine);
     }
     return rows;
   // eslint-disable-next-line react-hooks/exhaustive-deps

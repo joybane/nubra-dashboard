@@ -25,7 +25,7 @@ export interface MarginCalcApi {
 
 export function useMarginCalc(legs: Leg[], exch: string, multiplier: number): MarginCalcApi {
   const [margin, setMargin] = useState<MarginData | null>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const fetchMargin = useCallback(async () => {
     if (!legs.length) { setMargin(null); return; }

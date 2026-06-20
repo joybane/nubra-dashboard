@@ -188,7 +188,7 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
   useEffect(() => {
     if (!sym) return;
     const unsub = subscribe('option_chain', (msg) => {
-      const d = msg.data as Record<string, unknown> | undefined;
+      const d = (msg as any).data as Record<string, unknown> | undefined;
       if (!d) return;
       if (String(d.asset || '').toUpperCase() !== sym.toUpperCase()) return;
       const msgExpiry = String(d.expiry || '');

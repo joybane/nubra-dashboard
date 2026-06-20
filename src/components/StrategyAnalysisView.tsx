@@ -124,28 +124,47 @@ function chartOpts(isDark: boolean) {
   };
 }
 
+// ─── Cached chart data (survives chart recreation on toggle/theme change) ────
+interface ChartDataCache {
+  underlyingBars: HistBar[];
+  legPriceData: Map<number, Array<{ time: any; value: number }>>;
+  legPnlData: Map<number, Array<{ time: any; value: number }>>;
+  basketPnlData: Array<{ time: any; value: number }>;
+  chartFrom: number;
+  chartTo: number;
+  marketClose: number;
+}
+
 export default function StrategyAnalysisView({ basketGroupId, strategyName, theme, onBack }: StrategyAnalysisViewProps) {
   const { subscribe, subscribeChart, unsubscribeChart } = useWs();
 
+  // ── Position / order state ──
   const [positions, setPositions] = useState<PaperPosition[]>([]);
   const [closedPositions, setClosedPositions] = useState<PaperPosition[]>([]);
   const [orders, setOrders] = useState<PaperOrder[]>([]);
   const [posSubTab, setPosSubTab] = useState<'open' | 'closed'>('open');
   const [dataLoaded, setDataLoaded] = useState(false);
 
+  // ── Chart refs (grouped) ──
   const priceChartContainerRef = useRef<HTMLDivElement>(null);
   const pnlChartContainerRef = useRef<HTMLDivElement>(null);
   const priceChartRef = useRef<IChartApi | null>(null);
   const pnlChartRef = useRef<IChartApi | null>(null);
-  const underlyingSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
-  const legPriceSeriesRef = useRef<Map<number, ISeriesApi<'Line'>>>(new Map());
-  const legPnlSeriesRef = useRef<Map<number, ISeriesApi<'Line'>>>(new Map());
-  const basketPnlSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const seriesRef = useRef<{
+    underlying: ISeriesApi<'Candlestick'> | null;
+    legPrice: Map<number, ISeriesApi<'Line'>>;
+    legPnl: Map<number, ISeriesApi<'Line'>>;
+    basketPnl: ISeriesApi<'Line'> | null;
+  }>({ underlying: null, legPrice: new Map(), legPnl: new Map(), basketPnl: null });
+  const [chartData, setChartData] = useState<ChartDataCache | null>(null);
+  const chartDataRef = useRef<ChartDataCache | null>(null);
+  chartDataRef.current = chartData;
   const positionsRef = useRef<PaperPosition[]>([]);
   positionsRef.current = positions;
-  const historicalLoadedRef = useRef(false);
+  const allPositionsRef = useRef<PaperPosition[]>([]);
   const legMetasRef = useRef<LegMeta[]>([]);
 
+  // ── Chart display state ──
   const [pnlHeight, setPnlHeight] = useState(200);
   const [orderBookHeight, setOrderBookHeight] = useState(200);
   const [pnlVisible, setPnlVisible] = useState(true);
@@ -166,8 +185,9 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     entryMarkers: true,
   });
   const [legVisibility, setLegVisibility] = useState<Record<number, boolean>>({});
-
+  // ── Derived data ──
   const allPositions = useMemo(() => [...positions, ...closedPositions], [positions, closedPositions]);
+  allPositionsRef.current = allPositions;
   const underlying = useMemo(() => deriveUnderlying(allPositions), [allPositions]);
 
   const legMetas: LegMeta[] = useMemo(() => {
@@ -239,7 +259,11 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     return () => { unsubscribeChart({ indexes: [underlying] }, '1m', 'NSE'); };
   }, [underlying, subscribeChart, unsubscribeChart]);
 
-  // ── Create price chart ──
+  // ════════════════════════════════════════════════════════════════════════════
+  // CHART SECTION — rebuilt from scratch
+  // ════════════════════════════════════════════════════════════════════════════
+
+  // ── 1. Create price chart ──
   useEffect(() => {
     if (!priceChartContainerRef.current) return;
     const isDark = theme === 'dark';
@@ -253,8 +277,9 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       priceLineVisible: true, lastValueVisible: true,
       title: underlying || 'Underlying',
     } as Partial<CandlestickSeriesOptions>);
-    underlyingSeriesRef.current = candleSeries;
+    seriesRef.current.underlying = candleSeries;
 
+    // Crosshair → tooltip state
     chart.subscribeCrosshairMove((param) => {
       if (param.point) {
         setPriceTooltipPos({ x: param.point.x, y: param.point.y });
@@ -265,15 +290,12 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (!param.seriesData) return;
       const bar = param.seriesData.get(candleSeries) as any;
       if (bar) {
-        if (bar.open != null) {
-          setOhlc({ o: bar.open, h: bar.high, l: bar.low, c: bar.close });
-        } else if (bar.value != null) {
-          setOhlc({ o: bar.value, h: bar.value, l: bar.value, c: bar.value });
-        }
+        if (bar.open != null) setOhlc({ o: bar.open, h: bar.high, l: bar.low, c: bar.close });
+        else if (bar.value != null) setOhlc({ o: bar.value, h: bar.value, l: bar.value, c: bar.value });
       }
       const legs: Array<{ name: string; color: string; value: number }> = [];
-      for (const [refId, series] of legPriceSeriesRef.current) {
-        const d = param.seriesData.get(series) as any;
+      for (const [refId, s] of seriesRef.current.legPrice) {
+        const d = param.seriesData.get(s) as any;
         if (d?.value != null) {
           const meta = legMetasRef.current.find(l => l.refId === refId);
           if (meta) legs.push({ name: meta.displayName, color: meta.color, value: d.value });
@@ -282,16 +304,32 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       setLegPrices(legs);
     });
 
+    // Restore cached data (handles theme change without re-fetch)
+    const cached = chartDataRef.current;
+    if (cached) {
+      candleSeries.setData(cached.underlyingBars as any);
+      for (const leg of legMetasRef.current) {
+        const s = chart.addSeries(LineSeries, {
+          color: leg.color, lineWidth: 1, priceScaleId: 'legs',
+          title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
+        });
+        seriesRef.current.legPrice.set(leg.refId, s);
+        const data = cached.legPriceData.get(leg.refId);
+        if (data) s.setData(data);
+      }
+      try { chart.priceScale('legs').applyOptions({ scaleMargins: { top: 0.6, bottom: 0.05 } }); } catch {}
+      requestAnimationFrame(() => chart.timeScale().fitContent());
+    }
+
     return () => {
-      legPriceSeriesRef.current.clear();
-      historicalLoadedRef.current = false;
+      seriesRef.current.underlying = null;
+      seriesRef.current.legPrice.clear();
       chart.remove();
       priceChartRef.current = null;
-      underlyingSeriesRef.current = null;
     };
   }, [theme, underlying]);
 
-  // ── Create P&L chart ──
+  // ── 2. Create P&L chart ──
   useEffect(() => {
     if (!pnlChartContainerRef.current || !pnlVisible) return;
     const isDark = theme === 'dark';
@@ -300,11 +338,31 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
     const basketSeries = chart.addSeries(LineSeries, {
       color: '#ffffff', lineWidth: 3,
-      title: 'Total P&L',
-      lastValueVisible: true, priceLineVisible: true,
+      title: 'Total P&L', lastValueVisible: true, priceLineVisible: true,
     });
-    basketPnlSeriesRef.current = basketSeries;
+    seriesRef.current.basketPnl = basketSeries;
 
+    // Create all leg P&L series
+    for (const leg of legMetasRef.current) {
+      const s = chart.addSeries(LineSeries, {
+        color: leg.color, lineWidth: 1,
+        title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
+      });
+      seriesRef.current.legPnl.set(leg.refId, s);
+    }
+
+    // Restore cached data (handles toggle off→on and theme change)
+    const cached = chartDataRef.current;
+    if (cached) {
+      for (const leg of legMetasRef.current) {
+        const data = cached.legPnlData.get(leg.refId);
+        if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(data);
+      }
+      if (cached.basketPnlData.length > 0) basketSeries.setData(cached.basketPnlData);
+      requestAnimationFrame(() => chart.timeScale().fitContent());
+    }
+
+    // Crosshair → tooltip state
     chart.subscribeCrosshairMove((param) => {
       if (param.point) {
         setPnlTooltipPos({ x: param.point.x, y: param.point.y });
@@ -315,8 +373,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       const basketD = param.seriesData?.get(basketSeries) as any;
       const total = basketD?.value ?? 0;
       const legs: Array<{ name: string; color: string; value: number }> = [];
-      for (const [refId, series] of legPnlSeriesRef.current) {
-        const d = param.seriesData?.get(series) as any;
+      for (const [refId, s] of seriesRef.current.legPnl) {
+        const d = param.seriesData?.get(s) as any;
         if (d?.value != null) {
           const meta = legMetasRef.current.find(l => l.refId === refId);
           if (meta) legs.push({ name: meta.displayName, color: meta.color, value: d.value });
@@ -326,155 +384,124 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     });
 
     return () => {
-      legPnlSeriesRef.current.clear();
+      seriesRef.current.legPnl.clear();
+      seriesRef.current.basketPnl = null;
       chart.remove();
       pnlChartRef.current = null;
-      basketPnlSeriesRef.current = null;
     };
   }, [theme, pnlVisible]);
 
-  // ── Add leg series when legs change ──
+  // ── 3a. Fetch historical data (stores in state — decoupled from chart refs) ──
   useEffect(() => {
-    const priceChart = priceChartRef.current;
-    const pnlChart = pnlChartRef.current;
-    if (!priceChart) return;
+    console.log('[3a] ENTER: dataLoaded=', dataLoaded, 'underlying=', underlying);
+    if (!dataLoaded || !underlying) return;
+    const positions = allPositionsRef.current;
+    const metas = legMetasRef.current;
+    console.log('[3a] positions=', positions.length, 'metas=', metas.length);
+    if (positions.length === 0 || metas.length === 0) return;
 
-    for (const leg of legMetas) {
-      if (!legPriceSeriesRef.current.has(leg.refId)) {
-        const s = priceChart.addSeries(LineSeries, {
-          color: leg.color, lineWidth: 1,
-          priceScaleId: 'legs',
-          title: leg.displayName,
-          lastValueVisible: true, priceLineVisible: false,
-        });
-        legPriceSeriesRef.current.set(leg.refId, s);
-      }
-      if (pnlChart && !legPnlSeriesRef.current.has(leg.refId)) {
-        const s = pnlChart.addSeries(LineSeries, {
-          color: leg.color, lineWidth: 1,
-          title: leg.displayName,
-          lastValueVisible: true, priceLineVisible: false,
-        });
-        legPnlSeriesRef.current.set(leg.refId, s);
-      }
-    }
+    const entryTimes = positions.map(p => p.entry_time || 0).filter(t => t > 0);
+    const exitTimes = positions.map(p => p.exit_time || 0).filter(t => t > 0);
+    console.log('[3a] entryTimes=', entryTimes.length, 'exitTimes=', exitTimes.length);
+    if (entryTimes.length === 0) return;
 
-    try {
-      priceChart.priceScale('legs').applyOptions({ scaleMargins: { top: 0.6, bottom: 0.05 } });
-    } catch { /* not yet */ }
-  }, [legMetas]);
-
-  // ── Load historical data once positions are known ──
-  useEffect(() => {
-    if (!dataLoaded || historicalLoadedRef.current || allPositions.length === 0) return;
-    if (!priceChartRef.current || !underlyingSeriesRef.current) return;
-
-    historicalLoadedRef.current = true;
-
-    const entryTimes = allPositions.map(p => p.entry_time || 0).filter(t => t > 0);
-    const exitTimes = allPositions.map(p => p.exit_time || 0).filter(t => t > 0);
     const earliestNs = Math.min(...entryTimes);
     const latestNs = exitTimes.length > 0 ? Math.max(...exitTimes) : 0;
-
-    const startDate = earliestNs > 0 ? new Date(earliestNs / 1_000_000 - 30 * 60 * 1000) : new Date(Date.now() - 86400000);
-    const endDate = latestNs > 0 ? new Date(latestNs / 1_000_000 + 30 * 60 * 1000) : new Date();
-
-    // Compute chart time window: entry-2min to exit+2min (or market close 15:30 IST)
-    const entryChartTimeBound = earliestNs > 0
-      ? Math.floor(earliestNs / 1_000_000_000 / 60) * 60 + IST_OFFSET - 120
-      : 0;
-    // Market close = same day 15:30 IST
     const entryDate = new Date(earliestNs / 1_000_000);
-    const marketCloseUtc = new Date(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 10, 0, 0).getTime() / 1000; // 15:30 IST = 10:00 UTC
-    const marketCloseChartTime = marketCloseUtc + IST_OFFSET;
-    const rawExitBound = latestNs > 0
-      ? Math.ceil(latestNs / 1_000_000_000 / 60) * 60 + IST_OFFSET + 120
-      : Math.floor(Date.now() / 1000) + IST_OFFSET;
-    const exitChartTimeBound = Math.min(rawExitBound, marketCloseChartTime + 120);
-    // Entry chart time for P&L filtering (exact entry minute, no buffer before)
-    const entryChartTimeExact = earliestNs > 0
-      ? Math.floor(earliestNs / 1_000_000_000 / 60) * 60 + IST_OFFSET
-      : 0;
-    // P&L strict bounds: entry to min(exit, market close) — no buffer
-    const pnlExitBound = latestNs > 0
-      ? Math.min(Math.ceil(latestNs / 1_000_000_000 / 60) * 60 + IST_OFFSET, marketCloseChartTime)
-      : Math.min(Math.floor(Date.now() / 1000) + IST_OFFSET, marketCloseChartTime);
+    const marketClose = Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 10, 0, 0) / 1000 + IST_OFFSET;
+    const chartFrom = Math.floor(earliestNs / 1_000_000_000 / 60) * 60 + IST_OFFSET;
+    const chartTo = latestNs > 0
+      ? Math.min(Math.ceil(latestNs / 1_000_000_000 / 60) * 60 + IST_OFFSET, marketClose)
+      : marketClose;
+    const startDate = new Date(earliestNs / 1_000_000 - 30 * 60 * 1000);
+    const endDate = latestNs > 0 ? new Date(latestNs / 1_000_000 + 30 * 60 * 1000) : new Date();
+    const ul = underlying;
 
+    let cancelled = false;
     (async () => {
-      // Load underlying candles — filtered to entry→exit/market close (same range as P&L)
-      if (underlying) {
-        const allBars = await fetchHistorical(underlying, 'INDEX', '1m', startDate, endDate);
-        const bars = allBars.filter(b => b.time >= entryChartTimeExact && b.time <= pnlExitBound);
-        if (bars.length > 0 && underlyingSeriesRef.current) {
-          underlyingSeriesRef.current.setData(bars as any);
-        }
-      }
-
-      // Load historical for each leg and compute P&L
-      const allLegPnlData = new Map<number, Map<number, number>>();
-
-      for (const leg of legMetas) {
-        if (!leg.zanskarName) continue;
+      const legFetches = metas.filter(l => l.zanskarName).map(leg => {
         const type = leg.derivativeType === 'OPT' ? 'OPT' : leg.derivativeType === 'FUT' ? 'FUT' : 'STOCK';
-        const bars = await fetchHistorical(leg.zanskarName, type, '1m', startDate, endDate);
-        if (bars.length === 0) continue;
+        return fetchHistorical(leg.zanskarName, type, '1m', startDate, endDate).then(bars => ({ leg, bars }));
+      });
+      const [underlyingRaw, ...legResults] = await Promise.all([
+        fetchHistorical(ul, 'INDEX', '1m', startDate, endDate),
+        ...legFetches,
+      ]);
+      if (cancelled) return;
+      console.log('[3a] FETCHED: underlying=', underlyingRaw.length, 'legs=', legResults.map(r => `${r.leg.displayName}:${r.bars.length}`));
 
-        // Filter to entry→exit window (exact entry to exit/market close, no buffer)
-        const activeBars = bars.filter(b => b.time >= entryChartTimeExact && b.time <= pnlExitBound);
-        if (activeBars.length === 0) continue;
+      const underlyingBars = underlyingRaw.filter(b => b.time >= chartFrom && b.time <= chartTo);
+      const legPriceData = new Map<number, Array<{ time: any; value: number }>>();
+      const legPnlData = new Map<number, Array<{ time: any; value: number }>>();
+      const pnlByTime = new Map<number, Map<number, number>>();
 
-        const lineTicks = activeBars.map(b => ({ time: b.time as any, value: b.close }));
-        const series = legPriceSeriesRef.current.get(leg.refId);
-        if (series) series.setData(lineTicks);
-
-        const pos = allPositions.find(p => p.ref_id === leg.refId);
+      for (const { leg, bars } of legResults) {
+        const active = bars.filter(b => b.time >= chartFrom && b.time <= chartTo);
+        if (active.length === 0) continue;
+        legPriceData.set(leg.refId, active.map(b => ({ time: b.time as any, value: b.close })));
+        const pos = positions.find(p => p.ref_id === leg.refId);
         if (pos) {
           const side = (pos.order_side || '').includes('BUY') ? 1 : -1;
           const avgPrice = (pos.avg_price || 0) / 100;
           const qty = pos.qty || 0;
-
-          const pnlTicks = activeBars.map(b => ({
-            time: b.time as any,
-            value: side * (b.close - avgPrice) * qty,
-          }));
-          const pnlSeries = legPnlSeriesRef.current.get(leg.refId);
-          if (pnlSeries) pnlSeries.setData(pnlTicks);
-
-          for (const b of activeBars) {
-            if (!allLegPnlData.has(b.time)) allLegPnlData.set(b.time, new Map());
-            allLegPnlData.get(b.time)!.set(leg.refId, side * (b.close - avgPrice) * qty);
+          legPnlData.set(leg.refId, active.map(b => ({
+            time: b.time as any, value: side * (b.close - avgPrice) * qty,
+          })));
+          for (const b of active) {
+            if (!pnlByTime.has(b.time)) pnlByTime.set(b.time, new Map());
+            pnlByTime.get(b.time)!.set(leg.refId, side * (b.close - avgPrice) * qty);
           }
         }
       }
 
-      // Compute basket P&L from cached leg data
-      if (allLegPnlData.size > 0 && basketPnlSeriesRef.current) {
-        const sortedTimes = [...allLegPnlData.keys()].sort((a, b) => a - b);
-        const basketData = sortedTimes.map(t => {
+      const basketPnlData: Array<{ time: any; value: number }> = [];
+      if (pnlByTime.size > 0) {
+        const times = [...pnlByTime.keys()].sort((a, b) => a - b);
+        for (const t of times) {
           let total = 0;
-          for (const v of allLegPnlData.get(t)!.values()) total += v;
-          return { time: t as any, value: total };
-        });
-        if (basketData.length > 0) basketPnlSeriesRef.current.setData(basketData);
+          for (const v of pnlByTime.get(t)!.values()) total += v;
+          basketPnlData.push({ time: t as any, value: total });
+        }
       }
 
-      // Fit both charts — data already filtered to entry→exit/market close
-      requestAnimationFrame(() => {
-        priceChartRef.current?.timeScale().fitContent();
-        pnlChartRef.current?.timeScale().fitContent();
-      });
+      if (!cancelled) {
+        console.log('[3a] SETTING chartData: UL=', underlyingBars.length, 'legPrice=', [...legPriceData.entries()].map(([k,v]) => `${k}:${v.length}`), 'legPnl=', [...legPnlData.entries()].map(([k,v]) => `${k}:${v.length}`), 'basket=', basketPnlData.length);
+        setChartData({ underlyingBars, legPriceData, legPnlData, basketPnlData, chartFrom, chartTo, marketClose });
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [dataLoaded, underlying]);
 
-      // Add entry/exit price lines
-      for (const p of allPositions) {
-        const series = legPriceSeriesRef.current.get(p.ref_id);
+  // ── 3b. Apply fetched data to existing charts ──
+  useEffect(() => {
+    console.log('[3b] ENTER: chartData=', !!chartData, 'priceChart=', !!priceChartRef.current, 'pnlChart=', !!pnlChartRef.current);
+    if (!chartData) return;
+
+    const priceChart = priceChartRef.current;
+    if (priceChart && seriesRef.current.underlying) {
+      seriesRef.current.underlying.setData(chartData.underlyingBars as any);
+      for (const leg of legMetasRef.current) {
+        if (!seriesRef.current.legPrice.has(leg.refId)) {
+          const s = priceChart.addSeries(LineSeries, {
+            color: leg.color, lineWidth: 1, priceScaleId: 'legs',
+            title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
+          });
+          seriesRef.current.legPrice.set(leg.refId, s);
+        }
+        const data = chartData.legPriceData.get(leg.refId);
+        if (data) seriesRef.current.legPrice.get(leg.refId)?.setData(data);
+      }
+      try { priceChart.priceScale('legs').applyOptions({ scaleMargins: { top: 0.6, bottom: 0.05 } }); } catch {}
+
+      for (const p of allPositionsRef.current) {
+        const series = seriesRef.current.legPrice.get(p.ref_id);
         if (!series) continue;
         const entryPrice = (p.avg_price || 0) / 100;
         if (entryPrice > 0) {
           series.createPriceLine({
             price: entryPrice,
             color: (p.order_side || '').includes('BUY') ? '#22c55e' : '#ef4444',
-            lineWidth: 1, lineStyle: 2,
-            axisLabelVisible: true,
+            lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
             title: `Entry ${(p.order_side || '').includes('BUY') ? '▲' : '▼'}`,
           });
         }
@@ -486,24 +513,56 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           });
         }
       }
-    })();
-  }, [dataLoaded, allPositions, legMetas, underlying]);
+      requestAnimationFrame(() => priceChart.timeScale().fitContent());
+    }
 
-  // ── Sync crosshairs ──
+    const pnlChart = pnlChartRef.current;
+    if (pnlChart) {
+      for (const leg of legMetasRef.current) {
+        if (!seriesRef.current.legPnl.has(leg.refId)) {
+          const s = pnlChart.addSeries(LineSeries, {
+            color: leg.color, lineWidth: 1,
+            title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
+          });
+          seriesRef.current.legPnl.set(leg.refId, s);
+        }
+        const data = chartData.legPnlData.get(leg.refId);
+        if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(data);
+      }
+      if (chartData.basketPnlData.length > 0) {
+        seriesRef.current.basketPnl?.setData(chartData.basketPnlData);
+      }
+      requestAnimationFrame(() => pnlChart.timeScale().fitContent());
+    }
+  }, [chartData]);
+
+  // ── 4. Chart scroll sync (logical range) ──
   useEffect(() => {
     const pc = priceChartRef.current;
     const pnl = pnlChartRef.current;
     if (!pc || !pnl) return;
-    const syncFrom = (source: IChartApi, target: IChartApi) => {
-      source.timeScale().subscribeVisibleLogicalRangeChange((range) => {
-        if (range) target.timeScale().setVisibleLogicalRange(range);
-      });
+    let syncing = false;
+    const handler1 = (range: any) => {
+      if (syncing || !range) return;
+      syncing = true;
+      try { pnl.timeScale().setVisibleLogicalRange(range); } catch {}
+      syncing = false;
     };
-    syncFrom(pc, pnl);
-    syncFrom(pnl, pc);
+    const handler2 = (range: any) => {
+      if (syncing || !range) return;
+      syncing = true;
+      try { pc.timeScale().setVisibleLogicalRange(range); } catch {}
+      syncing = false;
+    };
+    pc.timeScale().subscribeVisibleLogicalRangeChange(handler1);
+    pnl.timeScale().subscribeVisibleLogicalRangeChange(handler2);
+    return () => {
+      try { pc.timeScale().unsubscribeVisibleLogicalRangeChange(handler1); } catch {}
+      try { pnl.timeScale().unsubscribeVisibleLogicalRangeChange(handler2); } catch {}
+    };
   }, [pnlVisible]);
 
-  // ── Handle resize ──
+  // ── 5. Resize observer ──
   useEffect(() => {
     const ro = new ResizeObserver(() => {
       if (priceChartContainerRef.current && priceChartRef.current) {
@@ -520,15 +579,17 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     return () => ro.disconnect();
   }, [pnlVisible]);
 
-  // ── Live WebSocket updates ──
+  // ── 6. Live WebSocket updates (charts) ──
   useEffect(() => {
     const unsub1 = subscribe('ohlcv', (msg: WsMessage) => {
-      if (msg.type !== 'ohlcv' || !underlying || !underlyingSeriesRef.current) return;
+      if (msg.type !== 'ohlcv' || !underlying || !seriesRef.current.underlying) return;
       const data = msg.data as { indexes?: Array<{ indexname?: string; timestamp?: string; open?: string; high?: string; low?: string; close?: string }> };
       const idx = data.indexes?.find(i => (i.indexname || '').toUpperCase() === underlying.toUpperCase());
       if (!idx?.timestamp) return;
-      const t = (Number(BigInt(idx.timestamp)) / 1e9 + IST_OFFSET);
-      underlyingSeriesRef.current.update({
+      const t = Number(BigInt(idx.timestamp)) / 1e9 + IST_OFFSET;
+      const cached = chartDataRef.current;
+      if (cached && (t < cached.chartFrom || t > cached.marketClose)) return;
+      seriesRef.current.underlying.update({
         time: t as any,
         open: parseFloat(idx.open || '0') / 100,
         high: parseFloat(idx.high || '0') / 100,
@@ -537,25 +598,22 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       });
     });
 
-    const processLtpUpdate = (ltpMap: Map<number, number>) => {
+    const processLtp = (ltpMap: Map<number, number>) => {
       const t = nowChartTime();
+      const cached = chartDataRef.current;
+      if (cached && (t < cached.chartFrom || t > cached.marketClose)) return;
       let totalPnl = 0;
-
       for (const p of positionsRef.current) {
-        const newLtp = ltpMap.get(p.ref_id);
-        if (newLtp == null) continue;
-        const series = legPriceSeriesRef.current.get(p.ref_id);
-        if (series) series.update({ time: t as any, value: newLtp / 100 });
-
+        const ltp = ltpMap.get(p.ref_id);
+        if (ltp == null) continue;
+        seriesRef.current.legPrice.get(p.ref_id)?.update({ time: t as any, value: ltp / 100 });
         const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-        const pnl = side * (newLtp - (p.avg_price || 0)) * (p.qty || 0) / 100;
-        const pnlSeries = legPnlSeriesRef.current.get(p.ref_id);
-        if (pnlSeries) pnlSeries.update({ time: t as any, value: pnl });
+        const pnl = side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
+        seriesRef.current.legPnl.get(p.ref_id)?.update({ time: t as any, value: pnl });
         totalPnl += pnl;
       }
-
-      if (positionsRef.current.length > 0 && basketPnlSeriesRef.current) {
-        basketPnlSeriesRef.current.update({ time: t as any, value: totalPnl });
+      if (positionsRef.current.length > 0 && seriesRef.current.basketPnl) {
+        seriesRef.current.basketPnl.update({ time: t as any, value: totalPnl });
       }
     };
 
@@ -566,12 +624,12 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       const ids = new Set(positionsRef.current.map(p => p.ref_id));
       const ltpMap = new Map<number, number>();
       for (const u of updates) { if (ids.has(u.ref_id)) ltpMap.set(u.ref_id, u.ltp); }
-      if (ltpMap.size > 0) processLtpUpdate(ltpMap);
+      if (ltpMap.size > 0) processLtp(ltpMap);
     });
 
     const unsub3 = subscribe('option_chain', (msg: WsMessage) => {
       if (msg.type !== 'option_chain') return;
-      const data = msg.data as { ce?: Array<Record<string, unknown>>; pe?: Array<Record<string, unknown>> };
+      const data = (msg as any).data as { ce?: Array<Record<string, unknown>>; pe?: Array<Record<string, unknown>> };
       const ids = new Set(positionsRef.current.map(p => p.ref_id));
       const ltpMap = new Map<number, number>();
       for (const item of [...(data.ce || []), ...(data.pe || [])]) {
@@ -579,13 +637,13 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         const ltp = Number(item.ltp ?? 0);
         if (refId && ltp > 0 && ids.has(refId)) ltpMap.set(refId, ltp);
       }
-      if (ltpMap.size > 0) processLtpUpdate(ltpMap);
+      if (ltpMap.size > 0) processLtp(ltpMap);
     });
 
     return () => { unsub1(); unsub2(); unsub3(); };
   }, [subscribe, underlying]);
 
-  // ── Live LTP for position table ──
+  // ── 7. Live LTP for position table (unchanged) ──
   useEffect(() => {
     const unsub1 = subscribe('position_ltp', (msg: WsMessage) => {
       if (msg.type !== 'position_ltp') return;
@@ -627,20 +685,21 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     return () => { unsub1(); unsub2(); };
   }, [subscribe]);
 
-  // ── Visibility ──
-  useEffect(() => { underlyingSeriesRef.current?.applyOptions({ visible: visibility.underlying }); }, [visibility.underlying]);
-  useEffect(() => { basketPnlSeriesRef.current?.applyOptions({ visible: visibility.basketPnl }); }, [visibility.basketPnl]);
+  // ── 8. Visibility toggles ──
+  useEffect(() => { seriesRef.current.underlying?.applyOptions({ visible: visibility.underlying }); }, [visibility.underlying]);
+  useEffect(() => { seriesRef.current.basketPnl?.applyOptions({ visible: visibility.basketPnl }); }, [visibility.basketPnl]);
   useEffect(() => {
     for (const leg of legMetas) {
       const vis = legVisibility[leg.refId] !== false;
-      legPriceSeriesRef.current.get(leg.refId)?.applyOptions({ visible: vis });
-      legPnlSeriesRef.current.get(leg.refId)?.applyOptions({ visible: vis });
+      seriesRef.current.legPrice.get(leg.refId)?.applyOptions({ visible: vis });
+      seriesRef.current.legPnl.get(leg.refId)?.applyOptions({ visible: vis });
     }
   }, [legVisibility, legMetas]);
 
   const toggleVis = useCallback((key: string) => { setVisibility(prev => ({ ...prev, [key]: !prev[key] })); }, []);
   const toggleLeg = useCallback((refId: number) => { setLegVisibility(prev => ({ ...prev, [refId]: !(prev[refId] !== false) })); }, []);
 
+  // ── Divider drag handlers ──
   const onPnlDividerDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     const startY = e.clientY; const startH = pnlHeight;
@@ -657,6 +716,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
   }, [orderBookHeight]);
 
+  // ── P&L calculations ──
   function calcPnl(p: PaperPosition): number {
     const side = (p.order_side || '').includes('BUY') ? 1 : -1;
     return side * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0) / 100;
@@ -683,7 +743,6 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           P&L: {strategyPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(strategyPnl))}
         </span>
       </div>
-
       {/* Legend */}
       <div className="h-8 shrink-0 flex items-center px-4 gap-2 border-b border-[var(--border)] bg-[var(--bg-secondary)] overflow-x-auto">
         {underlying && (
@@ -721,9 +780,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
       {/* Charts + order book */}
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
-        {/* Price chart — tooltip is CHILD of chart container (same pattern as CandleChart) */}
+        {/* Price chart */}
         <div ref={priceChartContainerRef} className="relative flex-1 min-h-[120px] bg-[var(--bg-primary)]">
-          {/* Always-visible OHLC bar */}
           <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px] text-[var(--text-muted)]">
             {ohlc
               ? <span><span className="text-[#fbbf24] font-semibold mr-1">{underlying}</span> O <span className={ohlc.c >= ohlc.o ? 'text-[var(--green)]' : 'text-[var(--red)]'}>{fmtPrice(ohlc.o)}</span> H <span className="text-[var(--green)]">{fmtPrice(ohlc.h)}</span> L <span className="text-[var(--red)]">{fmtPrice(ohlc.l)}</span> C <span className={ohlc.c >= ohlc.o ? 'text-[var(--green)]' : 'text-[var(--red)]'}>{fmtPrice(ohlc.c)}</span>
@@ -770,7 +828,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         {pnlVisible && (
           <>
             <div onMouseDown={onPnlDividerDown} className="h-1 shrink-0 bg-[var(--border)] hover:bg-[var(--accent)] cursor-row-resize transition-colors" />
-            {/* P&L chart — tooltip is CHILD of chart container */}
+            {/* P&L chart */}
             <div ref={pnlChartContainerRef} className="relative shrink-0 bg-[var(--bg-primary)]" style={{ height: pnlHeight }}>
               <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
                 {pnlValues

@@ -257,6 +257,7 @@ export interface PaperPosition {
   exit_time?:         number;
   exit_price?:        number;
   margin_required?:   number;
+  lot_size?:          number;
 }
 
 export interface PaperHolding {

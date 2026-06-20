@@ -101,9 +101,9 @@ export default function BasketOrder({ instrument }: Props) {
   const [symResults, setSymResults] = useState<Array<Record<string, unknown>>>([]);
   const [showSymSearch, setShowSymSearch] = useState(false);
   const [leftWidth, setLeftWidth] = useState(480);
-  const symSearchTimer = useRef<ReturnType<typeof setTimeout>>();
+  const symSearchTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const resizeRef = useRef<{ startX: number; startW: number } | null>(null);
-  const addScripTimer = useRef<ReturnType<typeof setTimeout>>();
+  const addScripTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const { subscribe } = useWs();
   const { onLegAdded, setBasketMode } = useBasket();
 
@@ -148,7 +148,7 @@ export default function BasketOrder({ instrument }: Props) {
   useEffect(() => {
     if (!sym) return;
     const unsub1 = subscribe('option_chain', (msg) => {
-      const d = msg.data as Record<string, unknown> | undefined;
+      const d = (msg as any).data as Record<string, unknown> | undefined;
       if (!d || String(d.asset || '').toUpperCase() !== sym.toUpperCase()) return;
       const msgExpiry = String(d.expiry || '');
       const ceArr = (d.ce || []) as Array<Record<string, unknown>>;
