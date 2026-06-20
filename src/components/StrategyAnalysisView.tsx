@@ -6,11 +6,13 @@ import {
   CrosshairMode,
   type IChartApi,
   type ISeriesApi,
+  type IPriceLine,
   type CandlestickSeriesOptions,
 } from 'lightweight-charts';
 import type { PaperPosition, PaperOrder, WsMessage, OptionChainData, OptionLeg } from '../types';
 import { fmtPrice, IST_OFFSET, toChartTime } from '../lib/utils';
 import { useWs } from '../hooks/useWsContext';
+import { blackScholes, impliedVolatility } from '../lib/GexService';
 
 interface StrategyAnalysisViewProps {
   basketGroupId: string;
@@ -163,6 +165,18 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   positionsRef.current = positions;
   const allPositionsRef = useRef<PaperPosition[]>([]);
   const legMetasRef = useRef<LegMeta[]>([]);
+  const priceLinesRef = useRef<Array<{ series: ISeriesApi<'Line'>; line: IPriceLine }>>([]);
+
+  // ── Greeks state ──
+  const [greeksVisible, setGreeksVisible] = useState(false);
+  const [greeksMode, setGreeksMode] = useState<'unit' | 'lot'>('unit');
+  const [greeksExpanded, setGreeksExpanded] = useState(false);
+  const [legGreeks, setLegGreeks] = useState<Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>>(new Map());
+  const [selectedGreeks, setSelectedGreeks] = useState<Set<string>>(new Set(['delta', 'gamma', 'theta', 'vega']));
+  const [lotSizeOverride, setLotSizeOverride] = useState<number | null>(null);
+  const [editingLotSize, setEditingLotSize] = useState(false);
+
+  const DEFAULT_LOT_SIZES: Record<string, number> = { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60, MIDCPNIFTY: 120, SENSEX: 20 };
 
   // ── Chart display state ──
   const [pnlHeight, setPnlHeight] = useState(200);
@@ -220,7 +234,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     });
   }, [legMetas]);
 
-  // ── Fetch positions and orders ──
+  // ── Fetch positions, orders, and Greeks in one batch ──
+  const greeksFetchedRef = useRef(false);
   const fetchData = useCallback(async () => {
     try {
       const [openRes, closedRes, ordersRes] = await Promise.all([
@@ -228,14 +243,18 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         fetch('/paper/positions/closed'),
         fetch('/paper/orders?executed=1'),
       ]);
+      let openPos: PaperPosition[] = [];
+      let closedPos: PaperPosition[] = [];
       if (openRes.ok) {
         const d = await openRes.json() as { portfolio?: { stock_positions?: PaperPosition[] } } | PaperPosition[];
         const all = Array.isArray(d) ? d : (d.portfolio?.stock_positions ?? []);
-        setPositions(all.filter(p => p.basket_group_id === basketGroupId));
+        openPos = all.filter(p => p.basket_group_id === basketGroupId);
+        setPositions(openPos);
       }
       if (closedRes.ok) {
         const d = await closedRes.json() as PaperPosition[];
-        setClosedPositions((Array.isArray(d) ? d : []).filter(p => p.basket_group_id === basketGroupId));
+        closedPos = (Array.isArray(d) ? d : []).filter(p => p.basket_group_id === basketGroupId);
+        setClosedPositions(closedPos);
       }
       if (ordersRes.ok) {
         const d = await ordersRes.json() as PaperOrder[] | { orders?: PaperOrder[] };
@@ -243,6 +262,76 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         setOrders(all.filter(o => o.basket_group_id === basketGroupId));
       }
       setDataLoaded(true);
+
+      // Fetch Greeks once alongside position data
+      const allPos = [...openPos, ...closedPos];
+      if (allPos.length > 0 && !greeksFetchedRef.current) {
+        greeksFetchedRef.current = true;
+        const ul = deriveUnderlying(allPos);
+        if (!ul) return;
+
+        const expiries = new Set<string>();
+        for (const p of allPos) { if (p.expiry) expiries.add(String(p.expiry)); }
+        const refIds = new Set(allPos.map(p => p.ref_id));
+        const greekUpdates = new Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>();
+
+        const ocFetches = [...expiries].map(expiry =>
+          fetch(`/api/optionchain/${ul}?expiry=${expiry}`).then(r => r.ok ? r.json() : null).catch(() => null)
+        );
+        const ocResults = await Promise.all(ocFetches);
+        for (const data of ocResults) {
+          if (!data) continue;
+          const chain = (data as any).chain || data;
+          for (const item of [...(chain.ce || []), ...(chain.pe || [])]) {
+            const refId = Number(item.ref_id ?? 0);
+            if (!refId || !refIds.has(refId)) continue;
+            const delta = Number(item.delta ?? 0);
+            const gamma = Number(item.gamma ?? 0);
+            const theta = Number(item.theta ?? 0);
+            const vega = Number(item.vega ?? 0);
+            const iv = Number(item.iv ?? 0);
+            if (delta !== 0 || gamma !== 0 || theta !== 0 || vega !== 0) {
+              greekUpdates.set(refId, { delta, gamma, theta, vega, iv });
+            }
+          }
+        }
+
+        // Fallback: Black-Scholes for positions not in the option chain
+        if (greekUpdates.size < refIds.size) {
+          let spotPrice = 0;
+          try {
+            const priceRes = await fetch(`/api/optionchain/${ul}/price`);
+            if (priceRes.ok) {
+              const priceData = await priceRes.json() as { ltp?: number; last_traded_price?: number; currentprice?: number };
+              spotPrice = Number(priceData.ltp ?? priceData.last_traded_price ?? priceData.currentprice ?? 0) / 100;
+            }
+          } catch {}
+          if (spotPrice > 0) {
+            for (const p of allPos) {
+              if (greekUpdates.has(p.ref_id)) continue;
+              const strike = p.strike_price ? (p.strike_price > 10000 ? p.strike_price / 100 : p.strike_price) : 0;
+              const optType = (p.option_type || '').toUpperCase() as 'CE' | 'PE';
+              if (!strike || (optType !== 'CE' && optType !== 'PE')) continue;
+              const ltp = (p.last_traded_price || p.avg_price || 0) / 100;
+              const daysToExpiry = p.expiry ? Math.max(0, (new Date(String(p.expiry)).getTime() - Date.now()) / (1000 * 86400)) : 1;
+              const T = Math.max(daysToExpiry / 365, 1 / (365 * 24));
+              const iv = ltp > 0 ? impliedVolatility(ltp, spotPrice, strike, T, 0.07, optType) : 0.2;
+              if (iv > 0) {
+                const g = blackScholes(spotPrice, strike, T, 0.07, iv, optType);
+                greekUpdates.set(p.ref_id, { delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega, iv });
+              }
+            }
+          }
+        }
+
+        if (greekUpdates.size > 0) {
+          setLegGreeks(prev => {
+            const next = new Map(prev);
+            for (const [k, v] of greekUpdates) next.set(k, v);
+            return next;
+          });
+        }
+      }
     } catch (e) { console.warn('[StrategyAnalysis] fetch failed:', e); }
   }, [basketGroupId]);
 
@@ -393,16 +482,16 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
   // ── 3a. Fetch historical data (stores in state — decoupled from chart refs) ──
   useEffect(() => {
-    console.log('[3a] ENTER: dataLoaded=', dataLoaded, 'underlying=', underlying);
+
     if (!dataLoaded || !underlying) return;
     const positions = allPositionsRef.current;
     const metas = legMetasRef.current;
-    console.log('[3a] positions=', positions.length, 'metas=', metas.length);
+
     if (positions.length === 0 || metas.length === 0) return;
 
     const entryTimes = positions.map(p => p.entry_time || 0).filter(t => t > 0);
     const exitTimes = positions.map(p => p.exit_time || 0).filter(t => t > 0);
-    console.log('[3a] entryTimes=', entryTimes.length, 'exitTimes=', exitTimes.length);
+
     if (entryTimes.length === 0) return;
 
     const earliestNs = Math.min(...entryTimes);
@@ -428,7 +517,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         ...legFetches,
       ]);
       if (cancelled) return;
-      console.log('[3a] FETCHED: underlying=', underlyingRaw.length, 'legs=', legResults.map(r => `${r.leg.displayName}:${r.bars.length}`));
+
 
       const underlyingBars = underlyingRaw.filter(b => b.time >= chartFrom && b.time <= chartTo);
       const legPriceData = new Map<number, Array<{ time: any; value: number }>>();
@@ -465,7 +554,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
 
       if (!cancelled) {
-        console.log('[3a] SETTING chartData: UL=', underlyingBars.length, 'legPrice=', [...legPriceData.entries()].map(([k,v]) => `${k}:${v.length}`), 'legPnl=', [...legPnlData.entries()].map(([k,v]) => `${k}:${v.length}`), 'basket=', basketPnlData.length);
+
         setChartData({ underlyingBars, legPriceData, legPnlData, basketPnlData, chartFrom, chartTo, marketClose });
       }
     })();
@@ -474,7 +563,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
   // ── 3b. Apply fetched data to existing charts ──
   useEffect(() => {
-    console.log('[3b] ENTER: chartData=', !!chartData, 'priceChart=', !!priceChartRef.current, 'pnlChart=', !!pnlChartRef.current);
+
     if (!chartData) return;
 
     const priceChart = priceChartRef.current;
@@ -493,24 +582,28 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
       try { priceChart.priceScale('legs').applyOptions({ scaleMargins: { top: 0.6, bottom: 0.05 } }); } catch {}
 
+      priceLinesRef.current.forEach(pl => { try { pl.series.removePriceLine(pl.line); } catch {} });
+      priceLinesRef.current = [];
       for (const p of allPositionsRef.current) {
         const series = seriesRef.current.legPrice.get(p.ref_id);
         if (!series) continue;
         const entryPrice = (p.avg_price || 0) / 100;
         if (entryPrice > 0) {
-          series.createPriceLine({
+          const line = series.createPriceLine({
             price: entryPrice,
             color: (p.order_side || '').includes('BUY') ? '#22c55e' : '#ef4444',
             lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
             title: `Entry ${(p.order_side || '').includes('BUY') ? '▲' : '▼'}`,
           });
+          priceLinesRef.current.push({ series, line });
         }
         if (p.exit_price) {
-          series.createPriceLine({
+          const line = series.createPriceLine({
             price: p.exit_price / 100,
             color: '#9ca3af', lineWidth: 1, lineStyle: 2,
             axisLabelVisible: true, title: 'Exit',
           });
+          priceLinesRef.current.push({ series, line });
         }
       }
       requestAnimationFrame(() => priceChart.timeScale().fitContent());
@@ -689,12 +782,73 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   useEffect(() => { seriesRef.current.underlying?.applyOptions({ visible: visibility.underlying }); }, [visibility.underlying]);
   useEffect(() => { seriesRef.current.basketPnl?.applyOptions({ visible: visibility.basketPnl }); }, [visibility.basketPnl]);
   useEffect(() => {
+    if (visibility.entryMarkers) {
+      priceLinesRef.current.forEach(pl => { try { pl.series.removePriceLine(pl.line); } catch {} });
+      priceLinesRef.current = [];
+      for (const p of allPositionsRef.current) {
+        const series = seriesRef.current.legPrice.get(p.ref_id);
+        if (!series) continue;
+        const entryPrice = (p.avg_price || 0) / 100;
+        if (entryPrice > 0) {
+          const line = series.createPriceLine({
+            price: entryPrice,
+            color: (p.order_side || '').includes('BUY') ? '#22c55e' : '#ef4444',
+            lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
+            title: `Entry ${(p.order_side || '').includes('BUY') ? '▲' : '▼'}`,
+          });
+          priceLinesRef.current.push({ series, line });
+        }
+        if (p.exit_price) {
+          const line = series.createPriceLine({
+            price: p.exit_price / 100,
+            color: '#9ca3af', lineWidth: 1, lineStyle: 2,
+            axisLabelVisible: true, title: 'Exit',
+          });
+          priceLinesRef.current.push({ series, line });
+        }
+      }
+    } else {
+      priceLinesRef.current.forEach(pl => { try { pl.series.removePriceLine(pl.line); } catch {} });
+      priceLinesRef.current = [];
+    }
+  }, [visibility.entryMarkers]);
+  useEffect(() => {
     for (const leg of legMetas) {
       const vis = legVisibility[leg.refId] !== false;
       seriesRef.current.legPrice.get(leg.refId)?.applyOptions({ visible: vis });
       seriesRef.current.legPnl.get(leg.refId)?.applyOptions({ visible: vis });
     }
   }, [legVisibility, legMetas]);
+
+  // ── 9. Live Greeks from option_chain WS ──
+  useEffect(() => {
+    const unsub = subscribe('option_chain', (msg: WsMessage) => {
+      if (msg.type !== 'option_chain') return;
+      const data = (msg as any).data as { ce?: Array<Record<string, unknown>>; pe?: Array<Record<string, unknown>> };
+      const ids = new Set(allPositionsRef.current.map(p => p.ref_id));
+      const updates = new Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>();
+      for (const item of [...(data.ce || []), ...(data.pe || [])]) {
+        const refId = Number(item.ref_id ?? item.refId ?? 0);
+        if (!refId || !ids.has(refId)) continue;
+        const delta = Number(item.delta ?? 0);
+        const gamma = Number(item.gamma ?? 0);
+        const theta = Number(item.theta ?? 0);
+        const vega = Number(item.vega ?? 0);
+        const iv = Number(item.iv ?? 0);
+        if (delta !== 0 || gamma !== 0 || theta !== 0 || vega !== 0) {
+          updates.set(refId, { delta, gamma, theta, vega, iv });
+        }
+      }
+      if (updates.size > 0) {
+        setLegGreeks(prev => {
+          const next = new Map(prev);
+          for (const [k, v] of updates) next.set(k, v);
+          return next;
+        });
+      }
+    });
+    return () => unsub();
+  }, [subscribe]);
 
   const toggleVis = useCallback((key: string) => { setVisibility(prev => ({ ...prev, [key]: !prev[key] })); }, []);
   const toggleLeg = useCallback((refId: number) => { setLegVisibility(prev => ({ ...prev, [refId]: !(prev[refId] !== false) })); }, []);
@@ -776,7 +930,116 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
             visibility.entryMarkers ? 'border-[var(--accent)]/40 bg-[var(--accent)]/10 text-[var(--accent)]' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)]'
           }`}>Markers</button>
+        <button onClick={() => setGreeksVisible(v => !v)}
+          className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
+            greeksVisible ? 'border-[#a78bfa]/40 bg-[#a78bfa]/10 text-[#a78bfa]' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)]'
+          }`}>Greeks</button>
       </div>
+
+      {/* Greeks tray */}
+      {greeksVisible && (() => {
+        const activeLotSize = lotSizeOverride ?? (underlying ? DEFAULT_LOT_SIZES[underlying] ?? 65 : 65);
+        const multiplier = greeksMode === 'lot' ? activeLotSize : 1;
+        const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
+        const activeGreeks = greekKeys.filter(k => selectedGreeks.has(k));
+        const netGreeks = { delta: 0, gamma: 0, theta: 0, vega: 0 };
+        for (const p of allPositions) {
+          const g = legGreeks.get(p.ref_id);
+          if (!g) continue;
+          const sign = (p.order_side || '').includes('BUY') ? 1 : -1;
+          netGreeks.delta += g.delta * sign * multiplier;
+          netGreeks.gamma += g.gamma * sign * multiplier;
+          netGreeks.theta += g.theta * sign * multiplier;
+          netGreeks.vega += g.vega * sign * multiplier;
+        }
+        const fmtG = (v: number, key: string) => key === 'gamma' ? v.toFixed(4) : v.toFixed(2);
+        return (
+          <div className="shrink-0 border-b border-[var(--border)] bg-[var(--bg-secondary)]">
+            {/* Controls row */}
+            <div className="flex items-center px-4 h-7 gap-2 text-[10px]">
+              <span className="text-[var(--text-muted)] font-semibold">GREEKS</span>
+              <div className="flex items-center bg-[var(--bg-primary)] rounded overflow-hidden border border-[var(--border)] ml-1">
+                <button onClick={() => setGreeksMode('unit')}
+                  className={`px-2 py-0.5 text-[10px] font-semibold transition-colors ${greeksMode === 'unit' ? 'bg-[#a78bfa]/20 text-[#a78bfa]' : 'text-[var(--text-muted)]'}`}>1 Unit</button>
+                <button onClick={() => setGreeksMode('lot')}
+                  className={`px-2 py-0.5 text-[10px] font-semibold transition-colors ${greeksMode === 'lot' ? 'bg-[#a78bfa]/20 text-[#a78bfa]' : 'text-[var(--text-muted)]'}`}>1 Lot</button>
+              </div>
+              {greeksMode === 'lot' && (
+                <div className="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
+                  <span>Lot:</span>
+                  {editingLotSize ? (
+                    <input type="number" autoFocus defaultValue={activeLotSize}
+                      className="w-12 bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1 py-0 text-[10px] text-[var(--text-primary)] outline-none focus:border-[#a78bfa]"
+                      onBlur={(e) => { const v = parseInt(e.target.value); if (v > 0) setLotSizeOverride(v); setEditingLotSize(false); }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { const v = parseInt((e.target as HTMLInputElement).value); if (v > 0) setLotSizeOverride(v); setEditingLotSize(false); } if (e.key === 'Escape') setEditingLotSize(false); }}
+                    />
+                  ) : (
+                    <button onClick={() => setEditingLotSize(true)} className="text-[var(--text-primary)] hover:text-[#a78bfa] transition-colors underline decoration-dotted">
+                      {activeLotSize}
+                    </button>
+                  )}
+                </div>
+              )}
+              <div className="flex items-center gap-1 ml-auto">
+                {greekKeys.map(k => (
+                  <button key={k} onClick={() => setSelectedGreeks(prev => { const n = new Set(prev); if (n.has(k)) n.delete(k); else n.add(k); return n; })}
+                    className={`px-1.5 py-0 rounded text-[9px] font-semibold transition-colors border ${
+                      selectedGreeks.has(k) ? 'border-[#a78bfa]/30 bg-[#a78bfa]/10 text-[#a78bfa]' : 'border-[var(--border)] text-[var(--text-muted)]'
+                    }`}>{k.charAt(0).toUpperCase() + k.slice(1)}</button>
+                ))}
+                <div className="w-px h-3 bg-[var(--border)] mx-1" />
+                <button onClick={() => setGreeksExpanded(v => !v)}
+                  className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-[10px] transition-colors">
+                  {greeksExpanded ? 'Net' : 'Legs'}
+                </button>
+              </div>
+            </div>
+            {/* Net Greeks row */}
+            <div className="flex items-center px-4 h-7 gap-4 text-[11px]">
+              <span className="text-[10px] text-[var(--text-muted)] font-medium w-8">Net</span>
+              {activeGreeks.map(k => (
+                <div key={k} className="flex items-center gap-1">
+                  <span className="text-[var(--text-muted)] text-[10px]">{k.charAt(0).toUpperCase() + k.slice(1)}</span>
+                  <span className={`font-semibold tabular-nums ${netGreeks[k] >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{netGreeks[k] >= 0 ? '+' : ''}{fmtG(netGreeks[k], k)}</span>
+                </div>
+              ))}
+              {legGreeks.size === 0 && <span className="text-[var(--text-muted)] text-[10px] italic">Waiting for live data...</span>}
+            </div>
+            {/* Leg-wise breakdown */}
+            {greeksExpanded && (
+              <div className="px-4 pb-2">
+                <div className="grid gap-0 text-[10px]" style={{ gridTemplateColumns: `24px 1fr ${activeGreeks.map(() => '70px').join(' ')} 50px` }}>
+                  <span className="text-[var(--text-muted)] font-semibold py-1">B/S</span>
+                  <span className="text-[var(--text-muted)] font-semibold py-1">Instrument</span>
+                  {activeGreeks.map(k => <span key={k} className="text-[var(--text-muted)] font-semibold py-1 text-right">{k.charAt(0).toUpperCase() + k.slice(1)}</span>)}
+                  <span className="text-[var(--text-muted)] font-semibold py-1 text-right">IV%</span>
+                  {allPositions.map(p => {
+                    const g = legGreeks.get(p.ref_id);
+                    const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
+                    const sign = side === 'BUY' ? 1 : -1;
+                    const meta = legMetas.find(l => l.refId === p.ref_id);
+                    return (
+                      <React.Fragment key={p.ref_id}>
+                        <span className={`py-0.5 font-bold text-[9px] ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{side === 'BUY' ? 'B' : 'S'}</span>
+                        <span className="py-0.5 text-[var(--text-primary)] flex items-center gap-1 truncate">
+                          {meta && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: meta.color }} />}
+                          {p.display_name || p.zanskar_name || p.ref_id}
+                        </span>
+                        {activeGreeks.map(k => {
+                          const raw = g ? g[k] : 0;
+                          const val = raw * sign * multiplier;
+                          return <span key={k} className={`py-0.5 text-right tabular-nums font-medium ${val >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{val >= 0 ? '+' : ''}{fmtG(val, k)}</span>;
+                        })}
+                        <span className="py-0.5 text-right tabular-nums text-[var(--text-secondary)]">{g?.iv ? (g.iv * 100).toFixed(1) : '—'}</span>
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Charts + order book */}
       <div className="flex-1 flex flex-col overflow-hidden min-h-0">
@@ -800,8 +1063,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
                 top: Math.max(20, Math.min(priceTooltipPos.y - 30, (priceChartContainerRef.current?.clientHeight ?? 400) - 140)),
               }}
             >
-              <div className="bg-[#1a1e24]/95 border border-[#2a2f38] rounded-lg px-3 py-2 shadow-2xl backdrop-blur-sm min-w-[200px]">
-                {crosshairTimeStr && <div className="text-[10px] text-[var(--text-muted)] border-b border-[#2a2f38] pb-1 mb-1.5 font-mono">{crosshairTimeStr}</div>}
+              <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
+                {crosshairTimeStr && <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">{crosshairTimeStr}</div>}
                 {ohlc && (
                   <div className="text-[11px] mb-1">
                     <span className="text-[#fbbf24] font-semibold mr-2">{underlying}</span>
@@ -849,8 +1112,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
                     top: Math.max(8, Math.min(pnlTooltipPos.y - 30, pnlHeight - 110)),
                   }}
                 >
-                  <div className="bg-[#1a1e24]/95 border border-[#2a2f38] rounded-lg px-3 py-2 shadow-2xl backdrop-blur-sm min-w-[200px]">
-                    {pnlCrosshairTimeStr && <div className="text-[10px] text-[var(--text-muted)] border-b border-[#2a2f38] pb-1 mb-1.5 font-mono">{pnlCrosshairTimeStr}</div>}
+                  <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
+                    {pnlCrosshairTimeStr && <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">{pnlCrosshairTimeStr}</div>}
                     {pnlValues.legs.map(l => (
                       <div key={l.name} className="flex items-center justify-between gap-4 text-[11px] py-0.5">
                         <span className="flex items-center gap-1.5 text-[var(--text-secondary)]">
@@ -862,7 +1125,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
                         </span>
                       </div>
                     ))}
-                    <div className="flex items-center justify-between gap-4 text-[11px] pt-1 mt-1 border-t border-[#2a2f38] font-semibold">
+                    <div className="flex items-center justify-between gap-4 text-[11px] pt-1 mt-1 border-t border-[#ffffff0a] font-semibold">
                       <span className="text-[var(--text-secondary)]">Total P&L</span>
                       <span className={pnlValues.total >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>
                         {pnlValues.total >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnlValues.total))}
