@@ -89,6 +89,12 @@ function padToGrid(
 
 const LEG_COLORS = ['#22c55e', '#ef4444', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
 
+const DEFAULT_LOT_SIZES: Record<string, number> = { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60, MIDCPNIFTY: 120, SENSEX: 20 };
+const MONTH_CODES: Record<string, string> = { '1':'01','2':'02','3':'03','4':'04','5':'05','6':'06','7':'07','8':'08','9':'09','O':'10','N':'11','D':'12' };
+const GREEK_SOURCES = ['net', 'CE', 'PE'] as const;
+const GREEK_LINE_STYLES: Record<string, number> = { net: 0, CE: 2, PE: 1 };
+const GREEK_LINE_WIDTHS: Record<string, 1 | 2> = { net: 2, CE: 1, PE: 1 };
+
 function deriveUnderlying(positions: PaperPosition[]): string | null {
   for (const p of positions) {
     const name = p.display_name || p.zanskar_name || '';
@@ -259,8 +265,6 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const [lotSizeOverride, setLotSizeOverride] = useState<number | null>(null);
   const [editingLotSize, setEditingLotSize] = useState(false);
 
-  const DEFAULT_LOT_SIZES: Record<string, number> = { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60, MIDCPNIFTY: 120, SENSEX: 20 };
-
   // ── Greeks chart refs ──
   const greeksChartContainerRef = useRef<HTMLDivElement>(null);
   const greeksChartRef = useRef<IChartApi | null>(null);
@@ -376,14 +380,13 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (!ul) return;
 
         // Parse expiry/strike/optType from zanskar_name: {UL}{YY}{M}{DD}{STRIKE}{CE|PE}
-        const monthCodes: Record<string, string> = { '1':'01','2':'02','3':'03','4':'04','5':'05','6':'06','7':'07','8':'08','9':'09','O':'10','N':'11','D':'12' };
         const parsedInfo = new Map<number, { expiry: string; strike: number; optType: string }>();
         const expiries = new Set<string>();
         for (const p of allPos) {
           if (p.expiry) { expiries.add(String(p.expiry)); continue; }
           const m = (p.zanskar_name || '').match(/^[A-Z]+(\d{2})([0-9OND])(\d{2})(\d+)(CE|PE)$/i);
           if (m) {
-            const mm = monthCodes[m[2].toUpperCase()] || '01';
+            const mm = MONTH_CODES[m[2].toUpperCase()] || '01';
             const expiry = `20${m[1]}${mm}${m[3]}`;
             expiries.add(expiry);
             parsedInfo.set(p.ref_id, { expiry, strike: Number(m[4]), optType: m[5].toUpperCase() });
@@ -1063,9 +1066,6 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   }, [subscribe, isSnapshot]);
 
   // ── 10. Greeks chart ──
-  const GREEK_SOURCES = ['net', 'CE', 'PE'] as const;
-  const GREEK_LINE_STYLES: Record<string, number> = { net: 0, CE: 2, PE: 1 };
-  const GREEK_LINE_WIDTHS: Record<string, 1 | 2> = { net: 2, CE: 1, PE: 1 };
   // All greeks share one draggable 'right' axis. Plotted values are normalized (true value / factor)
   // so different magnitudes are comparable; a custom formatter de-normalizes so badges/tooltip show true values.
 

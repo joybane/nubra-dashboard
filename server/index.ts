@@ -1222,6 +1222,8 @@ interface MultiOrderLeg {
 fastify.post<{ Body: { orders: MultiOrderLeg[] } }>('/paper/orders/multi', async (req, reply) => {
   if (!requireAuth(reply)) return;
   try {
+    if (!Array.isArray(req.body?.orders) || req.body.orders.length === 0)
+      return reply.status(400).send({ error: 'orders must be a non-empty array' });
     const results = req.body.orders.map((o) => {
       subscribeForSim(o.nubraName, o.liveRefId, o.derivative_type, o.asset, o.expiry);
       return simBroker.placeOrder({
@@ -1248,6 +1250,10 @@ fastify.post('/paper/orders/basket', async (req, reply) => {
   try {
     const body = req.body as Record<string, unknown>;
     const legs  = (body.orders as Array<Record<string, unknown>>);
+    if (!Array.isArray(legs) || legs.length === 0)
+      return reply.status(400).send({ error: 'orders must be a non-empty array' });
+    if (legs.some(l => !l.liveRefId))
+      return reply.status(400).send({ error: 'every leg must have a liveRefId' });
     const strategyName = (body.strategy_name as string) || undefined;
     const marginRequired = typeof body.margin_required === 'number' ? body.margin_required : undefined;
     const basketGroupId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;

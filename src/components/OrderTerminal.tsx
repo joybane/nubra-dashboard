@@ -270,7 +270,7 @@ function OrdersTab({ uatAuth, onOpenStrategyChart }: { uatAuth: boolean; onOpenS
 
       {/* table */}
       <div className="flex-1 overflow-auto">
-        <table className="w-full text-[11px] border-collapse">
+        <table className="w-full text-[11px] border-collapse tabular-nums">
           <thead className="sticky top-0 bg-[var(--bg-secondary)] z-10">
             <tr className="text-[var(--text-muted)] font-medium">
               {['Symbol', 'Status', 'Time', 'Product', 'Side', 'Qty', 'Price', 'Trigger', 'Avg Price', ''].map((h) => (
@@ -699,7 +699,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
         {loading && <span className="w-3 h-3 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin ml-2" />}
       </div>
       <div className="flex-1 overflow-auto">
-        <table className="w-full text-[11px] border-collapse">
+        <table className="w-full text-[11px] border-collapse tabular-nums">
           <thead className="sticky top-0 bg-[var(--bg-secondary)] z-10">
             <tr className="text-[var(--text-muted)]">
               {(showHistory
@@ -1007,7 +1007,7 @@ function HoldingsTab({ uatAuth }: { uatAuth: boolean }) {
         {loading && <span className="w-3 h-3 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin ml-auto" />}
       </div>
       <div className="flex-1 overflow-auto">
-        <table className="w-full text-[11px] border-collapse">
+        <table className="w-full text-[11px] border-collapse tabular-nums">
           <thead className="sticky top-0 bg-[var(--bg-secondary)] z-10">
             <tr className="text-[var(--text-muted)]">
               {['Symbol', 'Qty', 'Avg Price', 'LTP', 'Net P&L', 'P&L %', 'Day P&L'].map((h) => (
@@ -1200,8 +1200,9 @@ export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyC
       {/* body */}
       <div className="flex-1 overflow-hidden">
         {!uatAuth ? (
-          <div className="flex h-full items-center justify-center text-[12px] text-[var(--text-muted)]">
-            Login to Nubra to use paper trading.
+          <div className="flex flex-col h-full items-center justify-center gap-2 text-[var(--text-muted)]">
+            <span className="text-[28px] opacity-50">🔒</span>
+            <span className="text-[12px]">Login to Nubra to use paper trading.</span>
           </div>
         ) : (
           <>
