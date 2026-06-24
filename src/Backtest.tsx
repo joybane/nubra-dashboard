@@ -26,7 +26,10 @@ const inputCls =
   'text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]';
 const lblCls = 'text-[9px] uppercase tracking-wide text-[var(--text-muted)]';
 
-const DEFAULT_LOT: Record<Underlying, number> = { NIFTY: 75, SENSEX: 20 };
+const DEFAULT_LOT: Record<Underlying, number> = { NIFTY: 65, SENSEX: 20 };
+// Default AlgoTest calibration (signed %). −10% is a midpoint of the measured
+// short-premium deviation band (≈ −3% no-SL … −20% with SL/re-entry). Editable per run.
+const ALGOTEST_ADJ_DEFAULT = -10;
 
 function inr(n: number): string {
   const s = Math.abs(n) >= 100000
@@ -340,7 +343,7 @@ export default function Backtest({ instrument }: Props) {
             ))}
             <input type="number" min={0} step="any" value={lotMult} placeholder="custom"
               onChange={(e) => setLotMult(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') { const f = Number(lotMult); if (f > 0) { multiplyLots(f); setLotMult(''); } } }}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); const f = Number(lotMult); if (f > 0) { multiplyLots(f); setLotMult(''); } } }}
               className="w-14 px-1.5 py-0.5 rounded text-[10px] bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-primary)]" />
             <button onClick={() => { const f = Number(lotMult); if (f > 0) { multiplyLots(f); setLotMult(''); } }}
               disabled={!(Number(lotMult) > 0)}
@@ -430,6 +433,13 @@ function Results({ resp, tab, setTab, config }: { resp: BacktestResponse; tab: R
   const [wkFilter, setWkFilter] = useState<Set<WeekdayCode>>(new Set());  // empty = all (item 4)
   const [dteFilter, setDteFilter] = useState<Set<number>>(new Set());     // empty = all (item 4)
   const [detail, setDetail] = useState<DayTrade | null>(null);            // trade detail modal (items 2 & 6)
+  // AlgoTest calibration: our option premiums are cash/spot-priced while AlgoTest
+  // prices off futures, so on short-premium strategies our P&L systematically
+  // overshoots AlgoTest's. This signed % maps Overall → an estimated AlgoTest
+  // figure. It is NOT a constant — measured deviations: short ATM strangle (no SL)
+  // ≈ −3%, OTM strangle with SL + re-entry ≈ −20%, hedged/long-leg structures can
+  // swing the other way. Default targets naked short-premium strategies; tune per run.
+  const [algoAdj, setAlgoAdj] = useState(ALGOTEST_ADJ_DEFAULT);
 
   // available DTE values across all trades (for the filter dropdown)
   const dteOptions = useMemo(() => {
@@ -469,9 +479,11 @@ function Results({ resp, tab, setTab, config }: { resp: BacktestResponse; tab: R
   const toggleDte = (d: number) => setDteFilter((s) => { const n = new Set(s); n.has(d) ? n.delete(d) : n.add(d); return n; });
 
   const pos = (n: number) => (n >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]');
-  const cards: { label: string; val: string; cls?: string; hint?: string }[] = [
+  const estAlgo = m.totalPnl * (1 + algoAdj / 100);
+  const cards: { label: string; val: string; cls?: string; hint?: string; sub?: string }[] = [
     // ── AlgoTest-report parity set ──
-    { label: 'Overall profit', val: inr(m.totalPnl), cls: pos(m.totalPnl) },
+    { label: 'Overall profit', val: inr(m.totalPnl), cls: pos(m.totalPnl),
+      sub: `≈ AlgoTest ${inr(estAlgo)}` },
     { label: 'Trades', val: `${m.totalTrades}` },
     { label: 'Avg profit / trade', val: inr(m.avgPnl), cls: pos(m.avgPnl) },
     { label: 'Win %', val: `${m.winRate}%` },
@@ -508,7 +520,13 @@ function Results({ resp, tab, setTab, config }: { resp: BacktestResponse; tab: R
               {resp.tradingDaysScanned} days scanned{isFiltered ? ` · ${filtered.length} of ${resp.trades.length} trades shown` : ''}
             </span>
           </div>
-          <div className="flex gap-1">
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1" title="Maps Overall profit → an estimated AlgoTest figure. Our premiums are cash/spot-priced; AlgoTest prices off futures, so short-premium P&L overshoots. Measured deviation: ≈ −3% (no SL) to −20% (SL + re-entry); hedged structures can differ in sign. Tune to your strategy.">
+              <span className="text-[9px] text-[var(--text-muted)] uppercase tracking-wide">AlgoTest adj %</span>
+              <input type="number" step="1" value={algoAdj}
+                onChange={(e) => setAlgoAdj(Number(e.target.value) || 0)}
+                className="w-14 px-1.5 py-0.5 rounded text-[10px] bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-primary)] tabular-nums" />
+            </label>
             <button onClick={() => exportCSV(resp)} className="px-2 py-0.5 rounded text-[10px] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]">CSV</button>
             <button onClick={() => exportJSON(resp)} className="px-2 py-0.5 rounded text-[10px] bg-[var(--bg-card)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]">JSON</button>
           </div>
@@ -518,6 +536,7 @@ function Results({ resp, tab, setTab, config }: { resp: BacktestResponse; tab: R
             <div key={c.label} title={c.hint}>
               <div className="text-[9px] text-[var(--text-muted)] uppercase tracking-wide">{c.label}</div>
               <div className={`text-[13px] font-semibold ${c.cls ?? 'text-[var(--text-primary)]'}`}>{c.val}</div>
+              {c.sub && <div className="text-[10px] text-[var(--accent)] tabular-nums leading-tight" title="Estimated AlgoTest result = Overall × (1 + adj%). Calibration is approximate — see the AlgoTest adj field.">{c.sub}</div>}
             </div>
           ))}
         </div>

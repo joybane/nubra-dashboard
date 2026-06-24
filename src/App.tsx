@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { WsProvider } from './hooks/useWsContext';
+import { WsProvider, useWs } from './hooks/useWsContext';
 import { PaperTradingProvider } from './hooks/usePaperTrading';
 import { WatchlistProvider } from './hooks/useWatchlistContext';
 import { BasketProvider } from './hooks/useBasketContext';
@@ -28,6 +28,7 @@ function AppInner() {
   const [strategyChart, setStrategyChart] = useState<StrategyChartTarget | null>(null);
 
   const { loadInstrumentInActivePane } = useWorkspaceState();
+  const { subscribe } = useWs();
 
   const openStrategyChart = useCallback((basketGroupId: string, strategyName: string, snapshotId?: string) => {
     setStrategyChart({ basketGroupId, strategyName, snapshotId });
@@ -44,6 +45,16 @@ function AppInner() {
       .then((d) => setAuth(d.authenticated ? 'authenticated' : 'unauthenticated'))
       .catch(() => setAuth('unauthenticated'));
   }, []);
+
+  // React to live auth changes — e.g. the broker expiring our session mid-use
+  // makes the server broadcast auth_status, which re-shows the login overlay.
+  useEffect(() => {
+    const unsub = subscribe('auth_status', (msg) => {
+      if (msg.type !== 'auth_status') return;
+      setAuth(msg.status === 'authenticated' ? 'authenticated' : 'unauthenticated');
+    });
+    return unsub;
+  }, [subscribe]);
 
   if (auth === 'unknown') {
     return (

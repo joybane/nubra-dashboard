@@ -6,7 +6,9 @@ export type Side        = 'BUY' | 'SELL';
 export type WeekdayCode = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI';
 
 export type StrikeMethod =
-  | 'ATM' | 'CLOSEST_PREMIUM' | 'POINTS_FROM_SPOT' | 'PERCENT_FROM_SPOT' | 'FIXED_STRIKE' | 'DELTA';
+  | 'ATM' | 'CLOSEST_PREMIUM' | 'POINTS_FROM_SPOT' | 'PERCENT_FROM_SPOT' | 'FIXED_STRIKE' | 'DELTA'
+  | 'PREMIUM_GTE' | 'PREMIUM_LTE' | 'PREMIUM_RANGE'
+  | 'DELTA_RANGE' | 'STRADDLE_WIDTH' | 'ATM_STRADDLE_PREMIUM_PCT';
 
 export interface StrikeSelection {
   method:           StrikeMethod;
@@ -16,6 +18,12 @@ export interface StrikeSelection {
   percentFromSpot?: number;
   absoluteStrike?:  number;
   targetDelta?:     number;
+  premiumMin?:      number;
+  premiumMax?:      number;
+  deltaMin?:        number;
+  deltaMax?:        number;
+  straddleWidthMult?:  number;
+  straddlePremiumPct?: number;
 }
 
 export type SLTargetType =

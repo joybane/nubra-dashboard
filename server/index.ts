@@ -84,6 +84,61 @@ const authState = {
   status:       'idle' as 'idle' | 'awaiting_otp' | 'awaiting_mpin' | 'authenticated',
 };
 
+// When the broker rejects a request (401/403) we DON'T immediately force a login:
+// the dashboard fans out many broker calls (option chains, historical greeks across
+// strikes/expiries), and a single resource-level 403 or a transient stale-token blip
+// shouldn't log the user out while the live session is otherwise fine. Instead we try
+// to silently re-mint the session from the persisted auth token + MPIN, and only fall
+// back to prompting for a fresh login if that self-heal genuinely fails.
+let reauthing = false;                 // guards verifypin from re-triggering itself
+let reauthInFlight: Promise<boolean> | null = null;
+let lastReauthMs = 0;
+const REAUTH_COOLDOWN_MS = 30_000;     // a burst of 403s triggers at most one attempt
+
+function onBrokerAuthFailure(): void {
+  // Only meaningful once we believe we're logged in; ignore during the login handshake
+  // and while a re-auth (its own verifypin call) is in progress.
+  if (reauthing || authState.status !== 'authenticated') return;
+  void reauthSilently();
+}
+
+async function reauthSilently(): Promise<boolean> {
+  if (reauthInFlight) return reauthInFlight;
+  if (Date.now() - lastReauthMs < REAUTH_COOLDOWN_MS) return false;
+  if (!authState.authToken || !process.env.MPIN) { forceLogin(); return false; }
+  lastReauthMs = Date.now();
+  reauthInFlight = (async () => {
+    reauthing = true;
+    try {
+      const data = await nubraPost('/verifypin', { pin: process.env.MPIN! }, { Authorization: `Bearer ${authState.authToken}` });
+      const sessionToken = (data.session_token || (data.data as Record<string, unknown>)?.token) as string;
+      if (!sessionToken) throw new Error('no session_token in response');
+      authState.sessionToken = sessionToken;
+      authState.status       = 'authenticated';
+      console.log('[auth] Session silently refreshed — no login needed.');
+      connectNubraWs();
+      try { broadcast({ type: 'auth_status', status: 'authenticated' }); } catch { /* ws not ready */ }
+      return true;
+    } catch (err) {
+      console.warn(`[auth] Silent re-auth failed (${(err as Error).message}) — login required.`);
+      forceLogin();
+      return false;
+    } finally {
+      reauthing = false;
+      reauthInFlight = null;
+    }
+  })();
+  return reauthInFlight;
+}
+
+// Drop to a logged-out state and tell browser clients to show the login overlay.
+function forceLogin(): void {
+  authState.sessionToken = null;
+  authState.authToken    = null;
+  authState.status       = 'idle';
+  try { broadcast({ type: 'auth_status', status: authState.status }); } catch { /* ws not ready */ }
+}
+
 // ─── HTTP helpers ─────────────────────────────────────────────────────────────
 function baseHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return {
@@ -107,6 +162,7 @@ async function nubraPost(endpoint: string, body: object, extraHeaders: Record<st
     try { data = JSON.parse(text); } catch { data = { message: text }; }
   }
   if (!res.ok) {
+    if (res.status === 401 || res.status === 403) onBrokerAuthFailure();
     const msg = (data.message || data.error || `HTTP ${res.status}: ${text}`) as string;
     throw new Error(msg);
   }
@@ -125,6 +181,7 @@ async function nubraGet(endpoint: string, params: Record<string, string> = {}): 
     try { data = JSON.parse(text); } catch { data = { message: text }; }
   }
   if (!res.ok) {
+    if (res.status === 401 || res.status === 403) onBrokerAuthFailure();
     const msg = (data.message || data.error || `HTTP ${res.status}: ${text}`) as string;
     throw new Error(msg);
   }
@@ -217,6 +274,7 @@ fastify.post('/auth/verify-pin', async (_req, reply) => {
     authState.status       = 'authenticated';
     console.log('Authenticated. Session token acquired.');
     connectNubraWs();
+    try { broadcast({ type: 'auth_status', status: 'authenticated' }); } catch { /* ws not ready */ }
     return reply.send({ ok: true, message: 'Authenticated successfully.' });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -1612,6 +1670,7 @@ async function tryRestoreSession(): Promise<void> {
     authState.status       = 'authenticated';
     console.log('Session restored — OTP not needed.');
     connectNubraWs();
+    try { broadcast({ type: 'auth_status', status: 'authenticated' }); } catch { /* ws not ready */ }
   } catch (err) {
     console.log(`Saved token expired (${(err as Error).message}). Fresh OTP required.`);
     authState.authToken = null;

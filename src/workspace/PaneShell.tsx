@@ -6,6 +6,7 @@ import StrategyChart from '../StrategyChart';
 import BasketOrder from '../BasketOrder';
 import Backtest from '../Backtest';
 import Watchlist from '../Watchlist';
+import Tracker from '../Tracker';
 
 const VIEW_LABELS: Record<ViewType, string> = {
   chart:       'Chart',
@@ -15,6 +16,7 @@ const VIEW_LABELS: Record<ViewType, string> = {
   basket:      'Basket',
   backtest:    'Backtest',
   watchlist:   'Watchlist',
+  tracker:     'Tracker',
 };
 
 interface PaneShellProps {
@@ -46,6 +48,8 @@ export default function PaneShell({
         return <Backtest instrument={pane.instrument} />;
       case 'watchlist':
         return <Watchlist onNavigateToChart={onNavigateToChart} />;
+      case 'tracker':
+        return <Tracker instrument={pane.instrument} theme={theme} />;
     }
   })();
 

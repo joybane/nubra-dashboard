@@ -16,13 +16,20 @@ const inputCls =
 const lblCls = 'text-[9px] uppercase tracking-wide text-[var(--text-muted)]';
 
 const STRIKE_METHODS: { v: StrikeMethod; label: string }[] = [
-  { v: 'ATM',               label: 'ATM ± offset' },
-  { v: 'CLOSEST_PREMIUM',   label: 'Closest premium' },
-  { v: 'POINTS_FROM_SPOT',  label: 'Points from spot' },
-  { v: 'PERCENT_FROM_SPOT', label: '% from spot' },
-  { v: 'FIXED_STRIKE',      label: 'Fixed strike' },
-  { v: 'DELTA',             label: 'Target delta' },
+  { v: 'ATM',                     label: 'ATM ± offset' },
+  { v: 'CLOSEST_PREMIUM',         label: 'Closest premium' },
+  { v: 'PREMIUM_GTE',             label: 'Premium ≥' },
+  { v: 'PREMIUM_LTE',             label: 'Premium ≤' },
+  { v: 'PREMIUM_RANGE',           label: 'Premium range' },
+  { v: 'STRADDLE_WIDTH',          label: 'Straddle width' },
+  { v: 'ATM_STRADDLE_PREMIUM_PCT',label: 'ATM straddle premium %' },
+  { v: 'POINTS_FROM_SPOT',        label: 'Points from spot' },
+  { v: 'PERCENT_FROM_SPOT',       label: '% from spot' },
+  { v: 'FIXED_STRIKE',            label: 'Fixed strike' },
+  { v: 'DELTA',                   label: 'Target delta' },
+  { v: 'DELTA_RANGE',             label: 'Delta range' },
 ];
+const RANGE_STRIKE = (m: StrikeMethod): boolean => m === 'PREMIUM_RANGE' || m === 'DELTA_RANGE';
 const SL_TYPES: { v: SLTargetType; label: string }[] = [
   { v: 'NONE',              label: 'None' },
   { v: 'PREMIUM_PERCENT',   label: '% of premium' },
@@ -112,12 +119,25 @@ export default function LegCard({ leg, index, onChange, onRemove }: Props) {
             {STRIKE_METHODS.map((m) => <option key={m.v} value={m.v}>{m.label}</option>)}
           </select>
         </label>
-        <label>
+        <div>
           <span className={lblCls}>{strikeParamLabel(leg.strike.method)}</span>
-          <input type="number" value={strikeParamValue(leg)} step={strikeStep(leg.strike.method)}
-            onChange={(e) => set({ strike: { ...leg.strike, ...strikeParamPatch(leg.strike.method, Number(e.target.value)) } })}
-            className={inputCls} />
-        </label>
+          {RANGE_STRIKE(leg.strike.method) ? (
+            <div className="flex gap-1">
+              <input type="number" aria-label="min" placeholder="min" step={strikeStep(leg.strike.method)}
+                value={strikeRangeVal(leg, 'lo')}
+                onChange={(e) => set({ strike: { ...leg.strike, ...strikeRangePatch(leg.strike.method, 'lo', Number(e.target.value)) } })}
+                className={inputCls} />
+              <input type="number" aria-label="max" placeholder="max" step={strikeStep(leg.strike.method)}
+                value={strikeRangeVal(leg, 'hi')}
+                onChange={(e) => set({ strike: { ...leg.strike, ...strikeRangePatch(leg.strike.method, 'hi', Number(e.target.value)) } })}
+                className={inputCls} />
+            </div>
+          ) : (
+            <input type="number" value={strikeParamValue(leg)} step={strikeStep(leg.strike.method)}
+              onChange={(e) => set({ strike: { ...leg.strike, ...strikeParamPatch(leg.strike.method, Number(e.target.value)) } })}
+              className={inputCls} />
+          )}
+        </div>
       </div>
 
       {/* SL + target */}
@@ -250,33 +270,70 @@ function strikeParamLabel(m: StrikeMethod): string {
   switch (m) {
     case 'ATM': return 'ATM offset (steps)';
     case 'CLOSEST_PREMIUM': return 'Target premium ₹';
+    case 'PREMIUM_GTE': return 'Premium ≥ ₹';
+    case 'PREMIUM_LTE': return 'Premium ≤ ₹';
+    case 'PREMIUM_RANGE': return 'Premium range ₹';
+    case 'STRADDLE_WIDTH': return 'Straddle width ×';
+    case 'ATM_STRADDLE_PREMIUM_PCT': return '% of ATM straddle';
     case 'POINTS_FROM_SPOT': return 'Points (± )';
     case 'PERCENT_FROM_SPOT': return '% (± )';
     case 'FIXED_STRIKE': return 'Strike';
     case 'DELTA': return '|Delta| (0–1)';
+    case 'DELTA_RANGE': return '|Delta| range';
   }
 }
 function strikeStep(m: StrikeMethod): number {
-  return m === 'PERCENT_FROM_SPOT' ? 0.5 : m === 'ATM' ? 1 : m === 'FIXED_STRIKE' ? 50 : m === 'DELTA' ? 0.05 : 5;
+  switch (m) {
+    case 'PERCENT_FROM_SPOT': return 0.5;
+    case 'ATM': return 1;
+    case 'FIXED_STRIKE': return 50;
+    case 'DELTA':
+    case 'DELTA_RANGE': return 0.05;
+    case 'STRADDLE_WIDTH': return 0.1;
+    case 'ATM_STRADDLE_PREMIUM_PCT': return 1;
+    default: return 5; // premium-based criteria
+  }
 }
 function strikeParamValue(leg: Leg): number {
   const s = leg.strike;
   switch (s.method) {
     case 'ATM': return s.atmOffset ?? 0;
-    case 'CLOSEST_PREMIUM': return s.premiumTarget ?? 0;
+    case 'CLOSEST_PREMIUM':
+    case 'PREMIUM_GTE':
+    case 'PREMIUM_LTE': return s.premiumTarget ?? 0;
+    case 'STRADDLE_WIDTH': return s.straddleWidthMult ?? 1;
+    case 'ATM_STRADDLE_PREMIUM_PCT': return s.straddlePremiumPct ?? 0;
     case 'POINTS_FROM_SPOT': return s.pointsFromSpot ?? 0;
     case 'PERCENT_FROM_SPOT': return s.percentFromSpot ?? 0;
     case 'FIXED_STRIKE': return s.absoluteStrike ?? 0;
     case 'DELTA': return s.targetDelta ?? 0.3;
+    case 'PREMIUM_RANGE': return s.premiumMin ?? 0;   // unused (range UI), kept exhaustive
+    case 'DELTA_RANGE': return s.deltaMin ?? 0;       // unused (range UI), kept exhaustive
   }
 }
 function strikeParamPatch(m: StrikeMethod, v: number): Partial<Leg['strike']> {
   switch (m) {
     case 'ATM': return { atmOffset: Math.round(v) };
-    case 'CLOSEST_PREMIUM': return { premiumTarget: v };
+    case 'CLOSEST_PREMIUM':
+    case 'PREMIUM_GTE':
+    case 'PREMIUM_LTE': return { premiumTarget: v };
+    case 'STRADDLE_WIDTH': return { straddleWidthMult: v };
+    case 'ATM_STRADDLE_PREMIUM_PCT': return { straddlePremiumPct: v };
     case 'POINTS_FROM_SPOT': return { pointsFromSpot: v };
     case 'PERCENT_FROM_SPOT': return { percentFromSpot: v };
     case 'FIXED_STRIKE': return { absoluteStrike: v };
     case 'DELTA': return { targetDelta: v };
+    case 'PREMIUM_RANGE': return { premiumMin: v };   // unused (range UI), kept exhaustive
+    case 'DELTA_RANGE': return { deltaMin: v };        // unused (range UI), kept exhaustive
   }
+}
+// Range criteria (Premium range / Delta range) use two inputs (lo + hi).
+function strikeRangeVal(leg: Leg, side: 'lo' | 'hi'): number {
+  const s = leg.strike;
+  if (s.method === 'DELTA_RANGE') return (side === 'lo' ? s.deltaMin : s.deltaMax) ?? 0;
+  return (side === 'lo' ? s.premiumMin : s.premiumMax) ?? 0; // PREMIUM_RANGE
+}
+function strikeRangePatch(m: StrikeMethod, side: 'lo' | 'hi', v: number): Partial<Leg['strike']> {
+  if (m === 'DELTA_RANGE') return side === 'lo' ? { deltaMin: v } : { deltaMax: v };
+  return side === 'lo' ? { premiumMin: v } : { premiumMax: v }; // PREMIUM_RANGE
 }

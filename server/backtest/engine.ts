@@ -73,6 +73,39 @@ function chooseStrike(
     strikes.reduce((best, s) => Math.abs(s - target) < Math.abs(best - target) ? s : best, strikes[0]);
   const map = optionType === 'CALL' ? day.call : day.put;
 
+  // Premium of a strike at entry (this option type), or null if no/NaN bar.
+  const premAt = (s: number): number | null => {
+    const b = barFrom(map.get(s), entryHHMM);
+    return b && Number.isFinite(b.close) ? b.close : null;
+  };
+  // |Black-Scholes delta| of a strike at entry, or null.
+  const deltaAt = (s: number): number | null => {
+    const b = barFrom(map.get(s), entryHHMM);
+    if (!b) return null;
+    return Math.abs(bsDelta(optionType, b.spot, s, b.iv, yearsToExpiry(date, entryHHMM, expiry)));
+  };
+  // ATM straddle premium at entry (ATM CE close + ATM PE close) — used by
+  // STRADDLE_WIDTH and ATM_STRADDLE_PREMIUM_PCT.
+  const atmStraddlePremium = (): number | null => {
+    let ai = 0, bestD = Infinity;
+    strikes.forEach((s, i) => { const d = Math.abs(s - entrySpot); if (d < bestD) { bestD = d; ai = i; } });
+    const atm = strikes[ai];
+    const ce = barFrom(day.call.get(atm), entryHHMM);
+    const pe = barFrom(day.put.get(atm), entryHHMM);
+    if (!ce || !pe || !Number.isFinite(ce.close) || !Number.isFinite(pe.close)) return null;
+    return ce.close + pe.close;
+  };
+  // Pick the strike whose premium is nearest a target (used by several criteria).
+  const closestPremium = (tgt: number): number | null => {
+    let best: number | null = null, bestDiff = Infinity;
+    for (const s of strikes) {
+      const p = premAt(s); if (p == null) continue;
+      const diff = Math.abs(p - tgt);
+      if (diff < bestDiff) { bestDiff = diff; best = s; }
+    }
+    return best;
+  };
+
   switch (sel.method) {
     case 'ATM': {
       let ai = 0, bestD = Infinity;
@@ -87,16 +120,63 @@ function chooseStrike(
       return nearestTo(entrySpot * (1 + num(sel.percentFromSpot, 0) / 100));
     case 'FIXED_STRIKE':
       return sel.absoluteStrike != null ? nearestTo(num(sel.absoluteStrike)) : null;
-    case 'CLOSEST_PREMIUM': {
+    case 'CLOSEST_PREMIUM':
+      return closestPremium(num(sel.premiumTarget, 0));
+    case 'PREMIUM_GTE': {
+      // smallest premium still ≥ threshold (most-OTM strike meeting the floor)
       const tgt = num(sel.premiumTarget, 0);
+      let best: number | null = null, bestPrem = Infinity;
+      for (const s of strikes) {
+        const p = premAt(s); if (p == null) continue;
+        if (p >= tgt && p < bestPrem) { bestPrem = p; best = s; }
+      }
+      return best;
+    }
+    case 'PREMIUM_LTE': {
+      // largest premium still ≤ threshold (least-OTM strike under the cap)
+      const tgt = num(sel.premiumTarget, 0);
+      let best: number | null = null, bestPrem = -Infinity;
+      for (const s of strikes) {
+        const p = premAt(s); if (p == null) continue;
+        if (p <= tgt && p > bestPrem) { bestPrem = p; best = s; }
+      }
+      return best;
+    }
+    case 'PREMIUM_RANGE': {
+      // strike whose premium falls within [min,max], nearest the band midpoint
+      const lo = num(sel.premiumMin, 0), hi = num(sel.premiumMax, 0);
+      const mid = (lo + hi) / 2;
       let best: number | null = null, bestDiff = Infinity;
       for (const s of strikes) {
-        const b = barFrom(map.get(s), entryHHMM);
-        if (!b || !Number.isFinite(b.close)) continue;
-        const diff = Math.abs(b.close - tgt);
+        const p = premAt(s); if (p == null || p < lo || p > hi) continue;
+        const diff = Math.abs(p - mid);
         if (diff < bestDiff) { bestDiff = diff; best = s; }
       }
       return best;
+    }
+    case 'DELTA_RANGE': {
+      const lo = Math.abs(num(sel.deltaMin, 0)), hi = Math.abs(num(sel.deltaMax, 1));
+      const mid = (lo + hi) / 2;
+      let best: number | null = null, bestDiff = Infinity;
+      for (const s of strikes) {
+        const d = deltaAt(s); if (d == null || d < lo || d > hi) continue;
+        const diff = Math.abs(d - mid);
+        if (diff < bestDiff) { bestDiff = diff; best = s; }
+      }
+      return best;
+    }
+    case 'STRADDLE_WIDTH': {
+      // strike at ATM ± (multiplier × ATM-straddle premium): CALL above, PUT below.
+      const straddle = atmStraddlePremium();
+      if (straddle == null) return null;
+      const width = straddle * num(sel.straddleWidthMult, 1);
+      return nearestTo(optionType === 'CALL' ? entrySpot + width : entrySpot - width);
+    }
+    case 'ATM_STRADDLE_PREMIUM_PCT': {
+      // strike whose premium ≈ pct% of the ATM straddle premium
+      const straddle = atmStraddlePremium();
+      if (straddle == null) return null;
+      return closestPremium(straddle * (num(sel.straddlePremiumPct, 0) / 100));
     }
     case 'DELTA': {
       const tgt = Math.abs(num(sel.targetDelta, 0.5));

@@ -54,6 +54,24 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
     }
   }
 
+  // Fast path when the broker expired only the session token but the auth token
+  // is still valid — re-mint a session via MPIN with no OTP round-trip.
+  async function resumeSession() {
+    setLoading(true);
+    showStatus('Resuming session…', 'info');
+    try {
+      const res  = await fetch('/auth/verify-pin', { method: 'POST' });
+      const data = await res.json() as { ok: boolean; message?: string; error?: string };
+      if (!data.ok) throw new Error(data.error);
+      showStatus('Authenticated!', 'success');
+      setTimeout(() => onAuthenticated(), 500);
+    } catch (err: unknown) {
+      showStatus(`${(err as Error).message} — send OTP instead.`, 'error');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function verifyPin() {
     try {
       const res  = await fetch('/auth/verify-pin', { method: 'POST' });
@@ -95,6 +113,13 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
               className="w-full py-2.5 px-4 bg-[var(--accent)] hover:bg-[var(--accent-dim)] text-white rounded-md font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               Send OTP
+            </button>
+            <button
+              onClick={resumeSession}
+              disabled={loading}
+              className="w-full py-2 px-4 bg-[var(--bg-secondary)] border border-[var(--border)] hover:border-[var(--accent)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-md font-medium text-xs disabled:opacity-50 transition-colors"
+            >
+              Resume session (skip OTP)
             </button>
           </div>
         )}

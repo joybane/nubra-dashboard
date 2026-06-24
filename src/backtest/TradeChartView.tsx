@@ -185,6 +185,23 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
       priceFormat: { type: 'price', precision: 0, minMove: 1 },
     });
     candle.setData(bars.under.map((b) => ({ time: b.time as Time, open: b.open, high: b.high, low: b.low, close: b.close })));
+
+    // The P&L / Greeks series only span entry→exit (~09:35–15:15) while the candle
+    // pane spans the full session (09:15–15:30). Pad the shorter series with
+    // whitespace points at the candle endpoints so EVERY pane shares the exact same
+    // time domain — then fitContent on each pane shows all data, aligned, and the
+    // P&L lines can never be pushed outside a forced visible range (the old bug:
+    // value labels showed at the right edge but the lines were off-screen).
+    const tFirst = bars.under[0].time as Time;
+    const tLast  = bars.under[bars.under.length - 1].time as Time;
+    const pad = <T extends { time: Time }>(data: T[]): (T | { time: Time })[] => {
+      const out: (T | { time: Time })[] = [];
+      if (!data.length || (data[0].time as number) > (tFirst as number)) out.push({ time: tFirst });
+      out.push(...data);
+      if (!data.length || (data[data.length - 1].time as number) < (tLast as number)) out.push({ time: tLast });
+      return out;
+    };
+
     for (const lm of legs) {
       const lb = bars.legBars.get(lm.symbol);
       if (!lb) continue;
@@ -199,20 +216,12 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
     // P&L pane — per-leg + total (authoritative backtest series)
     for (const lm of legs) {
       const s = nc.addSeries(LineSeries, { color: lm.color, lineWidth: 1, title: lm.label, lastValueVisible: true, priceLineVisible: false, priceFormat: { type: 'price', precision: 0, minMove: 1 } });
-      s.setData(series.map((p) => { const lp = p.legs.find((x) => x.legId === lm.legId); return { time: toUnix(trade.date, p.hhmm) as Time, value: lp ? lp.pnl : NaN }; }).filter((d) => Number.isFinite(d.value as number)));
+      const legData = series.map((p) => { const lp = p.legs.find((x) => x.legId === lm.legId); return { time: toUnix(trade.date, p.hhmm) as Time, value: lp ? lp.pnl : NaN }; }).filter((d) => Number.isFinite(d.value as number));
+      s.setData(pad(legData));
     }
     const totalS = nc.addSeries(LineSeries, { color: '#ffffff', lineWidth: 3, title: 'Total P&L', lastValueVisible: true, priceLineVisible: true, priceFormat: { type: 'price', precision: 0, minMove: 1 } });
     const totalData = series.map((p) => ({ time: toUnix(trade.date, p.hhmm) as Time, value: p.total }));
-    totalS.setData(totalData);
-    // TEMP DIAGNOSTIC — compare P&L vs candle time coordinates
-    console.log('[PNL DEBUG]', {
-      candleCount: bars.under.length,
-      candleFirst: bars.under[0]?.time, candleLast: bars.under[bars.under.length - 1]?.time,
-      pnlCount: totalData.length,
-      pnlFirst: totalData[0]?.time, pnlLast: totalData[totalData.length - 1]?.time,
-      sampleHhmm: series.slice(0, 3).map((p) => p.hhmm),
-      pnlValuesSample: totalData.slice(0, 3).map((d) => d.value),
-    });
+    totalS.setData(pad(totalData));
     totalS.createPriceLine({ price: 0, color: '#2a2d42', lineWidth: 1, lineStyle: 0, axisLabelVisible: false, title: '' });
 
     // Greeks pane — net delta/gamma/theta/vega, each on its own overlay scale
@@ -221,7 +230,7 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
     greekArr.sort((a, b) => a[0] - b[0]);
     (['delta', 'gamma', 'theta', 'vega'] as const).forEach((gk, idx) => {
       const s = gc.addSeries(LineSeries, { color: GREEK_COLORS[gk], lineWidth: 1, priceScaleId: `gk-${gk}`, title: gk, lastValueVisible: true, priceLineVisible: false });
-      s.setData(greekArr.map((r) => ({ time: r[0] as Time, value: r[idx + 1] })));
+      s.setData(pad(greekArr.map((r) => ({ time: r[0] as Time, value: r[idx + 1] }))));
     });
 
     // size the charts to their containers up-front (don't wait for the first ResizeObserver tick)
@@ -237,17 +246,13 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
     // panes, so a time-range sync shows each pane all of its own data and stays
     // aligned.
     const charts = [pc, nc, gc];
-    const allTimes: number[] = bars.under.map((b) => b.time);
-    for (const p of series) allTimes.push(toUnix(trade.date, p.hhmm));
-    const from = Math.min(...allTimes) as Time;
-    const to = Math.max(...allTimes) as Time;
     let syncing = false;
     requestAnimationFrame(() => {
       syncing = true; // suppress the cross-pane sync so it can't re-impose a range mid-set
-      for (const c of charts) {
-        try { c.timeScale().setVisibleRange({ from, to }); }
-        catch { c.timeScale().fitContent(); }
-      }
+      // Every pane shares the same padded [tFirst,tLast] domain, so fitContent
+      // yields an identical, fully-populated range on each — no line can land
+      // outside the viewport.
+      for (const c of charts) { try { c.timeScale().fitContent(); } catch { /* noop */ } }
       syncing = false;
     });
 

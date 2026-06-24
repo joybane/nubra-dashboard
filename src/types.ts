@@ -153,7 +153,7 @@ export interface BacktestResult {
 }
 
 // ─── Workspace ────────────────────────────────────────────────────────────────
-export type ViewType = 'chart' | 'optionchain' | 'straddle' | 'strategy' | 'basket' | 'backtest' | 'watchlist';
+export type ViewType = 'chart' | 'optionchain' | 'straddle' | 'strategy' | 'basket' | 'backtest' | 'watchlist' | 'tracker';
 
 export type LayoutType = 'single' | 'hsplit' | 'vsplit' | 'grid' | 'tleft' | 'tright';
 

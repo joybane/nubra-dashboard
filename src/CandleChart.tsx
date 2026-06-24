@@ -13,6 +13,8 @@ import { useWs } from './hooks/useWsContext';
 import { usePaperTrading } from './hooks/usePaperTrading';
 import { useWatchlist } from './hooks/useWatchlistContext';
 import { useOIProfile } from './hooks/useOIProfile';
+import { useGreekOverlay } from './hooks/useGreekOverlay';
+import { GreekButton } from './components/GreekControls';
 import type { Instrument, OhlcBar, OhlcvData, VolBar, WsMessage } from './types';
 import { getSymbol } from './types';
 import {
@@ -176,6 +178,8 @@ export default function CandleChart({ instrument, theme }: Props) {
   intervalRef.current = interval;
 
   const oi = useOIProfile({ containerRef, canvasRef, candleRef, currentInstRef, allBarsRef });
+  const vega  = useGreekOverlay({ greek: 'vega',  chartRef, currentInstRef, allBarsRef });
+  const theta = useGreekOverlay({ greek: 'theta', chartRef, currentInstRef, allBarsRef });
 
   // ── Chart initialization ──────────────────────────────────────────────────
   useEffect(() => {
@@ -358,6 +362,8 @@ export default function CandleChart({ instrument, theme }: Props) {
       unsubscribeChart(wasIndex ? { indexes: [oldSym] } : { instruments: [oldSym] }, iv, currentInstRef.current.exchange || 'NSE');
     }
     oi.clearForInstrumentChange();
+    vega.clearForInstrumentChange();
+    theta.clearForInstrumentChange();
 
     currentInstRef.current  = inst;
     allBarsRef.current      = [];
@@ -632,6 +638,10 @@ export default function CandleChart({ instrument, theme }: Props) {
           )}
         </div>
 
+        {/* Aggregate Vega / Theta overlays */}
+        <GreekButton api={vega}  label="Vega" />
+        <GreekButton api={theta} label="Theta" />
+
         {/* Reset zoom */}
         <button
           onClick={resetZoom}
@@ -762,7 +772,7 @@ export default function CandleChart({ instrument, theme }: Props) {
 }
 
 // ── API fetch ─────────────────────────────────────────────────────────────────
-function nubraType(item: Instrument): string {
+export function nubraType(item: Instrument): string {
   const dt = (item.derivative_type || '').toUpperCase();
   const at = (item.asset_type      || '').toUpperCase();
   if (dt === 'FUT'   || at === 'FUT')   return 'FUT';
@@ -771,7 +781,7 @@ function nubraType(item: Instrument): string {
   return 'STOCK';
 }
 
-async function fetchRange(
+export async function fetchRange(
   instrument: Instrument,
   interval: string,
   startDate: Date,

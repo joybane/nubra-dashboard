@@ -22,16 +22,28 @@ export type StrikeMethod =
   | 'POINTS_FROM_SPOT'
   | 'PERCENT_FROM_SPOT'
   | 'FIXED_STRIKE'
-  | 'DELTA';
+  | 'DELTA'
+  | 'PREMIUM_GTE'              // cheapest strike with premium ≥ premiumTarget
+  | 'PREMIUM_LTE'              // richest strike with premium ≤ premiumTarget
+  | 'PREMIUM_RANGE'           // strike whose premium ∈ [premiumMin, premiumMax]
+  | 'DELTA_RANGE'             // strike whose |delta| ∈ [deltaMin, deltaMax]
+  | 'STRADDLE_WIDTH'          // ATM ± (straddleWidthMult × ATM straddle premium)
+  | 'ATM_STRADDLE_PREMIUM_PCT'; // strike whose premium ≈ straddlePremiumPct% of ATM straddle
 
 export interface StrikeSelection {
   method:          StrikeMethod;
   atmOffset?:      number;  // ATM: ± strike steps (e.g. +2 = 2 strikes OTM/ITM by sign)
-  premiumTarget?:  number;  // CLOSEST_PREMIUM: pick strike whose entry premium ≈ this
+  premiumTarget?:  number;  // CLOSEST_PREMIUM / PREMIUM_GTE / PREMIUM_LTE: premium target/threshold
   pointsFromSpot?: number;  // POINTS_FROM_SPOT: signed offset in index points
   percentFromSpot?:number;  // PERCENT_FROM_SPOT: signed % of spot
   absoluteStrike?: number;  // FIXED_STRIKE
   targetDelta?:    number;  // DELTA: pick strike whose |delta| ≈ this (0–1, e.g. 0.25)
+  premiumMin?:     number;  // PREMIUM_RANGE: lower premium bound
+  premiumMax?:     number;  // PREMIUM_RANGE: upper premium bound
+  deltaMin?:       number;  // DELTA_RANGE: lower |delta| bound
+  deltaMax?:       number;  // DELTA_RANGE: upper |delta| bound
+  straddleWidthMult?:  number; // STRADDLE_WIDTH: × ATM straddle premium (default 1)
+  straddlePremiumPct?: number; // ATM_STRADDLE_PREMIUM_PCT: % of ATM straddle premium
 }
 
 // ── Stop-loss / target ───────────────────────────────────────────────────────
