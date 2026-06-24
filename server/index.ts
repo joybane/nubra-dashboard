@@ -18,6 +18,8 @@ import {
   dbUpsertSnapshot, dbListSnapshots, dbGetSnapshot, dbDeleteSnapshot,
 } from './paperDb.ts';
 import { buildBasketSnapshot, istDateString, type SnapPosition } from './snapshotBuilder.ts';
+import { getMeta as btGetMeta, runBacktest, runDayDetail, validateConfig, validateSweep, runSweep, validateWalkForward, runWalkForward } from './backtest/index.ts';
+import type { BacktestConfig, SweepRequest, WalkForwardRequest } from './backtest/types.ts';
 import protobuf from 'protobufjs';
 
 dotenv.config();
@@ -1222,6 +1224,8 @@ interface MultiOrderLeg {
 fastify.post<{ Body: { orders: MultiOrderLeg[] } }>('/paper/orders/multi', async (req, reply) => {
   if (!requireAuth(reply)) return;
   try {
+    if (!Array.isArray(req.body?.orders) || req.body.orders.length === 0)
+      return reply.status(400).send({ error: 'orders must be a non-empty array' });
     const results = req.body.orders.map((o) => {
       subscribeForSim(o.nubraName, o.liveRefId, o.derivative_type, o.asset, o.expiry);
       return simBroker.placeOrder({
@@ -1248,6 +1252,10 @@ fastify.post('/paper/orders/basket', async (req, reply) => {
   try {
     const body = req.body as Record<string, unknown>;
     const legs  = (body.orders as Array<Record<string, unknown>>);
+    if (!Array.isArray(legs) || legs.length === 0)
+      return reply.status(400).send({ error: 'orders must be a non-empty array' });
+    if (legs.some(l => !l.liveRefId))
+      return reply.status(400).send({ error: 'every leg must have a liveRefId' });
     const strategyName = (body.strategy_name as string) || undefined;
     const marginRequired = typeof body.margin_required === 'number' ? body.margin_required : undefined;
     const basketGroupId = `bg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -1610,6 +1618,73 @@ async function tryRestoreSession(): Promise<void> {
     authState.status    = 'idle';
   }
 }
+
+// ─── Backtest ─────────────────────────────────────────────────────────────────
+fastify.get('/api/backtest/meta', async (_req, reply) => {
+  try {
+    return await btGetMeta();
+  } catch (err) {
+    reply.code(500);
+    return { error: (err as Error).message };
+  }
+});
+
+fastify.post<{ Body: BacktestConfig }>('/api/backtest/run', async (req, reply) => {
+  const cfg = req.body;
+  const err = validateConfig(cfg);
+  if (err) { reply.code(400); return { ok: false, error: err }; }
+  try {
+    const t0 = Date.now();
+    const res = await runBacktest(cfg);
+    console.log(`Backtest ${cfg.underlying} ${cfg.from}→${cfg.to}: ${res.trades.length} trades in ${Date.now() - t0}ms`);
+    return res;
+  } catch (e) {
+    reply.code(500);
+    return { ok: false, error: (e as Error).message };
+  }
+});
+
+fastify.post<{ Body: { config: BacktestConfig; date: string } }>('/api/backtest/day', async (req, reply) => {
+  const { config, date } = req.body ?? {} as { config: BacktestConfig; date: string };
+  const err = validateConfig(config);
+  if (err) { reply.code(400); return { ok: false, error: err }; }
+  try {
+    return await runDayDetail(config, date);
+  } catch (e) {
+    reply.code(500);
+    return { ok: false, error: (e as Error).message };
+  }
+});
+
+fastify.post<{ Body: SweepRequest }>('/api/backtest/sweep', async (req, reply) => {
+  const sw = req.body;
+  const err = validateSweep(sw);
+  if (err) { reply.code(400); return { ok: false, error: err }; }
+  try {
+    const t0 = Date.now();
+    const res = await runSweep(sw);
+    console.log(`Sweep ${sw.base.underlying} ${sw.param1.path} [${sw.param1.from}→${sw.param1.to}]: ${res.cells.length} cells in ${Date.now() - t0}ms`);
+    return res;
+  } catch (e) {
+    reply.code(500);
+    return { ok: false, error: (e as Error).message };
+  }
+});
+
+fastify.post<{ Body: WalkForwardRequest }>('/api/backtest/walkforward', async (req, reply) => {
+  const wf = req.body;
+  const err = validateWalkForward(wf);
+  if (err) { reply.code(400); return { ok: false, error: err }; }
+  try {
+    const t0 = Date.now();
+    const res = await runWalkForward(wf);
+    console.log(`Walk-forward ${wf.base.underlying} ${wf.windows}w ${wf.param.path}: ${res.windows.length} windows in ${Date.now() - t0}ms`);
+    return res;
+  } catch (e) {
+    reply.code(500);
+    return { ok: false, error: (e as Error).message };
+  }
+});
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 await loadProto();

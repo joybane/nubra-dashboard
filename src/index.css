@@ -90,6 +90,7 @@ body {
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .oc-table td.strike-col,
@@ -138,6 +139,16 @@ body {
 }
 .atm-row td.iv-cell {
   color: var(--accent);
+}
+
+/* ATM row accent band — instantly locatable while scrolling, without losing CE/PE side tint */
+.oc-table tr.atm-row td {
+  border-top:    1px solid var(--accent);
+  border-bottom: 1px solid var(--accent);
+}
+.oc-table tr.atm-row td.strike-cell,
+.oc-table tr.atm-row td.iv-cell {
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-card));
 }
 
 /* LTP cell: slight cursor pointer indication */

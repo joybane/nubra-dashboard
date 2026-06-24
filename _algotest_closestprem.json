@@ -1,0 +1,43 @@
+{
+  "underlying": "NIFTY",
+  "from": "2026-05-01",
+  "to": "2026-05-31",
+  "entryTime": "09:35",
+  "exitTime": "15:15",
+  "lotSize": 65,
+  "slippagePct": 0,
+  "brokeragePerLot": 0,
+  "legs": [
+    {
+      "id": "ce",
+      "enabled": true,
+      "optionType": "CALL",
+      "side": "SELL",
+      "lots": 30,
+      "expiry": { "flag": "WEEK", "offset": 0 },
+      "strike": { "method": "CLOSEST_PREMIUM", "premiumTarget": 100 },
+      "stopLoss": { "type": "PREMIUM_ABSOLUTE", "value": 40 },
+      "target": { "type": "NONE" }
+    },
+    {
+      "id": "pe",
+      "enabled": true,
+      "optionType": "PUT",
+      "side": "SELL",
+      "lots": 30,
+      "expiry": { "flag": "WEEK", "offset": 0 },
+      "strike": { "method": "CLOSEST_PREMIUM", "premiumTarget": 100 },
+      "stopLoss": { "type": "PREMIUM_ABSOLUTE", "value": 40 },
+      "target": { "type": "NONE" }
+    }
+  ],
+  "portfolioRisk": {},
+  "adjustments": [
+    {
+      "enabled": true,
+      "trigger": "ON_ANY_LEG_SL",
+      "replacementLegs": [],
+      "maxAdjustments": 1
+    }
+  ]
+}

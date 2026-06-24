@@ -406,7 +406,8 @@ export default function BasketOrder({ instrument }: Props) {
 
   if (!instrument) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#8b8fa3', fontSize: 14, background: '#0f0f14' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)', fontSize: 14, background: 'var(--bg-primary)' }}>
+        <span style={{ fontSize: 30, opacity: 0.5 }}>📊</span>
         Select an F&O instrument to build strategies
       </div>
     );
@@ -420,17 +421,17 @@ export default function BasketOrder({ instrument }: Props) {
     const filtered = sentimentFilter === 'All' ? STRATEGY_TEMPLATES : STRATEGY_TEMPLATES.filter(t => t.sentiment === sentimentFilter);
 
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0f0f14', color: '#e2e4f0', overflow: 'hidden' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid #1e2030', background: '#13141c' }}>
-          <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid #2a2d42' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-primary)', color: 'var(--text-primary)', overflow: 'hidden', fontVariantNumeric: 'tabular-nums' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)' }}>
+          <div style={{ display: 'flex', borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border)' }}>
             <button onClick={() => setViewMode('prebuilt')}
               style={{ padding: '6px 16px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
-                background: viewMode === 'prebuilt' ? '#5865f2' : 'transparent', color: viewMode === 'prebuilt' ? '#fff' : '#8b8fa3' }}>
+                background: viewMode === 'prebuilt' ? '#5865f2' : 'transparent', color: viewMode === 'prebuilt' ? '#fff' : 'var(--text-secondary)' }}>
               Pre-built
             </button>
             <button onClick={() => { setViewMode('saved'); persistence.loadSavedBaskets(); }}
               style={{ padding: '6px 16px', fontSize: 12, fontWeight: 600, border: 'none', cursor: 'pointer',
-                background: viewMode === 'saved' ? '#5865f2' : 'transparent', color: viewMode === 'saved' ? '#fff' : '#8b8fa3' }}>
+                background: viewMode === 'saved' ? '#5865f2' : 'transparent', color: viewMode === 'saved' ? '#fff' : 'var(--text-secondary)' }}>
               Saved
             </button>
           </div>
@@ -438,18 +439,18 @@ export default function BasketOrder({ instrument }: Props) {
           {viewMode === 'prebuilt' && (
             <>
               <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 12, fontSize: 12 }}>
-                <span style={{ color: '#8b8fa3', marginRight: 2 }}>🔍</span>
-                <span style={{ fontWeight: 600, color: '#e2e4f0' }}>{sym}</span>
-                <span style={{ color: '#22c55e', fontSize: 11 }}>{chain.spot ? chain.spot.toLocaleString('en-IN') : ''}</span>
-                <span style={{ color: '#8b8fa3', fontSize: 11 }}>{exch}</span>
+                <span style={{ color: 'var(--text-secondary)', marginRight: 2 }}>🔍</span>
+                <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{sym}</span>
+                <span style={{ color: 'var(--green)', fontSize: 11 }}>{chain.spot ? chain.spot.toLocaleString('en-IN') : ''}</span>
+                <span style={{ color: 'var(--text-secondary)', fontSize: 11 }}>{exch}</span>
               </div>
               <div style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
                 {(['All', 'Bullish', 'Bearish', 'Neutral', 'Volatile'] as const).map(s => (
                   <button key={s} onClick={() => setSentimentFilter(s)}
                     style={{ padding: '4px 12px', borderRadius: 16, fontSize: 11, fontWeight: 500, cursor: 'pointer',
-                      border: sentimentFilter === s ? '1px solid #5865f2' : '1px solid #2a2d42',
+                      border: sentimentFilter === s ? '1px solid #5865f2' : '1px solid var(--border)',
                       background: sentimentFilter === s ? '#5865f2' + '20' : 'transparent',
-                      color: sentimentFilter === s ? '#5865f2' : '#8b8fa3' }}>
+                      color: sentimentFilter === s ? '#5865f2' : 'var(--text-secondary)' }}>
                     {s !== 'All' && <span style={{ marginRight: 4 }}>{s === 'Bullish' ? '🟢' : s === 'Bearish' ? '🔴' : s === 'Neutral' ? '🟣' : '🟡'}</span>}
                     {s}
                   </button>
@@ -466,7 +467,7 @@ export default function BasketOrder({ instrument }: Props) {
                 const mini = miniPayoff(tmpl.legs);
                 const color = SENTIMENT_COLORS[tmpl.sentiment];
                 return (
-                  <div key={tmpl.id} style={{ background: '#181a25', borderRadius: 12, border: '1px solid #1e2030', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+                  <div key={tmpl.id} style={{ background: 'var(--bg-card)', borderRadius: 12, border: '1px solid var(--border)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
                     <div style={{ position: 'relative', height: 100, padding: '8px 12px 0' }}>
                       <button onClick={() => applyTemplate(tmpl.id)}
                         style={{ position: 'absolute', top: 8, right: 8, padding: '2px 8px', borderRadius: 4, fontSize: 10, fontWeight: 600,
@@ -489,10 +490,10 @@ export default function BasketOrder({ instrument }: Props) {
                     </div>
                     <div style={{ padding: '8px 12px 12px', flex: 1, display: 'flex', flexDirection: 'column' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                        <span style={{ fontWeight: 700, fontSize: 13, color: '#e2e4f0' }}>{tmpl.label}</span>
+                        <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>{tmpl.label}</span>
                         <span style={{ fontSize: 10, color, fontWeight: 500 }}>{tmpl.sentiment}</span>
                       </div>
-                      <p style={{ fontSize: 11, color: '#8b8fa3', lineHeight: 1.4, margin: 0, flex: 1 }}>{tmpl.description}</p>
+                      <p style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.4, margin: 0, flex: 1 }}>{tmpl.description}</p>
                       <button onClick={() => applyTemplate(tmpl.id)}
                         style={{ marginTop: 10, width: '100%', padding: '8px 0', borderRadius: 8, border: 'none', cursor: 'pointer',
                           background: '#5865f2', color: '#fff', fontWeight: 600, fontSize: 12 }}>
@@ -521,13 +522,13 @@ export default function BasketOrder({ instrument }: Props) {
                     <path d="M0,20 L50,30 L100,80 L150,100 L200,115 L250,120 L300,120" fill="none" stroke="#ef4444" strokeWidth="1.5" opacity={0.6} />
                     <line x1="0" y1="100" x2="300" y2="100" stroke="#2a2d42" strokeWidth="0.5" strokeDasharray="4 4" />
                   </svg>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: '#e2e4f0' }}>Your Strategies Will Appear Here</div>
-                  <div style={{ fontSize: 13, color: '#8b8fa3' }}>Build and save strategies to analyze your trades better</div>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Your Strategies Will Appear Here</div>
+                  <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Build and save strategies to analyze your trades better</div>
                 </div>
-                <div style={{ width: 260, background: '#181a25', borderRadius: 12, border: '1px solid #1e2030', padding: 24, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, alignSelf: 'center' }}>
+                <div style={{ width: 260, background: 'var(--bg-card)', borderRadius: 12, border: '1px solid var(--border)', padding: 24, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, alignSelf: 'center' }}>
                   <div style={{ fontSize: 40 }}>🎯</div>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: '#e2e4f0', textAlign: 'center' as const }}>Ready to create your own strategy?</div>
-                  <div style={{ fontSize: 12, color: '#8b8fa3', textAlign: 'center' as const }}>Take control and build one that works for you.</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)', textAlign: 'center' as const }}>Ready to create your own strategy?</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', textAlign: 'center' as const }}>Take control and build one that works for you.</div>
                   <button onClick={() => setViewMode('builder')}
                     style={{ marginTop: 4, padding: '10px 24px', borderRadius: 8, border: 'none', background: '#5865f2', color: '#fff', fontWeight: 600, fontSize: 13, cursor: 'pointer', width: '100%' }}>
                     Build my strategy
@@ -537,36 +538,36 @@ export default function BasketOrder({ instrument }: Props) {
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 12 }}>
                 {persistence.savedBaskets.map(b => (
-                  <div key={b.basket_id} style={{ background: '#181a25', borderRadius: 10, border: '1px solid #1e2030', padding: 14 }}>
+                  <div key={b.basket_id} style={{ background: 'var(--bg-card)', borderRadius: 10, border: '1px solid var(--border)', padding: 14 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                       {editingBasketId === b.basket_id ? (
                         <input type="text" value={editingBasketName} autoFocus
                           onChange={e => setEditingBasketName(e.target.value)}
                           onBlur={() => { if (editingBasketName.trim()) persistence.updateBasketName(b.basket_id, editingBasketName); setEditingBasketId(null); }}
                           onKeyDown={e => { if (e.key === 'Enter') { if (editingBasketName.trim()) persistence.updateBasketName(b.basket_id, editingBasketName); setEditingBasketId(null); } if (e.key === 'Escape') setEditingBasketId(null); }}
-                          style={{ fontWeight: 700, fontSize: 14, color: '#e2e4f0', background: '#1a1c28', border: '1px solid #5865f2', borderRadius: 4, padding: '2px 6px', outline: 'none', flex: 1, marginRight: 6 }} />
+                          style={{ fontWeight: 700, fontSize: 14, color: 'var(--text-primary)', background: 'var(--bg-card)', border: '1px solid #5865f2', borderRadius: 4, padding: '2px 6px', outline: 'none', flex: 1, marginRight: 6 }} />
                       ) : (
-                        <span style={{ fontWeight: 700, fontSize: 14, color: '#e2e4f0', cursor: 'pointer' }}
+                        <span style={{ fontWeight: 700, fontSize: 14, color: 'var(--text-primary)', cursor: 'pointer' }}
                           onDoubleClick={() => { setEditingBasketId(b.basket_id); setEditingBasketName(b.name); }}
                           title="Double-click to rename">{b.name}</span>
                       )}
                       <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                         <button onClick={() => { setEditingBasketId(b.basket_id); setEditingBasketName(b.name); }}
-                          style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.3)', color: '#e2e4f0', cursor: 'pointer', fontSize: 8, fontWeight: 600, padding: '1px 3px', borderRadius: 3, lineHeight: 1, width: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }} title="Rename">R</button>
+                          style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.3)', color: 'var(--text-primary)', cursor: 'pointer', fontSize: 8, fontWeight: 600, padding: '1px 3px', borderRadius: 3, lineHeight: 1, width: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }} title="Rename">R</button>
                         <button onClick={() => persistence.deleteSavedBasket(b.basket_id)}
-                          style={{ background: 'none', border: 'none', color: '#8b8fa3', cursor: 'pointer', fontSize: 14 }}>✕</button>
+                          style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14 }}>✕</button>
                       </div>
                     </div>
-                    <div style={{ fontSize: 11, color: '#8b8fa3', marginBottom: 10 }}>{b.symbol} · {formatExpiry(b.expiry)} · {b.legs.length} legs</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10 }}>{b.symbol} · {formatExpiry(b.expiry)} · {b.legs.length} legs</div>
                     <button onClick={() => loadSavedBasket(b)}
                       style={{ width: '100%', padding: '7px 0', borderRadius: 8, border: 'none', background: '#5865f2', color: '#fff', fontWeight: 600, fontSize: 12, cursor: 'pointer' }}>
                       Load Strategy
                     </button>
                   </div>
                 ))}
-                <div style={{ background: '#181a25', borderRadius: 10, border: '1px dashed #2a2d42', padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 100 }}>
+                <div style={{ background: 'var(--bg-card)', borderRadius: 10, border: '1px dashed var(--border)', padding: 14, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 100 }}>
                   <span style={{ fontSize: 24, color: '#5865f2' }}>+</span>
-                  <span style={{ fontSize: 13, fontWeight: 600, color: '#8b8fa3' }}>Build New Strategy</span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>Build New Strategy</span>
                   <button onClick={() => setViewMode('builder')}
                     style={{ padding: '7px 20px', borderRadius: 8, border: 'none', background: '#5865f2', color: '#fff', fontWeight: 600, fontSize: 12, cursor: 'pointer' }}>
                     Build
@@ -585,12 +586,12 @@ export default function BasketOrder({ instrument }: Props) {
   // ═══════════════════════════════════════════════════════════════════════════
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0f0f14', color: '#e2e4f0', overflow: 'hidden' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', borderBottom: '1px solid #1e2030', background: '#13141c', flexShrink: 0 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-primary)', color: 'var(--text-primary)', overflow: 'hidden', fontVariantNumeric: 'tabular-nums' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)', flexShrink: 0 }}>
         <button onClick={() => setViewMode('prebuilt')} style={{ background: 'none', border: 'none', color: '#5865f2', fontSize: 12, cursor: 'pointer', fontWeight: 500 }}>
           ← Back to all strategies
         </button>
-        <div style={{ marginLeft: 'auto', fontSize: 10, color: '#6b6f85' }}>
+        <div style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)' }}>
           {chain.expiry && `${Math.round(dte)}d to expiry`}
         </div>
       </div>
@@ -598,91 +599,91 @@ export default function BasketOrder({ instrument }: Props) {
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {/* LEFT PANEL */}
         <div style={{ width: leftWidth, flexShrink: 0, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ padding: '10px 16px', borderBottom: '1px solid #1e2030' }}>
+          <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, position: 'relative' as const }}>
-              <span style={{ fontSize: 12, color: '#8b8fa3', cursor: 'pointer' }} onClick={() => setShowSymSearch(!showSymSearch)}>🔍</span>
+              <span style={{ fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }} onClick={() => setShowSymSearch(!showSymSearch)}>🔍</span>
               {showSymSearch ? (
                 <div style={{ position: 'relative' }}>
                   <input type="text" value={symSearch} onChange={e => searchSymbol(e.target.value)} autoFocus
                     placeholder="Search NIFTY, BANKNIFTY..."
                     onBlur={() => setTimeout(() => setShowSymSearch(false), 200)}
-                    style={{ padding: '4px 10px', background: '#1a1c28', border: '1px solid #5865f2', borderRadius: 6, color: '#e2e4f0', fontSize: 13, fontWeight: 700, outline: 'none', width: 200 }} />
+                    style={{ padding: '4px 10px', background: 'var(--bg-card)', border: '1px solid #5865f2', borderRadius: 6, color: 'var(--text-primary)', fontSize: 13, fontWeight: 700, outline: 'none', width: 200 }} />
                   {symResults.length > 0 && (
-                    <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: 4, width: 240, background: '#181a25', border: '1px solid #2a2d42', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.5)', zIndex: 50, overflow: 'hidden' }}>
+                    <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: 4, width: 240, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.5)', zIndex: 50, overflow: 'hidden' }}>
                       {symResults.map((inst, i) => (
                         <button key={i} onMouseDown={() => selectSymbol(inst)}
-                          style={{ display: 'block', width: '100%', textAlign: 'left' as const, padding: '8px 12px', background: 'none', border: 'none', borderBottom: '1px solid #1e2030', color: '#e2e4f0', cursor: 'pointer', fontSize: 12 }}>
+                          style={{ display: 'block', width: '100%', textAlign: 'left' as const, padding: '8px 12px', background: 'none', border: 'none', borderBottom: '1px solid var(--border)', color: 'var(--text-primary)', cursor: 'pointer', fontSize: 12 }}>
                           <span style={{ fontWeight: 700 }}>{String(inst.asset || inst.stock_name || '')}</span>
-                          <span style={{ color: '#6b6f85', marginLeft: 6, fontSize: 10 }}>{String(inst.exchange || '')} · {String(inst.derivative_type || inst.asset_type || '')}</span>
+                          <span style={{ color: 'var(--text-muted)', marginLeft: 6, fontSize: 10 }}>{String(inst.exchange || '')} · {String(inst.derivative_type || inst.asset_type || '')}</span>
                         </button>
                       ))}
                     </div>
                   )}
                 </div>
               ) : (
-                <span style={{ fontWeight: 700, fontSize: 15, color: '#e2e4f0', cursor: 'pointer' }} onClick={() => setShowSymSearch(true)}>{sym}</span>
+                <span style={{ fontWeight: 700, fontSize: 15, color: 'var(--text-primary)', cursor: 'pointer' }} onClick={() => setShowSymSearch(true)}>{sym}</span>
               )}
-              <span style={{ fontSize: 13, color: '#22c55e' }}>{chain.spot ? chain.spot.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : ''}</span>
-              <span style={{ fontSize: 11, color: '#8b8fa3' }}>{exch}</span>
+              <span style={{ fontSize: 13, color: 'var(--green)' }}>{chain.spot ? chain.spot.toLocaleString('en-IN', { minimumFractionDigits: 2 }) : ''}</span>
+              <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{exch}</span>
               <select value="" onChange={e => { if (e.target.value) applyTemplate(e.target.value); }}
-                style={{ marginLeft: 'auto', padding: '4px 8px', background: '#1a1c28', border: '1px solid #2a2d42', borderRadius: 6, color: '#8b8fa3', fontSize: 11 }}>
+                style={{ marginLeft: 'auto', padding: '4px 8px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-secondary)', fontSize: 11 }}>
                 <option value="">Custom Strategy</option>
                 {STRATEGY_TEMPLATES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
               </select>
             </div>
             {chain.spot && (
-              <div style={{ fontSize: 11, color: '#8b8fa3' }}>
-                {totalPrice.toFixed(2)} <span style={{ color: totalPrice >= 0 ? '#22c55e' : '#ef4444' }}>+0.00 (0.00%)</span>
-                <span style={{ marginLeft: 12, color: '#6b6f85' }}>Bid 0.00  Ask 0.00</span>
+              <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                {totalPrice.toFixed(2)} <span style={{ color: totalPrice >= 0 ? 'var(--green)' : 'var(--red)' }}>+0.00 (0.00%)</span>
+                <span style={{ marginLeft: 12, color: 'var(--text-muted)' }}>Bid 0.00  Ask 0.00</span>
               </div>
             )}
           </div>
 
           {/* Legs table */}
           <div style={{ padding: '0 12px 8px' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '30px 88px 96px 30px 68px 52px 64px 24px', alignItems: 'center', gap: 2, padding: '8px 0', borderBottom: '1px solid #1e2030', fontSize: 10, fontWeight: 600, color: '#6b6f85', textTransform: 'uppercase' as const }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '30px 88px 96px 30px 68px 52px 64px 24px', alignItems: 'center', gap: 2, padding: '8px 0', borderBottom: '1px solid var(--border)', fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase' as const }}>
               <span>B/S</span><span>Expiry</span><span>Strike</span><span>Type</span><span>Qty</span><span>LTP</span><span>P&L</span><span></span>
             </div>
 
             {legs.map(leg => (
-              <div key={leg.id} style={{ display: 'grid', gridTemplateColumns: '30px 88px 96px 30px 68px 52px 64px 24px', alignItems: 'center', gap: 2, padding: '6px 0', borderBottom: '1px solid #1a1c28' }}>
+              <div key={leg.id} style={{ display: 'grid', gridTemplateColumns: '30px 88px 96px 30px 68px 52px 64px 24px', alignItems: 'center', gap: 2, padding: '6px 0', borderBottom: '1px solid var(--bg-card)' }}>
                 <button onClick={() => updateLeg(leg.id, { side: leg.side === 'BUY' ? 'SELL' : 'BUY' })}
                   style={{ width: 26, height: 22, borderRadius: 4, border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 11,
-                    background: leg.side === 'BUY' ? '#1a3a2a' : '#3a1a1a', color: leg.side === 'BUY' ? '#22c55e' : '#ef4444' }}>
+                    background: leg.side === 'BUY' ? 'var(--green-dim)' : 'var(--red-dim)', color: leg.side === 'BUY' ? 'var(--green)' : 'var(--red)' }}>
                   {leg.side === 'BUY' ? 'B' : 'S'}
                 </button>
                 <select value={leg.expiry} onChange={e => updateLeg(leg.id, { expiry: e.target.value })}
-                  style={{ padding: '3px 2px', background: '#1a1c28', border: '1px solid #2a2d42', borderRadius: 4, color: '#e2e4f0', fontSize: 11, width: '100%' }}>
+                  style={{ padding: '3px 2px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text-primary)', fontSize: 11, width: '100%' }}>
                   {chain.expiries.map(exp => <option key={exp} value={exp}>{formatExpiry(exp)}</option>)}
                 </select>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                   <button onClick={() => { const idx = chain.chainRows.findIndex(r => r.strike === leg.strike); if (idx > 0) { const r = chain.chainRows[idx - 1]; const newLtp = leg.optionType === 'CE' ? r.ceLtp : r.peLtp; updateLeg(leg.id, { strike: r.strike, ltp: newLtp, entryLtp: newLtp, refId: leg.optionType === 'CE' ? r.ceRefId : r.peRefId, nubraName: leg.optionType === 'CE' ? r.ceNubraName : r.peNubraName }); } }}
-                    style={{ width: 18, height: 20, borderRadius: 4, border: '1px solid #2a2d42', background: '#1a1c28', color: '#8b8fa3', cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>−</button>
-                  <span style={{ fontWeight: 600, fontSize: 11, color: '#e2e4f0', flex: 1, textAlign: 'center' as const }}>{leg.strike.toLocaleString('en-IN')}</span>
+                    style={{ width: 18, height: 20, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>−</button>
+                  <span style={{ fontWeight: 600, fontSize: 11, color: 'var(--text-primary)', flex: 1, textAlign: 'center' as const }}>{leg.strike.toLocaleString('en-IN')}</span>
                   <button onClick={() => { const idx = chain.chainRows.findIndex(r => r.strike === leg.strike); if (idx < chain.chainRows.length - 1) { const r = chain.chainRows[idx + 1]; const newLtp = leg.optionType === 'CE' ? r.ceLtp : r.peLtp; updateLeg(leg.id, { strike: r.strike, ltp: newLtp, entryLtp: newLtp, refId: leg.optionType === 'CE' ? r.ceRefId : r.peRefId, nubraName: leg.optionType === 'CE' ? r.ceNubraName : r.peNubraName }); } }}
-                    style={{ width: 18, height: 20, borderRadius: 4, border: '1px solid #2a2d42', background: '#1a1c28', color: '#8b8fa3', cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
+                    style={{ width: 18, height: 20, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
                 </div>
                 <button onClick={() => updateLeg(leg.id, { optionType: leg.optionType === 'CE' ? 'PE' : 'CE' })}
                   style={{ width: 26, height: 22, borderRadius: 4, border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: 10,
-                    background: leg.optionType === 'CE' ? '#1a3a2a' : '#3a1a1a', color: leg.optionType === 'CE' ? '#22c55e' : '#ef4444' }}>
+                    background: leg.optionType === 'CE' ? 'var(--green-dim)' : 'var(--red-dim)', color: leg.optionType === 'CE' ? 'var(--green)' : 'var(--red)' }}>
                   {leg.optionType}
                 </button>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                   <button onClick={() => updateLeg(leg.id, { lots: Math.max(1, leg.lots - 1) })}
-                    style={{ width: 18, height: 18, borderRadius: 3, border: '1px solid #2a2d42', background: '#1a1c28', color: '#8b8fa3', cursor: 'pointer', fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>−</button>
-                  <span style={{ fontSize: 11, fontWeight: 600, color: '#e2e4f0', flex: 1, textAlign: 'center' as const }}>{leg.lots * leg.lotSize}</span>
+                    style={{ width: 18, height: 18, borderRadius: 3, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>−</button>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)', flex: 1, textAlign: 'center' as const }}>{leg.lots * leg.lotSize}</span>
                   <button onClick={() => updateLeg(leg.id, { lots: leg.lots + 1 })}
-                    style={{ width: 18, height: 18, borderRadius: 3, border: '1px solid #2a2d42', background: '#1a1c28', color: '#8b8fa3', cursor: 'pointer', fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
+                    style={{ width: 18, height: 18, borderRadius: 3, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
                 </div>
-                <span style={{ fontSize: 11, color: '#8b8fa3' }}>{fmtPrice(leg.ltp)}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{fmtPrice(leg.ltp)}</span>
                 {(() => {
                   const mtm = (leg.ltp - leg.entryLtp) * leg.lots * leg.lotSize * (leg.side === 'BUY' ? 1 : -1);
-                  return <span style={{ fontSize: 11, fontWeight: 600, color: mtm >= 0 ? '#22c55e' : '#ef4444' }}>{mtm >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(mtm))}</span>;
+                  return <span style={{ fontSize: 11, fontWeight: 600, color: mtm >= 0 ? 'var(--green)' : 'var(--red)' }}>{mtm >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(mtm))}</span>;
                 })()}
                 <button onClick={() => removeLeg(leg.id)}
-                  style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid transparent', background: 'transparent', color: '#6b6f85', cursor: 'pointer', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                  onMouseEnter={e => { e.currentTarget.style.background = '#3a1a1a'; e.currentTarget.style.color = '#ef4444'; e.currentTarget.style.borderColor = '#ef444440'; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = '#6b6f85'; e.currentTarget.style.borderColor = 'transparent'; }}>
+                  style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid transparent', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'var(--red-dim)'; e.currentTarget.style.color = 'var(--red)'; e.currentTarget.style.borderColor = '#ef444440'; }}
+                  onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.borderColor = 'transparent'; }}>
                   ✕
                 </button>
               </div>
@@ -698,54 +699,54 @@ export default function BasketOrder({ instrument }: Props) {
                 + Add FUT Leg
               </button>
               <button onClick={() => { setShowAddScrip(true); setAddScripQuery(''); setAddScripResults([]); }}
-                style={{ background: 'none', border: 'none', color: '#22c55e', cursor: 'pointer', fontWeight: 600, fontSize: 12 }}>
+                style={{ background: 'none', border: 'none', color: 'var(--green)', cursor: 'pointer', fontWeight: 600, fontSize: 12 }}>
                 + Add Scrip
               </button>
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderTop: '1px solid #1e2030' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderTop: '1px solid var(--border)' }}>
               <div>
-                <span style={{ fontSize: 11, color: '#6b6f85' }}>Total Price: </span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: '#e2e4f0' }}>₹{totalPrice.toFixed(2)}</span>
-                <span style={{ fontSize: 11, color: '#6b6f85', marginLeft: 16 }}>Total Premium: </span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: totalPremium >= 0 ? '#22c55e' : '#ef4444' }}>{totalPremium >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(totalPremium))}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Total Price: </span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>₹{totalPrice.toFixed(2)}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 16 }}>Total Premium: </span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: totalPremium >= 0 ? 'var(--green)' : 'var(--red)' }}>{totalPremium >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(totalPremium))}</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                <span style={{ color: '#6b6f85' }}>Lot Multiplier:</span>
+                <span style={{ color: 'var(--text-muted)' }}>Lot Multiplier:</span>
                 <button onClick={() => applyMultiplier(Math.max(1, multiplier - 1))}
-                  style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid #2a2d42', background: '#1a1c28', color: '#8b8fa3', cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>−</button>
-                <span style={{ fontWeight: 700, color: '#e2e4f0', minWidth: 16, textAlign: 'center' as const }}>{multiplier}</span>
+                  style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>−</button>
+                <span style={{ fontWeight: 700, color: 'var(--text-primary)', minWidth: 16, textAlign: 'center' as const }}>{multiplier}</span>
                 <button onClick={() => applyMultiplier(multiplier + 1)}
-                  style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid #2a2d42', background: '#1a1c28', color: '#8b8fa3', cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
+                  style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
               </div>
             </div>
 
             {totalPremium > 0 && (
-              <div style={{ fontSize: 10, color: '#8b8fa3', padding: '4px 0', display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ color: '#6b6f85' }}>ℹ</span> Negative prices indicate that executing this strategy will result in a net cash inflow.
+              <div style={{ fontSize: 10, color: 'var(--text-secondary)', padding: '4px 0', display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ color: 'var(--text-muted)' }}>ℹ</span> Negative prices indicate that executing this strategy will result in a net cash inflow.
               </div>
             )}
 
             {margin && (
-              <div style={{ background: '#181a25', borderRadius: 10, border: '1px solid #1e2030', overflow: 'hidden', marginBottom: 8 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderBottom: '1px solid #1e2030' }}>
-                  <span style={{ fontWeight: 700, fontSize: 13, color: '#e2e4f0' }}>Margin Breakdown</span>
+              <div style={{ background: 'var(--bg-card)', borderRadius: 10, border: '1px solid var(--border)', overflow: 'hidden', marginBottom: 8 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderBottom: '1px solid var(--border)' }}>
+                  <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>Margin Breakdown</span>
                   {margin.benefit && margin.benefit > 0 && (
-                    <span style={{ fontWeight: 700, fontSize: 13, color: '#22c55e' }}>Margin Benefit: {fmtPrice(margin.benefit)}</span>
+                    <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--green)' }}>Margin Benefit: {fmtPrice(margin.benefit)}</span>
                   )}
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: '12px 14px' }}>
-                  <div><div style={{ fontSize: 10, color: '#6b6f85', marginBottom: 2 }}>Span</div><div style={{ fontSize: 13, fontWeight: 600, color: '#e2e4f0' }}>{margin.span ? fmtPrice(margin.span) : '—'}</div></div>
-                  <div><div style={{ fontSize: 10, color: '#6b6f85', marginBottom: 2 }}>Exposure</div><div style={{ fontSize: 13, fontWeight: 600, color: '#e2e4f0' }}>{margin.exposure ? fmtPrice(margin.exposure) : '—'}</div></div>
-                  <div><div style={{ fontSize: 10, color: '#6b6f85', marginBottom: 2 }}>Total Margin</div><div style={{ fontSize: 13, fontWeight: 600, color: '#e2e4f0' }}>{fmtPrice(margin.total)}</div></div>
-                  <div><div style={{ fontSize: 10, color: '#6b6f85', marginBottom: 2 }}>Premium Payable</div><div style={{ fontSize: 13, fontWeight: 600, color: '#e2e4f0' }}>{margin.premium ? fmtPrice(margin.premium) : fmtPrice(Math.abs(totalPremium))}</div></div>
+                  <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Span</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.span ? fmtPrice(margin.span) : '—'}</div></div>
+                  <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Exposure</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.exposure ? fmtPrice(margin.exposure) : '—'}</div></div>
+                  <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Total Margin</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{fmtPrice(margin.total)}</div></div>
+                  <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Premium Payable</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.premium ? fmtPrice(margin.premium) : fmtPrice(Math.abs(totalPremium))}</div></div>
                 </div>
               </div>
             )}
 
             <div style={{ display: 'flex', gap: 10, padding: '10px 0' }}>
               <button onClick={() => { setShowSaveModal(true); setSaveName(''); }}
-                style={{ flex: 1, padding: '10px 0', borderRadius: 8, border: '1px solid #2a2d42', background: 'transparent', color: '#e2e4f0', fontWeight: 600, fontSize: 13, cursor: 'pointer' }}>
+                style={{ flex: 1, padding: '10px 0', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-primary)', fontWeight: 600, fontSize: 13, cursor: 'pointer' }}>
                 Save
               </button>
               <button onClick={placeOrders} disabled={!legs.length}
@@ -757,27 +758,27 @@ export default function BasketOrder({ instrument }: Props) {
 
           {/* Greeks table */}
           {legs.length > 0 && legs.some(l => l.delta != null) && (
-            <div style={{ margin: '0 12px 12px', background: '#181a25', borderRadius: 10, border: '1px solid #1e2030', overflow: 'hidden' }}>
-              <div style={{ padding: '10px 14px', borderBottom: '1px solid #1e2030', fontWeight: 700, fontSize: 13, color: '#e2e4f0' }}>Greeks</div>
+            <div style={{ margin: '0 12px 12px', background: 'var(--bg-card)', borderRadius: 10, border: '1px solid var(--border)', overflow: 'hidden' }}>
+              <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>Greeks</div>
               <div style={{ padding: '0 14px' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 60px 40px 60px 60px 60px 60px', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid #1a1c28', fontSize: 10, fontWeight: 600, color: '#6b6f85' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 60px 40px 60px 60px 60px 60px', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--bg-card)', fontSize: 10, fontWeight: 600, color: 'var(--text-muted)' }}>
                   <span>B/S</span><span>Instrument</span><span>Strike</span><span>Qty</span><span>Delta</span><span>Theta</span><span>Gamma</span><span>Vega</span>
                 </div>
                 {legs.map(leg => (
-                  <div key={leg.id} style={{ display: 'grid', gridTemplateColumns: '32px 90px 60px 40px 60px 60px 60px 60px', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #1a1c28', fontSize: 11 }}>
+                  <div key={leg.id} style={{ display: 'grid', gridTemplateColumns: '32px 90px 60px 40px 60px 60px 60px 60px', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--bg-card)', fontSize: 11 }}>
                     <span style={{ width: 22, height: 18, borderRadius: 3, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 10,
-                      background: leg.side === 'BUY' ? '#1a3a2a' : '#3a1a1a', color: leg.side === 'BUY' ? '#22c55e' : '#ef4444' }}>{leg.side === 'BUY' ? 'B' : 'S'}</span>
-                    <span style={{ color: '#e2e4f0', fontSize: 11 }}>{formatExpiry(leg.expiry)} {leg.optionType}</span>
-                    <span style={{ color: '#e2e4f0' }}>{leg.strike.toLocaleString('en-IN')}</span>
-                    <span style={{ color: '#e2e4f0' }}>{leg.lots * leg.lotSize}</span>
-                    <span style={{ color: '#e2e4f0' }}>{leg.delta?.toFixed(2) ?? '—'}</span>
-                    <span style={{ color: '#e2e4f0' }}>{leg.theta?.toFixed(2) ?? '—'}</span>
-                    <span style={{ color: '#e2e4f0' }}>{leg.gamma?.toFixed(4) ?? '—'}</span>
-                    <span style={{ color: '#e2e4f0' }}>{leg.vega?.toFixed(2) ?? '—'}</span>
+                      background: leg.side === 'BUY' ? 'var(--green-dim)' : 'var(--red-dim)', color: leg.side === 'BUY' ? 'var(--green)' : 'var(--red)' }}>{leg.side === 'BUY' ? 'B' : 'S'}</span>
+                    <span style={{ color: 'var(--text-primary)', fontSize: 11 }}>{formatExpiry(leg.expiry)} {leg.optionType}</span>
+                    <span style={{ color: 'var(--text-primary)' }}>{leg.strike.toLocaleString('en-IN')}</span>
+                    <span style={{ color: 'var(--text-primary)' }}>{leg.lots * leg.lotSize}</span>
+                    <span style={{ color: 'var(--text-primary)' }}>{leg.delta?.toFixed(2) ?? '—'}</span>
+                    <span style={{ color: 'var(--text-primary)' }}>{leg.theta?.toFixed(2) ?? '—'}</span>
+                    <span style={{ color: 'var(--text-primary)' }}>{leg.gamma?.toFixed(4) ?? '—'}</span>
+                    <span style={{ color: 'var(--text-primary)' }}>{leg.vega?.toFixed(2) ?? '—'}</span>
                   </div>
                 ))}
-                <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 60px 40px 60px 60px 60px 60px', alignItems: 'center', padding: '8px 0', fontSize: 11, fontWeight: 700, color: '#e2e4f0' }}>
-                  <span></span><span style={{ fontSize: 10, color: '#6b6f85' }}>Total × (Lot size × Lots)</span><span></span><span></span>
+                <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 60px 40px 60px 60px 60px 60px', alignItems: 'center', padding: '8px 0', fontSize: 11, fontWeight: 700, color: 'var(--text-primary)' }}>
+                  <span></span><span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Total × (Lot size × Lots)</span><span></span><span></span>
                   <span>{netGreeks.delta.toFixed(2)}</span><span>{netGreeks.theta.toFixed(2)}</span><span>{netGreeks.gamma.toFixed(4)}</span><span>{netGreeks.vega.toFixed(2)}</span>
                 </div>
               </div>
@@ -786,30 +787,30 @@ export default function BasketOrder({ instrument }: Props) {
 
           {/* P&L table */}
           {legs.length > 0 && (
-            <div style={{ margin: '0 12px 16px', background: '#181a25', borderRadius: 10, border: '1px solid #1e2030', overflow: 'hidden' }}>
-              <div style={{ padding: '10px 14px', borderBottom: '1px solid #1e2030', fontWeight: 700, fontSize: 13, color: '#e2e4f0' }}>Profit / Loss</div>
+            <div style={{ margin: '0 12px 16px', background: 'var(--bg-card)', borderRadius: 10, border: '1px solid var(--border)', overflow: 'hidden' }}>
+              <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>Profit / Loss</div>
               <div style={{ padding: '0 14px' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 80px 50px 1fr', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid #1a1c28', fontSize: 10, fontWeight: 600, color: '#6b6f85' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 80px 50px 1fr', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--bg-card)', fontSize: 10, fontWeight: 600, color: 'var(--text-muted)' }}>
                   <span>B/S</span><span>Instrument</span><span>Strike</span><span>Qty</span><span style={{ textAlign: 'right' as const }}>Unrealized P&L</span>
                 </div>
                 {legs.map(leg => {
                   const mtm = (leg.ltp - leg.entryLtp) * leg.lots * leg.lotSize * (leg.side === 'BUY' ? 1 : -1);
                   return (
-                    <div key={leg.id} style={{ display: 'grid', gridTemplateColumns: '32px 90px 80px 50px 1fr', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid #1a1c28', fontSize: 11 }}>
+                    <div key={leg.id} style={{ display: 'grid', gridTemplateColumns: '32px 90px 80px 50px 1fr', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--bg-card)', fontSize: 11 }}>
                       <span style={{ width: 22, height: 18, borderRadius: 3, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 10,
-                        background: leg.side === 'BUY' ? '#1a3a2a' : '#3a1a1a', color: leg.side === 'BUY' ? '#22c55e' : '#ef4444' }}>{leg.side === 'BUY' ? 'B' : 'S'}</span>
-                      <span style={{ color: '#e2e4f0' }}>{formatExpiry(leg.expiry)} {leg.optionType}</span>
-                      <span style={{ color: '#e2e4f0' }}>{leg.strike.toLocaleString('en-IN')}</span>
-                      <span style={{ color: '#e2e4f0' }}>{leg.lots * leg.lotSize}</span>
-                      <span style={{ textAlign: 'right' as const, fontWeight: 600, color: mtm >= 0 ? '#22c55e' : '#ef4444' }}>{mtm >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(mtm))}</span>
+                        background: leg.side === 'BUY' ? 'var(--green-dim)' : 'var(--red-dim)', color: leg.side === 'BUY' ? 'var(--green)' : 'var(--red)' }}>{leg.side === 'BUY' ? 'B' : 'S'}</span>
+                      <span style={{ color: 'var(--text-primary)' }}>{formatExpiry(leg.expiry)} {leg.optionType}</span>
+                      <span style={{ color: 'var(--text-primary)' }}>{leg.strike.toLocaleString('en-IN')}</span>
+                      <span style={{ color: 'var(--text-primary)' }}>{leg.lots * leg.lotSize}</span>
+                      <span style={{ textAlign: 'right' as const, fontWeight: 600, color: mtm >= 0 ? 'var(--green)' : 'var(--red)' }}>{mtm >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(mtm))}</span>
                     </div>
                   );
                 })}
-                <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 80px 50px 1fr', alignItems: 'center', padding: '8px 0', fontSize: 11, fontWeight: 700, color: '#e2e4f0' }}>
-                  <span></span><span style={{ fontSize: 10, color: '#6b6f85' }}>Total Unrealized P&L</span><span></span><span></span>
-                  <span style={{ textAlign: 'right' as const, color: totalMtm >= 0 ? '#22c55e' : '#ef4444' }}>{totalMtm >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(totalMtm))}</span>
+                <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 80px 50px 1fr', alignItems: 'center', padding: '8px 0', fontSize: 11, fontWeight: 700, color: 'var(--text-primary)' }}>
+                  <span></span><span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Total Unrealized P&L</span><span></span><span></span>
+                  <span style={{ textAlign: 'right' as const, color: totalMtm >= 0 ? 'var(--green)' : 'var(--red)' }}>{totalMtm >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(totalMtm))}</span>
                 </div>
-                <div style={{ padding: '6px 0 8px', fontSize: 10, color: '#6b6f85' }}>P&L is mark-to-market (entry price vs current LTP).</div>
+                <div style={{ padding: '6px 0 8px', fontSize: 10, color: 'var(--text-muted)' }}>P&L is mark-to-market (entry price vs current LTP).</div>
               </div>
             </div>
           )}
@@ -824,19 +825,19 @@ export default function BasketOrder({ instrument }: Props) {
             const onUp = () => { resizeRef.current = null; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
             document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
           }}
-          style={{ width: 5, cursor: 'col-resize', background: '#1e2030', flexShrink: 0 }}
+          style={{ width: 5, cursor: 'col-resize', background: 'var(--border)', flexShrink: 0 }}
           onMouseEnter={e => (e.currentTarget.style.background = '#5865f2')}
-          onMouseLeave={e => { if (!resizeRef.current) e.currentTarget.style.background = '#1e2030'; }}
+          onMouseLeave={e => { if (!resizeRef.current) e.currentTarget.style.background = 'var(--border)'; }}
         />
 
         {/* RIGHT PANEL */}
         <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, padding: '12px 16px', borderBottom: '1px solid #1e2030', flexShrink: 0 }}>
-            <div><div style={{ fontSize: 10, color: '#6b6f85', marginBottom: 2 }}>Max Profit</div><div style={{ fontSize: 14, fontWeight: 700, color: '#22c55e' }}>{maxProfit > 1e6 ? 'Unlimited' : `+₹${fmtPrice(maxProfit)}`}</div></div>
-            <div><div style={{ fontSize: 10, color: '#6b6f85', marginBottom: 2 }}>Max Loss</div><div style={{ fontSize: 14, fontWeight: 700, color: '#ef4444' }}>{maxLoss < -1e6 ? 'Unlimited' : `-₹${fmtPrice(Math.abs(maxLoss))}`}</div></div>
-            <div><div style={{ fontSize: 10, color: '#6b6f85', marginBottom: 2 }}>Breakeven</div><div style={{ fontSize: 12, fontWeight: 600, color: '#e2e4f0' }}>{breakevenPoints.length ? breakevenPoints.map(bp => bp.toLocaleString('en-IN')).join(', ') : '—'}</div></div>
-            <div><div style={{ fontSize: 10, color: '#6b6f85', marginBottom: 2 }}>Risk Reward Ratio</div><div style={{ fontSize: 12, fontWeight: 600, color: '#e2e4f0' }}>{riskReward ? `1:${riskReward.toFixed(2)}` : '—'}</div></div>
-            <div><div style={{ fontSize: 10, color: '#6b6f85', marginBottom: 2 }}>Probability of profit</div><div style={{ fontSize: 12, fontWeight: 600, color: '#e2e4f0' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, padding: '12px 16px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Max Profit</div><div style={{ fontSize: 14, fontWeight: 700, color: 'var(--green)' }}>{maxProfit > 1e6 ? 'Unlimited' : `+₹${fmtPrice(maxProfit)}`}</div></div>
+            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Max Loss</div><div style={{ fontSize: 14, fontWeight: 700, color: 'var(--red)' }}>{maxLoss < -1e6 ? 'Unlimited' : `-₹${fmtPrice(Math.abs(maxLoss))}`}</div></div>
+            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Breakeven</div><div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{breakevenPoints.length ? breakevenPoints.map(bp => bp.toLocaleString('en-IN')).join(', ') : '—'}</div></div>
+            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Risk Reward Ratio</div><div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{riskReward ? `1:${riskReward.toFixed(2)}` : '—'}</div></div>
+            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Probability of profit</div><div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
               {breakevenPoints.length && chain.spot ? (() => {
                 const bullish = payoffData.filter(d => d.spot >= chain.spot! && d.pnl > 0).length;
                 const total = payoffData.filter(d => d.spot >= chain.spot! * 0.95).length;
@@ -845,18 +846,18 @@ export default function BasketOrder({ instrument }: Props) {
             </div></div>
           </div>
 
-          <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid #1e2030', flexShrink: 0 }}>
+          <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
             {([['payoff', 'Payoff Graph'], ['optionchain', 'Option Chain']] as const).map(([key, label]) => (
               <button key={key} onClick={() => setRightTab(key)}
                 style={{ padding: '8px 20px', fontSize: 12, fontWeight: 600, cursor: 'pointer', border: 'none', borderBottom: rightTab === key ? '2px solid #5865f2' : '2px solid transparent',
-                  background: 'transparent', color: rightTab === key ? '#e2e4f0' : '#6b6f85' }}>
+                  background: 'transparent', color: rightTab === key ? 'var(--text-primary)' : 'var(--text-muted)' }}>
                 {label}
               </button>
             ))}
             {rightTab === 'payoff' && (
-              <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center', paddingRight: 16, fontSize: 10, color: '#8b8fa3' }}>
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 12, alignItems: 'center', paddingRight: 16, fontSize: 10, color: 'var(--text-secondary)' }}>
                 <span><span style={{ display: 'inline-block', width: 12, height: 2, background: '#5865f2', marginRight: 4, verticalAlign: 'middle' }}></span> P/L at target</span>
-                <span><span style={{ display: 'inline-block', width: 12, height: 2, background: '#22c55e', marginRight: 4, verticalAlign: 'middle' }}></span> P/L at expiry</span>
+                <span><span style={{ display: 'inline-block', width: 12, height: 2, background: 'var(--green)', marginRight: 4, verticalAlign: 'middle' }}></span> P/L at expiry</span>
               </div>
             )}
           </div>
@@ -878,14 +879,14 @@ export default function BasketOrder({ instrument }: Props) {
                   legendLabels={{ pnl: 'P&L at expiry' }}
                 />
               </div>
-              <div style={{ padding: '8px 16px 16px', display: 'flex', alignItems: 'center', gap: 12, fontSize: 12, color: '#6b6f85', flexShrink: 0 }}>
-                <span>Target Date: <span style={{ color: '#e2e4f0', fontWeight: 600 }}>{targetDays} Day from Expiry</span></span>
+              <div style={{ padding: '8px 16px 16px', display: 'flex', alignItems: 'center', gap: 12, fontSize: 12, color: 'var(--text-muted)', flexShrink: 0 }}>
+                <span>Target Date: <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{targetDays} Day from Expiry</span></span>
                 <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
                   <button onClick={() => setTargetDays(Math.max(0, targetDays - 1))}
-                    style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid #2a2d42', background: '#1a1c28', color: '#8b8fa3', cursor: 'pointer', fontSize: 14 }}>−</button>
-                  <span style={{ color: '#e2e4f0', fontWeight: 600 }}>{chain.expiry ? formatExpiry(chain.expiry) : '—'}</span>
+                    style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14 }}>−</button>
+                  <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{chain.expiry ? formatExpiry(chain.expiry) : '—'}</span>
                   <button onClick={() => setTargetDays(targetDays + 1)}
-                    style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid #2a2d42', background: '#1a1c28', color: '#8b8fa3', cursor: 'pointer', fontSize: 14 }}>+</button>
+                    style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14 }}>+</button>
                 </div>
               </div>
             </>
@@ -905,20 +906,20 @@ export default function BasketOrder({ instrument }: Props) {
       {showSaveModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}
           onClick={() => setShowSaveModal(false)}>
-          <div style={{ background: '#181a25', borderRadius: 12, border: '1px solid #2a2d42', padding: 24, width: 360 }}
+          <div style={{ background: 'var(--bg-card)', borderRadius: 12, border: '1px solid var(--border)', padding: 24, width: 360 }}
             onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-              <span style={{ fontWeight: 700, fontSize: 16, color: '#e2e4f0' }}>Save Strategy</span>
-              <button onClick={() => setShowSaveModal(false)} style={{ background: 'none', border: 'none', color: '#6b6f85', fontSize: 18, cursor: 'pointer' }}>✕</button>
+              <span style={{ fontWeight: 700, fontSize: 16, color: 'var(--text-primary)' }}>Save Strategy</span>
+              <button onClick={() => setShowSaveModal(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer' }}>✕</button>
             </div>
-            <div style={{ fontSize: 12, color: '#8b8fa3', marginBottom: 8 }}>Name your strategy</div>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>Name your strategy</div>
             <input type="text" value={saveName} onChange={e => setSaveName(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') { persistence.saveBasket(saveName, sym, chain.expiry, legs).then(r => { setPlaced(r); setShowSaveModal(false); setSaveName(''); setTimeout(() => setPlaced(null), 3000); }); } }}
               autoFocus placeholder="e.g. NIFTY Iron Condor"
-              style={{ width: '100%', padding: '10px 12px', background: '#1a1c28', border: '1px solid #2a2d42', borderRadius: 8, color: '#e2e4f0', fontSize: 13, outline: 'none', boxSizing: 'border-box' as const }} />
+              style={{ width: '100%', padding: '10px 12px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box' as const }} />
             <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
               <button onClick={() => setShowSaveModal(false)}
-                style={{ flex: 1, padding: '10px 0', borderRadius: 8, border: '1px solid #2a2d42', background: 'transparent', color: '#8b8fa3', fontWeight: 600, fontSize: 13, cursor: 'pointer' }}>Cancel</button>
+                style={{ flex: 1, padding: '10px 0', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'var(--text-secondary)', fontWeight: 600, fontSize: 13, cursor: 'pointer' }}>Cancel</button>
               <button onClick={() => { persistence.saveBasket(saveName, sym, chain.expiry, legs).then(r => { setPlaced(r); setShowSaveModal(false); setSaveName(''); setTimeout(() => setPlaced(null), 3000); }); }} disabled={!saveName.trim()}
                 style={{ flex: 1, padding: '10px 0', borderRadius: 8, border: 'none', background: '#5865f2', color: '#fff', fontWeight: 600, fontSize: 13, cursor: 'pointer', opacity: saveName.trim() ? 1 : 0.5 }}>Save</button>
             </div>
@@ -930,28 +931,28 @@ export default function BasketOrder({ instrument }: Props) {
       {showAddScrip && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', paddingTop: 120, zIndex: 100 }}
           onClick={() => setShowAddScrip(false)}>
-          <div style={{ background: '#181a25', borderRadius: 12, border: '1px solid #2a2d42', padding: 20, width: 400, boxShadow: '0 12px 48px rgba(0,0,0,0.6)' }}
+          <div style={{ background: 'var(--bg-card)', borderRadius: 12, border: '1px solid var(--border)', padding: 20, width: 400, boxShadow: '0 12px 48px rgba(0,0,0,0.6)' }}
             onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
-              <span style={{ fontWeight: 700, fontSize: 15, color: '#e2e4f0' }}>Add Scrip</span>
-              <button onClick={() => setShowAddScrip(false)} style={{ background: 'none', border: 'none', color: '#6b6f85', fontSize: 18, cursor: 'pointer' }}>✕</button>
+              <span style={{ fontWeight: 700, fontSize: 15, color: 'var(--text-primary)' }}>Add Scrip</span>
+              <button onClick={() => setShowAddScrip(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer' }}>✕</button>
             </div>
             <input type="text" value={addScripQuery} onChange={e => searchScrip(e.target.value)}
               autoFocus placeholder="Search stocks, futures, options..."
-              style={{ width: '100%', padding: '10px 12px', background: '#1a1c28', border: '1px solid #2a2d42', borderRadius: 8, color: '#e2e4f0', fontSize: 13, outline: 'none', boxSizing: 'border-box' as const, marginBottom: 8 }} />
+              style={{ width: '100%', padding: '10px 12px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box' as const, marginBottom: 8 }} />
             <div style={{ maxHeight: 320, overflow: 'auto' }}>
               {addScripResults.length === 0 && addScripQuery.length >= 2 && (
-                <div style={{ padding: 16, textAlign: 'center' as const, color: '#6b6f85', fontSize: 12 }}>Searching…</div>
+                <div style={{ padding: 16, textAlign: 'center' as const, color: 'var(--text-muted)', fontSize: 12 }}>Searching…</div>
               )}
               {addScripResults.map((inst, i) => (
                 <button key={i} onClick={() => addScripToBasket(inst)}
                   style={{ display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left' as const, padding: '8px 10px', background: 'none', border: 'none',
-                    borderBottom: '1px solid #1e2030', color: '#e2e4f0', cursor: 'pointer', fontSize: 12 }}
-                  onMouseOver={e => (e.currentTarget.style.background = '#1e2030')}
+                    borderBottom: '1px solid var(--border)', color: 'var(--text-primary)', cursor: 'pointer', fontSize: 12 }}
+                  onMouseOver={e => (e.currentTarget.style.background = 'var(--border)')}
                   onMouseOut={e => (e.currentTarget.style.background = 'none')}>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 600, fontSize: 12 }}>{String(inst.stock_name || inst.symbol || inst.zanskar_name || '')}</div>
-                    <div style={{ fontSize: 10, color: '#6b6f85', marginTop: 2 }}>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
                       {String(inst.exchange || '')} · {String(inst.derivative_type || 'EQ')}
                       {inst.strike_price ? ` · Strike: ${Number(inst.strike_price) > 10000 ? (Number(inst.strike_price) / 100).toLocaleString('en-IN') : Number(inst.strike_price).toLocaleString('en-IN')}` : ''}
                       {inst.expiry ? ` · ${formatExpiry(String(inst.expiry))}` : ''}
@@ -968,7 +969,7 @@ export default function BasketOrder({ instrument }: Props) {
 
       {placed && (
         <div style={{ position: 'fixed', bottom: 24, right: 24, padding: '10px 20px', borderRadius: 8, fontSize: 12, fontWeight: 600, zIndex: 110, boxShadow: '0 4px 20px rgba(0,0,0,0.4)',
-          background: placed.ok ? '#1a3a2a' : '#3a1a1a', color: placed.ok ? '#22c55e' : '#ef4444', border: `1px solid ${placed.ok ? '#22c55e40' : '#ef444440'}` }}>
+          background: placed.ok ? 'var(--green-dim)' : 'var(--red-dim)', color: placed.ok ? 'var(--green)' : 'var(--red)', border: `1px solid ${placed.ok ? '#22c55e40' : '#ef444440'}` }}>
           {placed.msg}
         </div>
       )}

@@ -75,6 +75,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
   const [activeQuick, setActiveQuick] = useState<string | null>(null);
   const [showGoToAtm, setShowGoToAtm] = useState(false);
   const [atmDir,      setAtmDir]      = useState<'up' | 'down'>('up');
+  const [showGreeks,  setShowGreeks]  = useState(true);
 
   const cellMapRef        = useRef(new Map<string, HTMLElement>());
   const maxCeOiRef        = useRef(1);
@@ -442,6 +443,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
     setSymInput(sym);
     setSymbol(sym);
     setExchange(item.exchange || 'NSE');
+    setActiveQuick(null);
     setSuggestions([]);
     setShowSug(false);
     loadExpiryThenChain(sym, item.exchange || 'NSE');
@@ -517,7 +519,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
 
       const spotLine = isAtm && spot ? (
         <tr key={`${sp}-spot-line`} className="pointer-events-none select-none">
-          <td colSpan={16} className="p-0" style={{ height: '18px' }}>
+          <td colSpan={showGreeks ? 16 : 8} className="p-0" style={{ height: '18px' }}>
             <div className="flex items-center h-full px-1">
               <div className="flex-1 h-px bg-[var(--accent)] opacity-50" />
               <span className="mx-2 px-2 py-[2px] rounded text-[9px] font-bold bg-[var(--accent)] text-white leading-none whitespace-nowrap">
@@ -539,10 +541,12 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
           ref={isAtm ? (el) => { atmRowRef.current = el; } : undefined}
         >
           {/* CE: Vega Gamma Theta Delta OI Vol LTP */}
+          {showGreeks && (<>
           <td ref={registerCell(sp,'ce-vega')}  className="ce-side text-right px-2 py-1.5 text-[12px]">{ce ? fmtDec(g(ce, 'vega'), 4) : '—'}</td>
           <td ref={registerCell(sp,'ce-gamma')} className="ce-side text-right px-2 py-1.5 text-[12px]">{ce ? fmtDec(g(ce, 'gamma'), 4) : '—'}</td>
           <td ref={registerCell(sp,'ce-theta')} className="ce-side text-right px-2 py-1.5 text-[12px]">{ce ? fmtDec(g(ce, 'theta'), 2) : '—'}</td>
           <td ref={registerCell(sp,'ce-delta')} className="ce-side text-right px-2 py-1.5 text-[12px]">{ce ? fmtDec(g(ce, 'delta'), 4) : '—'}</td>
+          </>)}
           <td ref={registerCell(sp,'ce-oi')} className="ce-side text-right px-2 py-1.5 text-[12px]">
             {ce
               ? <><div>{fmtOI(g(ce, 'oi'))}</div><div className="oi-bar-wrap"><div className="oi-bar oi-bar-ce" style={{ width: `${Math.min(100, (ceOi / maxCeOiRef.current) * 100)}%` }} /></div></>
@@ -628,10 +632,12 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
               ? <><div>{fmtOI(g(pe, 'oi'))}</div><div className="oi-bar-wrap"><div className="oi-bar oi-bar-pe" style={{ width: `${Math.min(100, (peOi / maxPeOiRef.current) * 100)}%` }} /></div></>
               : '—'}
           </td>
+          {showGreeks && (<>
           <td ref={registerCell(sp,'pe-delta')} className="pe-side text-right px-2 py-1.5 text-[12px]">{pe ? fmtDec(g(pe, 'delta'), 4) : '—'}</td>
           <td ref={registerCell(sp,'pe-theta')} className="pe-side text-right px-2 py-1.5 text-[12px]">{pe ? fmtDec(g(pe, 'theta'), 2) : '—'}</td>
           <td ref={registerCell(sp,'pe-gamma')} className="pe-side text-right px-2 py-1.5 text-[12px]">{pe ? fmtDec(g(pe, 'gamma'), 4) : '—'}</td>
           <td ref={registerCell(sp,'pe-vega')}  className="pe-side text-right px-2 py-1.5 text-[12px]">{pe ? fmtDec(g(pe, 'vega'), 4) : '—'}</td>
+          </>)}
         </tr>
       );
 
@@ -639,7 +645,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
     }
     return rows;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chain, spot]);
+  }, [chain, spot, showGreeks]);
 
   // ── JSX ────────────────────────────────────────────────────────────────────
   return (
@@ -677,7 +683,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
             value={symInput}
             onChange={onSymInput}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') { const u = extractUnderlying(symInput); setSymInput(u); setSymbol(u); loadExpiryThenChain(u, exchange); }
+              if (e.key === 'Enter') { const u = extractUnderlying(symInput); setSymInput(u); setSymbol(u); setActiveQuick(null); loadExpiryThenChain(u, exchange); }
               if (e.key === 'Escape') setShowSug(false);
             }}
             placeholder="Symbol"
@@ -732,13 +738,26 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
         </select>
 
         <button
-          onClick={() => { const u = extractUnderlying(symInput) || symbol; setSymInput(u); setSymbol(u); loadExpiryThenChain(u, exchange); }}
+          onClick={() => { const u = extractUnderlying(symInput) || symbol; setSymInput(u); setSymbol(u); setActiveQuick(null); loadExpiryThenChain(u, exchange); }}
           className="px-3 py-1 rounded bg-[var(--accent)] text-white text-[12px] font-semibold hover:bg-[var(--accent-dim)] transition-colors shrink-0"
         >
           Load
         </button>
 
         <div className="w-px h-5 bg-[var(--border)] shrink-0 mx-1" />
+
+        {/* Greeks column toggle */}
+        <button
+          onClick={() => setShowGreeks(v => !v)}
+          className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all shrink-0 ${
+            showGreeks
+              ? 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              : 'bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)]'
+          }`}
+          title="Show or hide the option Greeks columns (Delta, Gamma, Theta, Vega)"
+        >
+          {showGreeks ? 'Hide Greeks' : 'Show Greeks'}
+        </button>
 
         {/* Basket mode toggle */}
         <button
@@ -769,24 +788,35 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       {/* Table container (relative so Go-to-ATM button can be absolute-positioned inside) */}
       <div className="flex-1 relative overflow-hidden">
         <div ref={tableContainerRef} className="h-full overflow-auto bg-[var(--bg-primary)]">
-          {loading && <div className="flex items-center justify-center h-40 text-[var(--text-secondary)] text-[14px]">Loading…</div>}
+          {loading && (
+            <div className="flex flex-col items-center justify-center h-40 gap-3 text-[var(--text-secondary)]">
+              <div className="w-6 h-6 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin" />
+              <span className="text-[12px]">Loading option chain…</span>
+            </div>
+          )}
           {error   && <div className="flex items-center justify-center h-40 text-[var(--red)] text-[14px]">{error}</div>}
           {!loading && !error && (
             <table className="oc-table w-full text-[12px] border-collapse" style={{ tableLayout: 'fixed' }}>
               <thead>
                 <tr className="sticky top-0 z-10">
-                  <th colSpan={7} className="oc-calls-th text-center py-1.5 text-[13px] font-bold">Calls</th>
+                  <th colSpan={showGreeks ? 7 : 3} className="oc-calls-th text-center py-1.5 text-[13px] font-bold">Calls</th>
                   <th colSpan={2} className="bg-[var(--bg-card)] border-b-2 border-[var(--border)]" />
-                  <th colSpan={7} className="oc-puts-th text-center py-1.5 text-[13px] font-bold">Puts</th>
+                  <th colSpan={showGreeks ? 7 : 3} className="oc-puts-th text-center py-1.5 text-[13px] font-bold">Puts</th>
                 </tr>
                 <tr className="sticky top-8 z-10 bg-[var(--bg-secondary)]">
-                  {['Vega','Gamma','Theta','Delta','OI (L)','Vol (L)','LTP'].map((h) => (
-                    <th key={h} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
+                  {showGreeks && ['Vega','Gamma','Theta','Delta'].map((h) => (
+                    <th key={`ce-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
+                  ))}
+                  {['OI (L)','Vol (L)','LTP'].map((h) => (
+                    <th key={`ce-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
                   ))}
                   <th className="text-center px-2 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] border-b border-[var(--border)] bg-[var(--bg-card)]">Strike</th>
                   <th className="text-center px-2 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] border-b border-[var(--border)] bg-[var(--bg-card)]">IV %</th>
-                  {['LTP','Vol (L)','OI (L)','Delta','Theta','Gamma','Vega'].map((h) => (
-                    <th key={h} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
+                  {['LTP','Vol (L)','OI (L)'].map((h) => (
+                    <th key={`pe-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
+                  ))}
+                  {showGreeks && ['Delta','Theta','Gamma','Vega'].map((h) => (
+                    <th key={`pe-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
