@@ -63,7 +63,13 @@ function nearestSpot(spot: TsV[], ts: number): number {
   const a = spot[Math.max(0, lo - 1)], b = spot[lo];
   return (Math.abs(a.ts - ts) <= Math.abs(b.ts - ts) ? a.v : b.v);
 }
-const SNAP_MIN_GAP_MS = 5_000;        // throttle live snapshot storage
+const SNAP_MIN_GAP_MS = 2_000;        // throttle live snapshot storage (tick-by-tick: ~2s greek points)
+// Live fallback poll: the line is driven by per-tick `option_chain` WS pushes, but
+// the broker pushes only on change and can stay silent for minutes (and SIM relies
+// entirely on it). Like the Option Chain view, poll the REST chain on a cadence —
+// but only when the WS feed has gone quiet — so the line tracks the latest candle.
+const LIVE_POLL_MS = 4_000;           // fallback-poll cadence
+const WS_QUIET_MS  = 6_000;           // only poll once the WS feed has been silent this long
 const METHOD_LABEL: Record<Method, string> = { mine: 'mine', industry: 'ind' };
 
 export interface GreekLegend { method: Method; point: SeriesPoint }
@@ -81,6 +87,11 @@ export interface GreekOverlayApi {
   legend:     GreekLegend[];
   histState:  'idle' | 'loading' | 'ok' | 'nogreeks';
   histGranularity: string;   // '1s' | '1m' | '' — which resolution backfilled
+  ceColor:    string;        // CE/PE line colors (distinct per greek) for legend swatches
+  peColor:    string;
+  greekDate:  string;        // 'YYYY-MM-DD' trading day being reconstructed
+  latestDay:  string;        // most recent loaded trading day (date-picker max / "Latest")
+  setGreekDate:  (d: string) => void;
   setShowPopup:  (v: boolean | ((p: boolean) => boolean)) => void;
   toggleExpiry:  (exp: string, shift: boolean) => void;
   setMethod:     (v: Method | 'both') => void;
@@ -104,9 +115,20 @@ interface Deps {
   inline?:        boolean;
 }
 
+// Distinct CE/PE palette per greek so overlapping Vega + Theta lines stay tellable apart.
+const GREEK_PALETTE: Record<GreekName, { ce: string; pe: string }> = {
+  vega:  { ce: '#22c55e', pe: '#ef4444' },   // green / red
+  theta: { ce: '#a855f7', pe: '#f59e0b' },   // purple / amber
+};
+
+// Trailing window (calendar days) of greek history to reconstruct, ending at the
+// selected day — matches the Tracker's 7-day candle load so greeks span the chart.
+const GREEK_HIST_DAYS = 7;
+
 export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, inline }: Deps): GreekOverlayApi {
   const { subscribe, subscribeOC, unsubscribeOC } = useWs();
   const greekLabel = greek === 'vega' ? 'Vega' : 'Theta';
+  const palette = GREEK_PALETTE[greek];
 
   // ── State ────────────────────────────────────────────────────────────────
   const [on, setOn]                 = useState(false);
@@ -121,6 +143,8 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
   const [legend, setLegend]         = useState<GreekLegend[]>([]);
   const [histState, setHistState]   = useState<'idle' | 'loading' | 'ok' | 'nogreeks'>('idle');
   const [histGranularity, setHistGranularity] = useState('');
+  const [greekDate, setGreekDateState] = useState('');
+  const [latestDay, setLatestDay]   = useState('');
 
   // ── Refs ─────────────────────────────────────────────────────────────────
   const enabledRef     = useRef(false);
@@ -137,11 +161,15 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
   const wsExchRef      = useRef('NSE');
   const liveLegsRef    = useRef<Map<string, { ce: AggLeg[]; pe: AggLeg[] }>>(new Map());
   const anchorExpiryRef = useRef('');
-  const histDoneRef    = useRef(false);
+  const greekDateRef   = useRef('');      // selected reconstruction day (mirrors greekDate)
+  const defaultDayRef  = useRef('');      // latest trading day loaded (today / last bar)
   const histLoadingRef = useRef(false);
   const drawPendingRef = useRef(false);
   const lastDrawMsRef  = useRef(0);
   const drawTimerRef   = useRef<number | null>(null);
+  const lastWsTickRef  = useRef(0);       // last time a live WS option_chain tick was applied
+  const pollTimerRef   = useRef<number | null>(null);
+  const pollBusyRef    = useRef(false);
 
   // Mirror settings into refs so the WS callback and redraw read fresh values.
   const cfgRef = useRef({ method, basket, seriesMode, showCalls, showPuts });
@@ -175,7 +203,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     if (!chart || !enabledRef.current) return;
     const wantMine = m === 'mine' || m === 'both';
     const wantInd  = m === 'industry' || m === 'both';
-    const paneOpts = inline ? { inline: true, paneIndex: 0 } : undefined;
+    const paneOpts = { ...(inline ? { inline: true, paneIndex: 0 } : {}), ceColor: palette.ce, peColor: palette.pe };
     if (wantMine && !minePaneRef.current) minePaneRef.current = createGreekPane(chart, `${greekLabel}·${METHOD_LABEL.mine}`, paneOpts);
     if (!wantMine && minePaneRef.current) { minePaneRef.current.destroy(); minePaneRef.current = null; }
     if (wantInd && !indPaneRef.current)  indPaneRef.current = createGreekPane(chart, `${greekLabel}·${METHOD_LABEL.industry}`, paneOpts);
@@ -289,12 +317,18 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
       if ((data.asset || '').toUpperCase() !== wsAssetRef.current) return;
       const exp = data.expiry || '';
       if (!wsExpiriesRef.current.has(exp)) return;
+      // Live ticks only belong on the latest day; skip while inspecting a past day.
+      if (greekDateRef.current && greekDateRef.current !== defaultDayRef.current) return;
+      lastWsTickRef.current = Date.now();   // WS is alive → fallback poll stays idle
       liveLegsRef.current.set(exp, legsFromChain(data, exp));
       storeCombinedLive();
       requestDraw();
     });
     return unsub;
   }, [subscribe]);
+
+  // Stop the fallback poll on unmount (toggle/clear handle the normal teardown paths).
+  useEffect(() => () => stopLivePoll(), []);
 
   function subscribeWsMulti(asset: string, expiriesSel: string[], exchange: string) {
     unsubscribeWsAll();
@@ -308,6 +342,44 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     }
     wsExpiriesRef.current = new Set();
     wsAssetRef.current = null;
+  }
+
+  // ── Live fallback poll ─────────────────────────────────────────────────────
+  // Drives the line forward when the WS option_chain feed is silent, so greeks
+  // track the latest candle instead of freezing minutes behind the price.
+  function stopLivePoll() {
+    if (pollTimerRef.current != null) { clearInterval(pollTimerRef.current); pollTimerRef.current = null; }
+  }
+
+  function startLivePoll() {
+    stopLivePoll();
+    pollTimerRef.current = window.setInterval(() => {
+      if (!enabledRef.current) return;
+      if (greekDateRef.current !== defaultDayRef.current) return;   // inspecting a past day
+      if (!isMarketOpenNow()) return;
+      if (Date.now() - lastWsTickRef.current < WS_QUIET_MS) return; // WS feed is live — leave it
+      void pollLiveOnce();
+    }, LIVE_POLL_MS);
+  }
+
+  /** One REST chain pull → refresh live legs + store a fresh snapshot (fallback path). */
+  async function pollLiveOnce() {
+    const inst = currentInstRef.current;
+    if (!inst || pollBusyRef.current) return;
+    pollBusyRef.current = true;
+    try {
+      const sym  = getSymbol(inst);
+      const exps = [...wsExpiriesRef.current];
+      let any = false;
+      for (const exp of exps) {
+        try {
+          const res  = await fetch(`/api/optionchain/${encodeURIComponent(sym)}?expiry=${encodeURIComponent(exp)}`);
+          const data = await res.json() as ChainResp;
+          if (data.chain) { liveLegsRef.current.set(exp, legsFromChain(data.chain, exp)); any = true; }
+        } catch { /* skip this expiry */ }
+      }
+      if (any && enabledRef.current) { storeCombinedLive(); requestDraw(); }
+    } finally { pollBusyRef.current = false; }
   }
 
   // ── Load chain (expiries, lot size, opening snapshot) ──────────────────────
@@ -359,24 +431,47 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
 
       snapshotsRef.current = new Map();
       lastSnapMsRef.current = 0;
-      histDoneRef.current = false;
-      if (liveLegs.size) storeCombinedLive(true);
+
+      // Default to the latest trading day; preserve a past day the user already picked.
+      const today = defaultGreekDay();
+      defaultDayRef.current = today;
+      setLatestDay(today);
+      const day = greekDateRef.current || today;
+      greekDateRef.current = day;
+      setGreekDateState(day);
+      if (liveLegs.size && day === today) storeCombinedLive(true);
 
       enabledRef.current = true;
       setOn(true);
       syncPanes(cfgRef.current.method);
       subscribeWsMulti(sym.toUpperCase(), expiriesSel, inst.exchange || 'NSE');
+      lastWsTickRef.current = Date.now();   // grace period before the fallback poll kicks in
+      startLivePoll();
       requestDraw();
-      fetchHistory();
+      fetchHistoryForDay(day);
     } catch (e) { console.warn(`[${greekLabel}] reload failed:`, e); }
   }
 
-  // ── Historical backfill (open → now), stitched ahead of live snapshots ─────
-  function chartDate(): Date {
+  // ── Historical backfill, reconstructed per trading day ─────────────────────
+  /** Latest loaded trading day as an IST 'YYYY-MM-DD' (bar.time has IST baked in). */
+  function defaultGreekDay(): string {
     const bars = allBarsRef.current;
     const last = bars[bars.length - 1];
-    if (last && typeof last.time === 'number') return new Date((last.time - IST_OFFSET) * 1000);
-    return new Date();
+    if (last && typeof last.time === 'number') return new Date(last.time * 1000).toISOString().slice(0, 10);
+    return new Date(Date.now() + IST_OFFSET * 1000).toISOString().slice(0, 10);
+  }
+
+  /** Switch the reconstructed day: clear prior reconstruction and rebuild for `dateStr`. */
+  function setGreekDate(dateStr: string) {
+    if (!dateStr) return;
+    setGreekDateState(dateStr);
+    greekDateRef.current = dateStr;
+    snapshotsRef.current = new Map();
+    lastSnapMsRef.current = 0;
+    // Re-seed the live point only when returning to the latest day during market hours.
+    if (dateStr === defaultDayRef.current && liveLegsRef.current.size) storeCombinedLive(true);
+    requestDraw();
+    fetchHistoryForDay(dateStr);
   }
 
   /** One historical pass → per-instrument field series (option price + OI [+ greeks]). */
@@ -389,7 +484,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     const results = await Promise.all(chunks.map(async (chunk) => {
       const res = await fetch('/api/historical', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: [{ exchange, type, values: chunk, fields: HIST_FIELDS, startDate: start.toISOString(), endDate: end.toISOString(), interval: HIST_INTERVAL, intraDay: true, realTime: false }] }),
+        body: JSON.stringify({ query: [{ exchange, type, values: chunk, fields: HIST_FIELDS, startDate: start.toISOString(), endDate: end.toISOString(), interval: HIST_INTERVAL, intraDay: false, realTime: false }] }),
       });
       return res.ok ? res.json() : null;
     }));
@@ -410,7 +505,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     try {
       const res = await fetch('/api/historical', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: [{ exchange, type: 'INDEX', values: [underlyingRef.current], fields: ['close'], startDate: start.toISOString(), endDate: end.toISOString(), interval: HIST_INTERVAL, intraDay: true, realTime: false }] }),
+        body: JSON.stringify({ query: [{ exchange, type: 'INDEX', values: [underlyingRef.current], fields: ['close'], startDate: start.toISOString(), endDate: end.toISOString(), interval: HIST_INTERVAL, intraDay: false, realTime: false }] }),
       });
       const data = res.ok ? await res.json() : null;
       const out: TsV[] = [];
@@ -424,17 +519,22 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     } catch { return []; }
   }
 
-  async function fetchHistory() {
+  /**
+   * Reconstruct the basket's greeks for a trailing window of IST trading days ending
+   * at `dateStr` (so the line spans the same range as the candle chart, not just one
+   * day). Uses `intraDay:false` — the broker ignores the date range for `intraDay:true`
+   * and always returns the current day, which is why earlier history never went back.
+   */
+  async function fetchHistoryForDay(dateStr: string) {
     const inst = currentInstRef.current;
     const meta = metaRef.current;
-    if (!inst || !meta.size || histLoadingRef.current || histDoneRef.current) return;
+    if (!inst || !meta.size || !dateStr || histLoadingRef.current) return;
     histLoadingRef.current = true;
     setHistState('loading');
 
     const names = [...meta.keys()];
-    const d = chartDate();
-    const startDate = new Date(d); startDate.setUTCHours(3, 45, 0, 0);  // ~09:15 IST
-    const endDate   = new Date(d); endDate.setUTCHours(10, 0, 0, 0);    // ~15:30 IST
+    const endDate   = new Date(`${dateStr}T10:00:00Z`);  // 15:30 IST of the selected day
+    const startDate = new Date(endDate.getTime() - GREEK_HIST_DAYS * 86_400_000);  // trailing window
     const exchange = inst.exchange || 'NSE';
 
     try {
@@ -447,8 +547,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
       const ok = added > 0;
       setHistState(ok ? 'ok' : 'nogreeks');
       setHistGranularity(ok ? HIST_INTERVAL : '');
-      if (!ok) console.warn(`[${greekLabel}] no historical option/spot data; series starts from live toggle time.`);
-      histDoneRef.current = true;
+      if (!ok) console.warn(`[${greekLabel}] no historical option/spot data for ${dateStr}.`);
       requestDraw();
     } catch (e) {
       console.error(`[${greekLabel}] history fetch failed:`, e);
@@ -521,6 +620,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
       setOn(false);
       setShowPopup(false);
       cancelDraw();
+      stopLivePoll();
       destroyPanes();
       unsubscribeWsAll();
       liveLegsRef.current = new Map();
@@ -544,20 +644,26 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     enabledRef.current = false;
     setOn(false);
     cancelDraw();
+    stopLivePoll();
     destroyPanes();
     unsubscribeWsAll();
     liveLegsRef.current = new Map();
     snapshotsRef.current = new Map();
     metaRef.current = new Map();
-    histDoneRef.current = false;
+    greekDateRef.current = '';
+    defaultDayRef.current = '';
     lastSnapMsRef.current = 0;
     setLegend([]);
+    setGreekDateState('');
+    setLatestDay('');
     setHistState('idle');
     setHistGranularity('');
   }
 
   return {
     on, showPopup, expiries, selExpiries, method, basket, seriesMode, showCalls, showPuts, legend, histState, histGranularity,
+    ceColor: palette.ce, peColor: palette.pe,
+    greekDate, latestDay, setGreekDate,
     setShowPopup, toggleExpiry, setMethod, setBasket, setSeriesMode, setShowCalls, setShowPuts,
     toggle, openSettings, applySettings, clearForInstrumentChange, enabledRef,
   };

@@ -20,6 +20,15 @@ const CE_COLOR = '#22c55e';
 const PE_COLOR = '#ef4444';
 const DIFF_SCALE = 'greekDiff';
 
+/** Inline overlay greeks can reach ~1e9 (industry = greek×OI×lot); keep axis tags short. */
+function compactAxis(v: number): string {
+  const a = Math.abs(v);
+  if (a >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+  if (a >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+  if (a >= 1e3) return (v / 1e3).toFixed(1) + 'K';
+  return v.toFixed(2);
+}
+
 /** Convert a snapshot epoch-ms timestamp to lightweight-charts intraday time. */
 export function msToChartTime(ms: number): UTCTimestamp {
   return (Math.floor(ms / 1000) + IST_OFFSET) as UTCTimestamp;
@@ -64,6 +73,9 @@ export interface GreekPaneOpts {
   paneIndex?: number;
   /** Sub-pane height when not inline. */
   height?:    number;
+  /** CE / PE line colors — distinct per greek so Vega vs Theta are tellable apart. */
+  ceColor?:   string;
+  peColor?:   string;
 }
 
 /**
@@ -96,19 +108,24 @@ export function createGreekPane(chart: IChartApi, label: string, opts: GreekPane
       lastValueVisible: scaleId !== diffScale,   // axis tag only for the totals scale
       crosshairMarkerVisible: true,
       title: `${label} ${title}`,
+      // Inline greeks share the price pane, so format their (often huge) values
+      // compactly instead of dumping raw 10-digit numbers onto the axis tag.
+      ...(inline ? { priceFormat: { type: 'custom' as const, minMove: 0.01, formatter: compactAxis } } : {}),
       ...(scaleId ? { priceScaleId: scaleId } : {}),
     }, paneIndex);
 
-  const ceTotal = mk(CE_COLOR, false, totScale, 'CE');
-  const peTotal = mk(PE_COLOR, false, totScale, 'PE');
-  const ceDiff  = mk(CE_COLOR, true,  diffScale, 'CE Δ');
-  const peDiff  = mk(PE_COLOR, true,  diffScale, 'PE Δ');
+  const CE = opts.ceColor ?? CE_COLOR;
+  const PE = opts.peColor ?? PE_COLOR;
+  const ceTotal = mk(CE, false, totScale, 'CE');
+  const peTotal = mk(PE, false, totScale, 'PE');
+  const ceDiff  = mk(CE, true,  diffScale, 'CE Δ');
+  const peDiff  = mk(PE, true,  diffScale, 'PE Δ');
 
   if (inline) {
-    // Keep both the greek totals and difference lines in the lower band of the price
-    // pane so they sit under/alongside the NIFTY line instead of overrunning it.
-    ceTotal.priceScale().applyOptions({ scaleMargins: { top: 0.6, bottom: 0.02 } });
-    ceDiff.priceScale().applyOptions({ scaleMargins:  { top: 0.6, bottom: 0.02 } });
+    // Greeks share the price pane and span most of its height (overlapping the NIFTY
+    // line is fine — distinct colors + the crosshair tooltip keep them readable).
+    ceTotal.priceScale().applyOptions({ scaleMargins: { top: 0.1, bottom: 0.08 } });
+    ceDiff.priceScale().applyOptions({ scaleMargins:  { top: 0.1, bottom: 0.08 } });
   } else {
     // Separate sub-pane: give the overlay diff scale its own margins vs the totals.
     ceDiff.priceScale().applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } });

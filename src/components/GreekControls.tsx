@@ -46,7 +46,7 @@ export function GreekButton({ api, label }: { api: GreekOverlayApi; label: strin
       </button>
 
       {api.showPopup && (
-        <div className="absolute top-full left-0 mt-1 z-50 w-[300px] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden">
+        <div className="absolute top-full right-0 mt-1 z-50 w-[300px] max-h-[80vh] overflow-y-auto bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl">
           <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
             <span className="text-[13px] font-semibold text-[var(--text-primary)]">{label} Settings</span>
             <button onClick={() => api.setShowPopup(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-lg leading-none">×</button>
@@ -76,12 +76,12 @@ export function GreekButton({ api, label }: { api: GreekOverlayApi; label: strin
               <label className="flex items-center gap-2 cursor-pointer select-none">
                 <input type="checkbox" checked={api.showCalls} onChange={(e) => api.setShowCalls(e.target.checked)} className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0" />
                 <span className="text-[12px] text-[var(--text-primary)]">CE</span>
-                <span className="w-3.5 h-3.5 rounded-sm" style={{ backgroundColor: '#22c55e' }} />
+                <span className="w-3.5 h-3.5 rounded-sm" style={{ backgroundColor: api.ceColor }} />
               </label>
               <label className="flex items-center gap-2 cursor-pointer select-none">
                 <input type="checkbox" checked={api.showPuts} onChange={(e) => api.setShowPuts(e.target.checked)} className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0" />
                 <span className="text-[12px] text-[var(--text-primary)]">PE</span>
-                <span className="w-3.5 h-3.5 rounded-sm" style={{ backgroundColor: '#ef4444' }} />
+                <span className="w-3.5 h-3.5 rounded-sm" style={{ backgroundColor: api.peColor }} />
               </label>
             </div>
 
@@ -105,6 +105,29 @@ export function GreekButton({ api, label }: { api: GreekOverlayApi; label: strin
               </div>
             )}
 
+            <div>
+              <div className="text-[10px] font-semibold tracking-wider text-[var(--text-muted)] mb-1.5">
+                HISTORIC DAY <span className="font-normal normal-case text-[9px]">· reconstruct any past session</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={api.greekDate}
+                  max={api.latestDay || undefined}
+                  onChange={(e) => e.target.value && api.setGreekDate(e.target.value)}
+                  className="flex-1 px-2 py-1 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-[12px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                />
+                <button
+                  onClick={() => api.latestDay && api.setGreekDate(api.latestDay)}
+                  disabled={!api.latestDay || api.greekDate === api.latestDay}
+                  className="px-2.5 py-1 rounded-md text-[11px] font-medium border border-[var(--border)] bg-[var(--bg-hover)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-40"
+                  title="Jump to the latest session (live)"
+                >
+                  Latest
+                </button>
+              </div>
+            </div>
+
             {api.histState === 'nogreeks' && (
               <div className="text-[10px] text-amber-500">Historical Greeks unavailable — series starts from now.</div>
             )}
@@ -113,7 +136,9 @@ export function GreekButton({ api, label }: { api: GreekOverlayApi; label: strin
             )}
             {api.histState === 'ok' && (
               <div className="text-[10px] text-[var(--text-muted)]">
-                History: {api.histGranularity} from open (reconstructed); live = per-tick
+                {api.greekDate === api.latestDay
+                  ? `${api.histGranularity} reconstructed (last sessions); live = per-tick`
+                  : `Through ${api.greekDate} (${api.histGranularity}, last sessions); past — no live`}
               </div>
             )}
           </div>

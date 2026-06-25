@@ -253,6 +253,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const allPositionsRef = useRef<PaperPosition[]>([]);
   const legMetasRef = useRef<LegMeta[]>([]);
   const markersRef = useRef<Array<{ detach: () => void }>>([]);
+  // Latest live LTP (paise) per leg ref_id. A tick batch usually carries only the leg(s)
+  // that just moved, so the basket total must sum ALL legs from their last-known LTP — not
+  // just the batch — or the live tip spikes to a single leg's P&L.
+  const lastLtpRef = useRef<Map<number, number>>(new Map());
 
   // ── Greeks state ──
   const [greeksVisible, setGreeksVisible] = useState(false);
@@ -899,27 +903,39 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       const t = nowChartTime();
       const cached = chartDataRef.current;
       if (cached && (t < cached.sessionOpen || t > cached.sessionClose)) return;
-      // Seed the live total with realized P&L of legs already closed this session, so the basket tip =
-      // realized (closed) + unrealized (open) — matching the frozen historical curve at the handoff.
-      let totalPnl = 0;
-      for (const p of closedPositionsRef.current) {
-        const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-        if (p.exit_price != null) totalPnl += side * (p.exit_price - (p.avg_price || 0)) * (p.qty || 0) / 100;
-      }
+
+      // Remember every leg's latest LTP so the basket can always sum ALL legs (below).
+      for (const [refId, ltp] of ltpMap) if (ltp > 0) lastLtpRef.current.set(refId, ltp);
+
+      // Update each leg's own price + P&L line for just the legs that ticked this batch.
       for (const p of positionsRef.current) {
         const ltp = ltpMap.get(p.ref_id);
-        if (ltp == null) continue;
+        if (ltp == null || ltp <= 0) continue;
         seriesRef.current.legPrice.get(p.ref_id)?.update({ time: t as any, value: normLeg(p.ref_id, ltp / 100) });
         const side = (p.order_side || '').includes('BUY') ? 1 : -1;
         const pnl = side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
         seriesRef.current.legPnl.get(p.ref_id)?.update({ time: t as any, value: pnl });
-        totalPnl += pnl;
         if (cached) { // keep cache complete with live ticks (raw values, as effect 3a stores them)
           let pa = cached.legPriceData.get(p.ref_id); if (!pa) { pa = []; cached.legPriceData.set(p.ref_id, pa); }
           upsertPoint(pa, t, ltp / 100);
           let na = cached.legPnlData.get(p.ref_id); if (!na) { na = []; cached.legPnlData.set(p.ref_id, na); }
           upsertPoint(na, t, pnl);
         }
+      }
+
+      // Basket = realized P&L of closed legs + unrealized over ALL open legs at their latest
+      // known LTP (last_traded_price until a leg first ticks live). Summing only the legs in
+      // this batch would collapse the total to one leg and spike the live tip — that was the bug.
+      let totalPnl = 0;
+      for (const p of closedPositionsRef.current) {
+        const side = (p.order_side || '').includes('BUY') ? 1 : -1;
+        if (p.exit_price != null) totalPnl += side * (p.exit_price - (p.avg_price || 0)) * (p.qty || 0) / 100;
+      }
+      for (const p of positionsRef.current) {
+        const ltp = lastLtpRef.current.get(p.ref_id) ?? p.last_traded_price;
+        if (ltp == null || ltp <= 0) continue;
+        const side = (p.order_side || '').includes('BUY') ? 1 : -1;
+        totalPnl += side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
       }
       if (positionsRef.current.length > 0 && seriesRef.current.basketPnl) {
         seriesRef.current.basketPnl.update({ time: t as any, value: totalPnl });
@@ -933,7 +949,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (!updates?.length) return;
       const ids = new Set(positionsRef.current.map(p => p.ref_id));
       const ltpMap = new Map<number, number>();
-      for (const u of updates) { if (ids.has(u.ref_id)) ltpMap.set(u.ref_id, u.ltp); }
+      for (const u of updates) { if (ids.has(u.ref_id) && u.ltp > 0) ltpMap.set(u.ref_id, u.ltp); }
       if (ltpMap.size > 0) processLtp(ltpMap);
     });
 
