@@ -32,6 +32,8 @@ const TICK_IV    = '1s';         // today's session loads at 1s, stitched onto t
 const HIST_DAYS  = 7;            // last 7 days of 1-minute history
 const CHUNK_DAYS = 5;            // load-more chunk when scrolling further back
 const TICK_VIEW_BARS = 5_400;    // initial visible window when today is 1s (~90 min)
+const DETAIL_WINDOW_SEC = 2 * 60 * 60;
+type Resolution = '1m' | '1s';
 
 /** True if an IST-baked chart-time (seconds) falls on the same IST calendar day as `nowMs`. */
 function isSameISTDay(chartTimeSec: unknown, nowMs: number): boolean {
@@ -124,6 +126,10 @@ export default function Tracker({ instrument, theme }: Props) {
   const chartRef       = useRef<IChartApi | null>(null);
   const lineRef        = useRef<ISeriesApi<'Line'> | null>(null);
   const allBarsRef     = useRef<OhlcBar[]>([]);
+  const minuteBarsRef  = useRef<OhlcBar[]>([]);
+  const secondBarsRef  = useRef<OhlcBar[]>([]);
+  const activeResRef   = useRef<Resolution>('1m');
+  const switchingRef   = useRef(false);
   const currentInstRef = useRef<Instrument | null>(null);
   const earliestRef    = useRef<Date | null>(null);
   const dayOpenRef     = useRef<number | null>(null);
@@ -159,7 +165,13 @@ export default function Tracker({ instrument, theme }: Props) {
       },
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', minimumWidth: 72 },
-      timeScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', timeVisible: true, secondsVisible: false, shiftVisibleRangeOnNewBar: true },
+      timeScale: {
+        borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+        timeVisible: true,
+        secondsVisible: true,
+        shiftVisibleRangeOnNewBar: true,
+        minBarSpacing: 0.05,
+      },
       handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
       handleScale:  { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     });
@@ -182,6 +194,9 @@ export default function Tracker({ instrument, theme }: Props) {
       if (!range || isLoadingRef.current || !earliestRef.current) return;
       if (range.from > 10) return;
       await loadMore();
+    });
+    chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
+      handleResolutionRange(range);
     });
 
     const onDblClick = () => {
@@ -270,6 +285,59 @@ export default function Tracker({ instrument, theme }: Props) {
     return bars.map((b) => ({ time: b.time, value: b.close })) as Parameters<NonNullable<typeof lineRef.current>['setData']>[0];
   }
 
+  function rangeTouchesToday(from: number, to: number): boolean {
+    const today = new Date(Date.now() + IST_OFFSET * 1000).toISOString().slice(0, 10);
+    const fromDay = new Date(from * 1000).toISOString().slice(0, 10);
+    const toDay = new Date(to * 1000).toISOString().slice(0, 10);
+    return fromDay <= today && today <= toDay;
+  }
+
+  function refreshGreekGrid() {
+    vega.refresh();
+    theta.refresh();
+  }
+
+  function setActiveResolution(res: Resolution, visibleRange?: { from: unknown; to: unknown }) {
+    const bars = res === '1s' && secondBarsRef.current.length ? secondBarsRef.current : minuteBarsRef.current;
+    if (!bars.length || activeResRef.current === res) return;
+    switchingRef.current = true;
+    activeResRef.current = res;
+    allBarsRef.current = bars;
+    lineRef.current?.setData(toLine(bars));
+    refreshGreekGrid();
+    if (visibleRange && chartRef.current) {
+      requestAnimationFrame(() => {
+        try { chartRef.current?.timeScale().setVisibleRange(visibleRange as any); } catch { /* ignore */ }
+        switchingRef.current = false;
+      });
+    } else {
+      switchingRef.current = false;
+    }
+  }
+
+  function handleResolutionRange(range: { from: unknown; to: unknown } | null) {
+    if (!range || switchingRef.current || !minuteBarsRef.current.length) return;
+    const from = Number(range.from);
+    const to = Number(range.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return;
+    const span = to - from;
+    if (activeResRef.current === '1s' && span > DETAIL_WINDOW_SEC) {
+      setActiveResolution('1m', range);
+    } else if (activeResRef.current === '1m' && span <= DETAIL_WINDOW_SEC && secondBarsRef.current.length && rangeTouchesToday(from, to)) {
+      setActiveResolution('1s', range);
+    }
+  }
+
+  function upsertLastBar(bars: OhlcBar[], bar: OhlcBar): OhlcBar {
+    const last = bars[bars.length - 1];
+    const lastTime = last && typeof last.time === 'number' ? last.time : 0;
+    let next = bar;
+    if (typeof bar.time === 'number' && bar.time < lastTime) next = { ...bar, time: lastTime };
+    if (lastTime === next.time) bars[bars.length - 1] = next;
+    else bars.push(next);
+    return next;
+  }
+
   // ── Live ticks → update the current 1-minute point (tick-by-tick line) ───────
   useEffect(() => {
     const unsub = subscribe('ohlcv', (msg: WsMessage) => {
@@ -300,22 +368,20 @@ export default function Tracker({ instrument, theme }: Props) {
       const close   = Number(b.close) / 100;
       if (!close) return;
 
-      const bars = allBarsRef.current;
-      const last = bars[bars.length - 1];
-      const lastTime = last && typeof last.time === 'number' ? last.time : 0;
+      const tickTime = utcSec + IST_OFFSET;
+      const minuteTime = Math.floor(tickTime / 60) * 60;
+      const open = Number(b.open) / 100 || close;
+      const high = Number(b.high) / 100 || close;
+      const low = Number(b.low) / 100 || close;
+      const minuteBar = upsertLastBar(minuteBarsRef.current, { time: minuteTime, open, high, low, close });
+      const secondBar = upsertLastBar(secondBarsRef.current, { time: tickTime, open, high, low, close });
+      const activeBar = activeResRef.current === '1s' ? secondBar : minuteBar;
+      allBarsRef.current = activeResRef.current === '1s' ? secondBarsRef.current : minuteBarsRef.current;
+      lineRef.current?.update({ time: activeBar.time, value: activeBar.close } as Parameters<NonNullable<typeof lineRef.current>['update']>[0]);
+      updatePrice(close, dayOpenRef.current);
       // 1-second chart time; never decrease — lightweight-charts update() requires
       // non-decreasing time, so out-of-order/same-second ticks overwrite the last point.
-      let barTime = utcSec + IST_OFFSET;
-      if (barTime < lastTime) barTime = lastTime;
-
-      const bar: OhlcBar = { time: barTime, open: Number(b.open) / 100 || close, high: Number(b.high) / 100 || close, low: Number(b.low) / 100 || close, close };
-      lineRef.current?.update({ time: barTime, value: close } as Parameters<NonNullable<typeof lineRef.current>['update']>[0]);
-
       // Keep allBarsRef (the grid the greek overlay snaps to) in sync with the live tail.
-      if (lastTime === barTime) bars[bars.length - 1] = bar;
-      else bars.push(bar);
-
-      updatePrice(close, dayOpenRef.current);
     } catch { /* ignore malformed tick */ }
   }
 
@@ -333,6 +399,10 @@ export default function Tracker({ instrument, theme }: Props) {
 
     currentInstRef.current = tracked;
     allBarsRef.current = [];
+    minuteBarsRef.current = [];
+    secondBarsRef.current = [];
+    activeResRef.current = '1m';
+    switchingRef.current = false;
     earliestRef.current = null;
     dayOpenRef.current = null;
     setPriceDisplay(null);
@@ -359,19 +429,22 @@ export default function Tracker({ instrument, theme }: Props) {
         }
       } catch { /* sub-minute unavailable → keep the 1m history */ }
 
-      allBarsRef.current  = combined;
+      minuteBarsRef.current = bars;
+      secondBarsRef.current = secondTail ? combined : [];
+      activeResRef.current = secondTail ? '1s' : '1m';
+      allBarsRef.current  = secondTail ? secondBarsRef.current : minuteBarsRef.current;
       earliestRef.current = start;
-      dayOpenRef.current  = combined[0].open;
-      lineRef.current.setData(toLine(combined));
+      dayOpenRef.current  = allBarsRef.current[0].open;
+      lineRef.current.setData(toLine(allBarsRef.current));
 
-      const len = combined.length;
+      const len = allBarsRef.current.length;
       const tail = secondTail ? TICK_VIEW_BARS : 120;   // ~90 min at 1s, else last 120 × 1m
       chartRef.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - tail), to: len + 5 });
       // Force a rescale: switching scripts (e.g. NIFTY→BANKNIFTY) must not leave the
       // price axis frozen at the previous instrument's range, which clips the new line.
       lineRef.current.priceScale().applyOptions({ autoScale: true });
       setLoading(null);
-      updatePrice(combined[combined.length - 1].close, dayOpenRef.current);
+      updatePrice(allBarsRef.current[allBarsRef.current.length - 1].close, dayOpenRef.current);
 
       const isIndex = nubraType(tracked) === 'INDEX';
       subscribeChart(isIndex ? { indexes: [sym] } : { instruments: [sym] }, TRACK_IV, tracked.exchange || 'NSE');
@@ -391,10 +464,12 @@ export default function Tracker({ instrument, theme }: Props) {
       const start = new Date(end.getTime() - CHUNK_DAYS * 86400000);
       const { bars } = await fetchRange(tracked, TRACK_IV, start, end);
       if (bars.length) {
-        bars.push(...allBarsRef.current);
-        allBarsRef.current  = bars;
+        minuteBarsRef.current = [...bars, ...minuteBarsRef.current];
+        if (secondBarsRef.current.length) secondBarsRef.current = [...bars, ...secondBarsRef.current];
+        allBarsRef.current = activeResRef.current === '1s' && secondBarsRef.current.length ? secondBarsRef.current : minuteBarsRef.current;
         earliestRef.current = start;
         lineRef.current?.setData(toLine(allBarsRef.current));
+        refreshGreekGrid();
       }
     } catch { /* ignore */ }
     isLoadingRef.current = false;
@@ -416,7 +491,7 @@ export default function Tracker({ instrument, theme }: Props) {
           </>
         )}
 
-        <span className="text-[10px] text-[var(--text-muted)] ml-1">line · today 1s · older 1m · live tick</span>
+        <span className="text-[10px] text-[var(--text-muted)] ml-1">line · auto 1m/1s · live tick</span>
 
         <div className="ml-auto flex items-center gap-2">
           <GreekButton api={vega}  label="Vega" />

@@ -6,7 +6,7 @@ import type { Instrument, OhlcBar, OptionChainData, WsMessage, OptionLeg } from 
 type ChainLeg = OptionLeg & { symbol?: string };
 type ChainResp = { chain?: OptionChainData & { lot_size?: number; all_expiries?: string[]; ce?: ChainLeg[]; pe?: ChainLeg[] } };
 import { getSymbol } from '../types';
-import { IST_OFFSET } from '../lib/utils';
+import { IST_OFFSET, strikeRs } from '../lib/utils';
 import {
   buildSeries, type AggLeg, type ChainSnapshot, type GreekName, type Method, type Basket, type SeriesPoint,
 } from '../lib/greekAggregator';
@@ -102,6 +102,7 @@ export interface GreekOverlayApi {
   toggle:        () => void;
   openSettings:  () => void;
   applySettings: () => void;
+  refresh:       () => void;
   clearForInstrumentChange: () => void;
   enabledRef:    React.RefObject<boolean>;
 }
@@ -287,7 +288,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
   // ── Snapshot helpers ───────────────────────────────────────────────────────
   function legsFromChain(data: { ce?: OptionLeg[]; pe?: OptionLeg[] }, exp: string): { ce: AggLeg[]; pe: AggLeg[] } {
     const map = (legs: OptionLeg[] | undefined): AggLeg[] =>
-      (legs || []).map(l => ({ sp: Number(l.sp), delta: l.delta, vega: l.vega, theta: l.theta, oi: l.oi, exp }));
+      (legs || []).map(l => ({ sp: strikeRs(l), delta: l.delta, vega: l.vega, theta: l.theta, oi: l.oi, exp }));
     return { ce: map(data.ce), pe: map(data.pe) };
   }
 
@@ -416,8 +417,8 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
         const data = await res.json() as ChainResp;
         if (!data.chain) continue;
         if (typeof data.chain.lot_size === 'number' && data.chain.lot_size > 0) lotSizeRef.current = data.chain.lot_size;
-        for (const l of (data.chain.ce || [])) if (l.symbol) meta.set(String(l.symbol), { sp: Number(l.sp), type: 'CE', exp });
-        for (const l of (data.chain.pe || [])) if (l.symbol) meta.set(String(l.symbol), { sp: Number(l.sp), type: 'PE', exp });
+        for (const l of (data.chain.ce || [])) if (l.symbol) meta.set(String(l.symbol), { sp: strikeRs(l), type: 'CE', exp });
+        for (const l of (data.chain.pe || [])) if (l.symbol) meta.set(String(l.symbol), { sp: strikeRs(l), type: 'PE', exp });
         asset = (data.chain.asset || sym).toUpperCase();
         // Only seed a "now" snapshot during market hours; after close it would plot a
         // stray point at wall-clock time, far right of the day's candles.
@@ -640,6 +641,10 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     if (selExpiries.length) reloadAll(selExpiries);
   }
 
+  function refresh() {
+    requestDraw();
+  }
+
   function clearForInstrumentChange() {
     enabledRef.current = false;
     setOn(false);
@@ -665,6 +670,6 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     ceColor: palette.ce, peColor: palette.pe,
     greekDate, latestDay, setGreekDate,
     setShowPopup, toggleExpiry, setMethod, setBasket, setSeriesMode, setShowCalls, setShowPuts,
-    toggle, openSettings, applySettings, clearForInstrumentChange, enabledRef,
+    toggle, openSettings, applySettings, refresh, clearForInstrumentChange, enabledRef,
   };
 }
