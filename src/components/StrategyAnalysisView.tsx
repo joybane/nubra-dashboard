@@ -177,6 +177,12 @@ function activeGreekSource(filter: Set<string>): GreekSource {
   return 'net';
 }
 
+const DEFAULT_LOT_SIZES: Record<string, number> = { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60, MIDCPNIFTY: 120, SENSEX: 20 };
+const MONTH_CODES: Record<string, string> = { '1':'01','2':'02','3':'03','4':'04','5':'05','6':'06','7':'07','8':'08','9':'09','O':'10','N':'11','D':'12' };
+const GREEK_SOURCES = ['net', 'CE', 'PE'] as const;
+const GREEK_LINE_STYLES: Record<string, number> = { net: 0, CE: 2, PE: 1 };
+const GREEK_LINE_WIDTHS: Record<string, 1 | 2> = { net: 2, CE: 1, PE: 1 };
+
 function deriveUnderlying(positions: PaperPosition[]): string | null {
   for (const p of positions) {
     const name = p.display_name || p.zanskar_name || '';
