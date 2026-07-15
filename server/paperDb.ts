@@ -128,6 +128,7 @@ export function initDb(): Database.Database {
   const orderCols = cols('orders');
   if (!orderCols.has('basket_group_id')) db.exec(`ALTER TABLE orders ADD COLUMN basket_group_id TEXT`);
   if (!orderCols.has('strategy_name'))   db.exec(`ALTER TABLE orders ADD COLUMN strategy_name TEXT`);
+  if (!orderCols.has('margin_required')) db.exec(`ALTER TABLE orders ADD COLUMN margin_required INTEGER`);
 
   // Positions table migration: old schema had PRIMARY KEY (ref_id) only.
   // If basket_group_id column is missing, recreate the table with composite key.
@@ -175,11 +176,11 @@ const _insertOrder = () => _stmtInsertOrder ??= db.prepare(`
   INSERT INTO orders (order_id, ref_id, nubra_name, display_name, order_type, order_side,
     order_price, trigger_price, order_qty, filled_qty, avg_filled_price, order_status,
     order_time, filled_time, order_delivery_type, validity_type, tag, sl_triggered,
-    basket_group_id, strategy_name)
+    basket_group_id, strategy_name, margin_required)
   VALUES (@order_id, @ref_id, @nubra_name, @display_name, @order_type, @order_side,
     @order_price, @trigger_price, @order_qty, @filled_qty, @avg_filled_price, @order_status,
     @order_time, @filled_time, @order_delivery_type, @validity_type, @tag, @sl_triggered,
-    @basket_group_id, @strategy_name)
+    @basket_group_id, @strategy_name, @margin_required)
 `);
 
 let _stmtUpdateOrder: ReturnType<typeof db.prepare> | null = null;
@@ -195,7 +196,7 @@ export function dbInsertOrder(o: {
   order_qty: number; filled_qty: number; avg_filled_price: number; order_status: string;
   order_time: number; filled_time: number | null; order_delivery_type: string;
   validity_type: string; tag?: string; sl_triggered: boolean;
-  basket_group_id?: string; strategy_name?: string;
+  basket_group_id?: string; strategy_name?: string; margin_required?: number;
 }): void {
   _insertOrder().run({
     order_id: o.order_id, ref_id: o.ref_id, nubra_name: o.nubraName,
@@ -206,6 +207,7 @@ export function dbInsertOrder(o: {
     order_delivery_type: o.order_delivery_type, validity_type: o.validity_type,
     tag: o.tag ?? null, sl_triggered: o.sl_triggered ? 1 : 0,
     basket_group_id: o.basket_group_id ?? null, strategy_name: o.strategy_name ?? null,
+    margin_required: o.margin_required ?? null,
   });
 }
 
@@ -250,7 +252,8 @@ export function dbUpsertPosition(p: {
     ON CONFLICT(ref_id, basket_group_id) DO UPDATE SET
       qty=@qty, avg_price=@avg_price, realized_pnl=@realized_pnl,
       last_traded_price=@last_traded_price, display_name=@display_name,
-      exit_time=@exit_time, exit_price=@exit_price
+      exit_time=@exit_time, exit_price=@exit_price,
+      margin_required=COALESCE(@margin_required, margin_required)
   `).run({
     ref_id: p.ref_id, nubra_name: p.nubraName, display_name: p.display_name,
     qty: p.qty, avg_price: p.avg_price, realized_pnl: p.realized_pnl,

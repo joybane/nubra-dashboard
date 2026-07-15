@@ -6,7 +6,7 @@ import type { Instrument, OhlcBar, OptionChainData, WsMessage, OptionLeg } from 
 type ChainLeg = OptionLeg & { symbol?: string };
 type ChainResp = { chain?: OptionChainData & { lot_size?: number; all_expiries?: string[]; ce?: ChainLeg[]; pe?: ChainLeg[] } };
 import { getSymbol } from '../types';
-import { IST_OFFSET, strikeRs } from '../lib/utils';
+import { IST_OFFSET, isNseMarketOpenNow, isNseMarketSessionChartTime, strikeRs } from '../lib/utils';
 import {
   buildSeries, type AggLeg, type ChainSnapshot, type GreekName, type Method, type Basket, type SeriesPoint,
 } from '../lib/greekAggregator';
@@ -37,12 +37,6 @@ const normTs = (ts: number | string): number => {
   if (n >= 1e11) return n;                      // milliseconds
   return n * 1000;                              // seconds      → ms
 };
-
-/** IST time-of-day market-hours check (09:15–15:30), used to avoid stray points. */
-function isMarketOpenNow(): boolean {
-  const istMin = ((Math.floor(Date.now() / 1000) + 5.5 * 3600) % 86400) / 60;
-  return istMin >= 9 * 60 + 15 && istMin <= 15 * 60 + 30;
-}
 
 /** Years to expiry at a given epoch-ms instant (expiry assumed 15:30 IST = 10:00 UTC). */
 function yearsToExpiry(expiry: string, ms: number): number {
@@ -254,7 +248,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     const n = times.length;
     return (ms: number): number | null => {
       const ct = Math.floor(ms / 1000) + IST_OFFSET;
-      if (!Number.isFinite(ct)) return null;
+      if (!Number.isFinite(ct) || !isNseMarketSessionChartTime(ct)) return null;
       if (!n) return ct;
       if (ct < times[0]) return null;            // before chart range — don't render
       if (ct >= times[n - 1]) return times[n - 1]; // live/future → clamp to last bar
@@ -292,6 +286,21 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     return { ce: map(data.ce), pe: map(data.pe) };
   }
 
+  function mergeLegSide(prev: AggLeg[], updates: AggLeg[]): AggLeg[] {
+    if (!updates.length) return prev;
+    const key = (leg: AggLeg) => `${leg.exp || ''}:${leg.sp}`;
+    const byStrike = new Map(prev.map((leg) => [key(leg), leg]));
+    for (const leg of updates) byStrike.set(key(leg), leg);
+    return [...byStrike.values()].sort((a, b) => a.sp - b.sp);
+  }
+
+  function mergeLiveLegs(exp: string, update: { ce: AggLeg[]; pe: AggLeg[] }) {
+    const prev = liveLegsRef.current.get(exp);
+    liveLegsRef.current.set(exp, prev
+      ? { ce: mergeLegSide(prev.ce, update.ce), pe: mergeLegSide(prev.pe, update.pe) }
+      : update);
+  }
+
   /** Combine the latest live legs across all selected expiries into one snapshot. */
   function storeCombinedLive(force = false) {
     const ce: AggLeg[] = [], pe: AggLeg[] = [];
@@ -301,6 +310,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
   }
 
   function storeSnapshot(snap: ChainSnapshot, force = false) {
+    if (!isNseMarketSessionChartTime(Math.floor(snap.ts / 1000) + IST_OFFSET)) return;
     if (!force && snap.ts - lastSnapMsRef.current < SNAP_MIN_GAP_MS) {
       // overwrite the live tail without adding a new bucket
       snapshotsRef.current.set(lastSnapMsRef.current, { ...snap, ts: lastSnapMsRef.current });
@@ -320,8 +330,9 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
       if (!wsExpiriesRef.current.has(exp)) return;
       // Live ticks only belong on the latest day; skip while inspecting a past day.
       if (greekDateRef.current && greekDateRef.current !== defaultDayRef.current) return;
+      if (!isNseMarketOpenNow()) return;
       lastWsTickRef.current = Date.now();   // WS is alive → fallback poll stays idle
-      liveLegsRef.current.set(exp, legsFromChain(data, exp));
+      mergeLiveLegs(exp, legsFromChain(data, exp));
       storeCombinedLive();
       requestDraw();
     });
@@ -357,7 +368,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     pollTimerRef.current = window.setInterval(() => {
       if (!enabledRef.current) return;
       if (greekDateRef.current !== defaultDayRef.current) return;   // inspecting a past day
-      if (!isMarketOpenNow()) return;
+      if (!isNseMarketOpenNow()) return;
       if (Date.now() - lastWsTickRef.current < WS_QUIET_MS) return; // WS feed is live — leave it
       void pollLiveOnce();
     }, LIVE_POLL_MS);
@@ -409,7 +420,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     try {
       const meta = new Map<string, { sp: number; type: 'CE' | 'PE'; exp: string }>();
       const liveLegs = new Map<string, { ce: AggLeg[]; pe: AggLeg[] }>();
-      const open = isMarketOpenNow();
+      const open = isNseMarketOpenNow();
       let asset = '';
 
       for (const exp of expiriesSel) {
@@ -470,7 +481,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     snapshotsRef.current = new Map();
     lastSnapMsRef.current = 0;
     // Re-seed the live point only when returning to the latest day during market hours.
-    if (dateStr === defaultDayRef.current && liveLegsRef.current.size) storeCombinedLive(true);
+    if (dateStr === defaultDayRef.current && liveLegsRef.current.size && isNseMarketOpenNow()) storeCombinedLive(true);
     requestDraw();
     fetchHistoryForDay(dateStr);
   }
@@ -568,6 +579,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     const buckets = new Map<number, ChainSnapshot>();
 
     const addLeg = (ts: number, type: 'CE' | 'PE', leg: AggLeg) => {
+      if (!isNseMarketSessionChartTime(Math.floor(ts / 1000) + IST_OFFSET)) return;
       let snap = buckets.get(ts);
       if (!snap) { snap = { ts, ce: [], pe: [] }; buckets.set(ts, snap); }
       (type === 'CE' ? snap.ce : snap.pe).push(leg);

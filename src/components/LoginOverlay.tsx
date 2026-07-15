@@ -16,7 +16,8 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
 
   async function sendOtp() {
     setLoading(true);
-    showStatus('Sending OTP…', 'info');
+    setOtp('');
+    showStatus('Sending OTP...', 'info');
     try {
       const res  = await fetch('/auth/send-otp', { method: 'POST' });
       const data = await res.json() as { ok: boolean; message?: string; error?: string };
@@ -34,7 +35,7 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
   async function verifyOtp() {
     if (!otp.trim()) { showStatus('Enter the OTP first.', 'error'); return; }
     setLoading(true);
-    showStatus('Verifying OTP…', 'info');
+    showStatus('Verifying OTP...', 'info');
     try {
       const res  = await fetch('/auth/verify-otp', {
         method:  'POST',
@@ -43,9 +44,9 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
       });
       const data = await res.json() as { ok: boolean; message?: string; error?: string };
       if (!data.ok) throw new Error(data.error);
-      showStatus('OTP verified. Verifying MPIN…', 'success');
+      showStatus('OTP verified. Verifying MPIN...', 'success');
       setStep(3);
-      await verifyPin();
+      await verifyPin(false);
     } catch (err: unknown) {
       showStatus((err as Error).message, 'error');
       setStep(2);
@@ -55,10 +56,10 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
   }
 
   // Fast path when the broker expired only the session token but the auth token
-  // is still valid — re-mint a session via MPIN with no OTP round-trip.
+  // is still valid - re-mint a session via MPIN with no OTP round-trip.
   async function resumeSession() {
     setLoading(true);
-    showStatus('Resuming session…', 'info');
+    showStatus('Resuming session...', 'info');
     try {
       const res  = await fetch('/auth/verify-pin', { method: 'POST' });
       const data = await res.json() as { ok: boolean; message?: string; error?: string };
@@ -66,13 +67,15 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
       showStatus('Authenticated!', 'success');
       setTimeout(() => onAuthenticated(), 500);
     } catch (err: unknown) {
-      showStatus(`${(err as Error).message} — send OTP instead.`, 'error');
+      showStatus(`${(err as Error).message} - send OTP instead.`, 'error');
     } finally {
       setLoading(false);
     }
   }
 
-  async function verifyPin() {
+  async function verifyPin(manageLoading = true) {
+    if (manageLoading) setLoading(true);
+    showStatus('Verifying MPIN...', 'info');
     try {
       const res  = await fetch('/auth/verify-pin', { method: 'POST' });
       const data = await res.json() as { ok: boolean; message?: string; error?: string };
@@ -80,8 +83,10 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
       showStatus('Authenticated!', 'success');
       setTimeout(() => onAuthenticated(), 600);
     } catch (err: unknown) {
-      showStatus((err as Error).message, 'error');
-      setStep(2);
+      showStatus(`OTP verified, but MPIN verification failed: ${(err as Error).message}. Check MPIN in .env, then retry MPIN or send a new OTP.`, 'error');
+      setStep(3);
+    } finally {
+      if (manageLoading) setLoading(false);
     }
   }
 
@@ -154,14 +159,33 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
 
         {/* Step 3: Auto MPIN */}
         {step === 3 && (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-3">
             <p className="text-xs text-[var(--text-secondary)]">
-              Verifying MPIN from server configuration…
+              Verifying MPIN from server configuration...
             </p>
-            <div className="flex items-center gap-2 text-[var(--text-muted)]">
-              <span className="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full" />
-              <span className="text-xs">Please wait…</span>
-            </div>
+            {loading ? (
+              <div className="flex items-center gap-2 text-[var(--text-muted)]">
+                <span className="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full" />
+                <span className="text-xs">Please wait...</span>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={() => verifyPin()}
+                  disabled={loading}
+                  className="w-full py-2.5 px-4 bg-[var(--accent)] hover:bg-[var(--accent-dim)] text-white rounded-md font-semibold text-sm disabled:opacity-50 transition-colors"
+                >
+                  Retry MPIN
+                </button>
+                <button
+                  onClick={sendOtp}
+                  disabled={loading}
+                  className="w-full py-2 px-4 bg-[var(--bg-secondary)] border border-[var(--border)] hover:border-[var(--accent)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-md font-medium text-xs disabled:opacity-50 transition-colors"
+                >
+                  Send new OTP
+                </button>
+              </div>
+            )}
           </div>
         )}
 

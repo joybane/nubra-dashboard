@@ -20,6 +20,7 @@ import {
 import { buildBasketSnapshot, istDateString, type SnapPosition } from './snapshotBuilder.ts';
 import { getMeta as btGetMeta, runBacktest, runDayDetail, validateConfig, validateSweep, runSweep, validateWalkForward, runWalkForward } from './backtest/index.ts';
 import type { BacktestConfig, SweepRequest, WalkForwardRequest } from './backtest/types.ts';
+import { calculateLocalBasketMargin } from './marginEngine.ts';
 import protobuf from 'protobufjs';
 
 dotenv.config();
@@ -28,8 +29,10 @@ initDb();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-const BASE_URL = process.env.NUBRA_BASE_URL || 'https://api2.nubra.io';
-const PORT     = Number(process.env.SERVER_PORT || 3000);
+const BASE_URL               = process.env.NUBRA_BASE_URL || 'https://api2.nubra.io';
+const LEGACY_MARGIN_BASE_URL = 'https://api.nubra.io';
+const MARGIN_BASE_URL        = process.env.NUBRA_MARGIN_BASE_URL || BASE_URL;
+const PORT            = Number(process.env.SERVER_PORT || 3000);
 
 // ─── Server-side refdata cache ────────────────────────────────────────────────
 // Avoids fetching 100k+ instrument records from Nubra on every search keystroke.
@@ -151,7 +154,11 @@ function baseHeaders(extra: Record<string, string> = {}): Record<string, string>
 }
 
 async function nubraPost(endpoint: string, body: object, extraHeaders: Record<string, string> = {}): Promise<Record<string, unknown>> {
-  const res  = await fetch(`${BASE_URL}${endpoint}`, {
+  return nubraPostAt(BASE_URL, endpoint, body, extraHeaders);
+}
+
+async function nubraPostAt(baseUrl: string, endpoint: string, body: object, extraHeaders: Record<string, string> = {}): Promise<Record<string, unknown>> {
+  const res  = await fetch(`${baseUrl}${endpoint}`, {
     method:  'POST',
     headers: baseHeaders(extraHeaders),
     body:    JSON.stringify(body),
@@ -701,6 +708,7 @@ class SimBroker {
         sl_triggered: !!(row.sl_triggered as number),
         basket_group_id: row.basket_group_id as string | undefined,
         strategy_name: row.strategy_name as string | undefined,
+        margin_required: row.margin_required as number | undefined,
       };
       this.orders.set(o.order_id, o);
       if (o.order_id >= this.nextId) this.nextId = o.order_id + 1;
@@ -1479,23 +1487,121 @@ interface BasketMarginBody {
     order_type: string;
     order_price?: number;
     order_delivery_type: string;
+    strike?: number;
+    option_type?: string;
+    ltp?: number;
+    lot_size?: number;
+    expiry?: string;
+    symbol?: string;
   }>;
+}
+
+function v3Side(side: string | undefined): 'BUY' | 'SELL' {
+  return (side || '').includes('SELL') ? 'SELL' : 'BUY';
+}
+
+function v3Delivery(delivery: string | undefined): 'IDAY' | 'CNC' {
+  return (delivery || '').includes('IDAY') ? 'IDAY' : 'CNC';
+}
+
+function readNumber(source: Record<string, unknown>, paths: string[]): number {
+  for (const path of paths) {
+    let cur: unknown = source;
+    for (const key of path.split('.')) {
+      if (!cur || typeof cur !== 'object') { cur = undefined; break; }
+      cur = (cur as Record<string, unknown>)[key];
+    }
+    const n = Number(cur);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 0;
+}
+
+function normalizeMarginResponse(data: Record<string, unknown>): Record<string, unknown> {
+  const totalMargin = readNumber(data, [
+    'total_margin',
+    'totalMargin',
+    'totalFundsRequired',
+    'marginInfo.totalMargin',
+    'data.total_margin',
+    'data.totalMargin',
+  ]);
+  const marginBenefit = readNumber(data, [
+    'margin_benefit',
+    'marginBenefit',
+    'marginBenefitAmount',
+    'benefit',
+    'marginInfo.marginBenefit',
+    'marginInfo.margin_benefit',
+    'data.margin_benefit',
+    'data.marginBenefit',
+  ]);
+  return {
+    ...data,
+    total_margin: totalMargin,
+    span: readNumber(data, ['span', 'span_margin', 'spanMargin', 'marginInfo.span', 'data.span']),
+    exposure: readNumber(data, ['exposure', 'exposure_margin', 'exposureMargin', 'marginInfo.exposure', 'data.exposure']),
+    opt_prem: readNumber(data, ['opt_prem', 'option_premium', 'premium', 'premiumPayable', 'marginInfo.optPrem', 'data.opt_prem']),
+    margin_benefit: marginBenefit,
+    leg_margin: data.leg_margin || data.legMargin || (data.data as Record<string, unknown> | undefined)?.leg_margin || null,
+    message: ((data.marginInfo as Record<string, unknown> | undefined)?.message || data.message || null) as unknown,
+  };
+}
+
+function buildV3MarginOrders(orders: BasketMarginBody['orders']): Array<Record<string, unknown>> {
+  if (orders.length <= 1) {
+    const o = orders[0];
+    return [{
+      refId: o.ref_id,
+      qty: o.order_qty,
+      side: v3Side(o.order_side),
+      deliveryType: v3Delivery(o.order_delivery_type),
+      priceType: o.order_price ? 'LIMIT' : 'MARKET',
+      validityType: 'DAY',
+      isMultiLeg: false,
+      executionMode: 'ENTRY',
+      entryPrice: o.order_price ?? 0,
+      stratTags: ['nubra-dashboard', 'single-margin'],
+    }];
+  }
+
+  const baseQty = Math.max(1, Math.min(...orders.map(o => Math.max(1, Number(o.order_qty || 1)))));
+  const first = orders[0];
+  return [{
+    isMultiLeg: true,
+    qty: baseQty,
+    side: v3Side(first?.order_side),
+    deliveryType: v3Delivery(first?.order_delivery_type),
+    priceType: 'MARKET',
+    validityType: 'DAY',
+    executionMode: 'ENTRY',
+    entryPrice: 0,
+    legs: orders.map(o => ({
+      refId: o.ref_id,
+      unitQty: Math.max(1, Math.round(Number(o.order_qty || baseQty) / baseQty)),
+    })),
+    stratTags: ['nubra-dashboard', 'basket-margin'],
+  }];
 }
 
 fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, reply) => {
   if (!requireAuth(reply)) return;
   try {
-    const { exchange = 'NSE', orders, multiplier = 1 } = req.body as BasketMarginBody & { multiplier?: number };
+    const { exchange = 'NSE', orders } = req.body as BasketMarginBody & { multiplier?: number };
+    if (!Array.isArray(orders) || orders.length === 0) return reply.status(400).send({ error: 'orders must be non-empty' });
 
     const apiOrders = orders.map(o => ({
       ref_id:              o.ref_id,
+      order_type:          'ORDER_TYPE_REGULAR',
+      price_type:          'MARKET',
       order_qty:           o.order_qty,
+      order_price:         o.order_price ?? 0,
       order_side:          o.order_side,
       order_delivery_type: o.order_delivery_type,
+      validity_type:       'IOC',
+      request_type:        'ORDER_REQUEST_NEW',
     }));
 
-    // Determine dominant side/delivery from first order
-    const firstOrder = orders[0];
     const payload = {
       with_portfolio: true,
       with_legs: true,
@@ -1503,22 +1609,64 @@ fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, rep
       order_req: {
         exchange,
         orders: apiOrders,
-        basket_params: {
-          order_side:          firstOrder?.order_side || 'ORDER_SIDE_BUY',
-          order_delivery_type: firstOrder?.order_delivery_type || 'ORDER_DELIVERY_TYPE_IDAY',
-          price_type:          'MARKET',
-          multiplier:          multiplier,
-        },
       },
     };
     console.log('[basket-margin] request:', JSON.stringify(payload));
-    const data = await nubraPost(
-      '/orders/v2/margin_required',
-      payload,
-      { Authorization: `Bearer ${authState.sessionToken!}` },
-    );
-    console.log('[basket-margin] response:', JSON.stringify(data));
-    return reply.send(data);
+    const v2Errors: string[] = [];
+    const v2BaseUrls = Array.from(new Set([MARGIN_BASE_URL, LEGACY_MARGIN_BASE_URL]));
+    for (const baseUrl of v2BaseUrls) {
+      try {
+        const data = await nubraPostAt(
+          baseUrl,
+          '/orders/v2/margin_required',
+          payload,
+          { Authorization: `Bearer ${authState.sessionToken!}` },
+        );
+        const normalized = normalizeMarginResponse(data);
+        console.log(`[basket-margin] response from ${baseUrl}:`, JSON.stringify(normalized));
+        return reply.send(normalized);
+      } catch (err) {
+        const msg = `${baseUrl}: ${(err as Error).message}`;
+        v2Errors.push(msg);
+        console.warn('[basket-margin] v2 failed:', msg);
+      }
+    }
+    console.warn('[basket-margin] all v2 bases failed, trying v3:', v2Errors.join(' | '));
+
+    const v3Payload = {
+      requestType: 'NEW',
+      orders: buildV3MarginOrders(orders),
+    };
+    console.log('[basket-margin-v3] request:', JSON.stringify(v3Payload));
+    try {
+      const v3Data = await nubraPostAt(
+        MARGIN_BASE_URL,
+        '/sentinel/orders/funds_required',
+        v3Payload,
+        { Authorization: `Bearer ${authState.sessionToken!}` },
+      );
+      const normalized = normalizeMarginResponse(v3Data);
+      console.log('[basket-margin-v3] response:', JSON.stringify(normalized));
+      if (Number(normalized.total_margin ?? 0) > 0) return reply.send(normalized);
+      throw new Error('Broker returned no total margin.');
+    } catch (err) {
+      const v3Error = (err as Error).message;
+      const localMargin = calculateLocalBasketMargin(orders);
+      if (localMargin && Number(localMargin.total_margin || 0) > 0) {
+        console.warn('[basket-margin] broker unavailable, using local margin:', JSON.stringify({
+          source: localMargin.source,
+          total_margin: localMargin.total_margin,
+          broker_error: `V2: ${v2Errors.join(' | ') || 'not attempted'}. V3: ${v3Error}`,
+        }));
+        return reply.send({
+          ...localMargin,
+          broker_error: `Broker margin unavailable. V2: ${v2Errors.join(' | ') || 'not attempted'}. V3: ${v3Error}`,
+        });
+      }
+      return reply.status(502).send({
+        error: `Broker margin unavailable. V2: ${v2Errors.join(' | ') || 'not attempted'}. V3: ${v3Error}`,
+      });
+    }
   } catch (err: unknown) {
     return reply.status(500).send({ error: (err as Error).message });
   }
@@ -1631,6 +1779,35 @@ fastify.post<{ Body: MarginBody }>('/paper/margin', async (req, reply) => {
     // Nubra API: ORDER_TYPE_MARKET is deprecated — use REGULAR + price_type
     const isMarket  = order_type === 'ORDER_TYPE_MARKET' || !order_price;
     const priceType = isMarket ? 'MARKET' : 'LIMIT';
+    const v3Payload = {
+      requestType: 'NEW',
+      orders: [{
+        refId: liveRefId,
+        qty: order_qty,
+        side: v3Side(order_side),
+        deliveryType: v3Delivery(order_delivery_type),
+        priceType,
+        validityType: 'DAY',
+        isMultiLeg: false,
+        executionMode: 'ENTRY',
+        entryPrice: order_price ?? 0,
+        stratTags: ['nubra-dashboard', 'single-margin'],
+      }],
+    };
+    console.log('[margin-v3] request:', JSON.stringify(v3Payload));
+    try {
+      const v3Data = await nubraPostAt(
+        MARGIN_BASE_URL,
+        '/sentinel/orders/funds_required',
+        v3Payload,
+        { Authorization: `Bearer ${authState.sessionToken!}` },
+      );
+      const normalized = normalizeMarginResponse(v3Data);
+      console.log('[margin-v3] response:', JSON.stringify(normalized));
+      if (Number(normalized.total_margin ?? 0) > 0) return reply.send(normalized);
+    } catch (err) {
+      console.warn('[margin-v3] failed, trying v2:', (err as Error).message);
+    }
     const order = {
       ref_id:              liveRefId,
       order_side,
@@ -1644,13 +1821,15 @@ fastify.post<{ Body: MarginBody }>('/paper/margin', async (req, reply) => {
     };
     const payload = { with_portfolio: true, with_legs: false, is_basket: false, order_req: { exchange, orders: [order] } };
     console.log('[margin] request:', JSON.stringify(payload));
-    const data = await nubraPost(
+    const data = await nubraPostAt(
+      MARGIN_BASE_URL,
       '/orders/v2/margin_required',
       payload,
       { Authorization: `Bearer ${authState.sessionToken!}` },
     );
-    console.log('[margin] response:', JSON.stringify(data));
-    return reply.send(data);
+    const normalized = normalizeMarginResponse(data);
+    console.log('[margin] response:', JSON.stringify(normalized));
+    return reply.send(normalized);
   } catch (err: unknown) {
     return reply.status(500).send({ error: (err as Error).message });
   }
@@ -1753,3 +1932,7 @@ httpServer.listen(PORT, async () => {
   console.log(`Nubra Dashboard server → http://localhost:${PORT}`);
   await tryRestoreSession();
 });
+
+
+
+

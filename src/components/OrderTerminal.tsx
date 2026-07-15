@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Instrument, PaperHolding, PaperOrder, PaperPosition, WsMessage, OptionChainData, OptionLeg } from '../types';
 import { fmtPrice } from '../lib/utils';
 import { usePaperTrading } from '../hooks/usePaperTrading';
@@ -388,6 +388,61 @@ function isPositionGroup(item: PaperPosition | PositionGroup): item is PositionG
   return 'positions' in item && Array.isArray((item as PositionGroup).positions);
 }
 
+function groupMarginPaise(positions: PaperPosition[]): number {
+  const withMargin = positions.find(p => typeof p.margin_required === 'number' && p.margin_required > 0);
+  return withMargin?.margin_required ?? 0;
+}
+
+function groupMarginKey(strategyName: string, positions: PaperPosition[]): string {
+  const product = positions[0]?.product || '';
+  return `${strategyName.trim().toLowerCase()}|${positions.length}|${product}`;
+}
+
+function parsePositionOption(p: PaperPosition): { symbol?: string; strike?: number; optionType?: 'CE' | 'PE' } {
+  const explicitType = String(p.option_type || '').toUpperCase();
+  const optionType = explicitType === 'CE' || explicitType === 'PE'
+    ? explicitType
+    : ((`${p.display_name || ''} ${p.zanskar_name || ''}`.toUpperCase().match(/\b(CE|PE)\b|(\d+)(CE|PE)$/)?.[1]
+      || `${p.display_name || ''} ${p.zanskar_name || ''}`.toUpperCase().match(/\b(CE|PE)\b|(\d+)(CE|PE)$/)?.[3]) as 'CE' | 'PE' | undefined);
+  const strike = Number(p.strike_price || (`${p.display_name || ''} ${p.zanskar_name || ''}`.match(/(\d+(?:\.\d+)?)\s*(?:CE|PE)\b/i)?.[1] ?? 0));
+  const symbol = String(p.display_name || p.zanskar_name || '')
+    .trim()
+    .split(/\s+/)[0]
+    ?.replace(/\d.*$/, '')
+    .toUpperCase();
+  return { symbol: symbol || undefined, strike: strike > 0 ? strike : undefined, optionType };
+}
+
+async function fetchPositionGroupMarginPaise(positions: PaperPosition[]): Promise<number> {
+  const orders = positions
+    .filter(p => p.ref_id && p.qty)
+    .map(p => {
+      const opt = parsePositionOption(p);
+      return {
+        ref_id: p.ref_id,
+        order_qty: Math.abs(p.qty),
+        strike: opt.strike,
+        option_type: opt.optionType,
+        ltp: (p.last_traded_price || p.avg_price || 0) / 100,
+        lot_size: p.lot_size,
+        expiry: p.expiry,
+        symbol: opt.symbol,
+        order_side: (p.order_side || '').includes('BUY') ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
+        order_delivery_type: p.product === 'MIS' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
+      };
+    });
+  if (!orders.length) return 0;
+
+  const res = await fetch('/paper/margin/basket', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ exchange: 'NSE', multiplier: 1, orders }),
+  });
+  if (!res.ok) return 0;
+  const data = await res.json() as Record<string, unknown>;
+  return Number(data.total_margin ?? 0);
+}
+
 // ─── Positions tab ────────────────────────────────────────────────────────────
 interface PositionsTabProps {
   uatAuth: boolean;
@@ -409,6 +464,9 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
   const [histFrom,     setHistFrom]     = useState('');
   const [histTo,       setHistTo]       = useState('');
   const [detailPos,    setDetailPos]    = useState<PaperPosition | null>(null);
+  const [groupMargins, setGroupMargins] = useState<Record<string, number>>({});
+  const groupMarginsRef = useRef<Record<string, number>>({});
+  const marginRequestsRef = useRef<Set<string>>(new Set());
   const { subscribe } = useWs();
 
   const posExitKey = (p: PaperPosition) => `${p.ref_id}:${p.basket_group_id || ''}`;
@@ -571,6 +629,41 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
   const groupedClosed  = groupPositions(filteredClosed);
   const groupedHistory = groupPositions(historyPositions);
 
+  const knownGroupMargins = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const item of groupPositions(closedPositions)) {
+      if (!isPositionGroup(item)) continue;
+      const margin = groupMarginPaise(item.positions);
+      if (margin > 0) out[groupMarginKey(item.strategy_name, item.positions)] = margin;
+    }
+    return out;
+  }, [closedPositions]);
+
+  function resolvedGroupMarginPaise(g: PositionGroup): number {
+    return groupMargins[g.basket_group_id]
+      || groupMarginPaise(g.positions)
+      || knownGroupMargins[groupMarginKey(g.strategy_name, g.positions)]
+      || 0;
+  }
+
+  useEffect(() => { groupMarginsRef.current = groupMargins; }, [groupMargins]);
+
+  useEffect(() => {
+    if (!uatAuth) return;
+    const groups = groupPositions(positions).filter(isPositionGroup);
+    for (const g of groups) {
+      if (groupMarginsRef.current[g.basket_group_id] != null) continue;
+      if (marginRequestsRef.current.has(g.basket_group_id)) continue;
+      marginRequestsRef.current.add(g.basket_group_id);
+      fetchPositionGroupMarginPaise(g.positions)
+        .then(total => {
+          if (total > 0) setGroupMargins(prev => ({ ...prev, [g.basket_group_id]: total }));
+        })
+        .catch(e => console.warn('[Positions] group margin fallback failed:', e))
+        .finally(() => marginRequestsRef.current.delete(g.basket_group_id));
+    }
+  }, [positions, uatAuth]);
+
   function calcPnl(p: PaperPosition): number {
     const side = (p.order_side || '').includes('BUY') ? 1 : -1;
     return side * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0) / 100;
@@ -721,8 +814,8 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
               const g = item;
               const isExp = expanded.has(g.basket_group_id);
               const groupPnl = g.positions.reduce((s, p) => s + (p.realised_pnl || p.pnl || 0) / 100, 0);
-              const gMargin = g.positions[0]?.margin_required;
-              const gMarginRs = gMargin ? gMargin / 100 : 0;
+              const gMargin = resolvedGroupMarginPaise(g);
+              const gMarginRs = gMargin / 100;
               const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
               return (
                 <React.Fragment key={g.basket_group_id}>
@@ -767,8 +860,8 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
               const isOpen = expanded.has(g.basket_group_id);
               const groupPnl = g.positions.reduce((s, p) => s + calcPnl(p), 0);
               const allExiting = g.positions.every(p => exiting.has(posExitKey(p)));
-              const gMargin = g.positions[0]?.margin_required;
-              const gMarginRs = gMargin ? gMargin / 100 : 0;
+              const gMargin = resolvedGroupMarginPaise(g);
+              const gMarginRs = gMargin / 100;
               const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
               return (
                 <React.Fragment key={g.basket_group_id}>
@@ -846,8 +939,8 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
               const g = item;
               const isOpen = expanded.has(g.basket_group_id);
               const groupPnl = g.positions.reduce((s, p) => s + (p.realised_pnl || p.pnl || 0) / 100, 0);
-              const gMargin = g.positions[0]?.margin_required;
-              const gMarginRs = gMargin ? gMargin / 100 : 0;
+              const gMargin = resolvedGroupMarginPaise(g);
+              const gMarginRs = gMargin / 100;
               const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
               return (
                 <React.Fragment key={g.basket_group_id}>

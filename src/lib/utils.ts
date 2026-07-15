@@ -58,7 +58,31 @@ export function formatExpiry(exp: string | number | null | undefined): string {
 
 // ─── IST chart time ──────────────────────────────────────────────────────────
 export const IST_OFFSET = 5.5 * 60 * 60; // seconds
+export const NSE_MARKET_OPEN_MIN = 9 * 60 + 15;
+export const NSE_MARKET_CLOSE_MIN = 15 * 60 + 30;
 
+export function chartTimeDayKey(t: number | { year: number; month: number; day: number }): string | null {
+  if (typeof t === 'object') return `${t.year}-${String(t.month).padStart(2, '0')}-${String(t.day).padStart(2, '0')}`;
+  if (!Number.isFinite(t)) return null;
+  return new Date(t * 1000).toISOString().slice(0, 10);
+}
+
+export function chartTimeMinuteOfDay(t: number | { year: number; month: number; day: number }): number | null {
+  if (typeof t !== 'number' || !Number.isFinite(t)) return null;
+  const d = new Date(t * 1000);
+  return d.getUTCHours() * 60 + d.getUTCMinutes();
+}
+
+export function isNseMarketSessionChartTime(t: number | { year: number; month: number; day: number }): boolean {
+  const min = chartTimeMinuteOfDay(t);
+  if (min == null) return true;
+  return min >= NSE_MARKET_OPEN_MIN && min <= NSE_MARKET_CLOSE_MIN;
+}
+
+export function isNseMarketOpenNow(): boolean {
+  const nowChartTime = Math.floor(Date.now() / 1000) + IST_OFFSET;
+  return isNseMarketSessionChartTime(nowChartTime);
+}
 export function toChartTime(tsNs: bigint | string | number, iv: string): number | { year: number; month: number; day: number } {
   const utcSec = Number(BigInt(tsNs.toString()) / 1_000_000_000n);
   const intraday = isIntradayInterval(iv);

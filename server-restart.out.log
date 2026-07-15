@@ -1,0 +1,6 @@
+[PaperDB] Opened E:\Derivativesproject\nubra-dashboard\paper.db
+[SimBroker] Restored 40 orders, 21 positions
+Protobuf schema loaded.
+Nubra Dashboard server → http://localhost:3000
+Attempting to restore session with saved token…
+Saved token expired (Something went wrong! Please try logging in again). Fresh OTP required.

@@ -63,6 +63,14 @@ function upsertPoint(arr: Array<{ time: any; value: number }>, time: number, val
   if (last && last.time === time) last.value = value;
   else if (!last || time > last.time) arr.push({ time, value });
 }
+function upsertGreekPoint(
+  arr: Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }>,
+  point: { time: number; delta: number; gamma: number; theta: number; vega: number },
+): void {
+  const last = arr[arr.length - 1];
+  if (last && last.time === point.time) Object.assign(last, point);
+  else if (!last || point.time > last.time) arr.push(point);
+}
 function upsertBar(arr: HistBar[], bar: HistBar): void {
   const last = arr[arr.length - 1];
   if (last && last.time === bar.time) { last.open = bar.open; last.high = bar.high; last.low = bar.low; last.close = bar.close; }
@@ -88,12 +96,86 @@ function padToGrid(
 }
 
 const LEG_COLORS = ['#22c55e', '#ef4444', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+const CALL_LEG_COLOR = '#22c55e';
+const PUT_LEG_COLOR = '#ef4444';
+
+function optionTypeForColor(p: PaperPosition): string {
+  const explicit = String(p.option_type || '').toUpperCase();
+  if (explicit === 'CE' || explicit === 'PE') return explicit;
+  const text = `${p.display_name || ''} ${p.zanskar_name || ''}`.toUpperCase();
+  const m = text.match(/\b(CE|PE)\b|(\d+)(CE|PE)$/);
+  return (m?.[1] || m?.[3] || '').toUpperCase();
+}
+
+function legColor(p: PaperPosition, fallbackIndex: number): string {
+  const optType = optionTypeForColor(p);
+  if (optType === 'CE') return CALL_LEG_COLOR;
+  if (optType === 'PE') return PUT_LEG_COLOR;
+  return LEG_COLORS[fallbackIndex % LEG_COLORS.length];
+}
+
+function positionGreekSource(p: PaperPosition): 'CE' | 'PE' | null {
+  const optType = optionTypeForColor(p);
+  return optType === 'CE' || optType === 'PE' ? optType : null;
+}
+
+function parsePositionOption(p: PaperPosition): { symbol?: string; strike?: number; optionType?: 'CE' | 'PE' } {
+  const explicitType = String(p.option_type || '').toUpperCase();
+  const text = `${p.display_name || ''} ${p.zanskar_name || ''}`.toUpperCase();
+  const optMatch = text.match(/\b(CE|PE)\b|(\d+)(CE|PE)$/);
+  const optionType = explicitType === 'CE' || explicitType === 'PE'
+    ? explicitType
+    : ((optMatch?.[1] || optMatch?.[3]) as 'CE' | 'PE' | undefined);
+  const strike = Number(p.strike_price || (text.match(/(\d+(?:\.\d+)?)\s*(?:CE|PE)\b/)?.[1] ?? 0));
+  const symbol = String(p.display_name || p.zanskar_name || '')
+    .trim()
+    .split(/\s+/)[0]
+    ?.replace(/\d.*$/, '')
+    .toUpperCase();
+  return { symbol: symbol || undefined, strike: strike > 0 ? strike : undefined, optionType };
+}
+
+async function fetchStrategyMarginPaise(positions: PaperPosition[]): Promise<number> {
+  const orders = positions
+    .filter(p => p.ref_id && p.qty)
+    .map(p => {
+      const opt = parsePositionOption(p);
+      return {
+        ref_id: p.ref_id,
+        order_qty: Math.abs(p.qty),
+        strike: opt.strike,
+        option_type: opt.optionType,
+        ltp: (p.last_traded_price || p.avg_price || 0) / 100,
+        lot_size: p.lot_size,
+        expiry: p.expiry,
+        symbol: opt.symbol,
+        order_side: (p.order_side || '').includes('BUY') ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
+        order_delivery_type: p.product === 'MIS' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
+      };
+    });
+  if (!orders.length) return 0;
+  const res = await fetch('/paper/margin/basket', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ exchange: 'NSE', multiplier: 1, orders }),
+  });
+  if (!res.ok) return 0;
+  const data = await res.json() as Record<string, unknown>;
+  return Number(data.total_margin ?? 0);
+}
 
 const DEFAULT_LOT_SIZES: Record<string, number> = { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60, MIDCPNIFTY: 120, SENSEX: 20 };
 const MONTH_CODES: Record<string, string> = { '1':'01','2':'02','3':'03','4':'04','5':'05','6':'06','7':'07','8':'08','9':'09','O':'10','N':'11','D':'12' };
 const GREEK_SOURCES = ['net', 'CE', 'PE'] as const;
+type GreekSource = typeof GREEK_SOURCES[number];
+type GreekKey = 'delta' | 'gamma' | 'theta' | 'vega';
 const GREEK_LINE_STYLES: Record<string, number> = { net: 0, CE: 2, PE: 1 };
 const GREEK_LINE_WIDTHS: Record<string, 1 | 2> = { net: 2, CE: 1, PE: 1 };
+
+function activeGreekSource(filter: Set<string>): GreekSource {
+  for (const src of GREEK_SOURCES) if (filter.has(src)) return src;
+  return 'net';
+}
 
 function deriveUnderlying(positions: PaperPosition[]): string | null {
   for (const p of positions) {
@@ -282,6 +364,11 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const [greeksChartHeight, setGreeksChartHeight] = useState(150);
   const [greeksTooltipPos, setGreeksTooltipPos] = useState<{ x: number; y: number } | null>(null);
   const [greeksTooltipValues, setGreeksTooltipValues] = useState<Record<string, number> | null>(null);
+  const [currentGreeksBySource, setCurrentGreeksBySource] = useState<Record<GreekSource, Record<GreekKey, number>>>({
+    net: { delta: 0, gamma: 0, theta: 0, vega: 0 },
+    CE: { delta: 0, gamma: 0, theta: 0, vega: 0 },
+    PE: { delta: 0, gamma: 0, theta: 0, vega: 0 },
+  });
   const [greeksCrosshairTime, setGreeksCrosshairTime] = useState('');
 
   // ── Chart display state ──
@@ -296,6 +383,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const [ohlc, setOhlc] = useState<{ o: number; h: number; l: number; c: number } | null>(null);
   const [legPrices, setLegPrices] = useState<Array<{ name: string; color: string; value: number }>>([]);
   const [pnlValues, setPnlValues] = useState<{ legs: Array<{ name: string; color: string; value: number }>; total: number } | null>(null);
+  const [strategyMarginPaise, setStrategyMarginPaise] = useState(0);
 
   const [priceTooltipPos, setPriceTooltipPos] = useState<{ x: number; y: number } | null>(null);
   const [pnlTooltipPos, setPnlTooltipPos] = useState<{ x: number; y: number } | null>(null);
@@ -326,7 +414,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         displayName: p.display_name || p.zanskar_name || String(p.ref_id),
         zanskarName: p.zanskar_name || '',
         side: (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL',
-        color: LEG_COLORS[result.length % LEG_COLORS.length],
+        color: legColor(p, result.length),
         derivativeType: p.derivative_type || 'OPT',
         optionType: p.option_type || '',
       });
@@ -1071,6 +1159,16 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         }
       }
       if (updates.size > 0) {
+        const t = nowChartTime();
+        const cached = chartDataRef.current;
+        if (cached && t >= cached.sessionOpen && t <= cached.sessionClose) {
+          for (const [refId, g] of updates) {
+            let hist = cached.legGreeksHist.get(refId);
+            if (!hist) { hist = []; cached.legGreeksHist.set(refId, hist); }
+            upsertGreekPoint(hist, { time: t, delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega });
+          }
+          setChartData({ ...cached, legGreeksHist: new Map(cached.legGreeksHist) });
+        }
         setLegGreeks(prev => {
           const next = new Map(prev);
           for (const [k, v] of updates) next.set(k, v);
@@ -1116,8 +1214,9 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (param.time != null) setGreeksCrosshairTime(fmtChartTime(param.time as number));
       } else { setGreeksTooltipPos(null); }
       const vals: Record<string, number> = {};
+      const tooltipSource = activeGreekSource(greeksLegFilter);
       for (const k of greekKeys) {
-        const s = greeksSeriesRef.current[`net_${k}`];
+        const s = greeksSeriesRef.current[`${tooltipSource}_${k}`];
         if (!s) continue;
         const d = param.seriesData?.get(s) as any;
         if (d?.value != null) { const f = greekFactorsRef.current[k] || { mid: 0, half: 1 }; vals[k] = d.value * f.half + f.mid; } // de-normalize to true value
@@ -1126,7 +1225,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     });
     requestAnimationFrame(() => chart.timeScale().fitContent());
     return () => { greeksSeriesRef.current = {}; chart.remove(); greeksChartRef.current = null; setChartEpoch(e => e + 1); };
-  }, [theme, greeksVisible]);
+  }, [theme, greeksVisible, greeksLegFilter]);
 
   // ── 10b. Apply Greeks data / recompute on mode, selection, or leg filter change ──
   useEffect(() => {
@@ -1152,13 +1251,43 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     };
 
     const allPos = allPositionsRef.current;
-    const cePositions = allPos.filter(p => (p.zanskar_name || '').toUpperCase().endsWith('CE'));
-    const pePositions = allPos.filter(p => (p.zanskar_name || '').toUpperCase().endsWith('PE'));
+    const cePositions = allPos.filter(p => positionGreekSource(p) === 'CE');
+    const pePositions = allPos.filter(p => positionGreekSource(p) === 'PE');
     const sourceData: Record<string, Map<number, { delta: number; gamma: number; theta: number; vega: number }>> = {
       net: computeByTime(allPos),
       CE: computeByTime(cePositions),
       PE: computeByTime(pePositions),
     };
+
+    setLegGreeks(prev => {
+      const next = new Map(prev);
+      for (const p of allPos) {
+        const hist = chartData.legGreeksHist.get(p.ref_id);
+        if (!hist?.length) continue;
+        const latest = hist[hist.length - 1];
+        const prior = next.get(p.ref_id);
+        next.set(p.ref_id, {
+          delta: latest.delta,
+          gamma: latest.gamma,
+          theta: latest.theta,
+          vega: latest.vega,
+          iv: prior?.iv ?? 0,
+        });
+      }
+      return next;
+    });
+
+    const latestBySource: Record<GreekSource, Record<GreekKey, number>> = {
+      net: { delta: 0, gamma: 0, theta: 0, vega: 0 },
+      CE: { delta: 0, gamma: 0, theta: 0, vega: 0 },
+      PE: { delta: 0, gamma: 0, theta: 0, vega: 0 },
+    };
+    for (const src of GREEK_SOURCES) {
+      const times = [...sourceData[src].keys()].sort((a, b) => a - b);
+      const latest = times.length ? sourceData[src].get(times[times.length - 1]) : null;
+      if (latest) latestBySource[src] = { ...latest };
+    }
+    setCurrentGreeksBySource(latestBySource);
 
     // Min-max normalization per greek: map each greek's [min,max] over the active sources to [-1,1]
     // so every greek spans the full height regardless of magnitude. Only selected greeks count toward
@@ -1312,9 +1441,21 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const closedPnl = closedPositions.reduce((s, p) => s + (p.realised_pnl || p.pnl || 0) / 100, 0);
   const strategyPnl = openPnl + closedPnl;
   const strategyMargin = useMemo(() => {
+    if (strategyMarginPaise > 0) return strategyMarginPaise / 100;
     const first = allPositions.find(p => p.margin_required && p.margin_required > 0);
     return first ? first.margin_required! / 100 : 0;
-  }, [allPositions]);
+  }, [allPositions, strategyMarginPaise]);
+
+  useEffect(() => {
+    if (isSnapshot) return;
+    const marginPositions = positions.length ? positions : allPositions;
+    if (!marginPositions.length) { setStrategyMarginPaise(0); return; }
+    let cancelled = false;
+    fetchStrategyMarginPaise(marginPositions)
+      .then(total => { if (!cancelled && total > 0) setStrategyMarginPaise(total); })
+      .catch(e => console.warn('[StrategyAnalysis] margin recalculation failed:', e));
+    return () => { cancelled = true; };
+  }, [positions, allPositions, isSnapshot]);
   const displayPositions = posSubTab === 'open' ? positions : closedPositions;
   const effectiveObHeight = orderBookCollapsed ? 32 : orderBookHeight;
   // The first visible chart panel flexes to fill remaining space; the rest keep their fixed heights.
@@ -1430,19 +1571,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
             const multiplier = greeksMode === 'lot' ? activeLotSize : 1;
             const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
             const activeGreeks = greekKeys.filter(k => selectedGreeks.has(k));
-            const netGreeks = { delta: 0, gamma: 0, theta: 0, vega: 0 };
-            for (const p of allPositions) {
-              const g = legGreeks.get(p.ref_id);
-              if (!g) continue;
-              const sign = (p.order_side || '').includes('BUY') ? 1 : -1;
-              netGreeks.delta += g.delta * sign * multiplier;
-              netGreeks.gamma += g.gamma * sign * multiplier;
-              netGreeks.theta += g.theta * sign * multiplier;
-              netGreeks.vega += g.vega * sign * multiplier;
-            }
+            const netGreeks = currentGreeksBySource.net;
             const fmtG = (v: number, key: string) => key === 'gamma' ? v.toFixed(4) : v.toFixed(2);
-            const cePositions = allPositions.filter(p => (p.zanskar_name || '').toUpperCase().endsWith('CE'));
-            const pePositions = allPositions.filter(p => (p.zanskar_name || '').toUpperCase().endsWith('PE'));
+            const cePositions = allPositions.filter(p => positionGreekSource(p) === 'CE');
+            const pePositions = allPositions.filter(p => positionGreekSource(p) === 'PE');
             return (
               <div className="absolute top-full right-0 mt-1 z-50 w-[280px] bg-[var(--bg-card,var(--bg-secondary))] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden">
                 <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
@@ -1807,7 +1939,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
                         <td className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}</td>
                         <td className={`px-3 py-1.5 ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%</td>
                         <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(p.entry_time)}</td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.margin_required ? `₹${fmtPrice(p.margin_required / 100)}` : '—'}</td>
+                        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{strategyMargin > 0 ? `₹${fmtPrice(strategyMargin)}` : '—'}</td>
                       </tr>
                     );
                   })}

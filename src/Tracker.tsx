@@ -14,7 +14,7 @@ import { GreekButton } from './components/GreekControls';
 import { fetchRange, nubraType } from './CandleChart';
 import type { Instrument, OhlcBar, OhlcvData, WsMessage } from './types';
 import { getSymbol } from './types';
-import { IST_OFFSET, fmtPrice, sortKey } from './lib/utils';
+import { IST_OFFSET, chartTimeDayKey, fmtPrice, isNseMarketSessionChartTime, sortKey } from './lib/utils';
 
 // The Tracker always charts an index line (NIFTY by default) at 1-minute resolution,
 // stitched with live per-tick updates, and overlays aggregate Vega / Theta *inline*
@@ -81,7 +81,7 @@ async function fetchTodayTick(instrument: Instrument): Promise<OhlcBar[]> {
     }
   }
   bars.sort((a, b) => sortKey(a.time) - sortKey(b.time));
-  return bars;
+  return bars.filter((b) => isNseMarketSessionChartTime(b.time));
 }
 
 // ── Crosshair-tooltip helpers (module-level: pure, no per-render churn) ─────────
@@ -281,8 +281,26 @@ export default function Tracker({ instrument, theme }: Props) {
     setPriceDisplay({ price: close, diff, pct: base ? ((diff / base) * 100).toFixed(2) : '0.00', up: diff >= 0 });
   }
 
+  function marketBars(bars: OhlcBar[]) {
+    return bars.filter((b) => isNseMarketSessionChartTime(b.time));
+  }
+
   function toLine(bars: OhlcBar[]) {
-    return bars.map((b) => ({ time: b.time, value: b.close })) as Parameters<NonNullable<typeof lineRef.current>['setData']>[0];
+    const points: Array<{ time: OhlcBar['time']; value?: number }> = [];
+    let lastDay: string | null = null;
+    let lastNumericTime: number | null = null;
+
+    for (const b of marketBars(bars)) {
+      const day = chartTimeDayKey(b.time);
+      if (lastDay && day && day !== lastDay && lastNumericTime != null) {
+        points.push({ time: (lastNumericTime + 1) as OhlcBar['time'] });
+      }
+      points.push({ time: b.time, value: b.close });
+      lastDay = day;
+      if (typeof b.time === 'number') lastNumericTime = b.time;
+    }
+
+    return points as Parameters<NonNullable<typeof lineRef.current>['setData']>[0];
   }
 
   function rangeTouchesToday(from: number, to: number): boolean {
@@ -369,6 +387,7 @@ export default function Tracker({ instrument, theme }: Props) {
       if (!close) return;
 
       const tickTime = utcSec + IST_OFFSET;
+      if (!isNseMarketSessionChartTime(tickTime)) return;
       const minuteTime = Math.floor(tickTime / 60) * 60;
       const open = Number(b.open) / 100 || close;
       const high = Number(b.high) / 100 || close;
@@ -411,7 +430,8 @@ export default function Tracker({ instrument, theme }: Props) {
     try {
       const end   = new Date();
       const start = new Date(end.getTime() - HIST_DAYS * 86400000);
-      const { bars } = await fetchRange(tracked, TRACK_IV, start, end);
+      const fetched = await fetchRange(tracked, TRACK_IV, start, end);
+      const bars = marketBars(fetched.bars);
       if (!bars.length) { setLoading('No historical data available.'); return; }
 
       // Upgrade today's session to 1-second resolution (tick-by-tick, matching the live
@@ -462,7 +482,8 @@ export default function Tracker({ instrument, theme }: Props) {
     try {
       const end   = new Date(earliestRef.current.getTime() - 60000);
       const start = new Date(end.getTime() - CHUNK_DAYS * 86400000);
-      const { bars } = await fetchRange(tracked, TRACK_IV, start, end);
+      const fetched = await fetchRange(tracked, TRACK_IV, start, end);
+      const bars = marketBars(fetched.bars);
       if (bars.length) {
         minuteBarsRef.current = [...bars, ...minuteBarsRef.current];
         if (secondBarsRef.current.length) secondBarsRef.current = [...bars, ...secondBarsRef.current];

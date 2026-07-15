@@ -11,7 +11,7 @@
 // axis would flatten the diff; the overlay scale keeps both readable.
 
 import { LineSeries, LineStyle, type IChartApi, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts';
-import { IST_OFFSET } from './utils.ts';
+import { IST_OFFSET, chartTimeDayKey, isNseMarketSessionChartTime } from './utils.ts';
 import type { SeriesPoint } from './greekAggregator.ts';
 
 export type SeriesMode = 'totals' | 'diff' | 'both';
@@ -44,19 +44,28 @@ export type TimeMapper = (ms: number) => number | null;
 
 const defaultMapper: TimeMapper = (ms) => msToChartTime(ms) as number;
 
-type LinePoint = { time: UTCTimestamp; value: number };
+type LinePoint = { time: UTCTimestamp; value: number } | { time: UTCTimestamp };
 
-/** De-duplicate by mapped time (keep last) and ensure ascending order for setData(). */
+/** De-duplicate by mapped time (keep last), filter closed-market points, and break overnight lines. */
 function toLine(points: ReadonlyArray<SeriesPoint>, pick: (p: SeriesPoint) => number, mapTime: TimeMapper): LinePoint[] {
   const byTime = new Map<number, number>();
   for (const p of points) {
     const t = mapTime(p.ts);
-    if (t == null || !Number.isFinite(t)) continue;
+    if (t == null || !Number.isFinite(t) || !isNseMarketSessionChartTime(t)) continue;
     byTime.set(t, pick(p));
   }
-  return [...byTime.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([time, value]) => ({ time: time as UTCTimestamp, value }));
+
+  const out: LinePoint[] = [];
+  let lastDay: string | null = null;
+  let lastTime: number | null = null;
+  for (const [time, value] of [...byTime.entries()].sort((a, b) => a[0] - b[0])) {
+    const day = chartTimeDayKey(time);
+    if (lastDay && day && day !== lastDay && lastTime != null) out.push({ time: (lastTime + 1) as UTCTimestamp });
+    out.push({ time: time as UTCTimestamp, value });
+    lastDay = day;
+    lastTime = time;
+  }
+  return out;
 }
 
 export interface GreekPane {

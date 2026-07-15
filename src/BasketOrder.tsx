@@ -12,7 +12,7 @@ import { useBasketPersistence } from './hooks/useBasketPersistence';
 import { useMarginCalc } from './hooks/useMarginCalc';
 import OptionChain from './OptionChain';
 
-// ─── Interfaces ──────────────────────────────────────────────────────────────
+// Interfaces
 
 interface Leg {
   id: string;
@@ -45,7 +45,7 @@ interface Props {
 
 type ViewMode = 'prebuilt' | 'saved' | 'builder';
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers
 
 function numField(obj: Record<string, unknown>, ...keys: string[]): number | null {
   for (const k of keys) {
@@ -79,7 +79,7 @@ function miniPayoff(legs: Array<{ optionType: 'CE' | 'PE'; side: 'BUY' | 'SELL';
   return Array.from({ length: 41 }, (_, i) => ({ x: i, y: payoffAtExpiry(min + i * step, mapped) }));
 }
 
-// ─── Component ───────────────────────────────────────────────────────────────
+// Component
 
 export default function BasketOrder({ instrument }: Props) {
   const [legs, setLegs] = useState<Leg[]>([]);
@@ -117,7 +117,7 @@ export default function BasketOrder({ instrument }: Props) {
 
   const chain = useBasketChain({ sym, exch, legExpiries });
   const persistence = useBasketPersistence();
-  const { margin } = useMarginCalc(legs, exch, multiplier);
+  const { margin, loading: marginLoading, error: marginError } = useMarginCalc(legs, exch, multiplier);
 
   // Auto-enable basket mode when OC tab active in builder
   useEffect(() => {
@@ -144,7 +144,7 @@ export default function BasketOrder({ instrument }: Props) {
     return unsub;
   }, [onLegAdded]);
 
-  // WS leg LTP updates — option chain (primary) + position_ltp (secondary for traded legs)
+  // WS leg LTP updates - option chain (primary) + position_ltp (secondary for traded legs)
   useEffect(() => {
     if (!sym) return;
     const unsub1 = subscribe('option_chain', (msg) => {
@@ -198,8 +198,7 @@ export default function BasketOrder({ instrument }: Props) {
 
     return () => { unsub1(); unsub2(); };
   }, [subscribe, sym, chain.expiry]);
-
-  // ── Leg CRUD ───────────────────────────────────────────────────────────────
+  // Leg CRUD
 
   function addLeg(strike: number, optionType: 'CE' | 'PE', side: 'BUY' | 'SELL', row: ChainRow) {
     const ltp = optionType === 'CE' ? row.ceLtp : row.peLtp;
@@ -222,8 +221,7 @@ export default function BasketOrder({ instrument }: Props) {
     const atm = chain.spot ? chain.chainRows.reduce((best, r) => Math.abs(r.strike - chain.spot!) < Math.abs(best.strike - chain.spot!) ? r : best, chain.chainRows[0]) : chain.chainRows[Math.floor(chain.chainRows.length / 2)];
     if (atm) addLeg(atm.strike, 'CE', 'BUY', atm);
   }
-
-  // ── Symbol search ─────────────────────────────────────────────────────────
+  // Symbol search
 
   function searchSymbol(q: string) {
     setSymSearch(q);
@@ -253,8 +251,7 @@ export default function BasketOrder({ instrument }: Props) {
     setShowSymSearch(false); setSymSearch(''); setSymResults([]);
     chain.loadChainForSymbol(newSym, String(inst.exchange || 'NSE'));
   }
-
-  // ── Add Scrip search ──────────────────────────────────────────────────────
+  // Add scrip search
 
   async function searchScrip(q: string) {
     setAddScripQuery(q);
@@ -288,8 +285,7 @@ export default function BasketOrder({ instrument }: Props) {
     }]);
     setShowAddScrip(false); setAddScripQuery(''); setAddScripResults([]);
   }
-
-  // ── Strategy templates ─────────────────────────────────────────────────────
+  // Strategy templates
 
   function applyTemplate(tmplId: string) {
     const tmpl = STRATEGY_TEMPLATES.find(t => t.id === tmplId);
@@ -332,8 +328,7 @@ export default function BasketOrder({ instrument }: Props) {
     setStrategyName(basket.name || 'Custom Strategy');
     setViewMode('builder');
   }
-
-  // ── Computed values ────────────────────────────────────────────────────────
+  // Computed values
 
   const totalPrice = useMemo(() => legs.reduce((acc, l) => acc + (l.side === 'BUY' ? 1 : -1) * l.ltp, 0), [legs]);
   const totalPremium = useMemo(() => legs.reduce((acc, l) => acc + (l.side === 'BUY' ? -1 : 1) * l.ltp * l.lots * l.lotSize, 0), [legs]);
@@ -370,8 +365,36 @@ export default function BasketOrder({ instrument }: Props) {
     return bps;
   }, [payoffData]);
   const riskReward = maxLoss !== 0 ? Math.abs(maxProfit / maxLoss) : 0;
+  // Place orders
 
-  // ── Place orders ───────────────────────────────────────────────────────────
+  async function fetchMarginRequiredPaise(orderLegs: Leg[]): Promise<number | undefined> {
+    const validLegs = orderLegs.filter(l => l.refId && l.strike > 0 && l.lots > 0 && l.lotSize > 0);
+    if (!validLegs.length) return undefined;
+    const res = await fetch('/paper/margin/basket', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        exchange: exch,
+        multiplier,
+        orders: validLegs.map(l => ({
+          ref_id: l.refId,
+          order_qty: l.lots * l.lotSize,
+          strike: l.strike,
+          option_type: l.optionType,
+          ltp: l.ltp,
+          lot_size: l.lotSize,
+          expiry: l.expiry,
+          symbol: l.symbol,
+          order_side: l.side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
+          order_delivery_type: l.deliveryType === 'IDAY' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
+        })),
+      }),
+    });
+    if (!res.ok) return undefined;
+    const data = await res.json() as Record<string, unknown>;
+    const total = Number(data.total_margin ?? 0);
+    return total > 0 ? total : undefined;
+  }
 
   async function placeOrders() {
     if (!legs.length) return;
@@ -381,8 +404,12 @@ export default function BasketOrder({ instrument }: Props) {
     setPlaced(null);
     const finalName = strategyName === 'Custom Strategy' ? persistence.getNextCustomName() : (strategyName || persistence.getNextCustomName());
     try {
+      const marginRequired = margin?.total && margin.total > 0
+        ? Math.round(margin.total * 100)
+        : await fetchMarginRequiredPaise(sorted);
+      if (!marginRequired) throw new Error('Margin unavailable. Please wait for the margin calculation and try again.');
       const res = await fetch('/paper/orders/basket', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ strategy_name: finalName, margin_required: margin ? Math.round(margin.total * 100) : undefined, orders: sorted.map(l => ({
+        body: JSON.stringify({ strategy_name: finalName, margin_required: marginRequired, orders: sorted.map(l => ({
           nubraName: l.nubraName || `${l.symbol}${l.strike}${l.optionType}`, liveRefId: l.refId,
           display_name: `${l.symbol} ${l.strike} ${l.optionType}`, order_type: ORDER_TYPE_MAP[l.orderType],
           order_side: l.side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL', order_qty: l.lots * l.lotSize,
@@ -399,23 +426,20 @@ export default function BasketOrder({ instrument }: Props) {
       setTimeout(() => setPlaced(null), 5000);
     } catch (e) { setPlaced({ ok: false, msg: (e as Error).message }); }
   }
-
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // Render
 
   const dte = chain.expiry ? daysToExpiry(chain.expiry) : 0;
 
   if (!instrument) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)', fontSize: 14, background: 'var(--bg-primary)' }}>
-        <span style={{ fontSize: 30, opacity: 0.5 }}>📊</span>
+        <span style={{ fontSize: 30, opacity: 0.5 }}>Chart</span>
         Select an F&O instrument to build strategies
       </div>
     );
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
   // PRE-BUILT / SAVED VIEWS
-  // ═══════════════════════════════════════════════════════════════════════════
 
   if (viewMode !== 'builder') {
     const filtered = sentimentFilter === 'All' ? STRATEGY_TEMPLATES : STRATEGY_TEMPLATES.filter(t => t.sentiment === sentimentFilter);
@@ -439,7 +463,7 @@ export default function BasketOrder({ instrument }: Props) {
           {viewMode === 'prebuilt' && (
             <>
               <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 12, fontSize: 12 }}>
-                <span style={{ color: 'var(--text-secondary)', marginRight: 2 }}>🔍</span>
+                <span style={{ color: 'var(--text-secondary)', marginRight: 2 }}>Search</span>
                 <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{sym}</span>
                 <span style={{ color: 'var(--green)', fontSize: 11 }}>{chain.spot ? chain.spot.toLocaleString('en-IN') : ''}</span>
                 <span style={{ color: 'var(--text-secondary)', fontSize: 11 }}>{exch}</span>
@@ -451,7 +475,7 @@ export default function BasketOrder({ instrument }: Props) {
                       border: sentimentFilter === s ? '1px solid #5865f2' : '1px solid var(--border)',
                       background: sentimentFilter === s ? '#5865f2' + '20' : 'transparent',
                       color: sentimentFilter === s ? '#5865f2' : 'var(--text-secondary)' }}>
-                    {s !== 'All' && <span style={{ marginRight: 4 }}>{s === 'Bullish' ? '🟢' : s === 'Bearish' ? '🔴' : s === 'Neutral' ? '🟣' : '🟡'}</span>}
+                    {s !== 'All' && <span style={{ marginRight: 4 }}>{s === 'Bullish' ? '' : s === 'Bearish' ? '' : s === 'Neutral' ? '' : ''}</span>}
                     {s}
                   </button>
                 ))}
@@ -526,7 +550,7 @@ export default function BasketOrder({ instrument }: Props) {
                   <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Build and save strategies to analyze your trades better</div>
                 </div>
                 <div style={{ width: 260, background: 'var(--bg-card)', borderRadius: 12, border: '1px solid var(--border)', padding: 24, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, alignSelf: 'center' }}>
-                  <div style={{ fontSize: 40 }}>🎯</div>
+                  <div style={{ fontSize: 40 }}>Target</div>
                   <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text-primary)', textAlign: 'center' as const }}>Ready to create your own strategy?</div>
                   <div style={{ fontSize: 12, color: 'var(--text-secondary)', textAlign: 'center' as const }}>Take control and build one that works for you.</div>
                   <button onClick={() => setViewMode('builder')}
@@ -555,10 +579,10 @@ export default function BasketOrder({ instrument }: Props) {
                         <button onClick={() => { setEditingBasketId(b.basket_id); setEditingBasketName(b.name); }}
                           style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.3)', color: 'var(--text-primary)', cursor: 'pointer', fontSize: 8, fontWeight: 600, padding: '1px 3px', borderRadius: 3, lineHeight: 1, width: 14, height: 14, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }} title="Rename">R</button>
                         <button onClick={() => persistence.deleteSavedBasket(b.basket_id)}
-                          style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14 }}>✕</button>
+                          style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14 }}>x</button>
                       </div>
                     </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10 }}>{b.symbol} · {formatExpiry(b.expiry)} · {b.legs.length} legs</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10 }}>{b.symbol}  -  {formatExpiry(b.expiry)}  -  {b.legs.length} legs</div>
                     <button onClick={() => loadSavedBasket(b)}
                       style={{ width: '100%', padding: '7px 0', borderRadius: 8, border: 'none', background: '#5865f2', color: '#fff', fontWeight: 600, fontSize: 12, cursor: 'pointer' }}>
                       Load Strategy
@@ -581,15 +605,13 @@ export default function BasketOrder({ instrument }: Props) {
     );
   }
 
-  // ═══════════════════════════════════════════════════════════════════════════
   // BUILDER VIEW
-  // ═══════════════════════════════════════════════════════════════════════════
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-primary)', color: 'var(--text-primary)', overflow: 'hidden', fontVariantNumeric: 'tabular-nums' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)', flexShrink: 0 }}>
         <button onClick={() => setViewMode('prebuilt')} style={{ background: 'none', border: 'none', color: '#5865f2', fontSize: 12, cursor: 'pointer', fontWeight: 500 }}>
-          ← Back to all strategies
+          &lt; Back to all strategies
         </button>
         <div style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-muted)' }}>
           {chain.expiry && `${Math.round(dte)}d to expiry`}
@@ -601,7 +623,7 @@ export default function BasketOrder({ instrument }: Props) {
         <div style={{ width: leftWidth, flexShrink: 0, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
           <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, position: 'relative' as const }}>
-              <span style={{ fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }} onClick={() => setShowSymSearch(!showSymSearch)}>🔍</span>
+              <span style={{ fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' }} onClick={() => setShowSymSearch(!showSymSearch)}>Search</span>
               {showSymSearch ? (
                 <div style={{ position: 'relative' }}>
                   <input type="text" value={symSearch} onChange={e => searchSymbol(e.target.value)} autoFocus
@@ -614,7 +636,7 @@ export default function BasketOrder({ instrument }: Props) {
                         <button key={i} onMouseDown={() => selectSymbol(inst)}
                           style={{ display: 'block', width: '100%', textAlign: 'left' as const, padding: '8px 12px', background: 'none', border: 'none', borderBottom: '1px solid var(--border)', color: 'var(--text-primary)', cursor: 'pointer', fontSize: 12 }}>
                           <span style={{ fontWeight: 700 }}>{String(inst.asset || inst.stock_name || '')}</span>
-                          <span style={{ color: 'var(--text-muted)', marginLeft: 6, fontSize: 10 }}>{String(inst.exchange || '')} · {String(inst.derivative_type || inst.asset_type || '')}</span>
+                          <span style={{ color: 'var(--text-muted)', marginLeft: 6, fontSize: 10 }}>{String(inst.exchange || '')}  -  {String(inst.derivative_type || inst.asset_type || '')}</span>
                         </button>
                       ))}
                     </div>
@@ -658,7 +680,7 @@ export default function BasketOrder({ instrument }: Props) {
                 </select>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                   <button onClick={() => { const idx = chain.chainRows.findIndex(r => r.strike === leg.strike); if (idx > 0) { const r = chain.chainRows[idx - 1]; const newLtp = leg.optionType === 'CE' ? r.ceLtp : r.peLtp; updateLeg(leg.id, { strike: r.strike, ltp: newLtp, entryLtp: newLtp, refId: leg.optionType === 'CE' ? r.ceRefId : r.peRefId, nubraName: leg.optionType === 'CE' ? r.ceNubraName : r.peNubraName }); } }}
-                    style={{ width: 18, height: 20, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>−</button>
+                    style={{ width: 18, height: 20, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>-</button>
                   <span style={{ fontWeight: 600, fontSize: 11, color: 'var(--text-primary)', flex: 1, textAlign: 'center' as const }}>{leg.strike.toLocaleString('en-IN')}</span>
                   <button onClick={() => { const idx = chain.chainRows.findIndex(r => r.strike === leg.strike); if (idx < chain.chainRows.length - 1) { const r = chain.chainRows[idx + 1]; const newLtp = leg.optionType === 'CE' ? r.ceLtp : r.peLtp; updateLeg(leg.id, { strike: r.strike, ltp: newLtp, entryLtp: newLtp, refId: leg.optionType === 'CE' ? r.ceRefId : r.peRefId, nubraName: leg.optionType === 'CE' ? r.ceNubraName : r.peNubraName }); } }}
                     style={{ width: 18, height: 20, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
@@ -670,7 +692,7 @@ export default function BasketOrder({ instrument }: Props) {
                 </button>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                   <button onClick={() => updateLeg(leg.id, { lots: Math.max(1, leg.lots - 1) })}
-                    style={{ width: 18, height: 18, borderRadius: 3, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>−</button>
+                    style={{ width: 18, height: 18, borderRadius: 3, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>-</button>
                   <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)', flex: 1, textAlign: 'center' as const }}>{leg.lots * leg.lotSize}</span>
                   <button onClick={() => updateLeg(leg.id, { lots: leg.lots + 1 })}
                     style={{ width: 18, height: 18, borderRadius: 3, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 11, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
@@ -678,13 +700,13 @@ export default function BasketOrder({ instrument }: Props) {
                 <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{fmtPrice(leg.ltp)}</span>
                 {(() => {
                   const mtm = (leg.ltp - leg.entryLtp) * leg.lots * leg.lotSize * (leg.side === 'BUY' ? 1 : -1);
-                  return <span style={{ fontSize: 11, fontWeight: 600, color: mtm >= 0 ? 'var(--green)' : 'var(--red)' }}>{mtm >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(mtm))}</span>;
+                  return <span style={{ fontSize: 11, fontWeight: 600, color: mtm >= 0 ? 'var(--green)' : 'var(--red)' }}>{mtm >= 0 ? '+' : '-'}Rs {fmtPrice(Math.abs(mtm))}</span>;
                 })()}
                 <button onClick={() => removeLeg(leg.id)}
                   style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid transparent', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                   onMouseEnter={e => { e.currentTarget.style.background = 'var(--red-dim)'; e.currentTarget.style.color = 'var(--red)'; e.currentTarget.style.borderColor = '#ef444440'; }}
                   onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-muted)'; e.currentTarget.style.borderColor = 'transparent'; }}>
-                  ✕
+                  x
                 </button>
               </div>
             ))}
@@ -707,14 +729,14 @@ export default function BasketOrder({ instrument }: Props) {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 0', borderTop: '1px solid var(--border)' }}>
               <div>
                 <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Total Price: </span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>₹{totalPrice.toFixed(2)}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Rs {totalPrice.toFixed(2)}</span>
                 <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 16 }}>Total Premium: </span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: totalPremium >= 0 ? 'var(--green)' : 'var(--red)' }}>{totalPremium >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(totalPremium))}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: totalPremium >= 0 ? 'var(--green)' : 'var(--red)' }}>{totalPremium >= 0 ? '+' : '-'}Rs {fmtPrice(Math.abs(totalPremium))}</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
                 <span style={{ color: 'var(--text-muted)' }}>Lot Multiplier:</span>
                 <button onClick={() => applyMultiplier(Math.max(1, multiplier - 1))}
-                  style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>−</button>
+                  style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>-</button>
                 <span style={{ fontWeight: 700, color: 'var(--text-primary)', minWidth: 16, textAlign: 'center' as const }}>{multiplier}</span>
                 <button onClick={() => applyMultiplier(multiplier + 1)}
                   style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>+</button>
@@ -723,24 +745,33 @@ export default function BasketOrder({ instrument }: Props) {
 
             {totalPremium > 0 && (
               <div style={{ fontSize: 10, color: 'var(--text-secondary)', padding: '4px 0', display: 'flex', alignItems: 'center', gap: 4 }}>
-                <span style={{ color: 'var(--text-muted)' }}>ℹ</span> Negative prices indicate that executing this strategy will result in a net cash inflow.
+                <span style={{ color: 'var(--text-muted)' }}>i</span> Negative prices indicate that executing this strategy will result in a net cash inflow.
               </div>
             )}
 
-            {margin && (
+            {(margin || marginLoading || marginError) && (
               <div style={{ background: 'var(--bg-card)', borderRadius: 10, border: '1px solid var(--border)', overflow: 'hidden', marginBottom: 8 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderBottom: '1px solid var(--border)' }}>
                   <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>Margin Breakdown</span>
-                  {margin.benefit && margin.benefit > 0 && (
-                    <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--green)' }}>Margin Benefit: {fmtPrice(margin.benefit)}</span>
+                  {margin && (
+                    <span style={{ fontWeight: 700, fontSize: 13, color: margin.benefit && margin.benefit > 0 ? 'var(--green)' : 'var(--text-secondary)' }}>
+                      Margin Benefit: {fmtPrice(margin.benefit || 0)}
+                    </span>
                   )}
+                  {marginLoading && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Calculating...</span>}
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: '12px 14px' }}>
-                  <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Span</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.span ? fmtPrice(margin.span) : '—'}</div></div>
-                  <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Exposure</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.exposure ? fmtPrice(margin.exposure) : '—'}</div></div>
-                  <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Total Margin</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{fmtPrice(margin.total)}</div></div>
-                  <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Premium Payable</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.premium ? fmtPrice(margin.premium) : fmtPrice(Math.abs(totalPremium))}</div></div>
-                </div>
+                {margin ? (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: '12px 14px' }}>
+                    <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Span</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.span ? fmtPrice(margin.span) : '-'}</div></div>
+                    <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Exposure</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.exposure ? fmtPrice(margin.exposure) : '-'}</div></div>
+                    <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Total Margin</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{fmtPrice(margin.total)}</div></div>
+                    <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Premium Payable</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.premium ? fmtPrice(margin.premium) : fmtPrice(Math.abs(totalPremium))}</div></div>
+                  </div>
+                ) : (
+                  <div style={{ padding: '12px 14px', fontSize: 11, color: marginError ? 'var(--red)' : 'var(--text-muted)' }}>
+                    {marginError ? `Margin unavailable: ${marginError}` : 'Calculating margin...'}
+                  </div>
+                )}
               </div>
             )}
 
@@ -771,14 +802,14 @@ export default function BasketOrder({ instrument }: Props) {
                     <span style={{ color: 'var(--text-primary)', fontSize: 11 }}>{formatExpiry(leg.expiry)} {leg.optionType}</span>
                     <span style={{ color: 'var(--text-primary)' }}>{leg.strike.toLocaleString('en-IN')}</span>
                     <span style={{ color: 'var(--text-primary)' }}>{leg.lots * leg.lotSize}</span>
-                    <span style={{ color: 'var(--text-primary)' }}>{leg.delta?.toFixed(2) ?? '—'}</span>
-                    <span style={{ color: 'var(--text-primary)' }}>{leg.theta?.toFixed(2) ?? '—'}</span>
-                    <span style={{ color: 'var(--text-primary)' }}>{leg.gamma?.toFixed(4) ?? '—'}</span>
-                    <span style={{ color: 'var(--text-primary)' }}>{leg.vega?.toFixed(2) ?? '—'}</span>
+                    <span style={{ color: 'var(--text-primary)' }}>{leg.delta?.toFixed(2) ?? '-'}</span>
+                    <span style={{ color: 'var(--text-primary)' }}>{leg.theta?.toFixed(2) ?? '-'}</span>
+                    <span style={{ color: 'var(--text-primary)' }}>{leg.gamma?.toFixed(4) ?? '-'}</span>
+                    <span style={{ color: 'var(--text-primary)' }}>{leg.vega?.toFixed(2) ?? '-'}</span>
                   </div>
                 ))}
                 <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 60px 40px 60px 60px 60px 60px', alignItems: 'center', padding: '8px 0', fontSize: 11, fontWeight: 700, color: 'var(--text-primary)' }}>
-                  <span></span><span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Total × (Lot size × Lots)</span><span></span><span></span>
+                  <span></span><span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Total x (Lot size x Lots)</span><span></span><span></span>
                   <span>{netGreeks.delta.toFixed(2)}</span><span>{netGreeks.theta.toFixed(2)}</span><span>{netGreeks.gamma.toFixed(4)}</span><span>{netGreeks.vega.toFixed(2)}</span>
                 </div>
               </div>
@@ -802,13 +833,13 @@ export default function BasketOrder({ instrument }: Props) {
                       <span style={{ color: 'var(--text-primary)' }}>{formatExpiry(leg.expiry)} {leg.optionType}</span>
                       <span style={{ color: 'var(--text-primary)' }}>{leg.strike.toLocaleString('en-IN')}</span>
                       <span style={{ color: 'var(--text-primary)' }}>{leg.lots * leg.lotSize}</span>
-                      <span style={{ textAlign: 'right' as const, fontWeight: 600, color: mtm >= 0 ? 'var(--green)' : 'var(--red)' }}>{mtm >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(mtm))}</span>
+                      <span style={{ textAlign: 'right' as const, fontWeight: 600, color: mtm >= 0 ? 'var(--green)' : 'var(--red)' }}>{mtm >= 0 ? '+' : '-'}Rs {fmtPrice(Math.abs(mtm))}</span>
                     </div>
                   );
                 })}
                 <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 80px 50px 1fr', alignItems: 'center', padding: '8px 0', fontSize: 11, fontWeight: 700, color: 'var(--text-primary)' }}>
                   <span></span><span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Total Unrealized P&L</span><span></span><span></span>
-                  <span style={{ textAlign: 'right' as const, color: totalMtm >= 0 ? 'var(--green)' : 'var(--red)' }}>{totalMtm >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(totalMtm))}</span>
+                  <span style={{ textAlign: 'right' as const, color: totalMtm >= 0 ? 'var(--green)' : 'var(--red)' }}>{totalMtm >= 0 ? '+' : '-'}Rs {fmtPrice(Math.abs(totalMtm))}</span>
                 </div>
                 <div style={{ padding: '6px 0 8px', fontSize: 10, color: 'var(--text-muted)' }}>P&L is mark-to-market (entry price vs current LTP).</div>
               </div>
@@ -833,16 +864,16 @@ export default function BasketOrder({ instrument }: Props) {
         {/* RIGHT PANEL */}
         <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, padding: '12px 16px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Max Profit</div><div style={{ fontSize: 14, fontWeight: 700, color: 'var(--green)' }}>{maxProfit > 1e6 ? 'Unlimited' : `+₹${fmtPrice(maxProfit)}`}</div></div>
-            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Max Loss</div><div style={{ fontSize: 14, fontWeight: 700, color: 'var(--red)' }}>{maxLoss < -1e6 ? 'Unlimited' : `-₹${fmtPrice(Math.abs(maxLoss))}`}</div></div>
-            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Breakeven</div><div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{breakevenPoints.length ? breakevenPoints.map(bp => bp.toLocaleString('en-IN')).join(', ') : '—'}</div></div>
-            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Risk Reward Ratio</div><div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{riskReward ? `1:${riskReward.toFixed(2)}` : '—'}</div></div>
+            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Max Profit</div><div style={{ fontSize: 14, fontWeight: 700, color: 'var(--green)' }}>{maxProfit > 1e6 ? 'Unlimited' : `+Rs ${fmtPrice(maxProfit)}`}</div></div>
+            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Max Loss</div><div style={{ fontSize: 14, fontWeight: 700, color: 'var(--red)' }}>{maxLoss < -1e6 ? 'Unlimited' : `-Rs ${fmtPrice(Math.abs(maxLoss))}`}</div></div>
+            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Breakeven</div><div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{breakevenPoints.length ? breakevenPoints.map(bp => bp.toLocaleString('en-IN')).join(', ') : '-'}</div></div>
+            <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Risk Reward Ratio</div><div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{riskReward ? `1:${riskReward.toFixed(2)}` : '-'}</div></div>
             <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Probability of profit</div><div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
               {breakevenPoints.length && chain.spot ? (() => {
                 const bullish = payoffData.filter(d => d.spot >= chain.spot! && d.pnl > 0).length;
                 const total = payoffData.filter(d => d.spot >= chain.spot! * 0.95).length;
-                return total > 0 ? `${((bullish / total) * 100).toFixed(1)}%` : '—';
-              })() : '—'}
+                return total > 0 ? `${((bullish / total) * 100).toFixed(1)}%` : '-';
+              })() : '-'}
             </div></div>
           </div>
 
@@ -874,8 +905,8 @@ export default function BasketOrder({ instrument }: Props) {
                     ...(chain.spot ? [{ axis: 'x' as const, value: chain.spot, color: '#5865f2', dashed: true, label: chain.spot.toLocaleString('en-IN'), labelColor: '#5865f2' }] : []),
                   ]}
                   xFormatter={v => v.toLocaleString('en-IN')}
-                  yFormatter={v => `₹${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + 'K' : String(v)}`}
-                  tooltipFormatter={d => `Spot: ${d.spot.toLocaleString('en-IN')}\nP&L: ₹${fmtPrice(d.pnl)}`}
+                  yFormatter={v => `Rs ${Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + 'K' : String(v)}`}
+                  tooltipFormatter={d => `Spot: ${d.spot.toLocaleString('en-IN')}\nP&L: Rs ${fmtPrice(d.pnl)}`}
                   legendLabels={{ pnl: 'P&L at expiry' }}
                 />
               </div>
@@ -883,8 +914,8 @@ export default function BasketOrder({ instrument }: Props) {
                 <span>Target Date: <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{targetDays} Day from Expiry</span></span>
                 <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
                   <button onClick={() => setTargetDays(Math.max(0, targetDays - 1))}
-                    style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14 }}>−</button>
-                  <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{chain.expiry ? formatExpiry(chain.expiry) : '—'}</span>
+                    style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14 }}>-</button>
+                  <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{chain.expiry ? formatExpiry(chain.expiry) : '-'}</span>
                   <button onClick={() => setTargetDays(targetDays + 1)}
                     style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border)', background: 'var(--bg-card)', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 14 }}>+</button>
                 </div>
@@ -910,7 +941,7 @@ export default function BasketOrder({ instrument }: Props) {
             onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
               <span style={{ fontWeight: 700, fontSize: 16, color: 'var(--text-primary)' }}>Save Strategy</span>
-              <button onClick={() => setShowSaveModal(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer' }}>✕</button>
+              <button onClick={() => setShowSaveModal(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer' }}>x</button>
             </div>
             <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>Name your strategy</div>
             <input type="text" value={saveName} onChange={e => setSaveName(e.target.value)}
@@ -935,14 +966,14 @@ export default function BasketOrder({ instrument }: Props) {
             onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
               <span style={{ fontWeight: 700, fontSize: 15, color: 'var(--text-primary)' }}>Add Scrip</span>
-              <button onClick={() => setShowAddScrip(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer' }}>✕</button>
+              <button onClick={() => setShowAddScrip(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', fontSize: 18, cursor: 'pointer' }}>x</button>
             </div>
             <input type="text" value={addScripQuery} onChange={e => searchScrip(e.target.value)}
               autoFocus placeholder="Search stocks, futures, options..."
               style={{ width: '100%', padding: '10px 12px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text-primary)', fontSize: 13, outline: 'none', boxSizing: 'border-box' as const, marginBottom: 8 }} />
             <div style={{ maxHeight: 320, overflow: 'auto' }}>
               {addScripResults.length === 0 && addScripQuery.length >= 2 && (
-                <div style={{ padding: 16, textAlign: 'center' as const, color: 'var(--text-muted)', fontSize: 12 }}>Searching…</div>
+                <div style={{ padding: 16, textAlign: 'center' as const, color: 'var(--text-muted)', fontSize: 12 }}>Searching...</div>
               )}
               {addScripResults.map((inst, i) => (
                 <button key={i} onClick={() => addScripToBasket(inst)}
@@ -953,10 +984,10 @@ export default function BasketOrder({ instrument }: Props) {
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 600, fontSize: 12 }}>{String(inst.stock_name || inst.symbol || inst.zanskar_name || '')}</div>
                     <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
-                      {String(inst.exchange || '')} · {String(inst.derivative_type || 'EQ')}
-                      {inst.strike_price ? ` · Strike: ${Number(inst.strike_price) > 10000 ? (Number(inst.strike_price) / 100).toLocaleString('en-IN') : Number(inst.strike_price).toLocaleString('en-IN')}` : ''}
-                      {inst.expiry ? ` · ${formatExpiry(String(inst.expiry))}` : ''}
-                      {inst.lot_size ? ` · Lot: ${inst.lot_size}` : ''}
+                      {String(inst.exchange || '')}  -  {String(inst.derivative_type || 'EQ')}
+                      {inst.strike_price ? `  -  Strike: ${Number(inst.strike_price) > 10000 ? (Number(inst.strike_price) / 100).toLocaleString('en-IN') : Number(inst.strike_price).toLocaleString('en-IN')}` : ''}
+                      {inst.expiry ? `  -  ${formatExpiry(String(inst.expiry))}` : ''}
+                      {inst.lot_size ? `  -  Lot: ${inst.lot_size}` : ''}
                     </div>
                   </div>
                   <span style={{ color: '#5865f2', fontWeight: 600, fontSize: 11, flexShrink: 0 }}>+ Add</span>
