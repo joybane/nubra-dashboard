@@ -750,9 +750,8 @@ style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border
             )}
 
             {(margin || marginLoading || marginError) && (
-                  )}
+              <div>
                   {marginLoading && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Calculating...</span>}
-                </div>
 {margin ? (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: '12px 14px' }}>
                     <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Span</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.span ? fmtPrice(margin.span) : '—'}</div></div>
@@ -800,7 +799,7 @@ style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border
                     <span style={{ color: 'var(--text-primary)' }}>{leg.gamma?.toFixed(4) ?? '—'}</span>
                     <span style={{ color: 'var(--text-primary)' }}>{leg.vega?.toFixed(2) ?? '—'}</span>
                   </div>
-                }))
+                ))}
                 <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 60px 40px 60px 60px 60px 60px', alignItems: 'center', padding: '8px 0', fontSize: 11, fontWeight: 700, color: 'var(--text-primary)' }}>
                   <span></span><span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Total × (Lot size × Lots)</span><span></span><span></span>
                   <span>{netGreeks.delta.toFixed(2)}</span><span>{netGreeks.theta.toFixed(2)}</span><span>{netGreeks.gamma.toFixed(4)}</span><span>{netGreeks.vega.toFixed(2)}</span>

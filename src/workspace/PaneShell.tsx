@@ -5,6 +5,7 @@ import StraddleChart from '../StraddleChart';
 import StrategyChart from '../StrategyChart';
 import BasketOrder from '../BasketOrder';
 import Backtest from '../Backtest';
+import NubraBacktest from '../NubraBacktest';
 import Watchlist from '../Watchlist';
 import Tracker from '../Tracker';
 
@@ -15,6 +16,7 @@ const VIEW_LABELS: Record<ViewType, string> = {
   strategy:    'Strategy',
   basket:      'Basket',
   backtest:    'Backtest',
+  nubrabacktest: 'Nubra BT',
   watchlist:   'Watchlist',
   tracker:     'Tracker',
 };
@@ -46,6 +48,8 @@ export default function PaneShell({
         return <BasketOrder instrument={pane.instrument} />;
       case 'backtest':
         return <Backtest instrument={pane.instrument} />;
+      case 'nubrabacktest':
+        return <NubraBacktest instrument={pane.instrument} theme={theme} />;
       case 'watchlist':
         return <Watchlist onNavigateToChart={onNavigateToChart} />;
       case 'tracker':

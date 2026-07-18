@@ -490,7 +490,7 @@ function decodeBinaryMsg(rawBuffer: Buffer): { type: string; data: unknown } | n
     }
     if (typeUrl.includes('OptionChainUpdate') && pbOptionChainUpdate) {
       const msg = pbOptionChainUpdate.decode(innerObj.value);
-      return { type: 'option_chain', data: pbOptionChainUpdate.toObject(msg, { longs: String, enums: String }) };
+      return { type: 'option_chain', data: pbOptionChainUpdate.toObject(msg, { longs: String, enums: String, defaults: true }) };
     }
   } catch { /* unknown message */ }
   return null;
@@ -1919,6 +1919,414 @@ fastify.post<{ Body: WalkForwardRequest }>('/api/backtest/walkforward', async (r
     console.log(`Walk-forward ${wf.base.underlying} ${wf.windows}w ${wf.param.path}: ${res.windows.length} windows in ${Date.now() - t0}ms`);
     return res;
   } catch (e) {
+    reply.code(500);
+    return { ok: false, error: (e as Error).message };
+  }
+});
+
+// ─── Nubra Backtest — Utilities ───────────────────────────────────────────────
+
+const _nbRefdataCache = new Map<string, Record<string, unknown>[]>();
+
+async function nbGetRefdataForDate(exchange: string, date: string): Promise<Record<string, unknown>[]> {
+  const key = `${exchange}_${date}`;
+  if (_nbRefdataCache.has(key)) return _nbRefdataCache.get(key)!;
+  try {
+    const raw = await nubraGet(`/refdata/refdata/${date}`, { exchange });
+    const arr = Array.isArray(raw.refdata) ? (raw.refdata as Record<string, unknown>[]) : [];
+    if (arr.length > 0) {
+      _nbRefdataCache.set(key, arr);
+    }
+    return arr;
+  } catch (e) {
+    console.error(`Failed to fetch refdata for date ${date}:`, e);
+    return [];
+  }
+}
+
+function nbTimeToMin(hhmm: string): number { const [h, m] = hhmm.split(':').map(Number); return h * 60 + (m || 0); }
+
+function nbTsToIstMin(tsNs: string): number {
+  const ms = Number(BigInt(tsNs) / 1000000n);
+  const d = new Date(ms + 19800000); // +5h30m IST
+  return d.getUTCHours() * 60 + d.getUTCMinutes();
+}
+
+function nbTsToIstHHMM(tsNs: string): string {
+  const m = nbTsToIstMin(tsNs);
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+}
+
+interface NbBar { ts: string; close: number; iv: number; vol: number; }
+
+function nbParseBars(chart: Record<string, unknown>): NbBar[] {
+  const closes = (chart.close || []) as Array<{ ts?: string; v: number }>;
+  const ivs = (chart.iv_mid || []) as Array<{ ts?: string; v: number }>;
+  const vols = (chart.cumulative_volume || []) as Array<{ ts?: string; v: number }>;
+  const bars: NbBar[] = [];
+  for (let i = 0; i < closes.length; i++) {
+    if (!closes[i].ts) continue;
+    bars.push({ ts: closes[i].ts!, close: closes[i].v / 100, iv: ivs[i]?.v ?? 0, vol: vols[i]?.v ?? 0 });
+  }
+  return bars;
+}
+
+function nbFindBar(bars: NbBar[], time: string): NbBar | null {
+  if (!bars.length) return null;
+  const target = nbTimeToMin(time);
+  let best = bars[0], bestD = Math.abs(nbTsToIstMin(bars[0].ts) - target);
+  for (let i = 1; i < bars.length; i++) {
+    const d = Math.abs(nbTsToIstMin(bars[i].ts) - target);
+    if (d < bestD) { best = bars[i]; bestD = d; }
+  }
+  return best;
+}
+
+async function nbFetchTs(
+  exchange: string,
+  type: string,
+  symbols: string[],
+  fields: string[],
+  date: string,
+  interval: string,
+  intraDay: boolean
+): Promise<Record<string, unknown>> {
+  // Nubra API limits 10 values/queries per request — chunk and merge
+  const BATCH = 10;
+  const chunks: string[][] = [];
+  for (let i = 0; i < symbols.length; i += BATCH) chunks.push(symbols.slice(i, i + BATCH));
+
+  const results = await Promise.all(chunks.map(batch =>
+    nubraPost('/charts/timeseries', {
+      query: batch.map(sym => ({
+        exchange,
+        type,
+        values: [sym],
+        fields,
+        startDate: `${date}T00:00:00.000Z`,
+        endDate:   `${date}T23:59:59.000Z`,
+        interval,
+        intraDay,
+        realTime: false
+      }))
+    }, { Authorization: `Bearer ${authState.sessionToken!}` })
+  ));
+
+  // Merge all batch results into a single response shape
+  const merged: Record<string, unknown> = { result: [{ values: [{}] }] };
+  const mergedMap = (merged as any).result[0].values[0] as Record<string, unknown>;
+  for (const res of results) {
+    for (const group of (res as any).result || []) {
+      for (const symbolMap of group.values || []) {
+        for (const [sym, data] of Object.entries(symbolMap as Record<string, unknown>)) {
+          mergedMap[sym] = data;
+        }
+      }
+    }
+  }
+  return merged;
+}
+
+function nbCollect(res: Record<string, unknown>): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const group of (res as any).result || []) {
+    for (const symbolMap of group.values || []) {
+      for (const [sym, data] of Object.entries(symbolMap as Record<string, unknown>)) {
+        out[sym] = data as Record<string, unknown>;
+      }
+    }
+  }
+  return out;
+}
+
+// ─── Nubra Backtest — Routes ──────────────────────────────────────────────────
+
+fastify.get<{ Querystring: { underlying?: string; date?: string; time?: string; expiry?: string } }>(
+  '/api/nubra-backtest/chain', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  const { underlying = 'NIFTY', date, time = '09:20', expiry } = req.query;
+  if (!date) { reply.code(400); return { ok: false, error: 'date is required.' }; }
+  if (!['NIFTY', 'SENSEX'].includes(underlying)) { reply.code(400); return { ok: false, error: 'underlying must be NIFTY or SENSEX.' }; }
+
+  try {
+    const t0 = Date.now();
+    const exchange = underlying === 'SENSEX' ? 'BSE' : 'NSE';
+    const indexName = underlying === 'SENSEX' ? 'SENSEX' : 'NIFTY';
+
+    // 1. Fetch spot on trade date (daily bar — intraday not available for INDEX)
+    const spotRes = await nubraPost('/charts/timeseries', {
+      query: [{ exchange, type: 'INDEX', values: [indexName], fields: ['close'],
+        startDate: `${date}T00:00:00.000Z`, endDate: `${date}T23:59:59.000Z`,
+        interval: '1d', intraDay: false, realTime: false }],
+    }, { Authorization: `Bearer ${authState.sessionToken!}` });
+    const spotAll = nbCollect(spotRes);
+    const spotChart = spotAll[indexName];
+    let spot = 0;
+    if (spotChart) {
+      const closes = (spotChart.close || []) as Array<{ ts?: string; v: number }>;
+      if (closes.length) spot = closes[0].v / 100;
+    }
+    if (!spot) {
+      return { ok: false, error: `Could not fetch ${underlying} spot for ${date}. Market may have been closed.`,
+        underlying, date, time, spot: 0, expiry: expiry || '', expiryFlag: 'WEEK',
+        availableExpiries: [], chain: [] };
+    }
+
+    // 2. Fetch historical refdata for the target date to resolve option symbols and expiries
+    const refdata = await nbGetRefdataForDate(exchange, date);
+    if (!refdata.length) {
+      return { ok: false, error: `Could not fetch option refdata for ${date}.`,
+        underlying, date, time, spot, expiry: expiry || '', expiryFlag: 'WEEK',
+        availableExpiries: [], chain: [] };
+    }
+
+    // Filter NSE/BSE options for the requested underlying asset
+    const assetRef = refdata.filter(x => x.asset === underlying && x.derivative_type === 'OPT');
+    if (!assetRef.length) {
+      return { ok: false, error: `No options found for ${underlying} on ${date}.`,
+        underlying, date, time, spot, expiry: expiry || '', expiryFlag: 'WEEK',
+        availableExpiries: [], chain: [] };
+    }
+
+    // Collect all unique available expiries and format as YYYY-MM-DD
+    const expiryNumbers = Array.from(new Set(assetRef.map(x => x.expiry as number))).sort();
+    const expiries = expiryNumbers.map(num => {
+      const s = String(num);
+      return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+    });
+
+    const selectedExpiry = expiry && expiries.includes(expiry) ? expiry : expiries[0];
+    const targetExpiryNum = Number(selectedExpiry.replace(/-/g, ''));
+    const expiryOptions = assetRef.filter(x => x.expiry === targetExpiryNum);
+
+    // 3. Generate ATM ± 10 strikes
+    const step = underlying === 'SENSEX' ? 100 : 50;
+    const atm = Math.round(spot / step) * step;
+    const strikes: number[] = [];
+    for (let i = -10; i <= 10; i++) strikes.push(atm + i * step);
+
+    // 4. Map strikes to option symbols (stock_names) in the refdata
+    const symbolsMap = new Map<string, { strike: number, type: 'CE' | 'PE' }>();
+    const symbolsToFetch: string[] = [];
+
+    for (const strike of strikes) {
+      const ceOpt = expiryOptions.find(x => x.strike_price === strike * 100 && x.option_type === 'CE');
+      const peOpt = expiryOptions.find(x => x.strike_price === strike * 100 && x.option_type === 'PE');
+      
+      if (ceOpt?.stock_name) {
+        symbolsToFetch.push(ceOpt.stock_name);
+        symbolsMap.set(ceOpt.stock_name, { strike, type: 'CE' });
+      }
+      if (peOpt?.stock_name) {
+        symbolsToFetch.push(peOpt.stock_name);
+        symbolsMap.set(peOpt.stock_name, { strike, type: 'PE' });
+      }
+    }
+
+    // 5. Fetch 1m candles for these symbols (batch-chunked in parallel)
+    const optRes = await nbFetchTs(exchange, 'OPT', symbolsToFetch, ['close', 'iv_mid', 'cumulative_volume'], date, '1m', false);
+    const optAll = nbCollect(optRes);
+
+    // 6. Build chain rows
+    const chainRowsMap = new Map<number, { strike: number; ceLtp: number; ceIv: number; ceOi: number; ceVol: number; peLtp: number; peIv: number; peOi: number; peVol: number }>();
+    for (const strike of strikes) {
+      chainRowsMap.set(strike, { strike, ceLtp: 0, ceIv: 0, ceOi: 0, ceVol: 0, peLtp: 0, peIv: 0, peOi: 0, peVol: 0 });
+    }
+
+    for (const sym of symbolsToFetch) {
+      const mapping = symbolsMap.get(sym);
+      if (!mapping) continue;
+      const chart = optAll[sym];
+      if (!chart) continue;
+      
+      const bars = nbParseBars(chart);
+      const bar = nbFindBar(bars, time);
+      if (!bar) continue;
+
+      const row = chainRowsMap.get(mapping.strike);
+      if (row) {
+        if (mapping.type === 'CE') {
+          row.ceLtp = bar.close;
+          row.ceIv = bar.iv;
+          row.ceVol = bar.vol;
+        } else {
+          row.peLtp = bar.close;
+          row.peIv = bar.iv;
+          row.peVol = bar.vol;
+        }
+      }
+    }
+    const chain = Array.from(chainRowsMap.values());
+
+    console.log(`NubraBacktest chain ${underlying} ${date} ${time} exp=${selectedExpiry}: ${chain.length} strikes, spot=${spot} in ${Date.now() - t0}ms`);
+    return { ok: true, underlying, date, time, spot, expiry: selectedExpiry, expiryFlag: 'WEEK',
+      availableExpiries: expiries.map(e => ({ expiry: e, flag: 'WEEK' })), chain };
+  } catch (e) {
+    console.error('NubraBacktest chain error:', e);
+    reply.code(500);
+    return { ok: false, error: (e as Error).message };
+  }
+});
+
+interface NbEvalLeg { strike: number; optionType: 'CALL' | 'PUT'; side: 'BUY' | 'SELL'; lots: number; }
+interface NbEvalBody { underlying: string; date: string; expiry: string; entryTime: string; exitTime: string; legs: NbEvalLeg[]; lotSize: number; }
+
+const IST_OFFSET = 19800; // 5h30m in seconds
+
+fastify.post<{ Body: NbEvalBody }>('/api/nubra-backtest/evaluate', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  const body = req.body;
+  if (!body?.underlying || !body?.date || !body?.legs?.length) {
+    reply.code(400); return { ok: false, error: 'underlying, date, and at least one leg are required.' };
+  }
+
+  try {
+    const t0 = Date.now();
+    const { underlying, date, expiry, entryTime, exitTime, legs, lotSize } = body;
+    const exchange = underlying === 'SENSEX' ? 'BSE' : 'NSE';
+    const indexName = underlying === 'SENSEX' ? 'SENSEX' : 'NIFTY';
+
+    // 1. Fetch historical refdata to map legs to option symbols
+    const refdata = await nbGetRefdataForDate(exchange, date);
+    const targetExpiryNum = Number(expiry.replace(/-/g, ''));
+    const expiryOptions = refdata.filter(x => x.asset === underlying && x.derivative_type === 'OPT' && x.expiry === targetExpiryNum);
+
+    const legSymbols: string[] = [];
+    for (const leg of legs) {
+      const opt = expiryOptions.find(x => x.strike_price === leg.strike * 100 && x.option_type === (leg.optionType === 'CALL' ? 'CE' : 'PE'));
+      if (opt?.stock_name) {
+        legSymbols.push(opt.stock_name);
+      } else {
+        return { ok: false, error: `Leg strike ${leg.strike} ${leg.optionType} not found in refdata for expiry ${expiry}.` };
+      }
+    }
+
+    // 2. Fetch 1m candles for option legs + 1m spot index close
+    const [optRes, spotRes] = await Promise.all([
+      nbFetchTs(exchange, 'OPT', legSymbols, ['close'], date, '1m', false),
+      nbFetchTs(exchange, 'INDEX', [indexName], ['close'], date, '1m', false),
+    ]);
+    const optAll = nbCollect(optRes);
+    const spotAll = nbCollect(spotRes);
+    const spotData = spotAll[indexName] || {};
+    const spotBars = nbParseBars(spotData);
+
+    const underlyingBars = spotBars.map(b => ({
+      time: Number(BigInt(b.ts) / 1000000000n) + IST_OFFSET,
+      open: b.close, high: b.close, low: b.close, close: b.close
+    }));
+
+    let daySpot = 0;
+    if (spotBars.length) {
+      daySpot = spotBars[spotBars.length - 1].close;
+    } else {
+      const dailyRes = await nubraPost('/charts/timeseries', {
+        query: [{ exchange, type: 'INDEX', values: [indexName], fields: ['close'],
+          startDate: `${date}T00:00:00.000Z`, endDate: `${date}T23:59:59.000Z`,
+          interval: '1d', intraDay: false, realTime: false }],
+      }, { Authorization: `Bearer ${authState.sessionToken!}` });
+      const dailyAll = nbCollect(dailyRes);
+      const closes = (dailyAll[indexName]?.close || []) as Array<{ ts?: string; v: number }>;
+      if (closes.length) daySpot = closes[0].v / 100;
+    }
+
+    const entryMin = nbTimeToMin(entryTime);
+    const exitMin = nbTimeToMin(exitTime);
+
+    // 3. Replay leg results
+    const legResults: Array<{ strike: number; optionType: string; side: string; lots: number; entryPrice: number; exitPrice: number; highAfterEntry: number; lowAfterEntry: number; pnl: number }> = [];
+    const legBarsList: NbBar[][] = [];
+    let totalPnl = 0;
+
+    const legPriceData: Array<{ legIndex: number; data: Array<{ time: number; value: number }> }> = [];
+    const legPnlData: Array<{ legIndex: number; data: Array<{ time: number; value: number }> }> = [];
+
+    for (let li = 0; li < legs.length; li++) {
+      const leg = legs[li];
+      const symbol = legSymbols[li];
+      const bars = optAll[symbol] ? nbParseBars(optAll[symbol]) : [];
+      legBarsList.push(bars);
+
+      const entryBar = nbFindBar(bars, entryTime);
+      const exitBar = nbFindBar(bars, exitTime);
+      const entryPrice = entryBar?.close ?? 0;
+      const exitPrice = exitBar?.close ?? 0;
+
+      const rangeBars = bars.filter(b => { const m = nbTsToIstMin(b.ts); return m >= entryMin && m <= exitMin; });
+      const high = rangeBars.length ? Math.max(...rangeBars.map(b => b.close)) : entryPrice;
+      const low = rangeBars.length ? Math.min(...rangeBars.map(b => b.close)) : entryPrice;
+
+      const qty = leg.lots * lotSize;
+      const sign = leg.side === 'BUY' ? 1 : -1;
+      const pnl = (exitPrice - entryPrice) * qty * sign;
+      totalPnl += pnl;
+
+      legResults.push({ strike: leg.strike, optionType: leg.optionType, side: leg.side, lots: leg.lots,
+        entryPrice, exitPrice, highAfterEntry: high, lowAfterEntry: low, pnl });
+
+      const pricePoints = bars.map(b => ({
+        time: Number(BigInt(b.ts) / 1000000000n) + IST_OFFSET,
+        value: b.close
+      }));
+      legPriceData.push({ legIndex: li, data: pricePoints });
+
+      const pnlPoints = bars.map(b => {
+        const t = Number(BigInt(b.ts) / 1000000000n) + IST_OFFSET;
+        const m = nbTsToIstMin(b.ts);
+        if (m < entryMin) return { time: t, value: 0 };
+        if (m > exitMin) return { time: t, value: (exitPrice - entryPrice) * qty * sign };
+        return { time: t, value: (b.close - entryPrice) * qty * sign };
+      });
+      legPnlData.push({ legIndex: li, data: pnlPoints });
+    }
+
+    // 4. Build intraday P&L curve at 1-minute resolution
+    const timeSet = new Set<string>();
+    for (const bars of legBarsList) {
+      for (const b of bars) {
+        const m = nbTsToIstMin(b.ts);
+        if (m >= entryMin && m <= exitMin) timeSet.add(nbTsToIstHHMM(b.ts));
+      }
+    }
+    const sortedTimes = [...timeSet].sort();
+
+    const intradayCurve: Array<{ hhmm: string; spot: number; total: number }> = [];
+    const basketPnlData: Array<{ time: number; value: number }> = [];
+
+    for (const hhmm of sortedTimes) {
+      let total = 0;
+      let timestamp = 0;
+      let currentSpot = daySpot;
+
+      const spotBar = nbFindBar(spotBars, hhmm);
+      if (spotBar) currentSpot = spotBar.close;
+
+      for (let li = 0; li < legs.length; li++) {
+        const leg = legs[li];
+        const bars = legBarsList[li];
+        const entry = nbFindBar(bars, entryTime);
+        const cur = nbFindBar(bars, hhmm);
+        if (!entry || !cur) continue;
+        total += (cur.close - entry.close) * leg.lots * lotSize * (leg.side === 'BUY' ? 1 : -1);
+        if (!timestamp) {
+          timestamp = Number(BigInt(cur.ts) / 1000000000n) + IST_OFFSET;
+        }
+      }
+      intradayCurve.push({ hhmm, spot: currentSpot, total: Math.round(total * 100) / 100 });
+      if (timestamp) {
+        basketPnlData.push({ time: timestamp, value: Math.round(total * 100) / 100 });
+      }
+    }
+
+    const entrySpotBar = nbFindBar(spotBars, entryTime);
+    const exitSpotBar = nbFindBar(spotBars, exitTime);
+    const entrySpot = entrySpotBar?.close ?? daySpot;
+    const exitSpot = exitSpotBar?.close ?? daySpot;
+
+    console.log(`NubraBacktest eval ${underlying} ${date} ${entryTime}→${exitTime}: ${legs.length} legs, P&L=${Math.round(totalPnl)} in ${Date.now() - t0}ms`);
+    return { ok: true, entrySpot, exitSpot, legs: legResults, grossPnl: Math.round(totalPnl * 100) / 100, intradayCurve, underlyingBars, legPriceData, legPnlData, basketPnlData };
+  } catch (e) {
+    console.error('NubraBacktest eval error:', e);
     reply.code(500);
     return { ok: false, error: (e as Error).message };
   }

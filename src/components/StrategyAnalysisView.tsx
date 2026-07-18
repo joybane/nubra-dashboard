@@ -177,11 +177,6 @@ function activeGreekSource(filter: Set<string>): GreekSource {
   return 'net';
 }
 
-const DEFAULT_LOT_SIZES: Record<string, number> = { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60, MIDCPNIFTY: 120, SENSEX: 20 };
-const MONTH_CODES: Record<string, string> = { '1':'01','2':'02','3':'03','4':'04','5':'05','6':'06','7':'07','8':'08','9':'09','O':'10','N':'11','D':'12' };
-const GREEK_SOURCES = ['net', 'CE', 'PE'] as const;
-const GREEK_LINE_STYLES: Record<string, number> = { net: 0, CE: 2, PE: 1 };
-const GREEK_LINE_WIDTHS: Record<string, 1 | 2> = { net: 2, CE: 1, PE: 1 };
 
 function deriveUnderlying(positions: PaperPosition[]): string | null {
   for (const p of positions) {
@@ -301,7 +296,7 @@ function minMaxFactor(values: number[]): { mid: number; half: number } {
 }
 
 export default function StrategyAnalysisView({ basketGroupId, strategyName, theme, onBack, snapshotId }: StrategyAnalysisViewProps) {
-  const { subscribe, subscribeChart, unsubscribeChart } = useWs();
+  const { subscribe, subscribeChart, unsubscribeChart, subscribeOC, unsubscribeOC } = useWs();
   const isSnapshot = !!snapshotId;
 
   // ── Position / order state ──
@@ -574,6 +569,27 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     subscribeChart({ indexes: [underlying] }, '1m', 'NSE');
     return () => { unsubscribeChart({ indexes: [underlying] }, '1m', 'NSE'); };
   }, [underlying, subscribeChart, unsubscribeChart, isSnapshot]);
+
+  // ── Subscribe option chain for strategy legs (ensures live ticks flow) ──
+  useEffect(() => {
+    if (isSnapshot || !underlying || positions.length === 0) return;
+    const keys = new Set<string>();
+    for (const p of positions) {
+      const expiry = p.expiry;
+      if (expiry) keys.add(`${underlying}:${expiry}`);
+    }
+    if (keys.size === 0) return;
+    for (const key of keys) {
+      const [asset, expiry] = key.split(':');
+      subscribeOC(asset, expiry, 'NSE');
+    }
+    return () => {
+      for (const key of keys) {
+        const [asset, expiry] = key.split(':');
+        unsubscribeOC(asset, expiry, 'NSE');
+      }
+    };
+  }, [underlying, positions, subscribeOC, unsubscribeOC, isSnapshot]);
 
   // ════════════════════════════════════════════════════════════════════════════
   // CHART SECTION — rebuilt from scratch
@@ -1062,6 +1078,52 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
     return () => { unsub1(); unsub2(); unsub3(); };
   }, [subscribe, underlying, isSnapshot]);
+
+  // ── 6b. Polling fallback — update charts from position state (fetchData polls every 3s) ──
+  // This ensures leg prices, leg P&L, and basket P&L update even if the WS option_chain /
+  // position_ltp messages aren't reaching this component.
+  useEffect(() => {
+    if (isSnapshot || positions.length === 0) return;
+    const t = nowChartTime();
+    const cached = chartDataRef.current;
+    if (cached && (t < cached.sessionOpen || t > cached.sessionClose)) return;
+
+    for (const p of positions) {
+      const ltp = p.last_traded_price;
+      if (!ltp || ltp <= 0) continue;
+      lastLtpRef.current.set(p.ref_id, ltp);
+
+      seriesRef.current.legPrice.get(p.ref_id)?.update({ time: t as any, value: normLeg(p.ref_id, ltp / 100) });
+
+      const side = (p.order_side || '').includes('BUY') ? 1 : -1;
+      const pnl = side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
+      seriesRef.current.legPnl.get(p.ref_id)?.update({ time: t as any, value: pnl });
+
+      if (cached) {
+        let pa = cached.legPriceData.get(p.ref_id); if (!pa) { pa = []; cached.legPriceData.set(p.ref_id, pa); }
+        upsertPoint(pa, t, ltp / 100);
+        let na = cached.legPnlData.get(p.ref_id); if (!na) { na = []; cached.legPnlData.set(p.ref_id, na); }
+        upsertPoint(na, t, pnl);
+      }
+    }
+
+    // Basket P&L
+    let totalPnl = 0;
+    for (const p of closedPositions) {
+      const side = (p.order_side || '').includes('BUY') ? 1 : -1;
+      if (p.exit_price != null) totalPnl += side * (p.exit_price - (p.avg_price || 0)) * (p.qty || 0) / 100;
+    }
+    for (const p of positions) {
+      const ltp = lastLtpRef.current.get(p.ref_id) ?? p.last_traded_price;
+      if (!ltp || ltp <= 0) continue;
+      const side = (p.order_side || '').includes('BUY') ? 1 : -1;
+      totalPnl += side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
+    }
+    if (seriesRef.current.basketPnl) {
+      seriesRef.current.basketPnl.update({ time: t as any, value: totalPnl });
+      if (cached) upsertPoint(cached.basketPnlData, t, totalPnl);
+    }
+  }, [positions, closedPositions, isSnapshot]);
 
   // ── 7. Live LTP for position table (unchanged) ──
   useEffect(() => {
