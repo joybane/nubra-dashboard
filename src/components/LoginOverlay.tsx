@@ -5,8 +5,10 @@ interface LoginOverlayProps {
 }
 
 export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
-  const [step,    setStep]    = useState<1 | 2 | 3>(1);
+  const [step,    setStep]    = useState<1 | 2>(1);
+  const [phone,   setPhone]   = useState(() => localStorage.getItem('saved_phone') || '');
   const [otp,     setOtp]     = useState('');
+  const [mpin,    setMpin]    = useState('');
   const [status,  setStatus]  = useState<{ msg: string; type: 'info' | 'error' | 'success' } | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -15,11 +17,17 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
   }
 
   async function sendOtp() {
+    if (!phone.trim()) { showStatus('Phone number is required.', 'error'); return; }
     setLoading(true);
     setOtp('');
     showStatus('Sending OTP...', 'info');
     try {
-      const res  = await fetch('/auth/send-otp', { method: 'POST' });
+      localStorage.setItem('saved_phone', phone.trim());
+      const res  = await fetch('/auth/send-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: phone.trim() }),
+      });
       const data = await res.json() as { ok: boolean; message?: string; error?: string };
       if (!data.ok) throw new Error(data.error);
       showStatus(data.message!, 'success');
@@ -34,29 +42,26 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
 
   async function verifyOtp() {
     if (!otp.trim()) { showStatus('Enter the OTP first.', 'error'); return; }
+    if (!mpin.trim()) { showStatus('Enter your MPIN.', 'error'); return; }
     setLoading(true);
-    showStatus('Verifying OTP...', 'info');
+    showStatus('Verifying OTP and MPIN...', 'info');
     try {
       const res  = await fetch('/auth/verify-otp', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ otp }),
+        body:    JSON.stringify({ otp: otp.trim(), mpin: mpin.trim() }),
       });
       const data = await res.json() as { ok: boolean; message?: string; error?: string };
       if (!data.ok) throw new Error(data.error);
-      showStatus('OTP verified. Verifying MPIN...', 'success');
-      setStep(3);
-      await verifyPin(false);
+      showStatus('Authenticated!', 'success');
+      setTimeout(() => onAuthenticated(), 600);
     } catch (err: unknown) {
       showStatus((err as Error).message, 'error');
-      setStep(2);
     } finally {
       setLoading(false);
     }
   }
 
-  // Fast path when the broker expired only the session token but the auth token
-  // is still valid - re-mint a session via MPIN with no OTP round-trip.
   async function resumeSession() {
     setLoading(true);
     showStatus('Resuming session...', 'info');
@@ -73,27 +78,10 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
     }
   }
 
-  async function verifyPin(manageLoading = true) {
-    if (manageLoading) setLoading(true);
-    showStatus('Verifying MPIN...', 'info');
-    try {
-      const res  = await fetch('/auth/verify-pin', { method: 'POST' });
-      const data = await res.json() as { ok: boolean; message?: string; error?: string };
-      if (!data.ok) throw new Error(data.error);
-      showStatus('Authenticated!', 'success');
-      setTimeout(() => onAuthenticated(), 600);
-    } catch (err: unknown) {
-      showStatus(`OTP verified, but MPIN verification failed: ${(err as Error).message}. Check MPIN in .env, then retry MPIN or send a new OTP.`, 'error');
-      setStep(3);
-    } finally {
-      if (manageLoading) setLoading(false);
-    }
-  }
-
   const statusColors = {
-    info:    'bg-blue-500/10 text-blue-400 border border-blue-500/20',
-    success: 'bg-green-500/10 text-green-400 border border-green-500/20',
-    error:   'bg-red-500/10 text-red-400 border border-red-500/20',
+    info:    'bg-[rgba(59,130,246,0.1)] text-blue-400 border border-blue-500/20',
+    success: 'bg-[rgba(34,197,94,0.1)] text-green-400 border border-green-500/20',
+    error:   'bg-[rgba(239,68,68,0.1)] text-red-400 border border-red-500/20',
   };
 
   return (
@@ -106,15 +94,23 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
           <p className="text-xs text-[var(--text-secondary)] mt-1">Sign in to continue</p>
         </div>
 
-        {/* Step 1: Send OTP */}
+        {/* Step 1: Phone & Send OTP */}
         {step === 1 && (
           <div className="flex flex-col gap-3">
-            <p className="text-xs text-[var(--text-secondary)]">
-              Click below to send an OTP to your registered mobile number.
-            </p>
+            <label className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
+              Phone Number
+            </label>
+            <input
+              type="text"
+              placeholder="10-digit Phone Number"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && phone.trim().length >= 10 && sendOtp()}
+              className="w-full px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-[var(--text-primary)] text-sm focus:outline-none focus:border-[var(--accent)] transition-colors"
+            />
             <button
               onClick={sendOtp}
-              disabled={loading}
+              disabled={loading || phone.trim().length < 10}
               className="w-full py-2.5 px-4 bg-[var(--accent)] hover:bg-[var(--accent-dim)] text-white rounded-md font-semibold text-sm disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
               Send OTP
@@ -129,7 +125,7 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
           </div>
         )}
 
-        {/* Step 2: Enter OTP */}
+        {/* Step 2: Enter OTP & MPIN */}
         {step === 2 && (
           <div className="flex flex-col gap-3">
             <label className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
@@ -144,48 +140,35 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
               autoComplete="one-time-code"
               value={otp}
               onChange={(e) => setOtp(e.target.value)}
+              className="w-full px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-[var(--text-primary)] text-sm focus:outline-none focus:border-[var(--accent)] transition-colors"
+            />
+            <label className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
+              Enter MPIN
+            </label>
+            <input
+              type="password"
+              inputMode="numeric"
+              maxLength={4}
+              placeholder="4-digit MPIN"
+              value={mpin}
+              onChange={(e) => setMpin(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && verifyOtp()}
-              className="w-full px-3 py-2.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-[var(--text-primary)] text-sm focus:outline-none focus:border-[var(--accent)] transition-colors"
+              className="w-full px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-[var(--text-primary)] text-sm focus:outline-none focus:border-[var(--accent)] transition-colors"
             />
             <button
               onClick={verifyOtp}
-              disabled={loading}
+              disabled={loading || !otp.trim() || !mpin.trim()}
               className="w-full py-2.5 px-4 bg-[var(--accent)] hover:bg-[var(--accent-dim)] text-white rounded-md font-semibold text-sm disabled:opacity-50 transition-colors"
             >
-              Verify OTP
+              Verify & Login
             </button>
-          </div>
-        )}
-
-        {/* Step 3: Auto MPIN */}
-        {step === 3 && (
-          <div className="flex flex-col gap-3">
-            <p className="text-xs text-[var(--text-secondary)]">
-              Verifying MPIN from server configuration...
-            </p>
-            {loading ? (
-              <div className="flex items-center gap-2 text-[var(--text-muted)]">
-                <span className="animate-spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full" />
-                <span className="text-xs">Please wait...</span>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <button
-                  onClick={() => verifyPin()}
-                  disabled={loading}
-                  className="w-full py-2.5 px-4 bg-[var(--accent)] hover:bg-[var(--accent-dim)] text-white rounded-md font-semibold text-sm disabled:opacity-50 transition-colors"
-                >
-                  Retry MPIN
-                </button>
-                <button
-                  onClick={sendOtp}
-                  disabled={loading}
-                  className="w-full py-2 px-4 bg-[var(--bg-secondary)] border border-[var(--border)] hover:border-[var(--accent)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-md font-medium text-xs disabled:opacity-50 transition-colors"
-                >
-                  Send new OTP
-                </button>
-              </div>
-            )}
+            <button
+              onClick={() => setStep(1)}
+              disabled={loading}
+              className="w-full py-2 px-4 bg-[var(--bg-secondary)] border border-[var(--border)] hover:border-[var(--accent)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] rounded-md font-medium text-xs disabled:opacity-50 transition-colors"
+            >
+              Change Phone / Resend OTP
+            </button>
           </div>
         )}
 

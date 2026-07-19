@@ -199,6 +199,28 @@ export default function Navbar({ onInstrumentSelect, theme, onThemeToggle }: Nav
         >
           {theme === 'dark' ? '☀' : '☾'}
         </button>
+
+        {/* Logout */}
+        <button
+          onClick={async () => {
+            if (confirm('Are you sure you want to log out of Nubra?')) {
+              try {
+                const res = await fetch('/auth/logout', { method: 'POST' });
+                if (res.ok) {
+                  window.location.reload();
+                }
+              } catch (e) {
+                console.error('Logout failed:', e);
+              }
+            }
+          }}
+          title="Logout"
+          className="w-8 h-8 rounded-full bg-[var(--bg-card)] border border-[var(--border)] text-red-400 hover:text-red-500 hover:border-red-500/50 flex items-center justify-center transition-all cursor-pointer"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
+          </svg>
+        </button>
       </div>
     </nav>
   );

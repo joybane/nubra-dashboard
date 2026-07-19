@@ -58,22 +58,77 @@ async function getRefdata(exchange: string): Promise<Record<string, unknown>[]> 
   return arr;
 }
 
+import crypto from 'crypto';
+
+const CRYPTO_ALGORITHM = 'aes-256-cbc';
+
+function getCryptoKey(salt: string): Buffer {
+  return crypto.scryptSync(salt || 'nubra-default-salt-key', 'salt', 32);
+}
+
+function encrypt(text: string, salt: string): string {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv(CRYPTO_ALGORITHM, getCryptoKey(salt), iv);
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return iv.toString('hex') + ':' + encrypted;
+}
+
+function decrypt(text: string, salt: string): string {
+  try {
+    const parts = text.split(':');
+    const iv = Buffer.from(parts.shift()!, 'hex');
+    const encryptedText = Buffer.from(parts.join(':'), 'hex');
+    const decipher = crypto.createDecipheriv(CRYPTO_ALGORITHM, getCryptoKey(salt), iv);
+    let decrypted = decipher.update(encryptedText);
+    decrypted = Buffer.concat([decrypted, decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
 // ─── Session persistence ──────────────────────────────────────────────────────
 const SESSION_FILE = path.join(__dirname, '..', 'session.json');
 
-function loadSavedSession(): { authToken?: string; deviceId?: string } {
+interface SavedSession {
+  deviceId?: string;
+  salt?: string;
+  phone?: string;
+  authToken?: string;
+  sessionToken?: string;
+  mpin?: string;
+}
+
+function loadSavedSession(): SavedSession {
   try {
     if (!existsSync(SESSION_FILE)) return {};
-    return JSON.parse(readFileSync(SESSION_FILE, 'utf8'));
+    const raw = JSON.parse(readFileSync(SESSION_FILE, 'utf8')) as SavedSession;
+    if (!raw.salt) return raw; // Legacy compatibility
+    return {
+      deviceId:     raw.deviceId,
+      salt:         raw.salt,
+      phone:        raw.phone,
+      authToken:    raw.authToken ? decrypt(raw.authToken, raw.salt) : undefined,
+      sessionToken: raw.sessionToken ? decrypt(raw.sessionToken, raw.salt) : undefined,
+      mpin:         raw.mpin ? decrypt(raw.mpin, raw.salt) : undefined,
+    };
   } catch { return {}; }
 }
 
 function saveSession(): void {
   try {
-    writeFileSync(SESSION_FILE, JSON.stringify({
-      authToken: authState.authToken,
-      deviceId:  authState.deviceId,
-    }), 'utf8');
+    const salt = authState.salt || crypto.randomBytes(16).toString('hex');
+    authState.salt = salt;
+    const payload: SavedSession = {
+      deviceId:     authState.deviceId,
+      salt,
+      phone:        authState.phone || undefined,
+      authToken:    authState.authToken ? encrypt(authState.authToken, salt) : undefined,
+      sessionToken: authState.sessionToken ? encrypt(authState.sessionToken, salt) : undefined,
+      mpin:         authState.mpin ? encrypt(authState.mpin, salt) : undefined,
+    };
+    writeFileSync(SESSION_FILE, JSON.stringify(payload, null, 2), 'utf8');
   } catch { /* non-critical */ }
 }
 
@@ -83,8 +138,11 @@ const authState = {
   deviceId:     _saved.deviceId  || randomUUID() + '-node',
   tempToken:    null as string | null,
   authToken:    _saved.authToken || null as string | null,
-  sessionToken: null as string | null,
-  status:       'idle' as 'idle' | 'awaiting_otp' | 'awaiting_mpin' | 'authenticated',
+  sessionToken: _saved.sessionToken || null as string | null,
+  mpin:         _saved.mpin || null as string | null,
+  phone:        _saved.phone || null as string | null,
+  salt:         _saved.salt || null as string | null,
+  status:       (_saved.sessionToken ? 'authenticated' : _saved.authToken ? 'awaiting_mpin' : 'idle') as 'idle' | 'awaiting_otp' | 'awaiting_mpin' | 'authenticated',
 };
 
 // When the broker rejects a request (401/403) we DON'T immediately force a login:
@@ -108,17 +166,19 @@ function onBrokerAuthFailure(): void {
 async function reauthSilently(): Promise<boolean> {
   if (reauthInFlight) return reauthInFlight;
   if (Date.now() - lastReauthMs < REAUTH_COOLDOWN_MS) return false;
-  if (!authState.authToken || !process.env.MPIN) { forceLogin(); return false; }
+  const mpin = authState.mpin || process.env.MPIN;
+  if (!authState.authToken || !mpin) { forceLogin(); return false; }
   lastReauthMs = Date.now();
   reauthInFlight = (async () => {
     reauthing = true;
     try {
-      const data = await nubraPost('/verifypin', { pin: process.env.MPIN! }, { Authorization: `Bearer ${authState.authToken}` });
+      const data = await nubraPost('/verifypin', { pin: mpin }, { Authorization: `Bearer ${authState.authToken}` });
       const sessionToken = (data.session_token || (data.data as Record<string, unknown>)?.token) as string;
       if (!sessionToken) throw new Error('no session_token in response');
       authState.sessionToken = sessionToken;
       authState.status       = 'authenticated';
       console.log('[auth] Session silently refreshed — no login needed.');
+      saveSession();
       connectNubraWs();
       try { broadcast({ type: 'auth_status', status: 'authenticated' }); } catch { /* ws not ready */ }
       return true;
@@ -224,25 +284,28 @@ if (existsSync(distPath)) {
 }
 
 // ─── Auth endpoints ───────────────────────────────────────────────────────────
-fastify.post('/auth/send-otp', async (_req, reply) => {
+fastify.post<{ Body: { phone?: string } }>('/auth/send-otp', async (req, reply) => {
   try {
-    const phone = process.env.PHONE_NO;
-    if (!phone) return reply.status(500).send({ ok: false, error: 'PHONE_NO not set in .env' });
+    const phone = req.body?.phone || authState.phone || process.env.PHONE_NO;
+    if (!phone) return reply.status(400).send({ ok: false, error: 'Phone number is required.' });
 
-    const data = await nubraPost('/sendphoneotp', { phone, flow: '', skip_totp: false });
+    const cleanPhone = phone.trim();
+    const data = await nubraPost('/sendphoneotp', { phone: cleanPhone, flow: '', skip_totp: false });
     let tempToken = data.temp_token as string;
     const next    = data.next as string;
 
     if (!tempToken) throw new Error('temp_token missing in response');
 
     if (next === 'VERIFY_TOTP') {
-      const data2 = await nubraPost('/sendphoneotp', { phone, flow: '', skip_totp: true }, { 'x-temp-token': tempToken });
+      const data2 = await nubraPost('/sendphoneotp', { phone: cleanPhone, flow: '', skip_totp: true }, { 'x-temp-token': tempToken });
       tempToken = data2.temp_token as string;
       if (!tempToken) throw new Error('temp_token missing in skip_totp response');
     }
 
     authState.tempToken = tempToken;
+    authState.phone     = cleanPhone;
     authState.status    = 'awaiting_otp';
+    saveSession();
     return reply.send({ ok: true, message: 'OTP sent to registered mobile number.' });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -250,16 +313,21 @@ fastify.post('/auth/send-otp', async (_req, reply) => {
   }
 });
 
-fastify.post<{ Body: { otp: string } }>('/auth/verify-otp', async (req, reply) => {
+fastify.post<{ Body: { otp: string; mpin?: string } }>('/auth/verify-otp', async (req, reply) => {
   try {
-    const { otp } = req.body;
+    const { otp, mpin } = req.body;
     if (!otp)                return reply.status(400).send({ ok: false, error: 'OTP required.' });
     if (!authState.tempToken) return reply.status(400).send({ ok: false, error: 'Send OTP first.' });
+    if (!authState.phone)     return reply.status(400).send({ ok: false, error: 'Phone number missing.' });
 
-    const phone = process.env.PHONE_NO!;
+    const suppliedMpin = mpin || authState.mpin || process.env.MPIN;
+    if (!suppliedMpin) return reply.status(400).send({ ok: false, error: 'MPIN required.' });
+
+    const cleanMpin = mpin ? String(mpin).trim() : '';
+
     const data  = await nubraPost(
       '/verifyphoneotp',
-      { phone, otp: String(otp) },
+      { phone: authState.phone, otp: String(otp).trim() },
       { 'x-temp-token': authState.tempToken },
     );
 
@@ -267,9 +335,24 @@ fastify.post<{ Body: { otp: string } }>('/auth/verify-otp', async (req, reply) =
     if (!authToken) throw new Error('auth_token missing in response');
 
     authState.authToken = authToken;
+    if (cleanMpin) authState.mpin = cleanMpin;
     authState.status    = 'awaiting_mpin';
     saveSession();
-    return reply.send({ ok: true, message: 'OTP verified. Verifying MPIN…' });
+
+    // Automatically execute verifypin block
+    const finalMpin = cleanMpin || authState.mpin || '';
+    const pinRes = await nubraPost('/verifypin', { pin: finalMpin }, { Authorization: `Bearer ${authToken}` });
+    const sessionToken = (pinRes.session_token || (pinRes.data as Record<string, unknown>)?.token) as string;
+    if (!sessionToken) throw new Error('session_token missing in response');
+
+    authState.sessionToken = sessionToken;
+    authState.status       = 'authenticated';
+    console.log('Authenticated. Session token acquired.');
+    saveSession();
+    connectNubraWs();
+    try { broadcast({ type: 'auth_status', status: 'authenticated' }); } catch { /* ws not ready */ }
+
+    return reply.send({ ok: true, message: 'Authenticated successfully.', authenticated: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     return reply.status(500).send({ ok: false, error: msg });
@@ -278,8 +361,8 @@ fastify.post<{ Body: { otp: string } }>('/auth/verify-otp', async (req, reply) =
 
 fastify.post('/auth/verify-pin', async (_req, reply) => {
   try {
-    const mpin = process.env.MPIN;
-    if (!mpin)                return reply.status(500).send({ ok: false, error: 'MPIN not set in .env' });
+    const mpin = authState.mpin || process.env.MPIN;
+    if (!mpin)                return reply.status(500).send({ ok: false, error: 'MPIN not set' });
     if (!authState.authToken) return reply.status(400).send({ ok: false, error: 'Verify OTP first.' });
 
     const data = await nubraPost('/verifypin', { pin: mpin }, { Authorization: `Bearer ${authState.authToken}` });
@@ -289,6 +372,7 @@ fastify.post('/auth/verify-pin', async (_req, reply) => {
     authState.sessionToken = sessionToken;
     authState.status       = 'authenticated';
     console.log('Authenticated. Session token acquired.');
+    saveSession();
     connectNubraWs();
     try { broadcast({ type: 'auth_status', status: 'authenticated' }); } catch { /* ws not ready */ }
     return reply.send({ ok: true, message: 'Authenticated successfully.' });
@@ -300,6 +384,37 @@ fastify.post('/auth/verify-pin', async (_req, reply) => {
 
 fastify.get('/auth/status', async (_req, reply) => {
   return reply.send({ status: authState.status, authenticated: authState.status === 'authenticated' });
+});
+
+fastify.post('/auth/logout', async (_req, reply) => {
+  try {
+    authState.sessionToken = null;
+    authState.authToken    = null;
+    authState.mpin         = null;
+    authState.phone        = null;
+    authState.status       = 'idle';
+    
+    try {
+      if (existsSync(SESSION_FILE)) {
+        const payload: SavedSession = {
+          deviceId: authState.deviceId,
+          salt: authState.salt || undefined,
+        };
+        writeFileSync(SESSION_FILE, JSON.stringify(payload, null, 2), 'utf8');
+      }
+    } catch {}
+
+    if (nubraWs) {
+      try { nubraWs.close(); } catch {}
+      nubraWs = null;
+    }
+    
+    try { broadcast({ type: 'auth_status', status: 'idle' }); } catch {}
+    return reply.send({ ok: true });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return reply.status(500).send({ ok: false, error: msg });
+  }
 });
 
 // ─── Auth guard ───────────────────────────────────────────────────────────────
@@ -1935,23 +2050,45 @@ fastify.post<{ Body: MarginBody }>('/paper/margin', async (req, reply) => {
 
 // ─── Startup session restore ──────────────────────────────────────────────────
 async function tryRestoreSession(): Promise<void> {
-  if (!authState.authToken) return;
-  const mpin = process.env.MPIN;
-  if (!mpin) return;
-  try {
-    console.log('Attempting to restore session with saved token…');
-    const data = await nubraPost('/verifypin', { pin: mpin }, { Authorization: `Bearer ${authState.authToken}` });
-    const sessionToken = (data.session_token || (data.data as Record<string, unknown>)?.token) as string;
-    if (!sessionToken) throw new Error('no session_token in response');
-    authState.sessionToken = sessionToken;
-    authState.status       = 'authenticated';
-    console.log('Session restored — OTP not needed.');
-    connectNubraWs();
-    try { broadcast({ type: 'auth_status', status: 'authenticated' }); } catch { /* ws not ready */ }
-  } catch (err) {
-    console.log(`Saved token expired (${(err as Error).message}). Fresh OTP required.`);
-    authState.authToken = null;
-    authState.status    = 'idle';
+  if (authState.sessionToken) {
+    try {
+      console.log('Testing saved session token...');
+      const today = new Date().toISOString().slice(0, 10);
+      await getRefdata('NSE');
+      
+      authState.status = 'authenticated';
+      console.log('[auth] Saved session token is valid. Zero-prompt bypass successful!');
+      connectNubraWs();
+      try { broadcast({ type: 'auth_status', status: 'authenticated' }); } catch { /* ws not ready */ }
+      return;
+    } catch (e: any) {
+      console.log('[auth] Saved session token is invalid or expired. Falling back to PIN/OTP.', e.message);
+      authState.sessionToken = null;
+    }
+  }
+
+  const mpin = authState.mpin || process.env.MPIN;
+  if (authState.authToken && mpin) {
+    try {
+      console.log('Attempting to restore session with saved token + MPIN…');
+      const data = await nubraPost('/verifypin', { pin: mpin }, { Authorization: `Bearer ${authState.authToken}` });
+      const sessionToken = (data.session_token || (data.data as Record<string, unknown>)?.token) as string;
+      if (!sessionToken) throw new Error('no session_token in response');
+      authState.sessionToken = sessionToken;
+      authState.status       = 'authenticated';
+      console.log('Session restored — OTP not needed.');
+      saveSession();
+      connectNubraWs();
+      try { broadcast({ type: 'auth_status', status: 'authenticated' }); } catch { /* ws not ready */ }
+      return;
+    } catch (err: any) {
+      console.log(`Saved token expired (${err.message}). Fresh OTP required.`);
+      authState.authToken = null;
+      authState.status    = 'idle';
+      saveSession();
+    }
+  } else {
+    authState.status = 'idle';
   }
 }
 
