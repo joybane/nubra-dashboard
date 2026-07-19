@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import SvgChart from './components/SvgChart';
 import type { Instrument } from './types';
 import { getSymbol } from './types';
@@ -117,7 +117,33 @@ export default function BasketOrder({ instrument }: Props) {
 
   const chain = useBasketChain({ sym, exch, legExpiries });
   const persistence = useBasketPersistence();
-  const { margin, loading: marginLoading, error: marginError } = useMarginCalc(legs, exch, multiplier);
+  const { margin, loading: marginLoading, error: marginError } = useMarginCalc(legs, exch, multiplier, useCallback((resolved: any[]) => {
+    setLegs(prev => {
+      let changed = false;
+      const next = prev.map(leg => {
+        const found = resolved.find((r: any) => r.strike === leg.strike && r.optionType === leg.optionType && r.expiry === leg.expiry);
+        if (found) {
+          if (leg.refId !== found.refId || leg.delta !== found.delta || leg.ltp !== found.ltp || leg.nubraName !== found.nubraName) {
+            changed = true;
+            return {
+              ...leg,
+              refId: found.refId,
+              ltp: found.ltp,
+              iv: found.iv ?? leg.iv,
+              delta: found.delta ?? leg.delta,
+              gamma: found.gamma ?? leg.gamma,
+              theta: found.theta ?? leg.theta,
+              vega: found.vega ?? leg.vega,
+              nubraName: found.nubraName,
+              lotSize: found.lotSize || leg.lotSize
+            };
+          }
+        }
+        return leg;
+      });
+      return changed ? next : prev;
+    });
+  }, []));
 
   // Auto-enable basket mode when OC tab active in builder
   useEffect(() => {
@@ -368,7 +394,7 @@ export default function BasketOrder({ instrument }: Props) {
   // Place orders
 
   async function fetchMarginRequiredPaise(orderLegs: Leg[]): Promise<number | undefined> {
-    const validLegs = orderLegs.filter(l => l.refId && l.strike > 0 && l.lots > 0 && l.lotSize > 0);
+    const validLegs = orderLegs.filter(l => l.strike > 0 && l.lots > 0 && l.lotSize > 0);
     if (!validLegs.length) return undefined;
     const res = await fetch('/paper/margin/basket', {
       method: 'POST',

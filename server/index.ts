@@ -1527,7 +1527,7 @@ function readNumber(source: Record<string, unknown>, paths: string[]): number {
 }
 
 function normalizeMarginResponse(data: Record<string, unknown>): Record<string, unknown> {
-  const multiplier = 1.068; // inflate by ~6.8% to match broker portal safety buffer exactly
+  const multiplier = 1.0; // remove the buffer to match raw broker margins exactly
   const totalMargin = readNumber(data, [
     'total_margin',
     'totalMargin',
@@ -1601,11 +1601,90 @@ function buildV3MarginOrders(orders: BasketMarginBody['orders']): Array<Record<s
   }];
 }
 
+function parseExpiryToYYYYMMDD(exp: string | undefined): string | null {
+  if (!exp) return null;
+  const clean = exp.trim();
+  if (/^\d{8}$/.test(clean)) return clean;
+  const parts = clean.split(/\s+/);
+  if (parts.length === 3) {
+    const day = parts[0].padStart(2, '0');
+    const monthStr = parts[1].toLowerCase();
+    const yearSuffix = parts[2];
+    const year = yearSuffix.length === 2 ? '20' + yearSuffix : yearSuffix;
+    const months: Record<string, string> = {
+      jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+      jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12'
+    };
+    const month = months[monthStr.slice(0, 3)];
+    if (month && day && year) {
+      return `${year}${month}${day}`;
+    }
+  }
+  try {
+    const d = new Date(clean);
+    if (!isNaN(d.getTime())) {
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      return `${yyyy}${mm}${dd}`;
+    }
+  } catch {}
+  return clean;
+}
+
 fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, reply) => {
   if (!requireAuth(reply)) return;
   try {
     const { exchange = 'NSE', orders } = req.body as BasketMarginBody & { multiplier?: number };
     if (!Array.isArray(orders) || orders.length === 0) return reply.status(400).send({ error: 'orders must be non-empty' });
+
+    const resolvedLegs: Array<Record<string, unknown>> = [];
+    const chainCache = new Map<string, any>();
+
+    for (const o of orders) {
+      const cleanExpiry = parseExpiryToYYYYMMDD(o.expiry);
+      if (o.symbol && cleanExpiry && o.strike && o.option_type) {
+        const cacheKey = `${o.symbol}__${cleanExpiry}`;
+        let chain = chainCache.get(cacheKey);
+        if (!chain) {
+          try {
+            const resData = await nubraGet(`/optionchains/${o.symbol}`, { exchange, expiry: cleanExpiry });
+            chain = resData.chain || resData;
+            chainCache.set(cacheKey, chain);
+          } catch (e: any) {
+            console.warn(`[basket-margin] failed to load optionchain for ${cacheKey}:`, e.message);
+          }
+        }
+        if (chain) {
+          const list = (o.option_type.toUpperCase() === 'CE' ? chain.ce : chain.pe) || [];
+          const matched = list.find((c: any) => {
+            const sp = Number(c.sp);
+            return sp === o.strike || sp === o.strike * 100;
+          });
+          if (matched) {
+            o.ref_id = Number(matched.ref_id || matched.refId);
+            resolvedLegs.push({
+              strike: o.strike,
+              optionType: o.option_type,
+              expiry: o.expiry,
+              refId: o.ref_id,
+              ltp: matched.ltp ? Number(matched.ltp) / 100 : (o.ltp || 0),
+              iv: matched.iv != null ? Number(matched.iv) : null,
+              delta: matched.delta != null ? Number(matched.delta) : null,
+              gamma: matched.gamma != null ? Number(matched.gamma) : null,
+              theta: matched.theta != null ? Number(matched.theta) : null,
+              vega: matched.vega != null ? Number(matched.vega) : null,
+              nubraName: String(matched.zanskar_name || matched.nubra_name || matched.symbol || ''),
+              lotSize: Number(matched.ls || matched.lot_size || o.lot_size || 1)
+            });
+            if (matched.symbol || matched.zanskar_name || matched.nubra_name) {
+              const name = String(matched.zanskar_name || matched.nubra_name || matched.symbol || '');
+              simBroker.registerName(name, o.ref_id);
+            }
+          }
+        }
+      }
+    }
 
     const apiOrders = orders.map(o => ({
       ref_id:              o.ref_id,
@@ -1641,7 +1720,7 @@ fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, rep
         );
         const normalized = normalizeMarginResponse(data);
         console.log(`[basket-margin] response from ${baseUrl}:`, JSON.stringify(normalized));
-        return reply.send(normalized);
+        return reply.send({ ...normalized, resolved_legs: resolvedLegs });
       } catch (err) {
         const msg = `${baseUrl}: ${(err as Error).message}`;
         v2Errors.push(msg);
@@ -1664,7 +1743,7 @@ fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, rep
       );
       const normalized = normalizeMarginResponse(v3Data);
       console.log('[basket-margin-v3] response:', JSON.stringify(normalized));
-      if (Number(normalized.total_margin ?? 0) > 0) return reply.send(normalized);
+      if (Number(normalized.total_margin ?? 0) > 0) return reply.send({ ...normalized, resolved_legs: resolvedLegs });
       throw new Error('Broker returned no total margin.');
     } catch (err) {
       const v3Error = (err as Error).message;
@@ -1678,6 +1757,7 @@ fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, rep
         }));
         return reply.send({
           ...normalizedLocal,
+          resolved_legs: resolvedLegs,
           broker_error: `Broker margin unavailable. V2: ${v2Errors.join(' | ') || 'not attempted'}. V3: ${v3Error}`,
         });
       }

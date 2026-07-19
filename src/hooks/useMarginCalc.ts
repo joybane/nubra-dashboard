@@ -30,7 +30,7 @@ export interface MarginCalcApi {
   error: string;
 }
 
-export function useMarginCalc(legs: Leg[], exch: string, multiplier: number): MarginCalcApi {
+export function useMarginCalc(legs: Leg[], exch: string, multiplier: number, onLegsResolved?: (resolved: any[]) => void): MarginCalcApi {
   const [margin, setMargin] = useState<MarginData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -38,7 +38,7 @@ export function useMarginCalc(legs: Leg[], exch: string, multiplier: number): Ma
 
   const fetchMargin = useCallback(async () => {
     if (!legs.length) { setMargin(null); setLoading(false); setError(''); return; }
-    const validLegs = legs.filter(l => l.refId && l.strike > 0 && l.lots > 0 && l.lotSize > 0 && (l.optionType === 'CE' || l.optionType === 'PE'));
+    const validLegs = legs.filter(l => l.strike > 0 && l.lots > 0 && l.lotSize > 0 && (l.optionType === 'CE' || l.optionType === 'PE'));
     if (!validLegs.length) { setMargin(null); setLoading(false); setError(''); return; }
     setLoading(true);
     setError('');
@@ -55,6 +55,9 @@ export function useMarginCalc(legs: Leg[], exch: string, multiplier: number): Ma
         setMargin(null);
         setError(String(data.error || data.message || `HTTP ${res.status}`));
         return;
+      }
+      if (Array.isArray(data.resolved_legs) && onLegsResolved) {
+        onLegsResolved(data.resolved_legs);
       }
       const total = Number(data.total_margin ?? 0) / 100;
       if (!(total > 0)) {
@@ -78,7 +81,7 @@ export function useMarginCalc(legs: Leg[], exch: string, multiplier: number): Ma
     } finally {
       setLoading(false);
     }
-  }, [legs, exch, multiplier]);
+  }, [legs, exch, multiplier, onLegsResolved]);
 
   useEffect(() => {
     clearTimeout(timerRef.current);
