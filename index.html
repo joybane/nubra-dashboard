@@ -5,6 +5,42 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Nubra Dashboard</title>
   <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('nubra-theme') || 'dark');</script>
+  <script>
+    window.onerror = function(message, source, lineno, colno, error) {
+      const div = document.createElement('div');
+      div.style.position = 'fixed';
+      div.style.top = '0';
+      div.style.left = '0';
+      div.style.width = '100%';
+      div.style.background = '#fee2e2';
+      div.style.color = '#991b1b';
+      div.style.padding = '24px';
+      div.style.zIndex = '999999';
+      div.style.fontFamily = 'monospace';
+      div.style.whiteSpace = 'pre-wrap';
+      div.style.fontSize = '14px';
+      div.style.boxShadow = '0 10px 15px -3px rgba(0,0,0,0.1)';
+      div.innerHTML = '<strong>Frontend Runtime Error:</strong>\n' + message + '\n\nSource: ' + source + ' (Line ' + lineno + ':' + colno + ')\n\nStack:\n' + (error && error.stack || 'No stack trace');
+      document.body.appendChild(div);
+      return false;
+    };
+    window.onunhandledrejection = function(event) {
+      const div = document.createElement('div');
+      div.style.position = 'fixed';
+      div.style.top = '0';
+      div.style.left = '0';
+      div.style.width = '100%';
+      div.style.background = '#fffbeb';
+      div.style.color = '#92400e';
+      div.style.padding = '24px';
+      div.style.zIndex = '999999';
+      div.style.fontFamily = 'monospace';
+      div.style.whiteSpace = 'pre-wrap';
+      div.style.fontSize = '14px';
+      div.innerHTML = '<strong>Unhandled Promise Rejection:</strong>\n' + (event.reason && event.reason.message || event.reason) + '\n\nStack:\n' + (event.reason && event.reason.stack || 'No stack trace');
+      document.body.appendChild(div);
+    };
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">

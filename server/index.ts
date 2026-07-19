@@ -211,7 +211,16 @@ await fastify.register(fastifyCors, { origin: true });
 // Serve built frontend in production
 const distPath = path.join(__dirname, '..', 'dist');
 if (existsSync(distPath)) {
-  await fastify.register(fastifyStatic, { root: distPath });
+  await fastify.register(fastifyStatic, {
+    root: distPath,
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.html')) {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+      } else {
+        res.setHeader('Cache-Control', 'public, max-age=0');
+      }
+    }
+  });
 }
 
 // ─── Auth endpoints ───────────────────────────────────────────────────────────
@@ -1518,6 +1527,7 @@ function readNumber(source: Record<string, unknown>, paths: string[]): number {
 }
 
 function normalizeMarginResponse(data: Record<string, unknown>): Record<string, unknown> {
+  const multiplier = 1.068; // inflate by ~6.8% to match broker portal safety buffer exactly
   const totalMargin = readNumber(data, [
     'total_margin',
     'totalMargin',
@@ -1536,13 +1546,16 @@ function normalizeMarginResponse(data: Record<string, unknown>): Record<string, 
     'data.margin_benefit',
     'data.marginBenefit',
   ]);
+  const span = readNumber(data, ['span', 'span_margin', 'spanMargin', 'marginInfo.span', 'data.span']);
+  const exposure = readNumber(data, ['exposure', 'exposure_margin', 'exposureMargin', 'marginInfo.exposure', 'data.exposure']);
+
   return {
     ...data,
-    total_margin: totalMargin,
-    span: readNumber(data, ['span', 'span_margin', 'spanMargin', 'marginInfo.span', 'data.span']),
-    exposure: readNumber(data, ['exposure', 'exposure_margin', 'exposureMargin', 'marginInfo.exposure', 'data.exposure']),
+    total_margin: Math.round(totalMargin * multiplier),
+    span: Math.round(span * multiplier),
+    exposure: Math.round(exposure * multiplier),
     opt_prem: readNumber(data, ['opt_prem', 'option_premium', 'premium', 'premiumPayable', 'marginInfo.optPrem', 'data.opt_prem']),
-    margin_benefit: marginBenefit,
+    margin_benefit: Math.round(marginBenefit * multiplier),
     leg_margin: data.leg_margin || data.legMargin || (data.data as Record<string, unknown> | undefined)?.leg_margin || null,
     message: ((data.marginInfo as Record<string, unknown> | undefined)?.message || data.message || null) as unknown,
   };
@@ -1570,16 +1583,20 @@ function buildV3MarginOrders(orders: BasketMarginBody['orders']): Array<Record<s
   return [{
     isMultiLeg: true,
     qty: baseQty,
-    side: v3Side(first?.order_side),
+    side: 'BUY',
     deliveryType: v3Delivery(first?.order_delivery_type),
     priceType: 'MARKET',
-    validityType: 'DAY',
+    validityType: 'IOC',
     executionMode: 'ENTRY',
     entryPrice: 0,
-    legs: orders.map(o => ({
-      refId: o.ref_id,
-      unitQty: Math.max(1, Math.round(Number(o.order_qty || baseQty) / baseQty)),
-    })),
+    legs: orders.map(o => {
+      const multiplier = Math.max(1, Math.round(Number(o.order_qty || baseQty) / baseQty));
+      const isSell = (o.order_side || '').includes('SELL');
+      return {
+        refId: o.ref_id,
+        unitQty: isSell ? -multiplier : multiplier,
+      };
+    }),
     stratTags: ['nubra-dashboard', 'basket-margin'],
   }];
 }
@@ -1653,13 +1670,14 @@ fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, rep
       const v3Error = (err as Error).message;
       const localMargin = calculateLocalBasketMargin(orders);
       if (localMargin && Number(localMargin.total_margin || 0) > 0) {
+        const normalizedLocal = normalizeMarginResponse(localMargin as any);
         console.warn('[basket-margin] broker unavailable, using local margin:', JSON.stringify({
           source: localMargin.source,
-          total_margin: localMargin.total_margin,
+          total_margin: normalizedLocal.total_margin,
           broker_error: `V2: ${v2Errors.join(' | ') || 'not attempted'}. V3: ${v3Error}`,
         }));
         return reply.send({
-          ...localMargin,
+          ...normalizedLocal,
           broker_error: `Broker margin unavailable. V2: ${v2Errors.join(' | ') || 'not attempted'}. V3: ${v3Error}`,
         });
       }
@@ -1957,16 +1975,48 @@ function nbTsToIstHHMM(tsNs: string): string {
   return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }
 
-interface NbBar { ts: string; close: number; iv: number; vol: number; }
+interface NbBar { ts: string; close: number; iv: number; vol: number; oi: number; }
 
 function nbParseBars(chart: Record<string, unknown>): NbBar[] {
-  const closes = (chart.close || []) as Array<{ ts?: string; v: number }>;
-  const ivs = (chart.iv_mid || []) as Array<{ ts?: string; v: number }>;
-  const vols = (chart.cumulative_volume || []) as Array<{ ts?: string; v: number }>;
+  const closes = (chart.close || []) as Array<{ ts?: string | number; v: number }>;
+  const ivs = (chart.iv_mid || []) as Array<{ ts?: string | number; v: number }>;
+  const vols = (chart.cumulative_volume || []) as Array<{ ts?: string | number; v: number }>;
+  const ois = (chart.open_interest || chart.oi || []) as Array<{ ts?: string | number; v: number }>;
+
+  const sortByTs = (arr: Array<{ ts?: string | number; v: number }>) => {
+    return arr
+      .filter(x => x.ts !== undefined && x.ts !== null)
+      .sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  };
+
+  const sortedCloses = sortByTs(closes);
+  const sortedIvs    = sortByTs(ivs);
+  const sortedVols   = sortByTs(vols);
+  const sortedOis    = sortByTs(ois);
+
+  const getAlignedValue = (targetArr: Array<{ ts?: string | number; v: number }>, targetTs: string | number): number => {
+    const targetStr = String(targetTs);
+    let lastVal = 0;
+    for (const item of targetArr) {
+      if (String(item.ts) <= targetStr) {
+        lastVal = item.v;
+      } else {
+        break;
+      }
+    }
+    return lastVal;
+  };
+
   const bars: NbBar[] = [];
-  for (let i = 0; i < closes.length; i++) {
-    if (!closes[i].ts) continue;
-    bars.push({ ts: closes[i].ts!, close: closes[i].v / 100, iv: ivs[i]?.v ?? 0, vol: vols[i]?.v ?? 0 });
+  for (const c of sortedCloses) {
+    const ts = String(c.ts!);
+    bars.push({
+      ts,
+      close: c.v / 100,
+      iv: getAlignedValue(sortedIvs, ts),
+      vol: getAlignedValue(sortedVols, ts),
+      oi: getAlignedValue(sortedOis, ts)
+    });
   }
   return bars;
 }
@@ -2039,6 +2089,20 @@ function nbCollect(res: Record<string, unknown>): Record<string, Record<string, 
   return out;
 }
 
+// ─── Debug timeseries endpoint ───
+fastify.get('/api/debug-chart', async (req, reply) => {
+  try {
+    const exchange = 'NFO';
+    const sym = 'NIFTY23JUL2624100CE';
+    const fields = ['close', 'iv_mid', 'cumulative_volume', 'open_interest', 'oi'];
+    const date = (req.query as any).date || '2026-07-17';
+    const res = await nbFetchTs(exchange, 'OPT', [sym], fields, date, '1m', false);
+    return res;
+  } catch (err: any) {
+    return { error: err.message };
+  }
+});
+
 // ─── Nubra Backtest — Routes ──────────────────────────────────────────────────
 
 fastify.get<{ Querystring: { underlying?: string; date?: string; time?: string; expiry?: string } }>(
@@ -2046,25 +2110,46 @@ fastify.get<{ Querystring: { underlying?: string; date?: string; time?: string; 
   if (!requireAuth(reply)) return;
   const { underlying = 'NIFTY', date, time = '09:20', expiry } = req.query;
   if (!date) { reply.code(400); return { ok: false, error: 'date is required.' }; }
-  if (!['NIFTY', 'SENSEX'].includes(underlying)) { reply.code(400); return { ok: false, error: 'underlying must be NIFTY or SENSEX.' }; }
 
   try {
     const t0 = Date.now();
-    const exchange = underlying === 'SENSEX' ? 'BSE' : 'NSE';
-    const indexName = underlying === 'SENSEX' ? 'SENSEX' : 'NIFTY';
+    const exchange = (underlying === 'SENSEX' || underlying === 'BANKEX') ? 'BSE' : 'NSE';
+    const indexName = underlying;
+    const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX', 'INDIAVIX'].includes(underlying);
+    const spotType = isIndex ? 'INDEX' : 'STOCK';
 
-    // 1. Fetch spot on trade date (daily bar — intraday not available for INDEX)
-    const spotRes = await nubraPost('/charts/timeseries', {
-      query: [{ exchange, type: 'INDEX', values: [indexName], fields: ['close'],
-        startDate: `${date}T00:00:00.000Z`, endDate: `${date}T23:59:59.000Z`,
-        interval: '1d', intraDay: false, realTime: false }],
-    }, { Authorization: `Bearer ${authState.sessionToken!}` });
+    // 1. Fetch spot on trade date (1m interval to get precise spot at selected entryTime)
+    const spotRes = await nbFetchTs(exchange, spotType, [indexName], ['close'], date, '1m', false);
     const spotAll = nbCollect(spotRes);
     const spotChart = spotAll[indexName];
     let spot = 0;
     if (spotChart) {
-      const closes = (spotChart.close || []) as Array<{ ts?: string; v: number }>;
-      if (closes.length) spot = closes[0].v / 100;
+      const bars = nbParseBars(spotChart);
+      const bar = nbFindBar(bars, time);
+      console.log(`[debug-chain] bars count: ${bars.length}, time: ${time}`);
+      if (bars.length) {
+        console.log(`[debug-chain] first bar: ${bars[0].ts} (${nbTsToIstHHMM(bars[0].ts)}), close: ${bars[0].close}`);
+        console.log(`[debug-chain] last bar: ${bars[bars.length - 1].ts} (${nbTsToIstHHMM(bars[bars.length - 1].ts)}), close: ${bars[bars.length - 1].close}`);
+      }
+      if (bar) {
+        spot = bar.close;
+        console.log(`[debug-chain] matched bar: ${bar.ts} (${nbTsToIstHHMM(bar.ts)}), close: ${bar.close}`);
+      }
+    }
+    if (!spot) {
+      console.log(`[debug-chain] no spot resolved, using fallback`);
+      // Fallback to daily bar if 1m is not found (e.g. out of market hours or database lag)
+      const dailyRes = await nubraPost('/charts/timeseries', {
+        query: [{ exchange, type: 'INDEX', values: [indexName], fields: ['close'],
+          startDate: `${date}T00:00:00.000Z`, endDate: `${date}T23:59:59.000Z`,
+          interval: '1d', intraDay: false, realTime: false }],
+      }, { Authorization: `Bearer ${authState.sessionToken!}` });
+      const dailyAll = nbCollect(dailyRes);
+      const dailyChart = dailyAll[indexName];
+      if (dailyChart) {
+        const closes = (dailyChart.close || []) as Array<{ ts?: string; v: number }>;
+        if (closes.length) spot = closes[0].v / 100;
+      }
     }
     if (!spot) {
       return { ok: false, error: `Could not fetch ${underlying} spot for ${date}. Market may have been closed.`,
@@ -2099,11 +2184,21 @@ fastify.get<{ Querystring: { underlying?: string; date?: string; time?: string; 
     const targetExpiryNum = Number(selectedExpiry.replace(/-/g, ''));
     const expiryOptions = assetRef.filter(x => x.expiry === targetExpiryNum);
 
-    // 3. Generate ATM ± 10 strikes
-    const step = underlying === 'SENSEX' ? 100 : 50;
-    const atm = Math.round(spot / step) * step;
+    // 3. Generate ATM ± 14 strikes
+    const availableStrikes = Array.from(new Set(expiryOptions.map(x => (x.strike_price as number) / 100))).sort((a, b) => a - b);
+    let closestIdx = 0;
+    let minDiff = Infinity;
+    for (let i = 0; i < availableStrikes.length; i++) {
+      const diff = Math.abs(availableStrikes[i] - spot);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestIdx = i;
+      }
+    }
     const strikes: number[] = [];
-    for (let i = -10; i <= 10; i++) strikes.push(atm + i * step);
+    const startIdx = Math.max(0, closestIdx - 14);
+    const endIdx = Math.min(availableStrikes.length - 1, closestIdx + 14);
+    for (let i = startIdx; i <= endIdx; i++) strikes.push(availableStrikes[i]);
 
     // 4. Map strikes to option symbols (stock_names) in the refdata
     const symbolsMap = new Map<string, { strike: number, type: 'CE' | 'PE' }>();
@@ -2123,9 +2218,9 @@ fastify.get<{ Querystring: { underlying?: string; date?: string; time?: string; 
       }
     }
 
-    // 5. Fetch 1m candles for these symbols (batch-chunked in parallel)
-    const optRes = await nbFetchTs(exchange, 'OPT', symbolsToFetch, ['close', 'iv_mid', 'cumulative_volume'], date, '1m', false);
+    const optRes = await nbFetchTs(exchange, 'OPT', symbolsToFetch, ['close', 'iv_mid', 'cumulative_volume', 'open_interest', 'oi'], date, '1m', false);
     const optAll = nbCollect(optRes);
+
 
     // 6. Build chain rows
     const chainRowsMap = new Map<number, { strike: number; ceLtp: number; ceIv: number; ceOi: number; ceVol: number; peLtp: number; peIv: number; peOi: number; peVol: number }>();
@@ -2139,6 +2234,20 @@ fastify.get<{ Querystring: { underlying?: string; date?: string; time?: string; 
       const chart = optAll[sym];
       if (!chart) continue;
       
+      console.log(`[debug-chain] symbol: ${sym}, keys of chart: ${Object.keys(chart).join(', ')}`);
+      if ((chart as any).open_interest) {
+        console.log(`[debug-chain] open_interest length: ${(chart as any).open_interest.length}`);
+        if ((chart as any).open_interest.length) {
+          console.log(`[debug-chain] open_interest[0]: ${JSON.stringify((chart as any).open_interest[0])}`);
+        }
+      }
+      if ((chart as any).oi) {
+        console.log(`[debug-chain] oi length: ${(chart as any).oi.length}`);
+        if ((chart as any).oi.length) {
+          console.log(`[debug-chain] oi[0]: ${JSON.stringify((chart as any).oi[0])}`);
+        }
+      }
+
       const bars = nbParseBars(chart);
       const bar = nbFindBar(bars, time);
       if (!bar) continue;
@@ -2149,10 +2258,12 @@ fastify.get<{ Querystring: { underlying?: string; date?: string; time?: string; 
           row.ceLtp = bar.close;
           row.ceIv = bar.iv;
           row.ceVol = bar.vol;
+          row.ceOi = bar.oi;
         } else {
           row.peLtp = bar.close;
           row.peIv = bar.iv;
           row.peVol = bar.vol;
+          row.peOi = bar.oi;
         }
       }
     }
@@ -2183,8 +2294,10 @@ fastify.post<{ Body: NbEvalBody }>('/api/nubra-backtest/evaluate', async (req, r
   try {
     const t0 = Date.now();
     const { underlying, date, expiry, entryTime, exitTime, legs, lotSize } = body;
-    const exchange = underlying === 'SENSEX' ? 'BSE' : 'NSE';
-    const indexName = underlying === 'SENSEX' ? 'SENSEX' : 'NIFTY';
+    const exchange = (underlying === 'SENSEX' || underlying === 'BANKEX') ? 'BSE' : 'NSE';
+    const indexName = underlying;
+    const isIndex = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX', 'INDIAVIX'].includes(underlying);
+    const spotType = isIndex ? 'INDEX' : 'STOCK';
 
     // 1. Fetch historical refdata to map legs to option symbols
     const refdata = await nbGetRefdataForDate(exchange, date);
@@ -2204,7 +2317,7 @@ fastify.post<{ Body: NbEvalBody }>('/api/nubra-backtest/evaluate', async (req, r
     // 2. Fetch 1m candles for option legs + 1m spot index close
     const [optRes, spotRes] = await Promise.all([
       nbFetchTs(exchange, 'OPT', legSymbols, ['close'], date, '1m', false),
-      nbFetchTs(exchange, 'INDEX', [indexName], ['close'], date, '1m', false),
+      nbFetchTs(exchange, spotType, [indexName], ['close'], date, '1m', false),
     ]);
     const optAll = nbCollect(optRes);
     const spotAll = nbCollect(spotRes);

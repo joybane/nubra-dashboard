@@ -2,8 +2,16 @@ import { createContext, useCallback, useContext, useState } from 'react';
 import type { Instrument, LayoutType, PaneState, ViewType, WorkspaceState } from '../types';
 import { generateId } from '../lib/utils';
 
+const DEFAULT_NIFTY: Instrument = {
+  stock_name: 'NIFTY 50',
+  nubra_name: 'NIFTY',
+  exchange: 'NSE',
+  derivative_type: 'INDEX',
+  lot_size: 65,
+};
+
 function defaultPane(view: ViewType = 'chart'): PaneState {
-  return { id: generateId(), view, instrument: null };
+  return { id: generateId(), view, instrument: DEFAULT_NIFTY };
 }
 
 function defaultState(): WorkspaceState {
@@ -13,7 +21,19 @@ function defaultState(): WorkspaceState {
 function loadState(): WorkspaceState {
   try {
     const saved = localStorage.getItem('nubra-workspace');
-    if (saved) return JSON.parse(saved) as WorkspaceState;
+    if (saved) {
+      const parsed = JSON.parse(saved) as WorkspaceState;
+      if (parsed && typeof parsed === 'object' && Array.isArray(parsed.panes) && parsed.layout) {
+        parsed.panes = parsed.panes.map(p => {
+          const sym = (p.instrument?.nubra_name || p.instrument?.stock_name || p.instrument?.symbol || '').toUpperCase();
+          if (!p.instrument || (!sym.includes('NIFTY') && !sym.includes('SENSEX'))) {
+            return { ...p, instrument: DEFAULT_NIFTY };
+          }
+          return p;
+        });
+        return parsed;
+      }
+    }
   } catch { /* ignore */ }
   return defaultState();
 }

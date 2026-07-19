@@ -309,6 +309,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   // ── Chart refs (grouped) ──
   const priceChartContainerRef = useRef<HTMLDivElement>(null);
   const pnlChartContainerRef = useRef<HTMLDivElement>(null);
+  const chartsWrapperRef = useRef<HTMLDivElement>(null);
   const priceChartRef = useRef<IChartApi | null>(null);
   const pnlChartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<{
@@ -364,7 +365,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   });
   const [greeksChartHeight, setGreeksChartHeight] = useState(150);
   const [greeksTooltipPos, setGreeksTooltipPos] = useState<{ x: number; y: number } | null>(null);
-  const [greeksTooltipValues, setGreeksTooltipValues] = useState<Record<string, number> | null>(null);
+  const [greeksTooltipValues, setGreeksTooltipValues] = useState<Record<string, Record<string, number>> | null>(null);
   const [currentGreeksBySource, setCurrentGreeksBySource] = useState<Record<GreekSource, Record<GreekKey, number>>>({
     net: { delta: 0, gamma: 0, theta: 0, vega: 0 },
     CE: { delta: 0, gamma: 0, theta: 0, vega: 0 },
@@ -1264,7 +1265,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         const key = `${src}_${k}`;
         const s = chart.addSeries(LineSeries, {
           color: GREEK_COLORS[k], lineWidth: GREEK_LINE_WIDTHS[src], lineStyle: GREEK_LINE_STYLES[src],
-          priceScaleId: 'right', title: src === 'net' ? k.charAt(0).toUpperCase() + k.slice(1) : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
+          priceScaleId: k, title: src === 'net' ? k.charAt(0).toUpperCase() + k.slice(1) : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
           lastValueVisible: true, priceLineVisible: false, visible: false,
           priceFormat: { type: 'custom', minMove: 0.00001, formatter: (price: number) => {
             const f = greekFactorsRef.current[k] || { mid: 0, half: 1 };
@@ -1275,21 +1276,33 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         greeksSeriesRef.current[key] = s;
       }
     }
-    chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.12, bottom: 0.12 } });
+    for (const k of greekKeys) {
+      chart.priceScale(k).applyOptions({ scaleMargins: { top: 0.12, bottom: 0.12 }, visible: false });
+    }
     chart.subscribeCrosshairMove((param) => {
       if (param.point) {
         setGreeksTooltipPos({ x: param.point.x, y: param.point.y });
         if (param.time != null) setGreeksCrosshairTime(fmtChartTime(param.time as number));
       } else { setGreeksTooltipPos(null); }
-      const vals: Record<string, number> = {};
-      const tooltipSource = activeGreekSource(greeksLegFilter);
-      for (const k of greekKeys) {
-        const s = greeksSeriesRef.current[`${tooltipSource}_${k}`];
-        if (!s) continue;
-        const d = param.seriesData?.get(s) as any;
-        if (d?.value != null) { const f = greekFactorsRef.current[k] || { mid: 0, half: 1 }; vals[k] = d.value * f.half + f.mid; } // de-normalize to true value
+      const vals: Record<string, Record<string, number>> = {};
+      let hasData = false;
+      for (const src of GREEK_SOURCES) {
+        const srcVals: Record<string, number> = {};
+        for (const k of greekKeys) {
+          const s = greeksSeriesRef.current[`${src}_${k}`];
+          if (!s) continue;
+          const d = param.seriesData?.get(s) as any;
+          if (d?.value != null) {
+            const f = greekFactorsRef.current[k] || { mid: 0, half: 1 };
+            srcVals[k] = d.value * f.half + f.mid;
+            hasData = true;
+          }
+        }
+        if (Object.keys(srcVals).length > 0) {
+          vals[src] = srcVals;
+        }
       }
-      setGreeksTooltipValues(Object.keys(vals).length > 0 ? vals : null);
+      setGreeksTooltipValues(hasData ? vals : null);
     });
     requestAnimationFrame(() => chart.timeScale().fitContent());
     return () => { greeksSeriesRef.current = {}; chart.remove(); greeksChartRef.current = null; setChartEpoch(e => e + 1); };
@@ -1478,18 +1491,32 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const onPnlDividerDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     const startY = e.clientY; const startH = pnlHeight;
-    const onMove = (ev: MouseEvent) => { setPnlHeight(Math.max(80, startH - (ev.clientY - startY))); };
+    const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
+    const dividersH = greeksVisible ? 16 : 8;
+    const maxCombined = totalH - dividersH - 120;
+    const maxPnl = greeksVisible ? Math.max(80, maxCombined - greeksChartHeight) : maxCombined;
+
+    const onMove = (ev: MouseEvent) => {
+      setPnlHeight(Math.max(80, Math.min(maxPnl, startH - (ev.clientY - startY))));
+    };
     const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
     document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
-  }, [pnlHeight]);
+  }, [pnlHeight, greeksChartHeight, greeksVisible]);
 
   const onGreeksDividerDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     const startY = e.clientY; const startH = greeksChartHeight;
-    const onMove = (ev: MouseEvent) => { setGreeksChartHeight(Math.max(80, startH - (ev.clientY - startY))); };
+    const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
+    const dividersH = greeksVisible ? 16 : 8;
+    const maxCombined = totalH - dividersH - 120;
+    const maxGreeks = Math.max(80, maxCombined - pnlHeight);
+
+    const onMove = (ev: MouseEvent) => {
+      setGreeksChartHeight(Math.max(80, Math.min(maxGreeks, startH - (ev.clientY - startY))));
+    };
     const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
     document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
-  }, [greeksChartHeight]);
+  }, [greeksChartHeight, pnlHeight, greeksVisible]);
 
   const onObDividerDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1780,7 +1807,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       </div>
 
       {/* Charts + order book */}
-      <div className="flex-1 flex flex-col overflow-hidden min-h-0">
+      <div ref={chartsWrapperRef} className="flex-1 flex flex-col overflow-hidden min-h-0">
         {/* Price chart */}
         {priceVisible && (
         <div ref={priceChartContainerRef} className="relative flex-1 min-h-[120px] bg-[var(--bg-primary)]">
@@ -1906,40 +1933,93 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
             <div ref={greeksChartContainerRef} className={`relative bg-[var(--bg-primary)] ${primaryPanel === 'greeks' ? 'flex-1 min-h-[80px]' : 'shrink-0'}`} style={primaryPanel === 'greeks' ? undefined : { height: greeksChartHeight }}>
               <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
                 {greeksTooltipValues
-                  ? <span>{(['delta', 'gamma', 'theta', 'vega'] as const).filter(k => selectedGreeks.has(k) && greeksTooltipValues[k] != null).map(k => (
+                  ? <span>{(['delta', 'gamma', 'theta', 'vega'] as const).filter(k => selectedGreeks.has(k) && greeksTooltipValues.net?.[k] != null).map(k => (
                       <span key={k} className="mr-3">
                         <span className="inline-block w-2 h-2 rounded-full align-middle mr-1" style={{ backgroundColor: GREEK_COLORS[k] }} />
                         <span className="text-[var(--text-muted)]">{k.charAt(0).toUpperCase() + k.slice(1)}</span>{' '}
-                        <span className={`font-medium ${(greeksTooltipValues[k] ?? 0) >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                          {(greeksTooltipValues[k] ?? 0) >= 0 ? '+' : ''}{k === 'gamma' ? (greeksTooltipValues[k] ?? 0).toFixed(4) : (greeksTooltipValues[k] ?? 0).toFixed(2)}
+                        <span className={`font-medium ${(greeksTooltipValues.net[k] ?? 0) >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                          {(greeksTooltipValues.net[k] ?? 0) >= 0 ? '+' : ''}{k === 'gamma' ? (greeksTooltipValues.net[k] ?? 0).toFixed(4) : (greeksTooltipValues.net[k] ?? 0).toFixed(2)}
                         </span>
                       </span>
                     ))}</span>
                   : <span className="text-[var(--text-muted)]">Greeks over time</span>
                 }
               </div>
-              {greeksTooltipPos && greeksTooltipValues && (
-                <div className="absolute z-50 pointer-events-none"
-                  style={{
-                    left: greeksTooltipPos.x > (greeksChartContainerRef.current?.clientWidth ?? 800) * 0.6 ? greeksTooltipPos.x - 200 : greeksTooltipPos.x + 20,
-                    top: Math.max(8, Math.min(greeksTooltipPos.y - 30, greeksChartHeight - 100)),
-                  }}>
-                  <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[150px]">
-                    {greeksCrosshairTime && <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">{greeksCrosshairTime}</div>}
-                    {(['delta', 'gamma', 'theta', 'vega'] as const).filter(k => selectedGreeks.has(k) && greeksTooltipValues[k] != null).map(k => (
-                      <div key={k} className="flex items-center justify-between gap-4 text-[11px] py-0.5">
-                        <span className="flex items-center gap-1.5 text-[var(--text-secondary)]">
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: GREEK_COLORS[k] }} />
-                          {k.charAt(0).toUpperCase() + k.slice(1)}
-                        </span>
-                        <span className={`font-medium tabular-nums ${(greeksTooltipValues[k] ?? 0) >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                          {(greeksTooltipValues[k] ?? 0) >= 0 ? '+' : ''}{k === 'gamma' ? (greeksTooltipValues[k] ?? 0).toFixed(4) : (greeksTooltipValues[k] ?? 0).toFixed(2)}
-                        </span>
-                      </div>
-                    ))}
+              {greeksTooltipPos && greeksTooltipValues && (() => {
+                const activeSources = Array.from(greeksLegFilter);
+                const useTable = activeSources.length > 1;
+                const tooltipWidth = useTable ? 200 : 150;
+                return (
+                  <div className="absolute z-50 pointer-events-none"
+                    style={{
+                      left: greeksTooltipPos.x > (greeksChartContainerRef.current?.clientWidth ?? 800) * 0.5 ? greeksTooltipPos.x - (tooltipWidth + 20) : greeksTooltipPos.x + 25,
+                      top: Math.max(8, Math.min(greeksTooltipPos.y - 80, greeksChartHeight - (useTable ? 100 : 80))),
+                    }}>
+                    <div className="bg-[#1a1e24]/85 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md text-[10px]" style={{ minWidth: tooltipWidth }}>
+                      {greeksCrosshairTime && <div className="text-[9px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">{greeksCrosshairTime}</div>}
+                      {useTable ? (
+                        <table className="w-full border-collapse">
+                          <thead>
+                            <tr className="border-b border-[#ffffff0a] text-[var(--text-muted)] text-[9px]">
+                              <th className="text-left font-medium pb-1">Ref</th>
+                              {(['delta', 'gamma', 'theta', 'vega'] as const).map(g => {
+                                if (!selectedGreeks.has(g)) return null;
+                                return (
+                                  <th key={g} className="text-right font-medium pb-1" style={{ color: GREEK_COLORS[g] }}>
+                                    {g.charAt(0).toUpperCase() + g.slice(1)}
+                                  </th>
+                                );
+                              })}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(['net', 'CE', 'PE'] as const).map(src => {
+                              const data = greeksTooltipValues[src];
+                              if (!data) return null;
+                              const label = src === 'net' ? 'Net' : `${src} Leg`;
+                              return (
+                                <tr key={src} className="border-b border-[#ffffff05] last:border-b-0">
+                                  <td className="font-semibold text-[#a78bfa] py-1">{label}</td>
+                                  {(['delta', 'gamma', 'theta', 'vega'] as const).map(g => {
+                                    if (!selectedGreeks.has(g)) return null;
+                                    const val = data[g] ?? 0;
+                                    const formatted = g === 'gamma' ? val.toFixed(4) : val.toFixed(2);
+                                    return (
+                                      <td key={g} className={`text-right font-semibold py-1 font-mono ${val >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                                        {val >= 0 ? '+' : ''}{formatted}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      ) : (
+                        (() => {
+                          const activeSrc = activeSources[0] || 'net';
+                          const data = greeksTooltipValues[activeSrc] || { delta: 0, gamma: 0, theta: 0, vega: 0 };
+                          return (['delta', 'gamma', 'theta', 'vega'] as const).filter(k => selectedGreeks.has(k) && data[k] != null).map(k => {
+                            const val = data[k] ?? 0;
+                            const formatted = k === 'gamma' ? val.toFixed(4) : val.toFixed(2);
+                            return (
+                              <div key={k} className="flex items-center justify-between gap-4 text-[11px] py-0.5">
+                                <span className="flex items-center gap-1.5 text-[var(--text-secondary)]">
+                                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: GREEK_COLORS[k] }} />
+                                  {k.charAt(0).toUpperCase() + k.slice(1)}
+                                </span>
+                                <span className={`font-semibold tabular-nums ${val >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                                  {val >= 0 ? '+' : ''}{formatted}
+                                </span>
+                              </div>
+                            );
+                          });
+                        })()
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </div>
           </>
         )}

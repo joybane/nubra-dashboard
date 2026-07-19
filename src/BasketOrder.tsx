@@ -94,7 +94,7 @@ export default function BasketOrder({ instrument }: Props) {
   const [addScripQuery, setAddScripQuery] = useState('');
   const [addScripResults, setAddScripResults] = useState<Array<Record<string, unknown>>>([]);
   const [showAddScrip, setShowAddScrip] = useState(false);
-  const [rightTab, setRightTab] = useState<'payoff' | 'optionchain'>('payoff');
+  const [rightTab, setRightTab] = useState<'payoff' | 'optionchain'>('optionchain');
   const [editingBasketId, setEditingBasketId] = useState<string | null>(null);
   const [editingBasketName, setEditingBasketName] = useState('');
   const [symSearch, setSymSearch] = useState('');

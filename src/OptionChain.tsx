@@ -21,8 +21,7 @@ function extractUnderlying(input: string): string {
 }
 
 const QUICK_PICKS: { sym: string; exch: string }[] = [
-  { sym: 'NIFTY', exch: 'NSE' }, { sym: 'BANKNIFTY', exch: 'NSE' },
-  { sym: 'FINNIFTY', exch: 'NSE' }, { sym: 'MIDCPNIFTY', exch: 'NSE' },
+  { sym: 'NIFTY', exch: 'NSE' },
   { sym: 'SENSEX', exch: 'BSE' },
 ];
 

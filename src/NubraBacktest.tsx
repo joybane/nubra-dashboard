@@ -3,7 +3,8 @@ import { createChart, LineSeries, CandlestickSeries, CrosshairMode } from 'light
 import type { IChartApi, ISeriesApi } from 'lightweight-charts';
 import SvgChart from './components/SvgChart';
 import type { Instrument } from './types';
-import { payoffAtExpiry } from './lib/GexService';
+import { useWorkspaceState } from './workspace/useWorkspaceState';
+import { payoffAtExpiry, blackScholes, impliedVolatility } from './lib/GexService';
 import { fmtPrice } from './lib/utils';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -85,6 +86,7 @@ function chartOpts(isDark: boolean) {
       vertLine: { color: '#4b5563', width: 1 as const, style: 0 as const, labelBackgroundColor: isDark ? '#22262b' : '#e8ecf5' },
       horzLine: { color: '#4b5563', width: 1 as const, style: 0 as const, labelBackgroundColor: '#2962ff' },
     },
+    leftPriceScale: { visible: true, borderColor: isDark ? '#2a2d32' : '#e0e3eb', minimumWidth: 72 },
     rightPriceScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', minimumWidth: 72 },
     timeScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', timeVisible: true, secondsVisible: false },
     handleScroll: { mouseWheel: true, pressedMouseMove: true },
@@ -99,6 +101,42 @@ function formatCrosshairTime(timeSec: number): string {
   const hh = Math.floor(totalMin / 60).toString().padStart(2, '0');
   const mm = (totalMin % 60).toString().padStart(2, '0');
   return `${hh}:${mm}`;
+}
+
+function adjustTime(timeStr: string, deltaMinutes: number): string {
+  if (!timeStr) return '09:20';
+  const parts = timeStr.split(':');
+  const h = parseInt(parts[0]) || 0;
+  const m = parseInt(parts[1]) || 0;
+  let totalMin = h * 60 + m + deltaMinutes;
+  if (totalMin < 0) totalMin += 24 * 60;
+  if (totalMin >= 24 * 60) totalMin -= 24 * 60;
+  const newH = Math.floor(totalMin / 60).toString().padStart(2, '0');
+  const newM = (totalMin % 60).toString().padStart(2, '0');
+  return `${newH}:${newM}`;
+}
+
+function padToGrid(
+  grid: number[],
+  data: Array<{ time: number; value: number }>,
+): Array<{ time: number; value?: number }> {
+  if (grid.length === 0) return data;
+  const valMap = new Map<number, number>();
+  for (const d of data) valMap.set(Math.floor(d.time / 60) * 60, d.value);
+
+  const result: Array<{ time: number; value?: number }> = [];
+  const allTimes = new Set<number>(grid.map(t => Math.floor(t / 60) * 60));
+  for (const d of data) allTimes.add(Math.floor(d.time / 60) * 60);
+
+  const sorted = Array.from(allTimes).sort((a, b) => a - b);
+  for (const t of sorted) {
+    if (valMap.has(t)) {
+      result.push({ time: t, value: valMap.get(t) });
+    } else {
+      result.push({ time: t });
+    }
+  }
+  return result;
 }
 
 let _idSeq = 0;
@@ -122,8 +160,9 @@ const DEFAULT_LOT: Record<string, number> = { NIFTY: 65, SENSEX: 20 };
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
+  const { loadInstrumentInActivePane } = useWorkspaceState();
   // Config state
-  const [underlying, setUnderlying] = useState<'NIFTY' | 'SENSEX'>('NIFTY');
+  const [underlying, setUnderlying] = useState<string>('NIFTY');
   const [date, setDate] = useState(() => {
     const d = new Date(); d.setDate(d.getDate() - 1);
     const day = d.getDay();
@@ -172,6 +211,101 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const pnlChartRef = useRef<IChartApi | null>(null);
   const [chartEpoch, setChartEpoch] = useState(0);
 
+  // Expand charts: hides left panel so all 3 charts get full width
+  const [chartsExpanded, setChartsExpanded] = useState(false);
+
+  // Layout heights & collapse states
+  const [pnlHeight, setPnlHeight] = useState(150);
+  const [greeksHeight, setGreeksHeight] = useState(150);
+  const [positionsHeight, setPositionsHeight] = useState(160);
+  const [positionsCollapsed, setPositionsCollapsed] = useState(false);
+
+  // Greeks visible state
+  const [greeksVisible, setGreeksVisible] = useState(false);
+
+  // Greeks series data state: split into Net, CE, and PE series arrays
+  const [greeksData, setGreeksData] = useState<{
+    net: {
+      delta: Array<{ time: number; value: number }>;
+      gamma: Array<{ time: number; value: number }>;
+      theta: Array<{ time: number; value: number }>;
+      vega: Array<{ time: number; value: number }>;
+    };
+    CE: {
+      delta: Array<{ time: number; value: number }>;
+      gamma: Array<{ time: number; value: number }>;
+      theta: Array<{ time: number; value: number }>;
+      vega: Array<{ time: number; value: number }>;
+    };
+    PE: {
+      delta: Array<{ time: number; value: number }>;
+      gamma: Array<{ time: number; value: number }>;
+      theta: Array<{ time: number; value: number }>;
+      vega: Array<{ time: number; value: number }>;
+    };
+  } | null>(null);
+
+  // Hover Greek data
+  const [hoverGreekData, setHoverGreekData] = useState<{
+    timeStr: string;
+    net?: { delta: number; gamma: number; theta: number; vega: number };
+    CE?: { delta: number; gamma: number; theta: number; vega: number };
+    PE?: { delta: number; gamma: number; theta: number; vega: number };
+  } | null>(null);
+
+  // Hover pointer positions
+  const [hoverPricePos, setHoverPricePos] = useState<{ x: number; y: number } | null>(null);
+  const [hoverPnlPos, setHoverPnlPos] = useState<{ x: number; y: number } | null>(null);
+  const [hoverGreekPos, setHoverGreekPos] = useState<{ x: number; y: number } | null>(null);
+  const [activeChartType, setActiveChartType] = useState<'price' | 'pnl' | 'greeks' | null>(null);
+
+  // Greeks Chart Refs
+  const greeksContainerRef = useRef<HTMLDivElement>(null);
+  const greeksChartRef = useRef<IChartApi | null>(null);
+
+  // Popup dropdown open states
+  const [chartsPopupOpen, setChartsPopupOpen] = useState(false);
+  const [pnlPopupOpen, setPnlPopupOpen] = useState(false);
+  const [greeksPopupOpen, setGreeksPopupOpen] = useState(false);
+
+  // References for clicking outside to close
+  const chartsPopupRef = useRef<HTMLDivElement>(null);
+  const pnlPopupRef = useRef<HTMLDivElement>(null);
+  const greeksPopupRef = useRef<HTMLDivElement>(null);
+  const chartsWrapperRef = useRef<HTMLDivElement>(null);
+
+  // Click outside to close handler
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (chartsPopupRef.current && !chartsPopupRef.current.contains(event.target as Node)) {
+        setChartsPopupOpen(false);
+      }
+      if (pnlPopupRef.current && !pnlPopupRef.current.contains(event.target as Node)) {
+        setPnlPopupOpen(false);
+      }
+      if (greeksPopupRef.current && !greeksPopupRef.current.contains(event.target as Node)) {
+        setGreeksPopupOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // Layer toggles
+  const [showSpotPrice, setShowSpotPrice] = useState(true);
+  const [hiddenLegPrices, setHiddenLegPrices] = useState<Set<string>>(() => new Set());
+  const [showTotalPnl, setShowTotalPnl] = useState(true);
+  const [hiddenLegPnls, setHiddenLegPnls] = useState<Set<string>>(() => new Set());
+
+  // Greeks options
+  const [greeksMode, setGreeksMode] = useState<'unit' | 'lot'>('lot');
+  const [selectedGreeks, setSelectedGreeks] = useState<Set<string>>(() => new Set(['delta', 'gamma', 'theta', 'vega']));
+  const [greeksLegFilter, setGreeksLegFilter] = useState<Set<string>>(() => new Set(['net'])); // 'net', 'CE', 'PE'
+  const [greeksExpanded, setGreeksExpanded] = useState(false);
+
+  // Active crosshair time for Greeks popover Net values and Leg breakdown
+  const [activeTime, setActiveTime] = useState<number | null>(null);
+
   // Layout
   const [leftWidth, setLeftWidth] = useState(480);
   const [isDragging, setIsDragging] = useState(false);
@@ -179,10 +313,14 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   // Lot Size State
   const [lotSize, setLotSize] = useState(65);
 
-  // Sync lot default value when underlying changes
+  // Sync lot default value when underlying or instrument changes
   useEffect(() => {
-    setLotSize(DEFAULT_LOT[underlying] ?? 65);
-  }, [underlying]);
+    if (instrument && instrument.lot_size) {
+      setLotSize(instrument.lot_size);
+    } else {
+      setLotSize(DEFAULT_LOT[underlying] ?? 1);
+    }
+  }, [underlying, instrument]);
 
   // Find closest strike to spot in chain (ATM)
   const closestStrike = useMemo(() => {
@@ -203,10 +341,203 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   // Determine underlying from selected instrument
   useEffect(() => {
     if (!instrument) return;
-    const sym = (instrument.symbol ?? instrument.asset ?? instrument.display_name ?? '').toUpperCase();
-    if (sym.includes('SENSEX')) setUnderlying('SENSEX');
-    else setUnderlying('NIFTY');
+    const sym = (instrument.asset || instrument.nubra_name || instrument.symbol || instrument.display_name || '').toUpperCase();
+    if (sym) {
+      setUnderlying(sym);
+    }
   }, [instrument]);
+
+  // Dynamic Greeks Calculation
+  const spotMap = useMemo(() => {
+    const m = new Map<number, number>();
+    if (evalResult?.underlyingBars) {
+      for (const bar of evalResult.underlyingBars) {
+        m.set(Math.floor(bar.time / 60) * 60, bar.close);
+      }
+    }
+    return m;
+  }, [evalResult]);
+
+  const legPriceMap = useMemo(() => {
+    const m = new Map<number, Map<number, number>>();
+    if (evalResult?.legPriceData) {
+      for (const lp of evalResult.legPriceData) {
+        const sub = new Map<number, number>();
+        for (const d of lp.data) {
+          sub.set(Math.floor(d.time / 60) * 60, d.value);
+        }
+        m.set(lp.legIndex, sub);
+      }
+    }
+    return m;
+  }, [evalResult]);
+
+  const expiryTimeMs = useMemo(() => {
+    if (!activeExpiry) return 0;
+    return new Date(activeExpiry + 'T15:30:00+05:30').getTime();
+  }, [activeExpiry]);
+
+  // Helper to calculate Greeks breakdown dynamically for popover / table
+  const getGreeksAtTime = useCallback((t: number) => {
+    const minuteKey = Math.floor(t / 60) * 60;
+    const spotPrice = spotMap.get(minuteKey) || 0;
+    if (spotPrice <= 0 || !activeExpiry) return null;
+
+    const barTimeMs = (t - IST_OFFSET) * 1000;
+    const timeToExpiryMs = Math.max(0, expiryTimeMs - barTimeMs);
+    const T = Math.max(timeToExpiryMs / (365 * 24 * 3600 * 1000), 1 / (365 * 24 * 60));
+
+    const legBreakdown: Array<{
+      id: string;
+      strike: number;
+      optionType: 'CE' | 'PE';
+      side: 'BUY' | 'SELL';
+      lots: number;
+      delta: number;
+      gamma: number;
+      theta: number;
+      vega: number;
+      iv: number;
+    }> = [];
+
+    let netDelta = 0, netGamma = 0, netTheta = 0, netVega = 0;
+
+    for (let legIdx = 0; legIdx < legs.length; legIdx++) {
+      const leg = legs[legIdx];
+      const prices = legPriceMap.get(legIdx);
+      const ltp = prices?.get(minuteKey) ?? 0;
+      if (ltp <= 0) continue;
+
+      const K = leg.strike;
+      const type = leg.optionType;
+      const sideMultiplier = leg.side === 'BUY' ? 1 : -1;
+      const qty = leg.lots * (greeksMode === 'lot' ? lotSize : 1);
+
+      let iv = impliedVolatility(ltp, spotPrice, K, T, 0.07, type);
+      if (iv <= 0 || !isFinite(iv)) iv = 0.2;
+
+      const g = blackScholes(spotPrice, K, T, 0.07, iv, type);
+      const delta = g.delta * qty * sideMultiplier;
+      const gamma = g.gamma * qty * sideMultiplier;
+      const theta = g.theta * qty * sideMultiplier;
+      const vega = g.vega * qty * sideMultiplier;
+
+      netDelta += delta; netGamma += gamma; netTheta += theta; netVega += vega;
+
+      legBreakdown.push({
+        id: leg.id,
+        strike: leg.strike,
+        optionType: leg.optionType,
+        side: leg.side,
+        lots: leg.lots,
+        delta,
+        gamma,
+        theta,
+        vega,
+        iv
+      });
+    }
+
+    return {
+      net: { delta: netDelta, gamma: netGamma, theta: netTheta, vega: netVega },
+      legs: legBreakdown
+    };
+  }, [legs, lotSize, greeksMode, spotMap, legPriceMap, expiryTimeMs, activeExpiry]);
+
+  useEffect(() => {
+    if (!evalResult || !evalResult.underlyingBars || !evalResult.legPriceData || !activeExpiry) {
+      setGreeksData(null);
+      return;
+    }
+
+    // Time points in the basket
+    const times = evalResult.basketPnlData?.map(d => d.time) || [];
+    if (!times.length) {
+      setGreeksData(null);
+      return;
+    }
+
+    // Net points
+    const netDelta: Array<{ time: number; value: number }> = [];
+    const netGamma: Array<{ time: number; value: number }> = [];
+    const netTheta: Array<{ time: number; value: number }> = [];
+    const netVega: Array<{ time: number; value: number }> = [];
+
+    // CE points
+    const ceDelta: Array<{ time: number; value: number }> = [];
+    const ceGamma: Array<{ time: number; value: number }> = [];
+    const ceTheta: Array<{ time: number; value: number }> = [];
+    const ceVega: Array<{ time: number; value: number }> = [];
+
+    // PE points
+    const peDelta: Array<{ time: number; value: number }> = [];
+    const peGamma: Array<{ time: number; value: number }> = [];
+    const peTheta: Array<{ time: number; value: number }> = [];
+    const peVega: Array<{ time: number; value: number }> = [];
+
+    for (const t of times) {
+      const minuteKey = Math.floor(t / 60) * 60;
+      const spotPrice = spotMap.get(minuteKey) || 0;
+      if (spotPrice <= 0) continue;
+
+      const barTimeMs = (t - IST_OFFSET) * 1000;
+      const timeToExpiryMs = Math.max(0, expiryTimeMs - barTimeMs);
+      const T = Math.max(timeToExpiryMs / (365 * 24 * 3600 * 1000), 1 / (365 * 24 * 60));
+
+      let netD = 0, netG = 0, netT = 0, netV = 0;
+      let ceD = 0, ceG = 0, ceT = 0, ceV = 0;
+      let peD = 0, peG = 0, peT = 0, peV = 0;
+
+      for (let legIdx = 0; legIdx < legs.length; legIdx++) {
+        const leg = legs[legIdx];
+        const prices = legPriceMap.get(legIdx);
+        const ltp = prices?.get(minuteKey) ?? 0;
+        if (ltp <= 0) continue;
+
+        const K = leg.strike;
+        const type = leg.optionType;
+        const sideMultiplier = leg.side === 'BUY' ? 1 : -1;
+        const qty = leg.lots * (greeksMode === 'lot' ? lotSize : 1);
+
+        let iv = impliedVolatility(ltp, spotPrice, K, T, 0.07, type);
+        if (iv <= 0 || !isFinite(iv)) iv = 0.2;
+
+        const g = blackScholes(spotPrice, K, T, 0.07, iv, type);
+        const d = g.delta * qty * sideMultiplier;
+        const gm = g.gamma * qty * sideMultiplier;
+        const th = g.theta * qty * sideMultiplier;
+        const vg = g.vega * qty * sideMultiplier;
+
+        netD += d; netG += gm; netT += th; netV += vg;
+        if (type === 'CE') {
+          ceD += d; ceG += gm; ceT += th; ceV += vg;
+        } else {
+          peD += d; peG += gm; peT += th; peV += vg;
+        }
+      }
+
+      netDelta.push({ time: t, value: netD });
+      netGamma.push({ time: t, value: netG });
+      netTheta.push({ time: t, value: netT });
+      netVega.push({ time: t, value: netV });
+
+      ceDelta.push({ time: t, value: ceD });
+      ceGamma.push({ time: t, value: ceG });
+      ceTheta.push({ time: t, value: ceT });
+      ceVega.push({ time: t, value: ceV });
+
+      peDelta.push({ time: t, value: peD });
+      peGamma.push({ time: t, value: peG });
+      peTheta.push({ time: t, value: peT });
+      peVega.push({ time: t, value: peV });
+    }
+
+    setGreeksData({
+      net: { delta: netDelta, gamma: netGamma, theta: netTheta, vega: netVega },
+      CE: { delta: ceDelta, gamma: ceGamma, theta: ceTheta, vega: ceVega },
+      PE: { delta: peDelta, gamma: peGamma, theta: peTheta, vega: peVega }
+    });
+  }, [evalResult, legs, lotSize, activeExpiry, greeksMode, spotMap, legPriceMap, expiryTimeMs]);
 
   // ── Load chain ────────────────────────────────────────────────────────────
 
@@ -303,80 +634,152 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     }
   }
 
+function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
+  if (filter.has('CE')) return 'CE';
+  if (filter.has('PE')) return 'PE';
+  return 'net';
+}
+
   // ── Lightweight Charts Synchronization & Lifecycle ─────────────────────────
   useEffect(() => {
-    if (!evalResult || !priceContainerRef.current || !pnlContainerRef.current) return;
+    if (!evalResult) return;
     const isDark = theme === 'dark';
+    const activeCharts: IChartApi[] = [];
 
-    // 1. Create Price Chart
-    const priceChart = createChart(priceContainerRef.current, chartOpts(isDark));
-    priceChartRef.current = priceChart;
+    // 1. Create Price Chart if container is visible
+    let priceChart: IChartApi | null = null;
+    let indexSeries: any = null;
+    const legPriceSeriesList: Array<{ legIndex: number; series: ISeriesApi<'Line'> }> = [];
 
-    // 2. Create P&L Chart
-    const pnlChart = createChart(pnlContainerRef.current, chartOpts(isDark));
-    pnlChartRef.current = pnlChart;
+    if (priceContainerRef.current) {
+      priceChart = createChart(priceContainerRef.current, chartOpts(isDark));
+      priceChartRef.current = priceChart;
+      activeCharts.push(priceChart);
+
+      // Index Line (NIFTY/SENSEX spot close)
+      indexSeries = priceChart.addSeries(LineSeries, {
+        priceScaleId: 'left',
+        color: '#2962ff',
+        lineWidth: 2,
+        priceLineVisible: true,
+        lastValueVisible: true,
+        visible: showSpotPrice,
+      });
+      const indexBars = evalResult.underlyingBars || [];
+      const grid = indexBars.map(b => b.time);
+
+      if (indexBars.length) {
+        indexSeries.setData(indexBars.map(b => ({ time: b.time, value: b.close })) as any);
+      }
+
+      // Option leg prices (Colored green for CE, red for PE)
+      if (evalResult.legPriceData) {
+        evalResult.legPriceData.forEach((ld) => {
+          const leg = legs[ld.legIndex];
+          if (!leg) return;
+          const color = leg.optionType === 'CE' ? '#22c55e' : '#ef4444';
+          const s = priceChart!.addSeries(LineSeries, {
+            priceScaleId: 'right',
+            color, lineWidth: 1,
+            title: `${leg.side === 'BUY' ? 'B' : 'S'} ${leg.strike} ${leg.optionType}`,
+            lastValueVisible: true, priceLineVisible: false,
+            visible: !hiddenLegPrices.has(ld.legIndex.toString()),
+          });
+          s.setData(padToGrid(grid, ld.data as any) as any);
+          legPriceSeriesList.push({ legIndex: ld.legIndex, series: s });
+        });
+      }
+    } else {
+      priceChartRef.current = null;
+    }
+
+    // 2. Create P&L Chart if container is visible
+    let pnlChart: IChartApi | null = null;
+    let basketSeries: any = null;
+    const legPnlSeriesList: Array<{ legIndex: number; series: ISeriesApi<'Line'> }> = [];
+
+    if (pnlContainerRef.current) {
+      pnlChart = createChart(pnlContainerRef.current, chartOpts(isDark));
+      pnlChartRef.current = pnlChart;
+      activeCharts.push(pnlChart);
+
+      const indexBars = evalResult.underlyingBars || [];
+      const grid = indexBars.map(b => b.time);
+
+      // Total Basket P&L (White line, width 3)
+      basketSeries = pnlChart.addSeries(LineSeries, {
+        color: '#ffffff', lineWidth: 3,
+        title: 'Total P&L', lastValueVisible: true, priceLineVisible: true,
+        visible: showTotalPnl,
+      });
+      if (evalResult.basketPnlData) {
+        basketSeries.setData(padToGrid(grid, evalResult.basketPnlData as any) as any);
+      }
+
+      // Leg P&Ls (Colored green for CE, red for PE)
+      if (evalResult.legPnlData) {
+        evalResult.legPnlData.forEach((ld) => {
+          const leg = legs[ld.legIndex];
+          if (!leg) return;
+          const color = leg.optionType === 'CE' ? '#22c55e' : '#ef4444';
+          const s = pnlChart!.addSeries(LineSeries, {
+            color, lineWidth: 1,
+            title: `${leg.side === 'BUY' ? 'B' : 'S'} ${leg.strike} ${leg.optionType}`,
+            lastValueVisible: true, priceLineVisible: false,
+            visible: !hiddenLegPnls.has(ld.legIndex.toString()),
+          });
+          s.setData(padToGrid(grid, ld.data as any) as any);
+          legPnlSeriesList.push({ legIndex: ld.legIndex, series: s });
+        });
+      }
+    } else {
+      pnlChartRef.current = null;
+    }
+
+    // 3. Create Greeks Chart if container is visible and data is ready
+    let greeksChart: IChartApi | null = null;
+    const greeksSeriesMap: Record<string, ISeriesApi<'Line'>> = {};
+
+    if (greeksVisible && greeksContainerRef.current && greeksData) {
+      greeksChart = createChart(greeksContainerRef.current, chartOpts(isDark));
+      greeksChartRef.current = greeksChart;
+      activeCharts.push(greeksChart);
+
+      const indexBars = evalResult.underlyingBars || [];
+      const grid = indexBars.map(b => b.time);
+
+      const gSources = ['net', 'CE', 'PE'] as const;
+      const gKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
+      const gColors = { delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' };
+      const gLineWidths = { net: 2, CE: 1, PE: 1 } as const;
+      const gLineStyles = { net: 0, CE: 0, PE: 2 } as const;
+
+      for (const src of gSources) {
+        const srcVisible = greeksLegFilter.has(src);
+        for (const k of gKeys) {
+          const s = greeksChart.addSeries(LineSeries, {
+            color: gColors[k],
+            lineWidth: gLineWidths[src],
+            lineStyle: gLineStyles[src],
+            priceScaleId: k,
+            title: src === 'net' ? k.charAt(0).toUpperCase() + k.slice(1) : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
+            lastValueVisible: true,
+            priceLineVisible: false,
+            visible: srcVisible && selectedGreeks.has(k),
+          });
+          const points = greeksData[src]?.[k] || [];
+          s.setData(padToGrid(grid, points as any) as any);
+          greeksSeriesMap[`${src}_${k}`] = s;
+        }
+      }
+    } else {
+      greeksChartRef.current = null;
+    }
 
     setChartEpoch(e => e + 1);
 
-    // ── Price Series ──
-    // Index Candles (NIFTY/SENSEX spot close)
-    const indexSeries = priceChart.addSeries(CandlestickSeries, {
-      upColor: '#26a69a', downColor: '#ef5350', borderVisible: false,
-      wickUpColor: '#26a69a', wickDownColor: '#ef5350',
-    });
-
-    const indexBars = evalResult.underlyingBars || [];
-    if (indexBars.length) {
-      indexSeries.setData(indexBars as any);
-    }
-
-    // Option leg prices
-    const legPriceSeriesList: Array<{ legIndex: number; series: ISeriesApi<'Line'> }> = [];
-    if (evalResult.legPriceData) {
-      evalResult.legPriceData.forEach((ld) => {
-        const leg = legs[ld.legIndex];
-        if (!leg) return;
-        const color = LEG_COLORS[ld.legIndex % LEG_COLORS.length];
-        const s = priceChart.addSeries(LineSeries, {
-          color, lineWidth: 1,
-          title: `${leg.side === 'BUY' ? 'B' : 'S'} ${leg.strike} ${leg.optionType}`,
-          lastValueVisible: true, priceLineVisible: false,
-        });
-        s.setData(ld.data as any);
-        legPriceSeriesList.push({ legIndex: ld.legIndex, series: s });
-      });
-    }
-
-    // ── P&L Series ──
-    // Total Basket P&L
-    const basketSeries = pnlChart.addSeries(LineSeries, {
-      color: isDark ? '#ffffff' : '#111827', lineWidth: 3,
-      title: 'Total P&L', lastValueVisible: true, priceLineVisible: true,
-    });
-    if (evalResult.basketPnlData) {
-      basketSeries.setData(evalResult.basketPnlData as any);
-    }
-
-    // Leg P&Ls
-    const legPnlSeriesList: Array<{ legIndex: number; series: ISeriesApi<'Line'> }> = [];
-    if (evalResult.legPnlData) {
-      evalResult.legPnlData.forEach((ld) => {
-        const leg = legs[ld.legIndex];
-        if (!leg) return;
-        const color = LEG_COLORS[ld.legIndex % LEG_COLORS.length];
-        const s = pnlChart.addSeries(LineSeries, {
-          color, lineWidth: 1,
-          title: `${leg.side === 'BUY' ? 'B' : 'S'} ${leg.strike} ${leg.optionType}`,
-          lastValueVisible: true, priceLineVisible: false,
-        });
-        s.setData(ld.data as any);
-        legPnlSeriesList.push({ legIndex: ld.legIndex, series: s });
-      });
-    }
-
     // Fit timescale layout
-    priceChart.timeScale().fitContent();
-    pnlChart.timeScale().fitContent();
+    activeCharts.forEach(c => c.timeScale().fitContent());
 
     // ── Resize observer ──
     const handleResize = () => {
@@ -388,88 +791,231 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         const { width, height } = pnlContainerRef.current.getBoundingClientRect();
         pnlChartRef.current.resize(width, height);
       }
+      if (greeksContainerRef.current && greeksChartRef.current) {
+        const { width, height } = greeksContainerRef.current.getBoundingClientRect();
+        greeksChartRef.current.resize(width, height);
+      }
     };
     const observer = new ResizeObserver(handleResize);
     if (priceContainerRef.current) observer.observe(priceContainerRef.current);
     if (pnlContainerRef.current) observer.observe(pnlContainerRef.current);
+    if (greeksContainerRef.current) observer.observe(greeksContainerRef.current);
+
+    const updateAllTooltips = (timeVal: number | null, x: number | null, activeChartY: number | null) => {
+      setActiveTime(timeVal);
+      if (timeVal === null || x === null) {
+        setHoverPriceData(null);
+        setHoverPricePos(null);
+        setHoverPnlData(null);
+        setHoverPnlPos(null);
+        setHoverGreekData(null);
+        setHoverGreekPos(null);
+        return null;
+      }
+
+      const timeStr = formatCrosshairTime(timeVal);
+      const minuteKey = Math.floor(timeVal / 60) * 60;
+
+      // 1. Price Tooltip Data
+      const indexBars = evalResult.underlyingBars || [];
+      const spotBar = indexBars.find(b => Math.floor(b.time / 60) * 60 === minuteKey);
+      const spot = spotBar?.close ?? null;
+
+      const priceLegs: Array<{ strike: number; optionType: 'CE' | 'PE'; side: 'BUY' | 'SELL'; value: number }> = [];
+      if (evalResult.legPriceData) {
+        evalResult.legPriceData.forEach((ld) => {
+          const leg = legs[ld.legIndex];
+          if (!leg) return;
+          const match = ld.data.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
+          if (match && match.value > 0) {
+            priceLegs.push({
+              strike: leg.strike,
+              optionType: leg.optionType,
+              side: leg.side,
+              value: match.value,
+            });
+          }
+        });
+      }
+
+      // 2. PNL Tooltip Data
+      const pnlPoints = evalResult.basketPnlData || [];
+      const pnlPoint = pnlPoints.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
+      const totalPnl = pnlPoint?.value ?? 0;
+
+      const pnlLegs: Array<{ strike: number; optionType: 'CE' | 'PE'; side: 'BUY' | 'SELL'; value: number }> = [];
+      if (evalResult.legPnlData) {
+        evalResult.legPnlData.forEach((ld) => {
+          const leg = legs[ld.legIndex];
+          if (!leg) return;
+          const match = ld.data.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
+          if (match) {
+            pnlLegs.push({
+              strike: leg.strike,
+              optionType: leg.optionType,
+              side: leg.side,
+              value: match.value,
+            });
+          }
+        });
+      }
+
+      // 3. Greeks Tooltip Data
+      let netG: { delta: number; gamma: number; theta: number; vega: number } | undefined;
+      let ceG: { delta: number; gamma: number; theta: number; vega: number } | undefined;
+      let peG: { delta: number; gamma: number; theta: number; vega: number } | undefined;
+      
+      let delta = 0; // fallback delta for syncing
+      if (greeksData) {
+        const getPts = (src: 'net' | 'CE' | 'PE') => {
+          const dPt = greeksData[src]?.delta.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
+          const gPt = greeksData[src]?.gamma.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
+          const tPt = greeksData[src]?.theta.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
+          const vPt = greeksData[src]?.vega.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
+          return {
+            delta: dPt?.value ?? 0,
+            gamma: gPt?.value ?? 0,
+            theta: tPt?.value ?? 0,
+            vega: vPt?.value ?? 0
+          };
+        };
+
+        if (greeksLegFilter.has('net')) {
+          netG = getPts('net');
+          delta = netG.delta;
+        }
+        if (greeksLegFilter.has('CE')) {
+          ceG = getPts('CE');
+          if (!netG) delta = ceG.delta;
+        }
+        if (greeksLegFilter.has('PE')) {
+          peG = getPts('PE');
+          if (!netG && !ceG) delta = peG.delta;
+        }
+      }
+
+      setHoverPriceData({ timeStr, spot, legs: priceLegs });
+      setHoverPnlData({ timeStr, total: totalPnl, legs: pnlLegs });
+      setHoverGreekData({ timeStr, net: netG, CE: ceG, PE: peG });
+
+      const defaultY = 40;
+      setHoverPricePos({ x, y: activeChartY !== null ? activeChartY : defaultY });
+      setHoverPnlPos({ x, y: activeChartY !== null ? activeChartY : defaultY });
+      setHoverGreekPos({ x, y: activeChartY !== null ? activeChartY : defaultY });
+
+      return { spot, totalPnl, delta };
+    };
 
     // ── Crosshair hover updates (Price Chart) ──
-    priceChart.subscribeCrosshairMove((param) => {
-      if (param.point && param.time != null) {
-        const timeVal = param.time as number;
-        const timeStr = formatCrosshairTime(timeVal);
-
-        const indexVal = param.seriesData.get(indexSeries) as { close?: number } | undefined;
-        const spot = indexVal?.close ?? null;
-
-        const legsData = legPriceSeriesList.map(({ legIndex, series }) => {
-          const leg = legs[legIndex];
-          const val = param.seriesData.get(series) as { value?: number } | undefined;
-          return {
-            strike: leg.strike,
-            optionType: leg.optionType,
-            side: leg.side,
-            value: val?.value ?? 0
-          };
-        }).filter(x => x.value > 0);
-
-        setHoverPriceData({ timeStr, spot, legs: legsData });
-      } else {
-        setHoverPriceData(null);
-      }
-    });
+    if (priceChart && indexSeries) {
+      priceChart.subscribeCrosshairMove((param) => {
+        if (param.point && param.time != null) {
+          setActiveChartType('price');
+          const res = updateAllTooltips(param.time as number, param.point.x, param.point.y);
+          if (res) {
+            if (pnlChart && basketSeries) pnlChart.setCrosshairPosition(res.totalPnl, param.time, basketSeries);
+            if (greeksChart) {
+              const src = activeGreekSource(greeksLegFilter);
+              const activeS = greeksSeriesMap[`${src}_delta`];
+              if (activeS) greeksChart.setCrosshairPosition(res.delta, param.time, activeS);
+            }
+          }
+        } else if (param.point === undefined && param.time !== undefined) {
+          // Programmatic sync, ignore
+        } else {
+          setActiveChartType(null);
+          updateAllTooltips(null, null, null);
+          if (pnlChart) pnlChart.clearCrosshairPosition();
+          if (greeksChart) greeksChart.clearCrosshairPosition();
+        }
+      });
+    }
 
     // ── Crosshair hover updates (P&L Chart) ──
-    pnlChart.subscribeCrosshairMove((param) => {
-      if (param.point && param.time != null) {
-        const timeVal = param.time as number;
-        const timeStr = formatCrosshairTime(timeVal);
+    if (pnlChart && basketSeries) {
+      pnlChart.subscribeCrosshairMove((param) => {
+        if (param.point && param.time != null) {
+          setActiveChartType('pnl');
+          const res = updateAllTooltips(param.time as number, param.point.x, param.point.y);
+          if (res) {
+            if (priceChart && indexSeries) priceChart.setCrosshairPosition(res.spot ?? 0, param.time, indexSeries);
+            if (greeksChart) {
+              const src = activeGreekSource(greeksLegFilter);
+              const activeS = greeksSeriesMap[`${src}_delta`];
+              if (activeS) greeksChart.setCrosshairPosition(res.delta, param.time, activeS);
+            }
+          }
+        } else if (param.point === undefined && param.time !== undefined) {
+          // Programmatic sync, ignore
+        } else {
+          setActiveChartType(null);
+          updateAllTooltips(null, null, null);
+          if (priceChart) priceChart.clearCrosshairPosition();
+          if (greeksChart) greeksChart.clearCrosshairPosition();
+        }
+      });
+    }
 
-        const basketVal = param.seriesData.get(basketSeries) as { value?: number } | undefined;
-        const total = basketVal?.value ?? 0;
-
-        const legsData = legPnlSeriesList.map(({ legIndex, series }) => {
-          const leg = legs[legIndex];
-          const val = param.seriesData.get(series) as { value?: number } | undefined;
-          return {
-            strike: leg.strike,
-            optionType: leg.optionType,
-            side: leg.side,
-            value: val?.value ?? 0
-          };
-        });
-
-        setHoverPnlData({ timeStr, total, legs: legsData });
-      } else {
-        setHoverPnlData(null);
-      }
-    });
+    // ── Crosshair hover updates (Greeks Chart) ──
+    if (greeksChart) {
+      greeksChart.subscribeCrosshairMove((param) => {
+        if (param.point && param.time != null) {
+          setActiveChartType('greeks');
+          const res = updateAllTooltips(param.time as number, param.point.x, param.point.y);
+          if (res) {
+            if (priceChart && indexSeries) priceChart.setCrosshairPosition(res.spot ?? 0, param.time, indexSeries);
+            if (pnlChart && basketSeries) pnlChart.setCrosshairPosition(res.totalPnl, param.time, basketSeries);
+          }
+        } else if (param.point === undefined && param.time !== undefined) {
+          // Programmatic sync, ignore
+        } else {
+          setActiveChartType(null);
+          updateAllTooltips(null, null, null);
+          if (priceChart) priceChart.clearCrosshairPosition();
+          if (pnlChart) pnlChart.clearCrosshairPosition();
+        }
+      });
+    }
 
     // ── Sync Scroll & Zoom ──
     let syncing = false;
-    const syncPriceToPnl = (range: any) => {
-      if (syncing || !range) return;
-      syncing = true;
-      try { pnlChart.timeScale().setVisibleLogicalRange(range); } catch {}
-      syncing = false;
+    const syncTimeScale = (sourceChart: IChartApi, targets: IChartApi[]) => {
+      return (range: any) => {
+        if (syncing || !range) return;
+        syncing = true;
+        for (const target of targets) {
+          try { target.timeScale().setVisibleLogicalRange(range); } catch {}
+        }
+        syncing = false;
+      };
     };
-    const syncPnlToPrice = (range: any) => {
-      if (syncing || !range) return;
-      syncing = true;
-      try { priceChart.timeScale().setVisibleLogicalRange(range); } catch {}
-      syncing = false;
-    };
-    priceChart.timeScale().subscribeVisibleLogicalRangeChange(syncPriceToPnl);
-    pnlChart.timeScale().subscribeVisibleLogicalRangeChange(syncPnlToPrice);
+
+    if (priceChart && pnlChart) {
+      const priceTargets = [pnlChart];
+      if (greeksChart) priceTargets.push(greeksChart);
+
+      const pnlTargets = [priceChart];
+      if (greeksChart) pnlTargets.push(greeksChart);
+
+      priceChart.timeScale().subscribeVisibleLogicalRangeChange(syncTimeScale(priceChart, priceTargets));
+      pnlChart.timeScale().subscribeVisibleLogicalRangeChange(syncTimeScale(pnlChart, pnlTargets));
+
+      if (greeksChart) {
+        const greeksTargets = [priceChart, pnlChart];
+        greeksChart.timeScale().subscribeVisibleLogicalRangeChange(syncTimeScale(greeksChart, greeksTargets));
+      }
+    }
 
     return () => {
       observer.disconnect();
-      priceChart.remove();
-      pnlChart.remove();
+      if (priceChart) priceChart.remove();
+      if (pnlChart) pnlChart.remove();
+      if (greeksChart) greeksChart.remove();
       priceChartRef.current = null;
       pnlChartRef.current = null;
+      greeksChartRef.current = null;
     };
-  }, [evalResult, theme]);
+  }, [evalResult, theme, greeksVisible, greeksData, chartsExpanded, showSpotPrice, hiddenLegPrices, showTotalPnl, hiddenLegPnls, selectedGreeks, greeksLegFilter]);
 
   // ── Computed ───────────────────────────────────────────────────────────────
 
@@ -512,6 +1058,44 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     document.addEventListener('mouseup', onUp);
   }, [leftWidth]);
 
+  const onPnlDividerDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY; const startH = pnlHeight;
+    const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
+    const dividersH = greeksVisible ? 12 : 6;
+    const maxCombined = totalH - 8 - dividersH - 120;
+    const maxPnl = greeksVisible ? Math.max(80, maxCombined - greeksHeight) : maxCombined;
+
+    const onMove = (ev: MouseEvent) => {
+      setPnlHeight(Math.max(80, Math.min(maxPnl, startH - (ev.clientY - startY))));
+    };
+    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
+  }, [pnlHeight, greeksHeight, greeksVisible]);
+
+  const onGreeksDividerDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY; const startH = greeksHeight;
+    const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
+    const dividersH = greeksVisible ? 12 : 6;
+    const maxCombined = totalH - 8 - dividersH - 120;
+    const maxGreeks = Math.max(80, maxCombined - pnlHeight);
+
+    const onMove = (ev: MouseEvent) => {
+      setGreeksHeight(Math.max(80, Math.min(maxGreeks, startH - (ev.clientY - startY))));
+    };
+    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
+  }, [greeksHeight, pnlHeight, greeksVisible]);
+
+  const onPositionsDividerDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY; const startH = positionsHeight;
+    const onMove = (ev: MouseEvent) => setPositionsHeight(Math.max(40, startH - (ev.clientY - startY)));
+    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
+  }, [positionsHeight]);
+
   // ── No instrument selected ────────────────────────────────────────────────
 
   if (!instrument) {
@@ -533,14 +1117,29 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
         {/* Underlying toggle */}
         <div style={{ display: 'flex', borderRadius: 6, overflow: 'hidden', border: '1px solid var(--border)' }}>
-          {(['NIFTY', 'SENSEX'] as const).map(u => (
-            <button key={u} onClick={() => setUnderlying(u)}
+          {['NIFTY', 'SENSEX'].map(u => (
+            <button key={u} onClick={() => {
+              setUnderlying(u);
+              const popular: Record<string, Instrument> = {
+                NIFTY: { stock_name: 'NIFTY 50', nubra_name: 'NIFTY', exchange: 'NSE', derivative_type: 'INDEX' },
+                SENSEX: { stock_name: 'SENSEX', nubra_name: 'SENSEX', exchange: 'BSE', derivative_type: 'INDEX' },
+              };
+              if (popular[u]) {
+                loadInstrumentInActivePane(popular[u]);
+              }
+            }}
               style={{ padding: '4px 12px', fontSize: 11, fontWeight: 600, border: 'none', cursor: 'pointer',
                 background: underlying === u ? '#5865f2' : 'transparent', color: underlying === u ? '#fff' : 'var(--text-secondary)' }}>
               {u}
             </button>
           ))}
         </div>
+
+        {underlying !== 'NIFTY' && underlying !== 'SENSEX' && (
+          <span style={{ padding: '4px 10px', fontSize: 11, fontWeight: 700, borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-hover)', color: 'var(--text-primary)' }}>
+            Active: {underlying}
+          </span>
+        )}
 
         {/* Date picker */}
         <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -552,21 +1151,73 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         {/* Entry time */}
         <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Entry</span>
-          <input type="time" value={entryTime} onChange={e => {
-            setEntryTime(e.target.value);
-            if (evalResult) resimulate(e.target.value, exitTime);
-          }}
-            style={{ padding: '4px 8px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', fontSize: 12 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <input type="time" value={entryTime} onChange={e => {
+              setEntryTime(e.target.value);
+              if (evalResult) resimulate(e.target.value, exitTime);
+            }}
+              style={{ padding: '4px 8px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', fontSize: 12 }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
+              <button
+                onClick={() => {
+                  const next = adjustTime(entryTime, 1);
+                  setEntryTime(next);
+                  if (evalResult) resimulate(next, exitTime);
+                }}
+                style={{ border: 'none', background: 'var(--border)', color: 'var(--text-primary)', fontSize: 7, padding: '1px 3px', borderRadius: 2, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', height: 10 }}
+                title="+1 Minute"
+              >
+                ▲
+              </button>
+              <button
+                onClick={() => {
+                  const next = adjustTime(entryTime, -1);
+                  setEntryTime(next);
+                  if (evalResult) resimulate(next, exitTime);
+                }}
+                style={{ border: 'none', background: 'var(--border)', color: 'var(--text-primary)', fontSize: 7, padding: '1px 3px', borderRadius: 2, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', height: 10 }}
+                title="-1 Minute"
+              >
+                ▼
+              </button>
+            </div>
+          </div>
         </label>
 
         {/* Exit time */}
         <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <span style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Exit</span>
-          <input type="time" value={exitTime} onChange={e => {
-            setExitTime(e.target.value);
-            if (evalResult) resimulate(entryTime, e.target.value);
-          }}
-            style={{ padding: '4px 8px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', fontSize: 12 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <input type="time" value={exitTime} onChange={e => {
+              setExitTime(e.target.value);
+              if (evalResult) resimulate(entryTime, e.target.value);
+            }}
+              style={{ padding: '4px 8px', background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text-primary)', fontSize: 12 }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
+              <button
+                onClick={() => {
+                  const next = adjustTime(exitTime, 1);
+                  setExitTime(next);
+                  if (evalResult) resimulate(entryTime, next);
+                }}
+                style={{ border: 'none', background: 'var(--border)', color: 'var(--text-primary)', fontSize: 7, padding: '1px 3px', borderRadius: 2, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', height: 10 }}
+                title="+1 Minute"
+              >
+                ▲
+              </button>
+              <button
+                onClick={() => {
+                  const next = adjustTime(exitTime, -1);
+                  setExitTime(next);
+                  if (evalResult) resimulate(entryTime, next);
+                }}
+                style={{ border: 'none', background: 'var(--border)', color: 'var(--text-primary)', fontSize: 7, padding: '1px 3px', borderRadius: 2, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', height: 10 }}
+                title="-1 Minute"
+              >
+                ▼
+              </button>
+            </div>
+          </div>
         </label>
 
         {/* Lot Size */}
@@ -589,18 +1240,413 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
           </label>
         )}
 
-        {/* Spot */}
-        {spot > 0 && (
-          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--green)', marginLeft: 'auto' }}>
-            {underlying} {spot.toLocaleString('en-IN')}
-          </span>
+        {evalResult && (
+          <>
+            <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 4px' }} />
+            
+            <button
+              onClick={() => setChartsExpanded(v => !v)}
+              style={{
+                padding: '3px 8px',
+                borderRadius: 4,
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: 'pointer',
+                border: '1px solid ' + (chartsExpanded ? 'var(--accent)' : 'var(--border)'),
+                background: chartsExpanded ? 'rgba(88,101,242,0.15)' : 'transparent',
+                color: chartsExpanded ? 'var(--accent)' : 'var(--text-secondary)',
+                transition: 'all 0.15s',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+              }}
+              title={chartsExpanded ? 'Collapse charts' : 'Expand charts to full width'}
+            >
+              {chartsExpanded ? '⤡ Collapse' : '⤢ Expand'}
+            </button>
+
+            {/* Charts Split Dropdown */}
+            <div ref={chartsPopupRef} className="relative flex items-stretch" style={{ height: 24 }}>
+              <button
+                onClick={() => setShowSpotPrice(s => !s)}
+                style={{
+                  padding: '0 8px',
+                  borderRadius: '4px 0 0 4px',
+                  fontSize: 11,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  border: '1px solid ' + (showSpotPrice ? 'var(--accent)' : 'var(--border)'),
+                  borderRight: 'none',
+                  background: showSpotPrice ? 'rgba(88,101,242,0.15)' : 'transparent',
+                  color: showSpotPrice ? 'var(--accent)' : 'var(--text-secondary)',
+                  transition: 'all 0.15s',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}
+              >
+                Charts
+              </button>
+              <button
+                onClick={() => setChartsPopupOpen(o => !o)}
+                style={{
+                  padding: '0 4px',
+                  borderRadius: '0 4px 4px 0',
+                  fontSize: 10,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  border: '1px solid ' + (showSpotPrice ? 'var(--accent)' : 'var(--border)'),
+                  borderLeft: 'none',
+                  background: showSpotPrice ? 'rgba(88,101,242,0.15)' : 'transparent',
+                  color: showSpotPrice ? 'var(--accent)' : 'var(--text-secondary)',
+                  transition: 'all 0.15s',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}
+              >
+                ▾
+              </button>
+              {chartsPopupOpen && (
+                <div
+                  className="absolute top-full left-0 mt-1 z-50 w-[220px] rounded-xl shadow-2xl border"
+                  style={{
+                    background: 'var(--bg-secondary)',
+                    borderColor: 'var(--border)',
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  <div className="flex items-center justify-between px-3 py-2 border-b" style={{ borderColor: 'var(--border)' }}>
+                    <span className="text-[11px] font-semibold">Chart Layers</span>
+                    <button onClick={() => setChartsPopupOpen(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm leading-none" style={{ background: 'none', border: 'none', cursor: 'pointer' }}>×</button>
+                  </div>
+                  <div className="px-3 py-2 flex flex-wrap gap-1.5">
+                    <button
+                      onClick={() => setShowSpotPrice(s => !s)}
+                      className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                        showSpotPrice ? 'border-white/40 bg-white/10 text-white' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
+                      }`}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: showSpotPrice ? '#3b82f6' : 'transparent', border: '1px solid #3b82f6' }} />
+                      {underlying} Spot
+                    </button>
+                    {legs.map((leg, idx) => {
+                      const active = !hiddenLegPrices.has(idx.toString());
+                      const color = leg.optionType === 'CE' ? '#22c55e' : '#ef4444';
+                      return (
+                        <button
+                          key={leg.id}
+                          onClick={() => setHiddenLegPrices(prev => {
+                            const n = new Set(prev);
+                            if (n.has(idx.toString())) n.delete(idx.toString());
+                            else n.add(idx.toString());
+                            return n;
+                          })}
+                          className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                            active ? 'border-white/20 bg-white/5 text-[var(--text-primary)]' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
+                          }`}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: active ? color : 'transparent', border: `1px solid ${color}` }} />
+                          {leg.side === 'BUY' ? 'B' : 'S'} {leg.strike} {leg.optionType}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* P&L Split Dropdown */}
+            <div ref={pnlPopupRef} className="relative flex items-stretch" style={{ height: 24 }}>
+              <button
+                onClick={() => setShowTotalPnl(s => !s)}
+                style={{
+                  padding: '0 8px',
+                  borderRadius: '4px 0 0 4px',
+                  fontSize: 11,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  border: '1px solid ' + (showTotalPnl ? 'var(--accent)' : 'var(--border)'),
+                  borderRight: 'none',
+                  background: showTotalPnl ? 'rgba(88,101,242,0.15)' : 'transparent',
+                  color: showTotalPnl ? 'var(--accent)' : 'var(--text-secondary)',
+                  transition: 'all 0.15s',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}
+              >
+                P&L
+              </button>
+              <button
+                onClick={() => setPnlPopupOpen(o => !o)}
+                style={{
+                  padding: '0 4px',
+                  borderRadius: '0 4px 4px 0',
+                  fontSize: 10,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  border: '1px solid ' + (showTotalPnl ? 'var(--accent)' : 'var(--border)'),
+                  borderLeft: 'none',
+                  background: showTotalPnl ? 'rgba(88,101,242,0.15)' : 'transparent',
+                  color: showTotalPnl ? 'var(--accent)' : 'var(--text-secondary)',
+                  transition: 'all 0.15s',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}
+              >
+                ▾
+              </button>
+              {pnlPopupOpen && (
+                <div
+                  className="absolute top-full left-0 mt-1 z-50 w-[220px] rounded-xl shadow-2xl border"
+                  style={{
+                    background: 'var(--bg-secondary)',
+                    borderColor: 'var(--border)',
+                    color: 'var(--text-primary)',
+                  }}
+                >
+                  <div className="flex items-center justify-between px-3 py-2 border-b" style={{ borderColor: 'var(--border)' }}>
+                    <span className="text-[11px] font-semibold">P&amp;L Layers</span>
+                    <button onClick={() => setPnlPopupOpen(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm leading-none" style={{ background: 'none', border: 'none', cursor: 'pointer' }}>×</button>
+                  </div>
+                  <div className="px-3 py-2 flex flex-wrap gap-1.5">
+                    <button
+                      onClick={() => setShowTotalPnl(s => !s)}
+                      className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                        showTotalPnl ? 'border-white/40 bg-white/10 text-white' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
+                      }`}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: showTotalPnl ? '#ffffff' : 'transparent', border: '1px solid #ffffff' }} />
+                      Total P&amp;L
+                    </button>
+                    {legs.map((leg, idx) => {
+                      const active = !hiddenLegPnls.has(idx.toString());
+                      const color = leg.optionType === 'CE' ? '#22c55e' : '#ef4444';
+                      return (
+                        <button
+                          key={leg.id}
+                          onClick={() => setHiddenLegPnls(prev => {
+                            const n = new Set(prev);
+                            if (n.has(idx.toString())) n.delete(idx.toString());
+                            else n.add(idx.toString());
+                            return n;
+                          })}
+                          className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border ${
+                            active ? 'border-white/20 bg-white/5 text-[var(--text-primary)]' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
+                          }`}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: active ? color : 'transparent', border: `1px solid ${color}` }} />
+                          {leg.side === 'BUY' ? 'B' : 'S'} {leg.strike} {leg.optionType}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Greeks Split Dropdown */}
+            <div ref={greeksPopupRef} className="relative flex items-stretch" style={{ height: 24 }}>
+              <button
+                onClick={() => setGreeksVisible(s => !s)}
+                style={{
+                  padding: '0 8px',
+                  borderRadius: '4px 0 0 4px',
+                  fontSize: 11,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  border: '1px solid ' + (greeksVisible ? 'var(--accent)' : 'var(--border)'),
+                  borderRight: 'none',
+                  background: greeksVisible ? 'rgba(88,101,242,0.15)' : 'transparent',
+                  color: greeksVisible ? 'var(--accent)' : 'var(--text-secondary)',
+                  transition: 'all 0.15s',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}
+              >
+                Greeks
+              </button>
+              <button
+                onClick={() => setGreeksPopupOpen(o => !o)}
+                style={{
+                  padding: '0 4px',
+                  borderRadius: '0 4px 4px 0',
+                  fontSize: 10,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  border: '1px solid ' + (greeksVisible ? 'var(--accent)' : 'var(--border)'),
+                  borderLeft: 'none',
+                  background: greeksVisible ? 'rgba(88,101,242,0.15)' : 'transparent',
+                  color: greeksVisible ? 'var(--accent)' : 'var(--text-secondary)',
+                  transition: 'all 0.15s',
+                  display: 'flex',
+                  alignItems: 'center',
+                }}
+              >
+                ▾
+              </button>
+              {greeksPopupOpen && (() => {
+                const activeGreeks = ['delta', 'gamma', 'theta', 'vega'].filter(k => selectedGreeks.has(k));
+                const targetT = activeTime || (evalResult?.basketPnlData && evalResult.basketPnlData.length > 0 ? evalResult.basketPnlData[evalResult.basketPnlData.length - 1].time : null);
+                const breakdown = targetT ? getGreeksAtTime(targetT) : null;
+                const netGreeks = breakdown?.net || { delta: 0, gamma: 0, theta: 0, vega: 0 };
+                const fmtG = (v: number, key: string) => key === 'gamma' ? v.toFixed(4) : v.toFixed(2);
+                return (
+                  <div
+                    className="absolute top-full right-0 mt-1 z-50 w-[280px] rounded-xl shadow-2xl border"
+                    style={{
+                      background: 'var(--bg-secondary)',
+                      borderColor: 'var(--border)',
+                      color: 'var(--text-primary)',
+                    }}
+                  >
+                    <div className="flex items-center justify-between px-3 py-2 border-b" style={{ borderColor: 'var(--border)' }}>
+                      <span className="text-[11px] font-semibold">Greeks Settings</span>
+                      <button onClick={() => setGreeksPopupOpen(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm" style={{ background: 'none', border: 'none', cursor: 'pointer' }}>×</button>
+                    </div>
+                    {/* Unit / Lot toggle */}
+                    <div className="px-3 py-2 flex items-center gap-2 border-b" style={{ borderColor: 'var(--border)' }}>
+                      <div className="flex items-center bg-[var(--bg-primary)] rounded overflow-hidden border" style={{ borderColor: 'var(--border)' }}>
+                        <button
+                          onClick={() => setGreeksMode('unit')}
+                          style={{ border: 'none', cursor: 'pointer' }}
+                          className={`px-2 py-0.5 text-[10px] font-semibold transition-colors ${greeksMode === 'unit' ? 'bg-[#a78bfa]/20 text-[#a78bfa]' : 'text-[var(--text-muted)]'}`}
+                        >
+                          1 Unit
+                        </button>
+                        <button
+                          onClick={() => setGreeksMode('lot')}
+                          style={{ border: 'none', cursor: 'pointer' }}
+                          className={`px-2 py-0.5 text-[10px] font-semibold transition-colors ${greeksMode === 'lot' ? 'bg-[#a78bfa]/20 text-[#a78bfa]' : 'text-[var(--text-muted)]'}`}
+                        >
+                          1 Lot
+                        </button>
+                      </div>
+                      {greeksMode === 'lot' && (
+                        <div className="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
+                          <span>Lot Size:</span>
+                          <span className="text-[var(--text-primary)] font-semibold">{lotSize}</span>
+                        </div>
+                      )}
+                    </div>
+                    {/* Greek selectors */}
+                    <div className="px-3 py-2 border-b" style={{ borderColor: 'var(--border)' }}>
+                      <div className="text-[9px] text-[var(--text-muted)] font-semibold mb-1.5">GREEKS</div>
+                      <div className="flex items-center gap-1">
+                        {['delta', 'gamma', 'theta', 'vega'].map(k => {
+                          const gColors: Record<string, string> = { delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' };
+                          const active = selectedGreeks.has(k);
+                          return (
+                            <button
+                              key={k}
+                              onClick={() => setSelectedGreeks(prev => { const n = new Set(prev); if (n.has(k)) n.delete(k); else n.add(k); return n; })}
+                              className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
+                                active ? `border-transparent text-white` : 'border-[var(--border)] text-[var(--text-muted)]'
+                              }`}
+                              style={active ? { backgroundColor: gColors[k] + '33', color: gColors[k], borderColor: gColors[k] + '55', cursor: 'pointer' } : { cursor: 'pointer' }}
+                            >
+                              {k.charAt(0).toUpperCase() + k.slice(1)}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    {/* Source filter: Net / CE / PE */}
+                    <div className="px-3 py-2 border-b" style={{ borderColor: 'var(--border)' }}>
+                      <div className="text-[9px] text-[var(--text-muted)] font-semibold mb-1.5">SHOW IN CHART</div>
+                      <div className="flex items-center gap-1">
+                        {['net', 'CE', 'PE'].map(src => (
+                          <button
+                            key={src}
+                            onClick={() => setGreeksLegFilter(prev => { const n = new Set(prev); if (n.has(src)) n.delete(src); else n.add(src); return n; })}
+                            className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
+                              greeksLegFilter.has(src) ? 'border-[#a78bfa]/40 bg-[#a78bfa]/15 text-[#a78bfa]' : 'border-[var(--border)] text-[var(--text-muted)]'
+                            }`}
+                            style={{ cursor: 'pointer' }}
+                          >
+                            {src === 'net' ? 'Net' : `${src} Leg`}
+                            {src !== 'net' && <span className="ml-1 text-[8px] text-[var(--text-muted)]">{src === 'CE' ? '━━' : '╌╌'}</span>}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    {/* Net Greeks values */}
+                    <div className="px-3 py-2 border-b" style={{ borderColor: 'var(--border)' }}>
+                      <div className="text-[9px] text-[var(--text-muted)] font-semibold mb-1">NET GREEKS</div>
+                      <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px]">
+                        {activeGreeks.map(k => (
+                          <div key={k} className="flex items-center gap-1">
+                            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: ({ delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' } as any)[k] }} />
+                            <span className="text-[var(--text-muted)] text-[10px]">{k.charAt(0).toUpperCase() + k.slice(1)}</span>
+                            <span className={`font-semibold tabular-nums ${(netGreeks as any)[k] >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{(netGreeks as any)[k] >= 0 ? '+' : ''}{fmtG((netGreeks as any)[k], k)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    {/* Leg breakdown */}
+                    <div className="px-3 py-1.5">
+                      <button
+                        onClick={() => setGreeksExpanded(v => !v)}
+                        className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors flex items-center gap-1"
+                        style={{ background: 'none', border: 'none', cursor: 'pointer' }}
+                      >
+                        <span className="text-[8px]">{greeksExpanded ? '▾' : '▸'}</span> Leg breakdown
+                      </button>
+                      {greeksExpanded && (
+                        <div className="mt-1.5 grid gap-0 text-[10px]" style={{ gridTemplateColumns: `20px 1fr ${activeGreeks.map(() => '48px').join(' ')} 40px` }}>
+                          <span className="text-[var(--text-muted)] font-semibold py-0.5">B/S</span>
+                          <span className="text-[var(--text-muted)] font-semibold py-0.5">Instrument</span>
+                          {activeGreeks.map(k => <span key={k} className="text-[var(--text-muted)] font-semibold py-0.5 text-right">{k.charAt(0).toUpperCase() + k.slice(1)}</span>)}
+                          <span className="text-[var(--text-muted)] font-semibold py-0.5 text-right">IV%</span>
+                          {breakdown?.legs.map(p => {
+                            const side = p.side;
+                            const metaColor = p.optionType === 'CE' ? '#22c55e' : '#ef4444';
+                            return (
+                              <>
+                                <span className={`py-0.5 font-bold text-[9px] ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{side === 'BUY' ? 'B' : 'S'}</span>
+                                <span className="py-0.5 text-[var(--text-primary)] flex items-center gap-1 truncate">
+                                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: metaColor }} />
+                                  {p.strike} {p.optionType}
+                                </span>
+                                {activeGreeks.map(k => {
+                                  const val = (p as any)[k];
+                                  return <span key={k} className={`py-0.5 text-right tabular-nums font-medium ${val >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{val >= 0 ? '+' : ''}{fmtG(val, k)}</span>;
+                                })}
+                                <span className="py-0.5 text-right tabular-nums text-[var(--text-secondary)]">{(p.iv * 100).toFixed(1)}%</span>
+                              </>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          </>
         )}
+
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 16 }}>
+          {spot > 0 && (
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--green)' }}>
+              {underlying} {spot.toLocaleString('en-IN')}
+            </span>
+          )}
+          {evalResult && (
+            <span style={{ fontSize: 12, fontWeight: 600, color: evalResult.grossPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
+              Gross P&L: {evalResult.grossPnl >= 0 ? '+' : ''}₹{fmtPrice(evalResult.grossPnl)}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* ── Main content ── */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {/* LEFT: Legs + chain */}
-        <div style={{ width: leftWidth, flexShrink: 0, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+        {!chartsExpanded && (
+          <div style={{ width: leftWidth, flexShrink: 0, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
           {/* Legs section */}
           <div style={{ padding: '10px 12px', borderBottom: '1px solid var(--border)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
@@ -691,7 +1737,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                       <tr key={row.strike} ref={isAtm ? atmRowRef : undefined} style={{ borderBottom: '1px solid var(--bg-card)', background: isAtm ? 'rgba(88,101,242,0.08)' : undefined }}>
                         <td style={{ padding: '4px 3px', textAlign: 'right', color: 'var(--text-muted)', fontSize: 10 }}>{row.ceOi ? (row.ceOi / 1000).toFixed(0) + 'K' : '—'}</td>
                         <td style={{ padding: '4px 3px', textAlign: 'right', color: 'var(--text-muted)', fontSize: 10 }}>{row.ceVol ? (row.ceVol / 1000).toFixed(0) + 'K' : '—'}</td>
-                        <td style={{ padding: '4px 3px', textAlign: 'right', color: 'var(--text-muted)', fontSize: 10 }}>{row.ceIv > 0 ? row.ceIv.toFixed(1) : '—'}</td>
+                        <td style={{ padding: '4px 3px', textAlign: 'right', color: 'var(--text-muted)', fontSize: 10 }}>{row.ceIv > 0 ? (row.ceIv * 100).toFixed(2) + '%' : '—'}</td>
                         <td style={{ padding: '4px 3px', textAlign: 'right', cursor: 'pointer' }}
                           onClick={() => addLeg(row.strike, 'CE', 'SELL')}
                           onContextMenu={e => { e.preventDefault(); addLeg(row.strike, 'CE', 'BUY'); }}
@@ -707,7 +1753,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                           title="Left-click: SELL  |  Right-click: BUY">
                           <span style={{ color: 'var(--red)', fontWeight: 500 }}>{row.peLtp > 0 ? row.peLtp.toFixed(2) : '—'}</span>
                         </td>
-                        <td style={{ padding: '4px 3px', textAlign: 'left', color: 'var(--text-muted)', fontSize: 10 }}>{row.peIv > 0 ? row.peIv.toFixed(1) : '—'}</td>
+                        <td style={{ padding: '4px 3px', textAlign: 'left', color: 'var(--text-muted)', fontSize: 10 }}>{row.peIv > 0 ? (row.peIv * 100).toFixed(2) + '%' : '—'}</td>
                         <td style={{ padding: '4px 3px', textAlign: 'left', color: 'var(--text-muted)', fontSize: 10 }}>{row.peVol ? (row.peVol / 1000).toFixed(0) + 'K' : '—'}</td>
                         <td style={{ padding: '4px 3px', textAlign: 'left', color: 'var(--text-muted)', fontSize: 10 }}>{row.peOi ? (row.peOi / 1000).toFixed(0) + 'K' : '—'}</td>
                       </tr>
@@ -723,25 +1769,20 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
             )}
           </div>
         </div>
+      )}
 
         {/* RESIZE HANDLE */}
-        <div onMouseDown={onDrag}
-          style={{ width: 5, cursor: 'col-resize', background: isDragging ? '#5865f2' : 'var(--border)', flexShrink: 0, transition: isDragging ? 'none' : 'background 0.15s' }}
-          onMouseEnter={e => { if (!isDragging) e.currentTarget.style.background = '#5865f2'; }}
-          onMouseLeave={e => { if (!isDragging) e.currentTarget.style.background = 'var(--border)'; }}
-        />
+        {!chartsExpanded && (
+          <div onMouseDown={onDrag}
+            style={{ width: 5, cursor: 'col-resize', background: isDragging ? '#5865f2' : 'var(--border)', flexShrink: 0, transition: isDragging ? 'none' : 'background 0.15s' }}
+            onMouseEnter={e => { if (!isDragging) e.currentTarget.style.background = '#5865f2'; }}
+            onMouseLeave={e => { if (!isDragging) e.currentTarget.style.background = 'var(--border)'; }}
+          />
+        )}
 
         {/* RIGHT: Payoff + Results */}
         <div style={{ flex: 1, minWidth: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', height: '100%' }}>
-          {/* Summary strip */}
-          {legs.length > 0 && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: '12px 16px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-              <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Max Profit</div><div style={{ fontSize: 14, fontWeight: 700, color: 'var(--green)' }}>{maxProfit > 1e6 ? 'Unlimited' : `+₹${fmtPrice(maxProfit)}`}</div></div>
-              <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Max Loss</div><div style={{ fontSize: 14, fontWeight: 700, color: 'var(--red)' }}>{maxLoss < -1e6 ? 'Unlimited' : `-₹${fmtPrice(Math.abs(maxLoss))}`}</div></div>
-              <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Breakeven</div><div style={{ fontSize: 12, fontWeight: 600 }}>{breakevenPoints.length ? breakevenPoints.map(bp => bp.toLocaleString('en-IN')).join(', ') : '—'}</div></div>
-              <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Lot Size</div><div style={{ fontSize: 12, fontWeight: 600 }}>{lotSize}</div></div>
-            </div>
-          )}
+
 
           {/* Payoff chart - Only show pre-simulation or when evalResult is not loaded yet */}
           {legs.length > 0 && payoffData.length > 0 && !evalResult && (
@@ -765,115 +1806,310 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
           {/* Simulation result: Synced Lightweight Charts */}
           {evalResult && (
             <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-              <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: '4px' }}>
+              <div ref={chartsWrapperRef} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', padding: '4px', gap: 0 }}>
                 {/* Price Chart Container */}
-                <div style={{ flex: 1, minHeight: 120, position: 'relative', borderBottom: '1px solid var(--border)' }}>
+                <div style={{
+                  flex: 1,
+                  minHeight: 120,
+                  position: 'relative',
+                  borderBottom: '1px solid var(--border)'
+                }}>
                   <div ref={priceContainerRef} style={{ width: '100%', height: '100%' }} />
-                  {hoverPriceData ? (
-                    <div style={{ position: 'absolute', top: 6, left: 8, zIndex: 10, pointerEvents: 'none', fontSize: 10, fontFamily: 'monospace', background: 'rgba(13,15,17,0.85)', border: '1px solid var(--border)', padding: '4px 8px', borderRadius: 6, color: 'var(--text-primary)' }}>
-                      <div style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{hoverPriceData.timeStr}</div>
+
+                  {hoverPricePos && hoverPriceData && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        zIndex: 50,
+                        pointerEvents: 'none',
+                        borderRadius: 6,
+                        border: '1px solid rgba(255,255,255,0.08)',
+                        background: 'rgba(10, 12, 16, 0.45)',
+                        padding: '4px 8px',
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                        minWidth: 120,
+                        fontSize: '9.5px',
+                        left: hoverPricePos.x > (priceContainerRef.current?.clientWidth ?? 800) * 0.5
+                          ? hoverPricePos.x - 180
+                          : hoverPricePos.x + 25,
+                        top: activeChartType === 'price'
+                          ? Math.max(8, Math.min(hoverPricePos.y - 80, (priceContainerRef.current?.clientHeight ?? 400) - 100))
+                          : 8,
+                      }}
+                    >
+                      <div style={{ fontSize: '9px', color: 'var(--text-muted)', borderBottom: '1px solid #ffffff0a', paddingBottom: 2, marginBottom: 4, fontFamily: 'monospace' }}>
+                        {hoverPriceData.timeStr}
+                      </div>
                       {hoverPriceData.spot !== null && (
-                        <div style={{ marginBottom: 2 }}>
-                          <span style={{ color: '#fbbf24', fontWeight: 600 }}>{underlying}</span> Spot: <span style={{ fontWeight: 600 }}>{hoverPriceData.spot.toFixed(2)}</span>
+                        <div style={{ fontSize: '10px', marginBottom: 3, fontWeight: 600, color: '#fbbf24' }}>
+                          Spot: ₹{fmtPrice(hoverPriceData.spot)}
                         </div>
                       )}
-                      {hoverPriceData.legs.map((leg, i) => {
-                        const color = LEG_COLORS[i % LEG_COLORS.length];
-                        return (
-                          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', backgroundColor: color }} />
-                            <span style={{ color: 'var(--text-secondary)' }}>{leg.side === 'BUY' ? 'B' : 'S'} {leg.strike} {leg.optionType}:</span>
-                            <span style={{ fontWeight: 600 }}>₹{leg.value.toFixed(2)}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div style={{ position: 'absolute', top: 6, left: 8, zIndex: 10, pointerEvents: 'none', fontSize: 10, color: 'var(--text-muted)' }}>
-                      Hover for price details
+                      {hoverPriceData.legs.map((leg, i) => (
+                        <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '1px 0' }}>
+                          <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-secondary)' }}>
+                            <span style={{ display: 'inline-block', width: 4, height: 4, borderRadius: '50%', backgroundColor: leg.optionType === 'CE' ? '#22c55e' : '#ef4444' }} />
+                            {leg.side === 'BUY' ? 'B' : 'S'} {leg.strike} {leg.optionType}
+                          </span>
+                          <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'monospace' }}>
+                            ₹{fmtPrice(leg.value)}
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
+
+                {/* Divider 1: Price / PNL */}
+                <div
+                  onMouseDown={onPnlDividerDown}
+                  style={{ height: 6, cursor: 'row-resize', background: 'var(--border)', flexShrink: 0, zIndex: 10 }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#5865f2'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'var(--border)'}
+                />
 
                 {/* P&L Chart Container */}
-                <div style={{ flex: 1, minHeight: 120, position: 'relative' }}>
+                <div style={{
+                  height: pnlHeight,
+                  minHeight: 80,
+                  position: 'relative',
+                  borderBottom: greeksVisible ? '1px solid var(--border)' : 'none',
+                  flexShrink: 0
+                }}>
                   <div ref={pnlContainerRef} style={{ width: '100%', height: '100%' }} />
-                  {hoverPnlData ? (
-                    <div style={{ position: 'absolute', top: 6, left: 8, zIndex: 10, pointerEvents: 'none', fontSize: 10, fontFamily: 'monospace', background: 'rgba(13,15,17,0.85)', border: '1px solid var(--border)', padding: '4px 8px', borderRadius: 6, color: 'var(--text-primary)' }}>
-                      <div style={{ color: 'var(--text-muted)', marginBottom: 2 }}>{hoverPnlData.timeStr}</div>
-                      <div style={{ marginBottom: 2 }}>
-                        <span style={{ color: '#ffffff', fontWeight: 600 }}>Total P&L</span>: <span style={{ fontWeight: 700, color: hoverPnlData.total >= 0 ? 'var(--green)' : 'var(--red)' }}>{hoverPnlData.total >= 0 ? '+' : ''}₹{fmtPrice(hoverPnlData.total)}</span>
+
+                  {hoverPnlPos && hoverPnlData && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        zIndex: 50,
+                        pointerEvents: 'none',
+                        borderRadius: 6,
+                        border: '1px solid rgba(255,255,255,0.08)',
+                        background: 'rgba(10, 12, 16, 0.45)',
+                        padding: '4px 8px',
+                        boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                        minWidth: 120,
+                        fontSize: '9.5px',
+                        left: hoverPnlPos.x > (pnlContainerRef.current?.clientWidth ?? 800) * 0.5
+                          ? hoverPnlPos.x - 180
+                          : hoverPnlPos.x + 25,
+                        top: activeChartType === 'pnl'
+                          ? Math.max(8, Math.min(hoverPnlPos.y - 80, (pnlContainerRef.current?.clientHeight ?? 400) - 100))
+                          : 8,
+                      }}
+                    >
+                      <div style={{ fontSize: '9px', color: 'var(--text-muted)', borderBottom: '1px solid #ffffff0a', paddingBottom: 2, marginBottom: 4, fontFamily: 'monospace' }}>
+                        {hoverPnlData.timeStr}
                       </div>
-                      {hoverPnlData.legs.map((leg, i) => {
-                        const color = LEG_COLORS[i % LEG_COLORS.length];
-                        return (
-                          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', backgroundColor: color }} />
-                            <span style={{ color: 'var(--text-secondary)' }}>{leg.side === 'BUY' ? 'B' : 'S'} {leg.strike} {leg.optionType}:</span>
-                            <span style={{ fontWeight: 600, color: leg.value >= 0 ? 'var(--green)' : 'var(--red)' }}>{leg.value >= 0 ? '+' : ''}₹{fmtPrice(leg.value)}</span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div style={{ position: 'absolute', top: 6, left: 8, zIndex: 10, pointerEvents: 'none', fontSize: 10, color: 'var(--text-muted)' }}>
-                      Hover for P&L details
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #ffffff0a', paddingBottom: 2, marginBottom: 3, fontWeight: 700, fontSize: '10px' }}>
+                        <span style={{ color: 'white' }}>Total P&L</span>
+                        <span style={{ color: hoverPnlData.total >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                          {hoverPnlData.total >= 0 ? '+' : ''}₹{fmtPrice(hoverPnlData.total)}
+                        </span>
+                      </div>
+                      {hoverPnlData.legs.map((leg, i) => (
+                        <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '1px 0' }}>
+                          <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-secondary)' }}>
+                            <span style={{ display: 'inline-block', width: 4, height: 4, borderRadius: '50%', backgroundColor: leg.optionType === 'CE' ? '#22c55e' : '#ef4444' }} />
+                            {leg.side === 'BUY' ? 'B' : 'S'} {leg.strike} {leg.optionType}
+                          </span>
+                          <span style={{ fontWeight: 600, color: leg.value >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: 'monospace' }}>
+                            {leg.value >= 0 ? '+' : ''}₹{fmtPrice(leg.value)}
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
+
+                {/* Divider 2: PNL / Greeks */}
+                {greeksVisible && (
+                  <div
+                    onMouseDown={onGreeksDividerDown}
+                    style={{ height: 6, cursor: 'row-resize', background: 'var(--border)', flexShrink: 0, zIndex: 10 }}
+                    onMouseEnter={e => e.currentTarget.style.background = '#5865f2'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'var(--border)'}
+                  />
+                )}
+
+                {/* Greeks Chart Container */}
+                <div style={{
+                  height: greeksHeight,
+                  minHeight: 80,
+                  position: 'relative',
+                  display: greeksVisible ? 'block' : 'none',
+                  flexShrink: 0
+                }}>
+                  <div ref={greeksContainerRef} style={{ width: '100%', height: '100%' }} />
+
+                  {hoverGreekPos && hoverGreekData && (() => {
+                    const activeSources = Array.from(greeksLegFilter);
+                    const useTable = activeSources.length > 1;
+                    const tooltipWidth = useTable ? 180 : 130;
+                    return (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          zIndex: 50,
+                          pointerEvents: 'none',
+                          borderRadius: 6,
+                          border: '1px solid rgba(255,255,255,0.08)',
+                          background: 'rgba(10, 12, 16, 0.45)',
+                          padding: '4px 8px',
+                          boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                          minWidth: tooltipWidth,
+                          fontSize: '9.5px',
+                          left: hoverGreekPos.x > (greeksContainerRef.current?.clientWidth ?? 800) * 0.5
+                            ? hoverGreekPos.x - (useTable ? 220 : 180)
+                            : hoverGreekPos.x + 25,
+                          top: activeChartType === 'greeks'
+                            ? Math.max(8, Math.min(hoverGreekPos.y - 80, (greeksContainerRef.current?.clientHeight ?? 400) - 100))
+                            : 8,
+                        }}
+                      >
+                        <div style={{ fontSize: '9px', color: 'var(--text-muted)', borderBottom: '1px solid #ffffff0a', paddingBottom: 2, marginBottom: 4, fontFamily: 'monospace' }}>
+                          {hoverGreekData.timeStr}
+                        </div>
+                        {useTable ? (
+                          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 4, fontSize: '9px', minWidth: 180 }}>
+                            <thead>
+                              <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.08)', color: 'var(--text-muted)' }}>
+                                <th style={{ textAlign: 'left', padding: '2px 4px', fontWeight: 500 }}>Ref</th>
+                                {['delta', 'gamma', 'theta', 'vega'].map(g => {
+                                  if (!selectedGreeks.has(g)) return null;
+                                  const gColors: Record<string, string> = { delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' };
+                                  return (
+                                    <th key={g} style={{ textAlign: 'right', padding: '2px 4px', fontWeight: 500, color: gColors[g] }}>
+                                      {g.charAt(0).toUpperCase() + g.slice(1)}
+                                    </th>
+                                  );
+                                })}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(['net', 'CE', 'PE'] as const).map(src => {
+                                const data = hoverGreekData[src];
+                                if (!data) return null;
+                                const label = src === 'net' ? 'Net' : `${src} Leg`;
+                                return (
+                                  <tr key={src} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
+                                    <td style={{ fontWeight: 600, color: '#a78bfa', padding: '3px 4px' }}>{label}</td>
+                                    {['delta', 'gamma', 'theta', 'vega'].map(g => {
+                                      if (!selectedGreeks.has(g)) return null;
+                                      const val = (data as any)[g] ?? 0;
+                                      const formatted = g === 'gamma' ? val.toFixed(4) : val.toFixed(2);
+                                      return (
+                                        <td key={g} style={{ textAlign: 'right', padding: '3px 4px', fontWeight: 600, color: val >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: 'monospace' }}>
+                                          {val >= 0 ? '+' : ''}{formatted}
+                                        </td>
+                                      );
+                                    })}
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        ) : (
+                          (() => {
+                            const activeSrc = (activeSources[0] || 'net') as 'net' | 'CE' | 'PE';
+                            const data = hoverGreekData[activeSrc] || { delta: 0, gamma: 0, theta: 0, vega: 0 };
+                            return ['delta', 'gamma', 'theta', 'vega'].map(k => {
+                              if (!selectedGreeks.has(k)) return null;
+                              const val = (data as any)[k] ?? 0;
+                              const formatted = k === 'gamma' ? val.toFixed(4) : val.toFixed(2);
+                              const gColors: Record<string, string> = { delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' };
+                              return (
+                                <div key={k} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '2px 0' }}>
+                                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)' }}>
+                                    <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', backgroundColor: gColors[k] }} />
+                                    {k.charAt(0).toUpperCase() + k.slice(1)}
+                                  </span>
+                                  <span style={{ marginLeft: 'auto', fontWeight: 600, color: val >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: 'monospace' }}>
+                                    {val >= 0 ? '+' : ''}{formatted}
+                                  </span>
+                                </div>
+                              );
+                            });
+                          })()
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
               </div>
 
-              {/* Simulated Positions Table (identical to live positions tracker) */}
-              <div style={{ flexShrink: 0, height: 160, display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)', overflow: 'hidden' }}>
-                <div style={{ height: 28, display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)', padding: '0 12px' }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-primary)' }}>Simulated Positions</span>
-                  <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' }}>
-                    Strategy P&L: <span style={{ fontWeight: 700, color: evalResult.grossPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>{evalResult.grossPnl >= 0 ? '+' : ''}₹{fmtPrice(evalResult.grossPnl)}</span>
-                  </span>
-                </div>
-                <div style={{ flex: 1, overflow: 'auto' }}>
-                  <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse', textAlign: 'left' }}>
-                    <thead style={{ position: 'sticky', top: 0, background: 'var(--bg-secondary)', zIndex: 10 }}>
-                      <tr style={{ color: 'var(--text-muted)' }}>
-                        {['Symbol', 'Product', 'Side', 'Qty', 'Entry Price', 'Exit Price', 'P&L', 'P&L %', 'Entry Time', 'Exit Time'].map(h => (
-                          <th key={h} style={{ padding: '6px 12px', fontWeight: 500, borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}>{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {evalResult.legs.map((l, i) => {
-                        const side = l.side;
-                        const pnl = l.pnl;
-                        const pnlPct = l.entryPrice > 0 ? ((l.exitPrice - l.entryPrice) / l.entryPrice * 100 * (side === 'BUY' ? 1 : -1)) : 0;
-                        const color = LEG_COLORS[i % LEG_COLORS.length];
-                        return (
-                          <tr key={i} style={{ borderBottom: '1px solid var(--border)/50', background: 'var(--bg-primary)', height: 28 }}>
-                            <td style={{ padding: '4px 12px', fontWeight: 600, whiteSpace: 'nowrap' }}>
-                              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                                <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', backgroundColor: color }} />
-                                {underlying} {l.strike} {l.optionType === 'CALL' ? 'CE' : 'PE'}
-                              </span>
-                            </td>
-                            <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>NRML</td>
-                            <td style={{ padding: '4px 12px', fontWeight: 700, color: side === 'BUY' ? 'var(--green)' : 'var(--red)' }}>{side}</td>
-                            <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>{l.lots * lotSize}</td>
-                            <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>₹{l.entryPrice.toFixed(2)}</td>
-                            <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>₹{l.exitPrice.toFixed(2)}</td>
-                            <td style={{ padding: '4px 12px', fontWeight: 600, color: pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                              {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
-                            </td>
-                            <td style={{ padding: '4px 12px', color: pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                              {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
-                            </td>
-                            <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>{entryTime}</td>
-                            <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>{exitTime}</td>
+              {/* Divider 3: Charts / Positions */}
+              {!chartsExpanded && (
+                <div
+                  onMouseDown={onPositionsDividerDown}
+                  style={{ height: 6, cursor: 'row-resize', background: 'var(--border)', flexShrink: 0, zIndex: 10 }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#5865f2'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'var(--border)'}
+                />
+              )}
+
+              {/* Simulated Positions Table */}
+              {!chartsExpanded && (
+                <div style={{ flexShrink: 0, height: positionsCollapsed ? 28 : positionsHeight, display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)', overflow: 'hidden' }}>
+                  <div style={{ height: 28, display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)', padding: '0 12px', userSelect: 'none' }}>
+                    <button
+                      onClick={() => setPositionsCollapsed(v => !v)}
+                      style={{ background: 'none', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', marginRight: 6, padding: 0, fontSize: 10, display: 'flex', alignItems: 'center', justifyContent: 'center', width: 14, height: 14 }}
+                    >
+                      {positionsCollapsed ? '▲' : '▼'}
+                    </button>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-primary)' }}>Simulated Positions</span>
+                    <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-muted)' }}>
+                      Strategy P&L: <span style={{ fontWeight: 700, color: evalResult.grossPnl >= 0 ? 'var(--green)' : 'var(--red)' }}>{evalResult.grossPnl >= 0 ? '+' : ''}₹{fmtPrice(evalResult.grossPnl)}</span>
+                    </span>
+                  </div>
+                  {!positionsCollapsed && (
+                    <div style={{ flex: 1, overflow: 'auto' }}>
+                      <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse', textAlign: 'left' }}>
+                        <thead style={{ position: 'sticky', top: 0, background: 'var(--bg-secondary)', zIndex: 10 }}>
+                          <tr style={{ color: 'var(--text-muted)' }}>
+                            {['Symbol', 'Product', 'Side', 'Qty', 'Entry Price', 'Exit Price', 'P&L', 'P&L %', 'Entry Time', 'Exit Time'].map(h => (
+                              <th key={h} style={{ padding: '6px 12px', fontWeight: 500, borderBottom: '1px solid var(--border)', whiteSpace: 'nowrap' }}>{h}</th>
+                            ))}
                           </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                        </thead>
+                        <tbody>
+                          {evalResult.legs.map((l, i) => {
+                            const side = l.side;
+                            const pnl = l.pnl;
+                            const pnlPct = l.entryPrice > 0 ? ((l.exitPrice - l.entryPrice) / l.entryPrice * 100 * (side === 'BUY' ? 1 : -1)) : 0;
+                            const color = l.optionType === 'CALL' || l.optionType === 'CE' ? '#22c55e' : '#ef4444';
+                            return (
+                              <tr key={i} style={{ borderBottom: '1px solid var(--border)/50', background: 'var(--bg-primary)', height: 28 }}>
+                                <td style={{ padding: '4px 12px', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                                    <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', backgroundColor: color }} />
+                                    {underlying} {l.strike} {l.optionType === 'CALL' ? 'CE' : 'PE'}
+                                  </span>
+                                </td>
+                                <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>NRML</td>
+                                <td style={{ padding: '4px 12px', fontWeight: 700, color: side === 'BUY' ? 'var(--green)' : 'var(--red)' }}>{side}</td>
+                                <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>{l.lots * lotSize}</td>
+                                <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>₹{l.entryPrice.toFixed(2)}</td>
+                                <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>₹{l.exitPrice.toFixed(2)}</td>
+                                <td style={{ padding: '4px 12px', fontWeight: 600, color: pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                                  {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
+                                </td>
+                                <td style={{ padding: '4px 12px', color: pnl >= 0 ? 'var(--green)' : 'var(--red)' }}>
+                                  {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+                                </td>
+                                <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>{entryTime}</td>
+                                <td style={{ padding: '4px 12px', color: 'var(--text-secondary)' }}>{exitTime}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
-              </div>
+              )}
             </div>
           )}
 

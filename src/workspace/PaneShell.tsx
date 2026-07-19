@@ -63,28 +63,7 @@ export default function PaneShell({
         isActive ? 'outline outline-1 outline-[var(--accent)] outline-offset-[-1px]' : ''
       }`}
     >
-      {/* Pane header — view selector tabs */}
-      <div
-        onClick={onActivate}
-        className="h-7 shrink-0 bg-[var(--bg-secondary)] border-b border-[var(--border)] flex items-center px-1 gap-0.5 cursor-default"
-      >
-        {(Object.keys(VIEW_LABELS) as ViewType[]).map((v) => (
-          <button
-            key={v}
-            onClick={(e) => { e.stopPropagation(); onActivate(); onViewChange(v); }}
-            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
-              pane.view === v
-                ? 'bg-[var(--accent)] text-white'
-                : 'text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]'
-            }`}
-          >
-            {VIEW_LABELS[v]}
-          </button>
-        ))}
-        {isActive && (
-          <span className="ml-auto text-[9px] text-[var(--accent)] pr-1">active</span>
-        )}
-      </div>
+
 
       {/* Content area */}
       <div className="flex-1 overflow-hidden min-h-0">

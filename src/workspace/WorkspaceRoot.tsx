@@ -134,15 +134,16 @@ export default function WorkspaceRoot({ theme }: WorkspaceRootProps) {
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Layout picker bar */}
-      <div className="h-8 bg-[var(--bg-secondary)] border-b border-[var(--border)] flex items-center px-3 shrink-0 gap-2">
-        <LayoutPicker current={layout as LayoutType} onChange={setLayout} />
-        {panes.length > 1 && (
+      {panes.length > 1 && (
+        <div className="h-6 bg-[var(--bg-secondary)] border-b border-[var(--border)] flex items-center px-3 shrink-0 justify-between">
           <span className="text-[10px] text-[var(--text-muted)]">
             Click a pane to activate it, then search to load a symbol
           </span>
-        )}
-      </div>
+          <span className="text-[10px] text-[var(--accent)] font-medium">
+            Active: Pane {panes.findIndex(p => p.id === activePane) + 1}
+          </span>
+        </div>
+      )}
 
       <div id="workspace-root" className="flex-1 overflow-hidden">
         {renderLayout()}

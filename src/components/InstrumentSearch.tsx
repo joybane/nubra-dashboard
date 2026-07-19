@@ -11,7 +11,7 @@ const POPULAR_INDICES: Instrument[] = [
   { stock_name: 'MIDCPNIFTY', nubra_name: 'MIDCPNIFTY', exchange: 'NSE', derivative_type: 'INDEX' },
   { stock_name: 'SENSEX',     nubra_name: 'SENSEX',     exchange: 'BSE', derivative_type: 'INDEX' },
   { stock_name: 'BANKEX',     nubra_name: 'BANKEX',     exchange: 'BSE', derivative_type: 'INDEX' },
-  { stock_name: 'INDIA VIX',  nubra_name: 'INDIAVIX',   exchange: 'NSE', derivative_type: 'INDEX' },
+  { stock_name: 'INDIA VIX',  nubra_name: 'INDIA_VIX',   exchange: 'NSE', derivative_type: 'INDEX' },
 ];
 
 const FILTER_TABS: { label: string; types: InstrumentType[] }[] = [
@@ -137,7 +137,7 @@ export default function InstrumentSearch({ placeholder = 'Search symbol…', onS
     : results;
 
   return (
-    <div className="relative w-[280px]">
+    <div className="relative w-full">
       <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] pointer-events-none text-sm">⌕</span>
       <input
         ref={inputRef}
