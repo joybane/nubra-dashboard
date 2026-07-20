@@ -156,28 +156,49 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     return unsub;
   }, [subscribe]);
 
+  function safePriceToCoordinate(s: ISeriesApi<'Candlestick'> | null, p: number): number | null {
+    if (!s) return null;
+    try {
+      const y = s.priceToCoordinate(p);
+      return typeof y === 'number' && !isNaN(y) ? y : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function safeCoordinateToPrice(s: ISeriesApi<'Candlestick'> | null, py: number): number | null {
+    if (!s) return null;
+    try {
+      const p = s.coordinateToPrice(py);
+      return typeof p === 'number' && !isNaN(p) ? p : null;
+    } catch {
+      return null;
+    }
+  }
+
   // ── Core draw ────────────────────────────────────────────────────────────
   function drawOI() {
-    const canvas = canvasRef.current;
-    const cont = containerRef.current;
-    const series = candleRef.current;
-    if (!canvas || !cont || !series || !oiChainRef.current) return;
+    try {
+      const canvas = canvasRef.current;
+      const cont = containerRef.current;
+      const series = candleRef.current;
+      if (!canvas || !cont || !series || !oiChainRef.current) return;
 
-    const today = new Date().toISOString().slice(0, 10);
-    const isToday = !oiHistDateRef.current || oiHistDateRef.current === today;
+      const today = new Date().toISOString().slice(0, 10);
+      const isToday = !oiHistDateRef.current || oiHistDateRef.current === today;
 
-    renderOI({
-      canvas,
-      containerW: cont.clientWidth,
-      containerH: cont.clientHeight,
-      priceToCoordinate: (p) => series.priceToCoordinate(p),
-      oiChain: oiChainRef.current,
-      enabled: oiEnabledRef.current,
-      widthScale: oiWidthScaleRef.current,
-      showCalls,
-      showPuts,
-      mode: oiModeRef.current,
-      histFetched: oiHistFetchedRef.current,
+      renderOI({
+        canvas,
+        containerW: cont.clientWidth,
+        containerH: cont.clientHeight,
+        priceToCoordinate: (p) => safePriceToCoordinate(series, p),
+        oiChain: oiChainRef.current,
+        enabled: oiEnabledRef.current,
+        widthScale: oiWidthScaleRef.current,
+        showCalls,
+        showPuts,
+        mode: oiModeRef.current,
+        histFetched: oiHistFetchedRef.current,
       historicalMap: oiHistoricalRef.current,
       symbolMap: oiSymbolMapRef.current,
       fromMs: oiFromMsRef.current,
@@ -415,8 +436,8 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
         x, y, containerW: w,
         widthScale: oiWidthScaleRef.current,
         oiChain: oiChainRef.current,
-        priceToCoordinate: (p) => candleRef.current!.priceToCoordinate(p),
-        coordinateToPrice: (py) => candleRef.current!.coordinateToPrice(py),
+        priceToCoordinate: (p) => safePriceToCoordinate(candleRef.current, p),
+        coordinateToPrice: (py) => safeCoordinateToPrice(candleRef.current, py),
         mode: oiModeRef.current,
         histFetched: oiHistFetchedRef.current,
         deltas: oiDeltasRef.current,

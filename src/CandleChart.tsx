@@ -247,7 +247,15 @@ export default function CandleChart({ instrument, theme }: Props) {
 
     chart.timeScale().subscribeVisibleLogicalRangeChange(async (range) => {
       oi.requestDraw();
-      if (!range || isLoadingRef.current || !currentInstRef.current || !earliestRef.current) return;
+      if (!range) return;
+      if (hasReachedEarliestRef.current && range.from < -5) {
+        try {
+          const span = range.to - range.from;
+          chart.timeScale().setVisibleLogicalRange({ from: -5, to: -5 + span });
+        } catch {}
+        return;
+      }
+      if (isLoadingRef.current || !currentInstRef.current || !earliestRef.current) return;
       if (range.from > 10) return;
       await loadMoreHistory();
     });
@@ -336,6 +344,18 @@ export default function CandleChart({ instrument, theme }: Props) {
     return unsub;
   }, [subscribe]);
 
+  function upsertBar(arr: OhlcBar[], bar: OhlcBar): void {
+    const last = arr[arr.length - 1];
+    if (last && sortKey(last.time) === sortKey(bar.time)) {
+      last.open = bar.open;
+      last.high = Math.max(last.high, bar.high);
+      last.low = Math.min(last.low, bar.low);
+      last.close = bar.close;
+    } else if (!last || sortKey(bar.time) > sortKey(last.time)) {
+      arr.push(bar);
+    }
+  }
+
   function applyBucket(b: Record<string,string>) {
     try {
       const tsStr = (b.bucket_timestamp && b.bucket_timestamp !== '0') ? b.bucket_timestamp : b.timestamp;
@@ -356,11 +376,38 @@ export default function CandleChart({ instrument, theme }: Props) {
       };
       candleRef.current?.update(candle as Parameters<typeof candleRef.current.update>[0]);
       lastBarRef.current = candle;
+      upsertBar(allBarsRef.current, candle);
       updatePriceDisplay(candle.close, dayOpenRef.current || candle.open);
       setOhlc({ o: candle.open, h: candle.high, l: candle.low, c: candle.close, vol: Number(b.cumulative_volume) || undefined });
       updateCountdownPosition();
     } catch (e) { console.warn('[Chart] applyBucket error:', e); }
   }
+
+  const hasReachedEarliestRef = useRef(false);
+  const lastLoadTimeRef       = useRef(0);
+
+function sanitizeCandles(bars: OhlcBar[]): OhlcBar[] {
+  if (!bars || !bars.length) return [];
+  return bars.filter(b =>
+    b &&
+    b.time != null &&
+    typeof b.open === 'number' && !isNaN(b.open) && b.open > 0 &&
+    typeof b.high === 'number' && !isNaN(b.high) && b.high > 0 &&
+    typeof b.low === 'number' && !isNaN(b.low) && b.low > 0 &&
+    typeof b.close === 'number' && !isNaN(b.close) && b.close > 0
+  );
+}
+
+function dedupeAndSortBars<T extends { time: any }>(bars: T[]): T[] {
+  if (!bars || bars.length === 0) return [];
+  const seen = new Map<number, T>();
+  for (const b of bars) {
+    if (!b || b.time == null) continue;
+    const k = sortKey(b.time);
+    seen.set(k, b);
+  }
+  return Array.from(seen.values()).sort((a, b) => sortKey(a.time) - sortKey(b.time));
+}
 
   // ── Load instrument ───────────────────────────────────────────────────────
   const loadInstrument = useCallback(async (inst: Instrument, iv: Interval) => {
@@ -375,12 +422,14 @@ export default function CandleChart({ instrument, theme }: Props) {
     vega.clearForInstrumentChange();
     theta.clearForInstrumentChange();
 
-    currentInstRef.current  = inst;
-    allBarsRef.current      = [];
-    allVolBarsRef.current   = [];
-    earliestRef.current     = null;
-    lastBarRef.current      = null;
-    dayOpenRef.current      = null;
+    currentInstRef.current       = inst;
+    allBarsRef.current           = [];
+    allVolBarsRef.current        = [];
+    earliestRef.current          = null;
+    lastBarRef.current           = null;
+    dayOpenRef.current           = null;
+    hasReachedEarliestRef.current = false;
+    lastLoadTimeRef.current       = 0;
     stopCountdown();
     setLoading('Loading historical data…');
     setPriceDisplay(null);
@@ -390,18 +439,21 @@ export default function CandleChart({ instrument, theme }: Props) {
       const end   = new Date();
       const start = new Date(end.getTime() - historyDays(iv) * 86400000);
       const { bars, volBars } = await fetchRange(inst, iv, start, end);
-      if (!bars.length) { setLoading('No historical data available.'); return; }
+      const sanitized = sanitizeCandles(bars);
+      const cleanBars = dedupeAndSortBars(sanitized);
+      const cleanVolBars = dedupeAndSortBars(volBars);
+      if (!cleanBars.length) { setLoading('No historical data available.'); return; }
 
-      allBarsRef.current    = bars;
-      allVolBarsRef.current = volBars;
+      allBarsRef.current    = cleanBars;
+      allVolBarsRef.current = cleanVolBars;
       earliestRef.current   = start;
-      lastBarRef.current    = bars[bars.length - 1];
-      dayOpenRef.current    = bars[0].open;
+      lastBarRef.current    = cleanBars[cleanBars.length - 1];
+      dayOpenRef.current    = cleanBars[0].open;
 
-      candleRef.current.setData(bars as Parameters<typeof candleRef.current.setData>[0]);
-      volRef.current.setData(volBars as Parameters<typeof volRef.current.setData>[0]);
+      candleRef.current.setData(cleanBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })) as Parameters<typeof candleRef.current.setData>[0]);
+      volRef.current.setData(cleanVolBars.map(v => ({ time: v.time, value: v.value, color: v.color })) as Parameters<typeof volRef.current.setData>[0]);
 
-      const len = bars.length;
+      const len = cleanBars.length;
       chartRef.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 60), to: len + 5 });
       setLoading(null);
       startCountdown();
@@ -422,37 +474,31 @@ export default function CandleChart({ instrument, theme }: Props) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instrument, interval]);
 
-  useEffect(() => {
-    const restore = () => {
-      if (!chartRef.current || !candleRef.current || !allBarsRef.current.length) return;
-      candleRef.current.setData(allBarsRef.current as Parameters<typeof candleRef.current.setData>[0]);
-      if (volRef.current && allVolBarsRef.current.length) {
-        volRef.current.setData(allVolBarsRef.current as Parameters<typeof volRef.current.setData>[0]);
-      }
-    };
-    const onVisChange = () => { if (document.visibilityState === 'visible') restore(); };
-    document.addEventListener('visibilitychange', onVisChange);
-    const guard = window.setInterval(restore, 60000);
-    return () => { document.removeEventListener('visibilitychange', onVisChange); clearInterval(guard); };
-  }, []);
+
 
   async function loadMoreHistory() {
-    if (isLoadingRef.current || !earliestRef.current || !currentInstRef.current) return;
+    const now = Date.now();
+    if (isLoadingRef.current || hasReachedEarliestRef.current || !earliestRef.current || !currentInstRef.current) return;
+    if (now - lastLoadTimeRef.current < 500) return;
     isLoadingRef.current = true;
+    lastLoadTimeRef.current = now;
     setLoadMore(true);
     try {
       const end   = new Date(earliestRef.current.getTime() - 60000);
       const start = new Date(end.getTime() - chunkDays(intervalRef.current) * 86400000);
       const { bars, volBars } = await fetchRange(currentInstRef.current, intervalRef.current, start, end);
-      if (bars.length) {
-        bars.push(...allBarsRef.current);
-        allBarsRef.current = bars;
-        volBars.push(...allVolBarsRef.current);
-        allVolBarsRef.current = volBars;
-        earliestRef.current   = start;
-        dayOpenRef.current    = allBarsRef.current[0].open;
-        candleRef.current?.setData(allBarsRef.current as Parameters<typeof candleRef.current.setData>[0]);
-        volRef.current?.setData(allVolBarsRef.current as Parameters<typeof volRef.current.setData>[0]);
+      earliestRef.current = start;
+      if (bars.length > 0) {
+        const sanitizedNew = sanitizeCandles(bars);
+        const mergedBars = dedupeAndSortBars([...sanitizedNew, ...allBarsRef.current]);
+        const mergedVolBars = dedupeAndSortBars([...volBars, ...allVolBarsRef.current]);
+        allBarsRef.current = mergedBars;
+        allVolBarsRef.current = mergedVolBars;
+        if (mergedBars.length > 0) dayOpenRef.current = mergedBars[0].open;
+        candleRef.current?.setData(mergedBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })) as Parameters<typeof candleRef.current.setData>[0]);
+        volRef.current?.setData(mergedVolBars.map(v => ({ time: v.time, value: v.value, color: v.color })) as Parameters<typeof volRef.current.setData>[0]);
+      } else {
+        hasReachedEarliestRef.current = true;
       }
     } catch (e) { console.warn('[Chart] loadMoreHistory failed:', e); }
     isLoadingRef.current = false;
@@ -487,8 +533,10 @@ export default function CandleChart({ instrument, theme }: Props) {
   }
   function updateCountdownPosition() {
     if (!lastBarRef.current || !candleRef.current) return;
-    const y = candleRef.current.priceToCoordinate(lastBarRef.current.close);
-    if (y != null) setCountdownY(Math.round(y) + 13);
+    try {
+      const y = candleRef.current.priceToCoordinate(lastBarRef.current.close);
+      if (y != null && !isNaN(y)) setCountdownY(Math.round(y) + 13);
+    } catch {}
   }
 
   function updatePriceDisplay(price: number, open: number) {
