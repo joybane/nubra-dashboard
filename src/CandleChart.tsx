@@ -342,8 +342,18 @@ export default function CandleChart({ instrument, theme }: Props) {
       if (!tsStr || tsStr === '0' || !/^\d+$/.test(tsStr)) return;
       const utcSec  = Number(BigInt(tsStr) / 1_000_000_000n);
       const barTime = snapToCandle(utcSec, intervalRef.current);
-      const candle  = { time: barTime, open: Number(b.open)/100, high: Number(b.high)/100, low: Number(b.low)/100, close: Number(b.close)/100 };
-      if (!candle.open || !candle.close) return;
+      const oVal = Number(b.open) / 100;
+      const hVal = Number(b.high) / 100;
+      const lVal = Number(b.low) / 100;
+      const cVal = Number(b.close) / 100;
+      if (isNaN(oVal) || isNaN(hVal) || isNaN(lVal) || isNaN(cVal) || oVal <= 0 || cVal <= 0) return;
+      const candle = {
+        time: barTime,
+        open: oVal,
+        high: Math.max(hVal, oVal, cVal),
+        low: Math.min(lVal, oVal, hVal, cVal),
+        close: cVal,
+      };
       candleRef.current?.update(candle as Parameters<typeof candleRef.current.update>[0]);
       lastBarRef.current = candle;
       updatePriceDisplay(candle.close, dayOpenRef.current || candle.open);
@@ -819,13 +829,21 @@ export async function fetchRange(
         const len = Math.min(opens.length, highs.length, lows.length, closes.length);
 
         for (let i = 0; i < len; i++) {
-          const tsNs = opens[i].ts;
+          const tsNs = opens[i]?.ts;
           if (tsNs == null) continue;
+          const oVal = opens[i]?.v;
+          const hVal = highs[i]?.v;
+          const lVal = lows[i]?.v;
+          const cVal = closes[i]?.v;
+          if (oVal == null || hVal == null || lVal == null || cVal == null) continue;
+          const o = Number(oVal) / 100, h = Number(hVal) / 100, l = Number(lVal) / 100, c = Number(cVal) / 100;
+          if (isNaN(o) || isNaN(h) || isNaN(l) || isNaN(c) || o <= 0 || c <= 0) continue;
           const t = toChartTime(BigInt(tsNs), interval);
-          const o = opens[i].v / 100, h = highs[i].v / 100, l = lows[i].v / 100, c = closes[i].v / 100;
-          bars.push({ time: t, open: o, high: h, low: l, close: c });
+          const validH = Math.max(h, o, l, c);
+          const validL = Math.min(l, o, h, c);
+          bars.push({ time: t, open: o, high: validH, low: validL, close: c });
           if (vols[i]?.v) {
-            volBars.push({ time: t, value: vols[i].v, color: c >= o ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)' });
+            volBars.push({ time: t, value: Number(vols[i].v), color: c >= o ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)' });
           }
         }
       }

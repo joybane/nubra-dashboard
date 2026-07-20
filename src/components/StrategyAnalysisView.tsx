@@ -260,10 +260,14 @@ async function fetchHistorical(symbol: string, type: string, interval: string, s
           const opens = chart.open || [], highs = chart.high || [], lows = chart.low || [], closes = chart.close || [];
           const len = Math.min(opens.length, highs.length, lows.length, closes.length);
           for (let i = 0; i < len; i++) {
-            const tsNs = opens[i].ts;
+            const tsNs = opens[i]?.ts;
             if (tsNs == null) continue;
+            const oVal = opens[i]?.v, hVal = highs[i]?.v, lVal = lows[i]?.v, cVal = closes[i]?.v;
+            if (oVal == null || hVal == null || lVal == null || cVal == null) continue;
+            const o = Number(oVal) / 100, h = Number(hVal) / 100, l = Number(lVal) / 100, c = Number(cVal) / 100;
+            if (isNaN(o) || isNaN(h) || isNaN(l) || isNaN(c) || o <= 0 || c <= 0) continue;
             const t = toChartTime(BigInt(tsNs), interval) as number;
-            bars.push({ time: t, open: opens[i].v / 100, high: highs[i].v / 100, low: lows[i].v / 100, close: closes[i].v / 100 });
+            bars.push({ time: t, open: o, high: Math.max(h, o, l, c), low: Math.min(l, o, h, c), close: c });
           }
         }
       }
@@ -1116,13 +1120,25 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
             if (c !== sourceChart) {
               try {
                 let s: ISeriesApi<any> | null = null;
-                if (c === pc) s = seriesRef.current.underlying;
-                else if (c === nc) s = seriesRef.current.basketPnl;
-                else if (c === gc) {
+                let val = 0;
+                const cd = chartDataRef.current;
+                if (c === pc) {
+                  s = seriesRef.current.underlying;
+                  if (cd) {
+                    const b = cd.underlyingBars.find(bar => bar.time === t);
+                    if (b) val = b.close;
+                  }
+                } else if (c === nc) {
+                  s = seriesRef.current.basketPnl;
+                  if (cd) {
+                    const p = cd.basketPnlData.find(pt => pt.time === t);
+                    if (p) val = p.value;
+                  }
+                } else if (c === gc) {
                   const firstKey = Object.keys(greeksSeriesRef.current).find(k => greeksSeriesRef.current[k]);
                   if (firstKey) s = greeksSeriesRef.current[firstKey];
                 }
-                if (s) c.setCrosshairPosition(0, t as any, s);
+                if (s) c.setCrosshairPosition(val, t as any, s);
               } catch {}
             }
           }

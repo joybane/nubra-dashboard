@@ -1008,12 +1008,12 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
 
     return () => {
       observer.disconnect();
-      if (priceChart) priceChart.remove();
-      if (pnlChart) pnlChart.remove();
-      if (greeksChart) greeksChart.remove();
       priceChartRef.current = null;
       pnlChartRef.current = null;
       greeksChartRef.current = null;
+      if (priceChart) try { priceChart.remove(); } catch {}
+      if (pnlChart) try { pnlChart.remove(); } catch {}
+      if (greeksChart) try { greeksChart.remove(); } catch {}
     };
   }, [evalResult, theme, greeksVisible, greeksData, chartsExpanded, showSpotPrice, hiddenLegPrices, showTotalPnl, hiddenLegPnls, selectedGreeks, greeksLegFilter]);
 
