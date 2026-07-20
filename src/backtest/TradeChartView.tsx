@@ -22,9 +22,26 @@ const MCODE: Record<number, string> = { 1: '1', 2: '2', 3: '3', 4: '4', 5: '5', 
 const RISK_FREE = 0.07;
 const YEAR_SECS = 365 * 86400;
 
-interface Bar { time: number; open: number; high: number; low: number; close: number }
+interface Bar {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  delta?: number;
+  gamma?: number;
+  theta?: number;
+  vega?: number;
+}
 interface LegMeta { legId: string; label: string; color: string; symbol: string; strike: number; opt: 'CE' | 'PE'; expirySec: number; sign: number; }
-interface Frame { spot: number; legPrice: Record<string, number>; total: number; legPnl: Record<string, number>; greeks: { delta: number; gamma: number; theta: number; vega: number }; }
+interface Frame {
+  spot: number;
+  legPrice: Record<string, number>;
+  total: number;
+  legPnl: Record<string, number>;
+  greeks: { delta: number; gamma: number; theta: number; vega: number };
+  isNubraGreeks?: boolean;
+}
 
 // date "YYYY-MM-DD" + hhmm → IST-wall-clock-as-UTC seconds (matches utils.toChartTime intraday output)
 function toUnix(date: string, hhmm: string): number {
@@ -65,22 +82,45 @@ async function fetchHist(values: string[], type: 'INDEX' | 'OPT', date: string):
   const [y, mo, d] = date.split('-').map(Number);
   const startDate = new Date(Date.UTC(y, mo - 1, d, 3, 45, 0)).toISOString();
   const endDate = new Date(Date.UTC(y, mo - 1, d, 10, 0, 0)).toISOString();
+  const fields = type === 'OPT'
+    ? ['open', 'high', 'low', 'close', 'delta', 'gamma', 'theta', 'vega']
+    : ['open', 'high', 'low', 'close'];
+
   try {
     const res = await fetch('/api/historical', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: [{ exchange: 'NSE', type, values, fields: ['open', 'high', 'low', 'close'], startDate, endDate, interval: '1m', intraDay: false, realTime: false }] }),
+      body: JSON.stringify({ query: [{ exchange: 'NSE', type, values, fields, startDate, endDate, interval: '1m', intraDay: false, realTime: false }] }),
     });
     if (!res.ok) return out;
-    const json = await res.json() as { result?: Array<{ values: Array<Record<string, { open?: Array<{ ts: number; v: number }>; high?: Array<{ v: number }>; low?: Array<{ v: number }>; close?: Array<{ v: number }> }>> }> };
+    const json = await res.json() as { result?: Array<{ values: Array<Record<string, {
+      open?: Array<{ ts: number; v: number }>;
+      high?: Array<{ v: number }>;
+      low?: Array<{ v: number }>;
+      close?: Array<{ v: number }>;
+      delta?: Array<{ v: number }>;
+      gamma?: Array<{ v: number }>;
+      theta?: Array<{ v: number }>;
+      vega?: Array<{ v: number }>;
+    }>> }> };
     for (const group of json.result || []) {
       for (const symMap of group.values || []) {
         for (const [sym, ch] of Object.entries(symMap)) {
           const o = ch.open || [], h = ch.high || [], l = ch.low || [], c = ch.close || [];
+          const dArr = ch.delta || [], gArr = ch.gamma || [], tArr = ch.theta || [], vArr = ch.vega || [];
           const n = Math.min(o.length, h.length, l.length, c.length);
           const bars: Bar[] = [];
           for (let i = 0; i < n; i++) {
             const t = Math.floor(Number(o[i].ts) / 1e9) + IST_OFFSET;
-            bars.push({ time: t, open: o[i].v / 100, high: h[i].v / 100, low: l[i].v / 100, close: c[i].v / 100 });
+            const delta = dArr[i]?.v != null ? Number(dArr[i].v) : undefined;
+            const gamma = gArr[i]?.v != null ? Number(gArr[i].v) : undefined;
+            const theta = tArr[i]?.v != null ? Number(tArr[i].v) : undefined;
+            const vega = vArr[i]?.v != null ? Number(vArr[i].v) : undefined;
+
+            bars.push({
+              time: t,
+              open: o[i].v / 100, high: h[i].v / 100, low: l[i].v / 100, close: c[i].v / 100,
+              delta, gamma, theta, vega,
+            });
           }
           if (bars.length) out.set(sym, bars);
         }
@@ -139,7 +179,7 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
   // ── build the per-minute frame index (used for crosshair legend) ──
   const frames = useMemo(() => {
     const m = new Map<number, Frame>();
-    const ensure = (t: number) => { let f = m.get(t); if (!f) { f = { spot: NaN, legPrice: {}, total: NaN, legPnl: {}, greeks: { delta: 0, gamma: 0, theta: 0, vega: 0 } }; m.set(t, f); } return f; };
+    const ensure = (t: number) => { let f = m.get(t); if (!f) { f = { spot: NaN, legPrice: {}, total: NaN, legPnl: {}, greeks: { delta: 0, gamma: 0, theta: 0, vega: 0 }, isNubraGreeks: false }; m.set(t, f); } return f; };
     if (bars) for (const b of bars.under) ensure(b.time).spot = b.close;
     for (const p of series) {
       const t = toUnix(trade.date, p.hhmm);
@@ -147,7 +187,8 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
       f.total = p.total;
       for (const lp of p.legs) f.legPnl[lp.legId] = lp.pnl;
     }
-    // leg price + greeks from option candles
+
+    // leg price + greeks from option candles (Nubra API with local Black-Scholes fallback)
     if (bars) for (const lm of legs) {
       const lb = bars.legBars.get(lm.symbol);
       if (!lb) continue;
@@ -156,14 +197,24 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
         f.legPrice[lm.legId] = b.close;
         const spot = f.spot;
         if (Number.isFinite(spot) && spot > 0 && b.close > 0) {
-          const T = Math.max((lm.expirySec - b.time) / YEAR_SECS, 1e-6);
-          let iv = impliedVolatility(b.close, spot, lm.strike, T, RISK_FREE, lm.opt);
-          if (!Number.isFinite(iv) || iv <= 0) iv = 0.2;
-          const g = blackScholes(spot, lm.strike, T, RISK_FREE, iv, lm.opt);
-          f.greeks.delta += lm.sign * g.delta;
-          f.greeks.gamma += lm.sign * g.gamma;
-          f.greeks.theta += lm.sign * g.theta;
-          f.greeks.vega += lm.sign * g.vega;
+          // If Nubra API provided exact historical Greeks for this bar, use them directly
+          if (typeof b.delta === 'number' && typeof b.gamma === 'number' && typeof b.theta === 'number' && typeof b.vega === 'number') {
+            f.greeks.delta += lm.sign * b.delta;
+            f.greeks.gamma += lm.sign * b.gamma;
+            f.greeks.theta += lm.sign * b.theta;
+            f.greeks.vega += lm.sign * b.vega;
+            f.isNubraGreeks = true;
+          } else {
+            // Fallback: Compute via local Black-Scholes model
+            const T = Math.max((lm.expirySec - b.time) / YEAR_SECS, 1e-6);
+            let iv = impliedVolatility(b.close, spot, lm.strike, T, RISK_FREE, lm.opt);
+            if (!Number.isFinite(iv) || iv <= 0) iv = 0.2;
+            const g = blackScholes(spot, lm.strike, T, RISK_FREE, iv, lm.opt, true);
+            f.greeks.delta += lm.sign * g.delta;
+            f.greeks.gamma += lm.sign * g.gamma;
+            f.greeks.theta += lm.sign * g.theta;
+            f.greeks.vega += lm.sign * g.vega;
+          }
         }
       }
     }
@@ -327,6 +378,15 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
           {(['delta', 'gamma', 'theta', 'vega'] as const).map((gk) => (
             <span key={gk} style={{ color: GREEK_COLORS[gk] }} className="capitalize">{gk} {hf ? hf.greeks[gk].toFixed(gk === 'gamma' ? 4 : 2) : '—'}</span>
           ))}
+          {(hf?.isNubraGreeks || Array.from(frames.values()).some(f => f.isNubraGreeks)) ? (
+            <span className="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 cursor-help" title="Historical Greeks fetched directly from Nubra API">
+              ✓ Nubra API
+            </span>
+          ) : (
+            <span className="ml-auto px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30 cursor-help" title="Historical Greeks calculated per-minute via Black-Scholes model">
+              ⚡ Black-Scholes Est.
+            </span>
+          )}
         </div>
         <div ref={greeksRef} className="h-[150px] w-full border border-[var(--border)] rounded bg-[#0d0f11]" />
       </div>

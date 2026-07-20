@@ -776,10 +776,31 @@ style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border
             )}
 
             {(margin || marginLoading || marginError) && (
-              <div>
-                  {marginLoading && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Calculating...</span>}
-{margin ? (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: '12px 14px' }}>
+              <div style={{ marginTop: 8, background: 'var(--bg-card)', borderRadius: 8, border: '1px solid var(--border)', overflow: 'hidden' }}>
+                <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  <span>Margin Requirements</span>
+                  {marginLoading ? (
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Calculating...</span>
+                  ) : margin ? (
+                    margin.estimated ? (
+                      <span
+                        style={{ background: 'rgba(234, 179, 8, 0.15)', color: '#eab308', border: '1px solid rgba(234, 179, 8, 0.3)', padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600, cursor: 'help' }}
+                        title={margin.message || 'Broker margin unavailable. Calculated locally via exchange-style fallback / SPAN risk data.'}
+                      >
+                        ⚡ Local Est.
+                      </span>
+                    ) : (
+                      <span
+                        style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#22c55e', border: '1px solid rgba(34, 197, 94, 0.3)', padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600 }}
+                        title="Calculated live from Nubra API"
+                      >
+                        ✓ Nubra API
+                      </span>
+                    )
+                  ) : null}
+                </div>
+                {margin ? (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: '10px 12px' }}>
                     <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Span</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.span ? fmtPrice(margin.span) : '—'}</div></div>
                     <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Exposure</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{margin.exposure ? fmtPrice(margin.exposure) : '—'}</div></div>
                     <div><div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>Total Margin</div><div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{fmtPrice(margin.total)}</div></div>
@@ -808,7 +829,15 @@ style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border
           {/* Greeks table */}
           {legs.length > 0 && legs.some(l => l.delta != null) && (
             <div style={{ margin: '0 12px 12px', background: 'var(--bg-card)', borderRadius: 10, border: '1px solid var(--border)', overflow: 'hidden' }}>
-              <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>Greeks</div>
+              <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>
+                <span>Greeks</span>
+                <span
+                  style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#22c55e', border: '1px solid rgba(34, 197, 94, 0.3)', padding: '2px 7px', borderRadius: 4, fontSize: 10, fontWeight: 600 }}
+                  title="Option Greeks received live from Nubra Option Chain feed"
+                >
+                  ✓ Nubra API
+                </span>
+              </div>
               <div style={{ padding: '0 14px' }}>
                 <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 60px 40px 60px 60px 60px 60px', alignItems: 'center', padding: '8px 0', borderBottom: '1px solid var(--bg-card)', fontSize: 10, fontWeight: 600, color: 'var(--text-muted)' }}>
                   <span>B/S</span><span>Instrument</span><span>Strike</span><span>Qty</span><span>Delta</span><span>Theta</span><span>Gamma</span><span>Vega</span>

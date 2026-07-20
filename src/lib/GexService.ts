@@ -27,12 +27,13 @@ export interface Greeks {
 }
 
 export function blackScholes(
-  S: number,      // spot price
+  S: number,      // spot or futures price
   K: number,      // strike price
   T: number,      // time to expiry in years
   r: number,      // risk-free rate (e.g. 0.07 for 7%)
   sigma: number,  // annualized implied volatility (e.g. 0.15 for 15%)
   type: 'CE' | 'PE',
+  isFutures = true, // Default to Futures/Forward model (Black-76), standard for NSE Index Options
 ): Greeks {
   if (T <= 0 || sigma <= 0 || S <= 0 || K <= 0) {
     const intrinsic = type === 'CE' ? Math.max(0, S - K) : Math.max(0, K - S);
@@ -40,7 +41,9 @@ export function blackScholes(
   }
 
   const sqrtT = Math.sqrt(T);
-  const d1 = (Math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sqrtT);
+  // Black-76 for Futures/Forwards: d1 uses 0.5 * sigma^2 * T without additional drift r*T
+  const drift = isFutures ? 0.5 * sigma * sigma : r + 0.5 * sigma * sigma;
+  const d1 = (Math.log(S / K) + drift * T) / (sigma * sqrtT);
   const d2 = d1 - sigma * sqrtT;
 
   const Nd1  = normalCDF(d1);
@@ -48,22 +51,22 @@ export function blackScholes(
   const Nnd1 = normalCDF(-d1);
   const Nnd2 = normalCDF(-d2);
   const nd1  = normalPDF(d1);
+  const df   = isFutures ? Math.exp(-r * T) : 1;
   const ert  = Math.exp(-r * T);
 
   const price = type === 'CE'
-    ? S * Nd1 - K * ert * Nd2
-    : K * ert * Nnd2 - S * Nnd1;
+    ? (isFutures ? df * (S * Nd1 - K * Nd2) : S * Nd1 - K * ert * Nd2)
+    : (isFutures ? df * (K * Nnd2 - S * Nnd1) : K * ert * Nnd2 - S * Nnd1);
 
-  const delta = type === 'CE' ? Nd1 : Nd1 - 1;
+  const delta = type === 'CE' ? Nd1 * (isFutures ? df : 1) : (Nd1 - 1) * (isFutures ? df : 1);
+  const gamma = (nd1 * (isFutures ? df : 1)) / (S * sigma * sqrtT);
 
-  const gamma = nd1 / (S * sigma * sqrtT);
-
-  // Theta per calendar day (not per year)
+  // Theta per calendar day
   const theta = type === 'CE'
     ? (-(S * nd1 * sigma) / (2 * sqrtT) - r * K * ert * Nd2) / 365
     : (-(S * nd1 * sigma) / (2 * sqrtT) + r * K * ert * Nnd2) / 365;
 
-  const vega = S * nd1 * sqrtT / 100; // per 1% change in vol
+  const vega = (S * nd1 * sqrtT * (isFutures ? df : 1)) / 100; // per 1% change in vol
 
   const rho = type === 'CE'
     ? K * T * ert * Nd2 / 100

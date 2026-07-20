@@ -413,7 +413,7 @@ function parsePositionOption(p: PaperPosition): { symbol?: string; strike?: numb
   return { symbol: symbol || undefined, strike: strike > 0 ? strike : undefined, optionType };
 }
 
-async function fetchPositionGroupMarginPaise(positions: PaperPosition[]): Promise<number> {
+async function fetchPositionGroupMarginPaise(positions: PaperPosition[]): Promise<{ total: number; estimated: boolean }> {
   const orders = positions
     .filter(p => p.ref_id && p.qty)
     .map(p => {
@@ -431,16 +431,19 @@ async function fetchPositionGroupMarginPaise(positions: PaperPosition[]): Promis
         order_delivery_type: p.product === 'MIS' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
       };
     });
-  if (!orders.length) return 0;
+  if (!orders.length) return { total: 0, estimated: false };
 
   const res = await fetch('/paper/margin/basket', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ exchange: 'NSE', multiplier: 1, orders }),
   });
-  if (!res.ok) return 0;
+  if (!res.ok) return { total: 0, estimated: false };
   const data = await res.json() as Record<string, unknown>;
-  return Number(data.total_margin ?? 0);
+  return {
+    total: Number(data.total_margin ?? 0),
+    estimated: Boolean(data.estimated),
+  };
 }
 
 // ─── Positions tab ────────────────────────────────────────────────────────────
@@ -464,8 +467,8 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
   const [histFrom,     setHistFrom]     = useState('');
   const [histTo,       setHistTo]       = useState('');
   const [detailPos,    setDetailPos]    = useState<PaperPosition | null>(null);
-  const [groupMargins, setGroupMargins] = useState<Record<string, number>>({});
-  const groupMarginsRef = useRef<Record<string, number>>({});
+  const [groupMargins, setGroupMargins] = useState<Record<string, { total: number; estimated: boolean }>>({});
+  const groupMarginsRef = useRef<Record<string, { total: number; estimated: boolean }>>({});
   const marginRequestsRef = useRef<Set<string>>(new Set());
   const { subscribe } = useWs();
 
@@ -630,20 +633,21 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
   const groupedHistory = groupPositions(historyPositions);
 
   const knownGroupMargins = useMemo(() => {
-    const out: Record<string, number> = {};
+    const out: Record<string, { total: number; estimated: boolean }> = {};
     for (const item of groupPositions(closedPositions)) {
       if (!isPositionGroup(item)) continue;
       const margin = groupMarginPaise(item.positions);
-      if (margin > 0) out[groupMarginKey(item.strategy_name, item.positions)] = margin;
+      if (margin > 0) out[groupMarginKey(item.strategy_name, item.positions)] = { total: margin, estimated: true };
     }
     return out;
   }, [closedPositions]);
 
-  function resolvedGroupMarginPaise(g: PositionGroup): number {
-    return groupMargins[g.basket_group_id]
-      || groupMarginPaise(g.positions)
-      || knownGroupMargins[groupMarginKey(g.strategy_name, g.positions)]
-      || 0;
+  function resolvedGroupMarginInfo(g: PositionGroup): { paise: number; estimated: boolean } {
+    const fetched = groupMargins[g.basket_group_id];
+    if (fetched && fetched.total > 0) return { paise: fetched.total, estimated: fetched.estimated };
+    const known = knownGroupMargins[groupMarginKey(g.strategy_name, g.positions)];
+    if (known && known.total > 0) return { paise: known.total, estimated: true };
+    return { paise: groupMarginPaise(g.positions), estimated: true };
   }
 
   useEffect(() => { groupMarginsRef.current = groupMargins; }, [groupMargins]);
@@ -656,8 +660,8 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
       if (marginRequestsRef.current.has(g.basket_group_id)) continue;
       marginRequestsRef.current.add(g.basket_group_id);
       fetchPositionGroupMarginPaise(g.positions)
-        .then(total => {
-          if (total > 0) setGroupMargins(prev => ({ ...prev, [g.basket_group_id]: total }));
+        .then(res => {
+          if (res.total > 0) setGroupMargins(prev => ({ ...prev, [g.basket_group_id]: res }));
         })
         .catch(e => console.warn('[Positions] group margin fallback failed:', e))
         .finally(() => marginRequestsRef.current.delete(g.basket_group_id));
@@ -814,8 +818,8 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
               const g = item;
               const isExp = expanded.has(g.basket_group_id);
               const groupPnl = g.positions.reduce((s, p) => s + (p.realised_pnl || p.pnl || 0) / 100, 0);
-              const gMargin = resolvedGroupMarginPaise(g);
-              const gMarginRs = gMargin / 100;
+              const gMarginInfo = resolvedGroupMarginInfo(g);
+              const gMarginRs = gMarginInfo.paise / 100;
               const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
               return (
                 <React.Fragment key={g.basket_group_id}>
@@ -842,7 +846,9 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                         {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
                       </span>
                       {gMarginRs > 0 && (<>
-                        <span className="text-[var(--text-muted)] ml-3 text-[11px]">Margin ₹{fmtPrice(gMarginRs)}</span>
+                        <span className="text-[var(--text-muted)] ml-3 text-[11px]" title={gMarginInfo.estimated ? 'Calculated locally via conservative fallback' : 'Calculated live from Nubra API'}>
+                          Margin ₹{fmtPrice(gMarginRs)} {gMarginInfo.estimated && <span className="text-amber-400 font-semibold ml-0.5">(Est.)</span>}
+                        </span>
                         <span className={`ml-2 text-[11px] font-semibold ${gRoi >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>ROI {gRoi >= 0 ? '+' : ''}{gRoi.toFixed(1)}%</span>
                       </>)}
                     </td>
@@ -860,8 +866,8 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
               const isOpen = expanded.has(g.basket_group_id);
               const groupPnl = g.positions.reduce((s, p) => s + calcPnl(p), 0);
               const allExiting = g.positions.every(p => exiting.has(posExitKey(p)));
-              const gMargin = resolvedGroupMarginPaise(g);
-              const gMarginRs = gMargin / 100;
+              const gMarginInfo = resolvedGroupMarginInfo(g);
+              const gMarginRs = gMarginInfo.paise / 100;
               const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
               return (
                 <React.Fragment key={g.basket_group_id}>
@@ -912,7 +918,9 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                         {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
                       </span>
                       {gMarginRs > 0 && (<>
-                        <span className="text-[var(--text-muted)] ml-3 text-[11px]">Margin ₹{fmtPrice(gMarginRs)}</span>
+                        <span className="text-[var(--text-muted)] ml-3 text-[11px]" title={gMarginInfo.estimated ? 'Calculated locally via conservative fallback' : 'Calculated live from Nubra API'}>
+                          Margin ₹{fmtPrice(gMarginRs)} {gMarginInfo.estimated && <span className="text-amber-400 font-semibold ml-0.5">(Est.)</span>}
+                        </span>
                         <span className={`ml-2 text-[11px] font-semibold ${gRoi >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>ROI {gRoi >= 0 ? '+' : ''}{gRoi.toFixed(1)}%</span>
                       </>)}
                     </td>
@@ -939,8 +947,8 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
               const g = item;
               const isOpen = expanded.has(g.basket_group_id);
               const groupPnl = g.positions.reduce((s, p) => s + (p.realised_pnl || p.pnl || 0) / 100, 0);
-              const gMargin = resolvedGroupMarginPaise(g);
-              const gMarginRs = gMargin / 100;
+              const gMarginInfo = resolvedGroupMarginInfo(g);
+              const gMarginRs = gMarginInfo.paise / 100;
               const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
               return (
                 <React.Fragment key={g.basket_group_id}>
@@ -989,7 +997,9 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                         {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
                       </span>
                       {gMarginRs > 0 && (<>
-                        <span className="text-[var(--text-muted)] ml-3 text-[11px]">Margin ₹{fmtPrice(gMarginRs)}</span>
+                        <span className="text-[var(--text-muted)] ml-3 text-[11px]" title={gMarginInfo.estimated ? 'Calculated locally via conservative fallback' : 'Calculated live from Nubra API'}>
+                          Margin ₹{fmtPrice(gMarginRs)} {gMarginInfo.estimated && <span className="text-amber-400 font-semibold ml-0.5">(Est.)</span>}
+                        </span>
                         <span className={`ml-2 text-[11px] font-semibold ${gRoi >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>ROI {gRoi >= 0 ? '+' : ''}{gRoi.toFixed(1)}%</span>
                       </>)}
                     </td>

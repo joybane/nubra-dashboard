@@ -13,9 +13,9 @@ function normCdf(x: number): number {
   return x >= 0 ? 1 - p : p;
 }
 
-/** Black-Scholes option delta. ivPct is the IV percentage; tYears years to expiry. */
+/** Black-Scholes / Black-76 option delta. ivPct is the IV percentage; tYears years to expiry. */
 export function bsDelta(
-  optionType: OptionType, spot: number, strike: number, ivPct: number, tYears: number,
+  optionType: OptionType, spot: number, strike: number, ivPct: number, tYears: number, isFutures = true,
 ): number {
   if (!(spot > 0) || !(strike > 0) || !(ivPct > 0) || !(tYears > 0)) {
     // degenerate: fall back to moneyness sign
@@ -23,15 +23,27 @@ export function bsDelta(
     return spot <= strike ? -1 : 0;
   }
   const sigma = ivPct / 100;
+  // Black-76 drift for Futures/Forward pricing (standard for NSE index options)
   const d1 = (Math.log(spot / strike) + (sigma * sigma / 2) * tYears) / (sigma * Math.sqrt(tYears));
   const cdf = normCdf(d1);
   return optionType === 'CALL' ? cdf : cdf - 1; // put delta is negative
 }
 
-/** Calendar years between an IST trade datetime and expiry (expiry assumed 15:30 IST). */
+/** Trading years between an IST trade datetime and expiry (expiry assumed 15:30 IST). */
 export function yearsToExpiry(date: string, hhmm: string, expiry: string): number {
   const now = Date.parse(`${date}T${hhmm}:00+05:30`);
   const exp = Date.parse(`${expiry}T15:30:00+05:30`);
-  const yrs = (exp - now) / (365 * 86400000);
-  return yrs > 0 ? yrs : 1 / (365 * 24 * 60); // floor at ~1 minute to avoid div-by-0
+  const totalMs = exp - now;
+  if (totalMs <= 0) return 1 / (365 * 24 * 60);
+
+  const days = Math.floor(totalMs / 86400000);
+  if (days === 0) {
+    // Intraday: map remaining minutes to trading day ratio
+    const minsLeft = Math.max(1, totalMs / 60000);
+    return (minsLeft / 375) / 252; // 375 trading mins/day, 252 trading days/yr
+  }
+
+  // Multi-day: trading day weighting
+  const yrs = (days * (375 / 1440) + ((totalMs % 86400000) / 86400000) * (375 / 1440)) / 252;
+  return yrs > 0 ? yrs : 1 / (365 * 24 * 60);
 }
