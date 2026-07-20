@@ -52,7 +52,8 @@ function fmtChartTime(chartTime: number): string {
 }
 
 function nowChartTime(): number {
-  return Math.floor(Date.now() / 1000) + IST_OFFSET;
+  const s = Math.floor(Date.now() / 1000) + IST_OFFSET;
+  return Math.floor(s / 60) * 60;
 }
 
 // Append/replace the trailing cache point, mirroring lightweight-charts' series.update() (same time →
@@ -327,6 +328,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const [chartData, setChartData] = useState<ChartDataCache | null>(null);
   const chartDataRef = useRef<ChartDataCache | null>(null);
   chartDataRef.current = chartData;
+  const hasInitialFittedRef = useRef(false);
+  useEffect(() => {
+    hasInitialFittedRef.current = false;
+  }, [basketGroupId, snapshotId]);
   // Bumped whenever any chart is created/destroyed, so the scroll-sync effect re-runs once all
   // currently-visible charts actually exist (chart creation effects run after the sync effect).
   const [chartEpoch, setChartEpoch] = useState(0);
@@ -926,7 +931,9 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
       try { priceChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } }); } catch {}
 
-      requestAnimationFrame(() => priceChart.timeScale().fitContent());
+      if (!hasInitialFittedRef.current) {
+        requestAnimationFrame(() => priceChart.timeScale().fitContent());
+      }
     }
 
     // Shared full-session grid (from the underlying candles) used to time-align the P&L and greeks panes.
@@ -948,15 +955,22 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (chartData.basketPnlData.length > 0) {
         seriesRef.current.basketPnl?.setData(padToGrid(grid, chartData.basketPnlData) as any);
       }
-      requestAnimationFrame(() => pnlChart.timeScale().fitContent());
+      if (!hasInitialFittedRef.current) {
+        requestAnimationFrame(() => pnlChart.timeScale().fitContent());
+        hasInitialFittedRef.current = true;
+      }
     }
   }, [chartData]);
 
-  // ── 4. Chart scroll sync (logical range) ──
+  // ── 4. Chart scroll & crosshair sync (logical range + crosshairs) ──
   useEffect(() => {
-    const charts = [priceChartRef.current, pnlChartRef.current, greeksChartRef.current].filter(Boolean) as IChartApi[];
+    const pc = priceChartRef.current;
+    const nc = pnlChartRef.current;
+    const gc = greeksChartRef.current;
+    const charts = [pc, nc, gc].filter(Boolean) as IChartApi[];
     if (charts.length < 2) return;
     const unsubs: (() => void)[] = [];
+
     for (let i = 0; i < charts.length; i++) {
       for (let j = i + 1; j < charts.length; j++) {
         const a = charts[i], b = charts[j];
@@ -968,6 +982,60 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         unsubs.push(() => { try { a.timeScale().unsubscribeVisibleLogicalRangeChange(h1); } catch {} try { b.timeScale().unsubscribeVisibleLogicalRangeChange(h2); } catch {} });
       }
     }
+
+    let syncingCrosshair = false;
+    for (const sourceChart of charts) {
+      const onCrosshairMove = (param: any) => {
+        if (syncingCrosshair) return;
+        syncingCrosshair = true;
+        try {
+          if (!param.point || param.time == null) {
+            setPriceTooltipPos(null);
+            setPnlTooltipPos(null);
+            setGreeksTooltipPos(null);
+            for (const c of charts) {
+              if (c !== sourceChart) {
+                try { c.clearCrosshairPosition(); } catch {}
+              }
+            }
+            return;
+          }
+
+          const t = param.time as number;
+          const xPos = param.point.x;
+          const tStr = fmtChartTime(t);
+
+          setCrosshairTimeStr(tStr);
+          setPnlCrosshairTimeStr(tStr);
+          setGreeksCrosshairTime(tStr);
+
+          if (pc) setPriceTooltipPos({ x: xPos, y: 20 });
+          if (nc) setPnlTooltipPos({ x: xPos, y: 20 });
+          if (gc) setGreeksTooltipPos({ x: xPos, y: 20 });
+
+          for (const c of charts) {
+            if (c !== sourceChart) {
+              try {
+                let s: ISeriesApi<any> | null = null;
+                if (c === pc) s = seriesRef.current.underlying;
+                else if (c === nc) s = seriesRef.current.basketPnl;
+                else if (c === gc) {
+                  const firstKey = Object.keys(greeksSeriesRef.current).find(k => greeksSeriesRef.current[k]);
+                  if (firstKey) s = greeksSeriesRef.current[firstKey];
+                }
+                if (s) c.setCrosshairPosition(0, t as any, s);
+              } catch {}
+            }
+          }
+        } finally {
+          syncingCrosshair = false;
+        }
+      };
+
+      sourceChart.subscribeCrosshairMove(onCrosshairMove);
+      unsubs.push(() => { try { sourceChart.unsubscribeCrosshairMove(onCrosshairMove); } catch {} });
+    }
+
     return () => unsubs.forEach(u => u());
   }, [priceVisible, pnlVisible, greeksVisible, chartEpoch]);
 
@@ -1001,7 +1069,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       const data = msg.data as { indexes?: Array<{ indexname?: string; timestamp?: string; open?: string; high?: string; low?: string; close?: string }> };
       const idx = data.indexes?.find(i => (i.indexname || '').toUpperCase() === underlying.toUpperCase());
       if (!idx?.timestamp) return;
-      const t = Number(BigInt(idx.timestamp)) / 1e9 + IST_OFFSET;
+      const t = Math.floor((Number(BigInt(idx.timestamp)) / 1e9 + IST_OFFSET) / 60) * 60;
       const cached = chartDataRef.current;
       if (cached && (t < cached.sessionOpen || t > cached.sessionClose)) return;
       const o = parseFloat(idx.open || '0') / 100, h = parseFloat(idx.high || '0') / 100;
@@ -1304,7 +1372,9 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
       setGreeksTooltipValues(hasData ? vals : null);
     });
-    requestAnimationFrame(() => chart.timeScale().fitContent());
+    if (!hasInitialFittedRef.current) {
+      requestAnimationFrame(() => chart.timeScale().fitContent());
+    }
     return () => { greeksSeriesRef.current = {}; chart.remove(); greeksChartRef.current = null; setChartEpoch(e => e + 1); };
   }, [theme, greeksVisible, greeksLegFilter]);
 
@@ -1414,7 +1484,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
     }
 
-    requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
+    if (!hasInitialFittedRef.current) {
+      requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
+      hasInitialFittedRef.current = true;
+    }
   }, [chartData, greeksMode, lotSizeOverride, selectedGreeks, greeksVisible, underlying, greeksLegFilter]);
 
   const toggleVis = useCallback((key: string) => { setVisibility(prev => ({ ...prev, [key]: !prev[key] })); }, []);

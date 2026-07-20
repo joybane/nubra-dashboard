@@ -92,7 +92,41 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
   const { subscribe, subscribeOC, unsubscribeOC } = useWs();
   const { addItem: watchlistAdd } = useWatchlist();
   const { openTicket } = usePaperTrading();
-  const { basketMode, setBasketMode, addLegFromChain, legCount } = useBasket();
+  const { basketMode, setBasketMode, legs, addLegFromChain, removeLeg, updateLegQty, clearBasket, legCount } = useBasket();
+
+  const netPrem = useMemo(() => {
+    return legs.reduce((acc, leg) => {
+      const qty = leg.qty || leg.lotSize || 65;
+      return acc + (leg.side === 'SELL' ? 1 : -1) * (leg.ltp || 0) * qty;
+    }, 0);
+  }, [legs]);
+
+  const tradeBasketDirectly = useCallback(async () => {
+    if (!legs.length) return;
+    try {
+      for (const leg of legs) {
+        await fetch('/paper/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            nubraName: leg.nubraName,
+            liveRefId: leg.refId,
+            display_name: `${leg.asset} ${formatExpiry(leg.expiry)} ${leg.strike} ${leg.optionType}`,
+            order_type: 'ORDER_TYPE_MARKET',
+            order_qty: leg.qty || leg.lotSize || 65,
+            order_side: leg.side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
+            order_delivery_type: 'ORDER_DELIVERY_TYPE_IDAY',
+            validity_type: 'DAY',
+          }),
+        });
+      }
+      clearBasket();
+      setBasketMode(false);
+      onChangeView?.('tracker');
+    } catch (e) {
+      console.warn('[OptionChain] Trade basket failed:', e);
+    }
+  }, [legs, clearBasket, setBasketMode, onChangeView]);
 
   const openOrderTicket = useCallback((
     sp: number, optType: 'CE' | 'PE', side: 'BUY' | 'SELL', leg: OptionLeg | null,
@@ -784,60 +818,191 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
         )}
       </div>
 
-      {/* Table container (relative so Go-to-ATM button can be absolute-positioned inside) */}
-      <div className="flex-1 relative overflow-hidden">
-        <div ref={tableContainerRef} className="h-full overflow-auto bg-[var(--bg-primary)]">
-          {loading && (
-            <div className="flex flex-col items-center justify-center h-40 gap-3 text-[var(--text-secondary)]">
-              <div className="w-6 h-6 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin" />
-              <span className="text-[12px]">Loading option chain…</span>
-            </div>
-          )}
-          {error   && <div className="flex items-center justify-center h-40 text-[var(--red)] text-[14px]">{error}</div>}
-          {!loading && !error && (
-            <table className="oc-table w-full text-[12px] border-collapse" style={{ tableLayout: 'fixed' }}>
-              <thead>
-                <tr className="sticky top-0 z-10">
-                  <th colSpan={showGreeks ? 7 : 3} className="oc-calls-th text-center py-1.5 text-[13px] font-bold">Calls</th>
-                  <th colSpan={2} className="bg-[var(--bg-card)] border-b-2 border-[var(--border)]" />
-                  <th colSpan={showGreeks ? 7 : 3} className="oc-puts-th text-center py-1.5 text-[13px] font-bold">Puts</th>
-                </tr>
-                <tr className="sticky top-8 z-10 bg-[var(--bg-secondary)]">
-                  {showGreeks && ['Vega','Gamma','Theta','Delta'].map((h) => (
-                    <th key={`ce-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
-                  ))}
-                  {['OI (L)','Vol (L)','LTP'].map((h) => (
-                    <th key={`ce-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
-                  ))}
-                  <th className="text-center px-2 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] border-b border-[var(--border)] bg-[var(--bg-card)]">Strike</th>
-                  <th className="text-center px-2 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] border-b border-[var(--border)] bg-[var(--bg-card)]">IV %</th>
-                  {['LTP','Vol (L)','OI (L)'].map((h) => (
-                    <th key={`pe-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
-                  ))}
-                  {showGreeks && ['Delta','Theta','Gamma','Vega'].map((h) => (
-                    <th key={`pe-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>{tableRows}</tbody>
-            </table>
-          )}
-          {!loading && !error && !chain && (
-            <div className="flex items-center justify-center h-40 text-[var(--text-muted)] text-[14px]">
-              Select a symbol and click Load
-            </div>
+      {/* Main Container: Table + Optional Custom Basket Side Drawer */}
+      <div className="flex-1 flex overflow-hidden relative">
+        {/* Table container */}
+        <div className="flex-1 relative overflow-hidden">
+          <div ref={tableContainerRef} className="h-full overflow-auto bg-[var(--bg-primary)]">
+            {loading && (
+              <div className="flex flex-col items-center justify-center h-40 gap-3 text-[var(--text-secondary)]">
+                <div className="w-6 h-6 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin" />
+                <span className="text-[12px]">Loading option chain…</span>
+              </div>
+            )}
+            {error   && <div className="flex items-center justify-center h-40 text-[var(--red)] text-[14px]">{error}</div>}
+            {!loading && !error && (
+              <table className="oc-table w-full text-[12px] border-collapse" style={{ tableLayout: 'fixed' }}>
+                <thead>
+                  <tr className="sticky top-0 z-10">
+                    <th colSpan={showGreeks ? 7 : 3} className="oc-calls-th text-center py-1.5 text-[13px] font-bold">Calls</th>
+                    <th colSpan={2} className="bg-[var(--bg-card)] border-b-2 border-[var(--border)]" />
+                    <th colSpan={showGreeks ? 7 : 3} className="oc-puts-th text-center py-1.5 text-[13px] font-bold">Puts</th>
+                  </tr>
+                  <tr className="sticky top-8 z-10 bg-[var(--bg-secondary)]">
+                    {showGreeks && ['Vega','Gamma','Theta','Delta'].map((h) => (
+                      <th key={`ce-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
+                    ))}
+                    {['OI (L)','Vol (L)','LTP'].map((h) => (
+                      <th key={`ce-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
+                    ))}
+                    <th className="text-center px-2 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] border-b border-[var(--border)] bg-[var(--bg-card)]">Strike</th>
+                    <th className="text-center px-2 py-1.5 text-[11px] font-medium text-[var(--text-secondary)] border-b border-[var(--border)] bg-[var(--bg-card)]">IV %</th>
+                    {['LTP','Vol (L)','OI (L)'].map((h) => (
+                      <th key={`pe-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
+                    ))}
+                    {showGreeks && ['Delta','Theta','Gamma','Vega'].map((h) => (
+                      <th key={`pe-${h}`} className="text-right px-2 py-1.5 text-[11px] font-medium text-[var(--text-muted)] border-b border-[var(--border)] whitespace-nowrap">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>{tableRows}</tbody>
+              </table>
+            )}
+            {!loading && !error && !chain && (
+              <div className="flex items-center justify-center h-40 text-[var(--text-muted)] text-[14px]">
+                Select a symbol and click Load
+              </div>
+            )}
+          </div>
+
+          {/* Go to ATM floating button */}
+          {showGoToAtm && chain && (
+            <button
+              onClick={scrollToAtm}
+              className="absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[var(--accent)] text-white text-[12px] font-semibold shadow-lg hover:bg-[var(--accent-dim)] transition-all"
+              style={{ [atmDir === 'up' ? 'top' : 'bottom']: '10px' }}
+            >
+              {atmDir === 'up' ? '↑' : '↓'} Go to ATM
+            </button>
           )}
         </div>
 
-        {/* Go to ATM floating button */}
-        {showGoToAtm && chain && (
-          <button
-            onClick={scrollToAtm}
-            className="absolute left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[var(--accent)] text-white text-[12px] font-semibold shadow-lg hover:bg-[var(--accent-dim)] transition-all"
-            style={{ [atmDir === 'up' ? 'top' : 'bottom']: '10px' }}
-          >
-            {atmDir === 'up' ? '↑' : '↓'} Go to ATM
-          </button>
+        {/* Custom Basket Side Drawer (matching Nubra design) */}
+        {basketMode && (
+          <div className="w-[310px] shrink-0 border-l border-[var(--border)] bg-[var(--bg-secondary)] flex flex-col h-full overflow-hidden shadow-2xl z-20">
+            {/* Header */}
+            <div className="p-3 border-b border-[var(--border)] flex items-center justify-between bg-[var(--bg-card)]">
+              <div className="flex items-center gap-2">
+                <span className="text-base">🧺</span>
+                <span className="font-bold text-xs text-[var(--text-primary)]">Custom Basket</span>
+                {legs.length > 0 && (
+                  <span className="px-2 py-0.5 rounded-full bg-[var(--accent)]/20 text-[var(--accent)] text-[10px] font-semibold">
+                    {legs.length} {legs.length === 1 ? 'leg' : 'legs'}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {legs.length > 0 && (
+                  <button
+                    onClick={clearBasket}
+                    className="text-[11px] text-[var(--text-muted)] hover:text-[var(--red)] transition-colors"
+                  >
+                    Clear
+                  </button>
+                )}
+                <button
+                  onClick={() => setBasketMode(false)}
+                  className="w-5 h-5 rounded flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors text-xs"
+                  title="Close basket"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {/* Legs List */}
+            <div className="flex-1 overflow-auto p-2.5 space-y-2">
+              {legs.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-48 text-center p-4 border border-dashed border-[var(--border)] rounded-lg">
+                  <div className="text-2xl mb-2 opacity-50">🧺</div>
+                  <div className="text-xs font-semibold text-[var(--text-secondary)] mb-1">Your basket is empty</div>
+                  <div className="text-[10px] text-[var(--text-muted)] leading-relaxed">
+                    Click <span className="font-bold text-emerald-400">B</span> or <span className="font-bold text-red-400">S</span> on any strike row to add strategy legs.
+                  </div>
+                </div>
+              ) : (
+                legs.map((leg, idx) => {
+                  const isBuy = leg.side === 'BUY';
+                  const lotSize = leg.lotSize || 65;
+                  const currentQty = leg.qty || lotSize;
+                  return (
+                    <div
+                      key={leg.id || idx}
+                      className="p-2 rounded border border-[var(--border)] bg-[var(--bg-card)] hover:border-[var(--accent)]/40 transition-all text-xs"
+                    >
+                      {/* Top Row: Side badge, Expiry, Strike & Type, Remove */}
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`w-4 h-4 rounded flex items-center justify-center font-bold text-[9px] ${
+                            isBuy ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                          }`}>
+                            {isBuy ? 'B' : 'S'}
+                          </span>
+                          <span className="text-[10px] text-[var(--text-muted)]">{formatExpiry(leg.expiry)}</span>
+                          <span className="font-bold text-[var(--text-primary)]">{fmtPrice(leg.strike)} {leg.optionType}</span>
+                        </div>
+                        <button
+                          onClick={() => removeLeg(idx)}
+                          className="w-4 h-4 rounded flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--red)] hover:bg-[var(--red)]/10 transition-colors text-xs"
+                          title="Remove leg"
+                        >
+                          ✕
+                        </button>
+                      </div>
+
+                      {/* Bottom Row: Qty adjustment & Price */}
+                      <div className="flex items-center justify-between text-[11px] pt-1 border-t border-[var(--border)]/40">
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => updateLegQty(idx, Math.max(lotSize, currentQty - lotSize))}
+                            className="w-4 h-4 rounded bg-[var(--bg-primary)] border border-[var(--border)] flex items-center justify-center text-[10px] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]"
+                          >
+                            −
+                          </button>
+                          <span className="font-semibold text-[var(--text-primary)] min-w-[28px] text-center">{currentQty}</span>
+                          <button
+                            onClick={() => updateLegQty(idx, currentQty + lotSize)}
+                            className="w-4 h-4 rounded bg-[var(--bg-primary)] border border-[var(--border)] flex items-center justify-center text-[10px] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]"
+                          >
+                            +
+                          </button>
+                        </div>
+                        <div className="font-semibold text-[var(--text-primary)]">
+                          ₹{fmtPrice(leg.ltp)}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Bottom Footer Actions */}
+            {legs.length > 0 && (
+              <div className="p-2.5 border-t border-[var(--border)] bg-[var(--bg-card)] space-y-2">
+                <div className="flex items-center justify-between text-xs font-semibold">
+                  <span className="text-[var(--text-muted)]">Net Premium:</span>
+                  <span className={netPrem >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>
+                    {netPrem >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(netPrem))}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    onClick={() => onChangeView?.('basket')}
+                    className="w-full py-1.5 rounded border border-[var(--accent)] text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 font-semibold text-xs transition-all flex items-center justify-center gap-1"
+                  >
+                    📊 Analyze
+                  </button>
+                  <button
+                    onClick={tradeBasketDirectly}
+                    className="w-full py-1.5 rounded bg-[var(--accent)] text-white hover:bg-[var(--accent-dim)] font-semibold text-xs shadow transition-all flex items-center justify-center gap-1"
+                  >
+                    ⚡ Trade
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>
