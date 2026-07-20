@@ -78,22 +78,71 @@ function upsertBar(arr: HistBar[], bar: HistBar): void {
   else if (!last || bar.time > last.time) arr.push(bar);
 }
 
-// Pad a value series with whitespace ({time} with no value) so it spans the full underlying time grid.
-// The P&L and greeks panes only have data from entry→exit, while the underlying candle pane spans the
-// whole session; each chart fitContent()s its own range and the cross-pane sync is logical (bar-index),
-// so without a shared grid the same x-position means different times in each pane. Padding gives every
-// pane one identical bar-index↔time mapping → the logical sync becomes a true time alignment, while the
-// whitespace stays invisible so the P&L line still only draws entry→exit.
-function padToGrid(
+// Fill a P&L data series over the full underlying time grid (09:15 to session close).
+// P&L before entry time defaults to 0, and holds its value for un-ticked minutes so lightweight-charts
+// creates a 1-to-1 matching bar index array starting at 09:15 for 100% perfect multi-pane alignment.
+function fillPnlToGrid(
   grid: number[],
   data: Array<{ time: any; value: number }>,
-): Array<{ time: any; value: number } | { time: any }> {
+): Array<{ time: any; value: number }> {
   if (grid.length === 0) return data;
-  const valByTime = new Map<number, number>();
-  for (const d of data) valByTime.set(d.time as number, d.value);
-  const times = new Set<number>(grid);
-  for (const d of data) times.add(d.time as number);
-  return [...times].sort((a, b) => a - b).map(t => valByTime.has(t) ? { time: t as any, value: valByTime.get(t)! } : { time: t as any });
+  if (data.length === 0) return grid.map(t => ({ time: t as any, value: 0 }));
+
+  const valMap = new Map<number, number>();
+  for (const d of data) {
+    if (d && d.time != null) valMap.set(Number(d.time), d.value);
+  }
+
+  const firstTime = Number(data[0].time ?? 0);
+  const result: Array<{ time: any; value: number }> = [];
+  let currentVal = 0;
+
+  for (const t of grid) {
+    if (valMap.has(t)) {
+      currentVal = valMap.get(t)!;
+    } else if (t < firstTime) {
+      currentVal = 0;
+    }
+    result.push({ time: t as any, value: currentVal });
+  }
+  return result;
+}
+
+// Fill a Greek series over the full underlying time grid (09:15 to session close).
+// Forward-fills the initial value to 09:15 and holds across un-ticked minutes so lightweight-charts
+// creates an identical 1-to-1 bar index mapping (index 0 = 09:15) matching the candlestick chart.
+function fillGreeksToGrid(
+  grid: number[],
+  byTime: Map<number, { delta: number; gamma: number; theta: number; vega: number }>,
+  greekKey: 'delta' | 'gamma' | 'theta' | 'vega',
+  factor: { mid: number; half: number },
+): Array<{ time: any; value: number }> {
+  if (grid.length === 0) return [];
+  const times = [...byTime.keys()].sort((a, b) => a - b);
+  if (times.length === 0) return grid.map(t => ({ time: t as any, value: 0 }));
+
+  const firstTime = times[0];
+  const firstVal = (byTime.get(firstTime)![greekKey] - factor.mid) / factor.half;
+  const result: Array<{ time: any; value: number }> = [];
+  let currentVal = firstVal;
+
+  for (const t of grid) {
+    const pt = byTime.get(t);
+    if (pt != null && pt[greekKey] != null) {
+      currentVal = (pt[greekKey] - factor.mid) / factor.half;
+    }
+    result.push({ time: t as any, value: currentVal });
+  }
+  return result;
+}
+
+function safeSetVisibleLogicalRange(chart: IChartApi | null | undefined, range: any): void {
+  if (!chart || !range) return;
+  try {
+    chart.timeScale().setVisibleLogicalRange(range);
+  } catch (e) {
+    // Ignore disposed chart calls safely
+  }
 }
 
 const LEG_COLORS = ['#22c55e', '#ef4444', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
@@ -226,25 +275,39 @@ async function fetchHistorical(symbol: string, type: string, interval: string, s
   }
 }
 
-function chartOpts(isDark: boolean) {
+function chartOpts(isDark: boolean, hideTimeScale: boolean = false, showLeftScale: boolean = false) {
   return {
     layout: {
       background: { color: isDark ? '#0d0f11' : '#ffffff' },
       textColor: isDark ? '#c9d1d9' : '#131722',
       fontSize: 11,
-      fontFamily: "'Inter', 'Segoe UI', sans-serif",
+      fontFamily: "'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif",
     },
     grid: {
-      vertLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-      horzLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
+      vertLines: { color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)', style: 1 as const },
+      horzLines: { color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)', style: 1 as const },
     },
     crosshair: {
       mode: CrosshairMode.Normal,
-      vertLine: { color: '#4b5563', width: 1 as const, style: 0 as const, labelBackgroundColor: isDark ? '#22262b' : '#e8ecf5' },
-      horzLine: { color: '#4b5563', width: 1 as const, style: 0 as const, labelBackgroundColor: '#2962ff' },
+      vertLine: { color: isDark ? '#4b5563' : '#9ca3af', width: 1 as const, style: 2 as const, labelBackgroundColor: isDark ? '#22262b' : '#e8ecf5' },
+      horzLine: { color: isDark ? '#3b82f6' : '#2563eb', width: 1 as const, style: 2 as const, labelBackgroundColor: '#2563eb' },
     },
-    rightPriceScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', minimumWidth: 72 },
-    timeScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', timeVisible: true, secondsVisible: false },
+    leftPriceScale: {
+      visible: showLeftScale,
+      borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+      minimumWidth: 60,
+    },
+    rightPriceScale: {
+      visible: true,
+      borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+      minimumWidth: 72,
+    },
+    timeScale: {
+      visible: !hideTimeScale,
+      borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+      timeVisible: !hideTimeScale,
+      secondsVisible: false,
+    },
     handleScroll: { mouseWheel: true, pressedMouseMove: true },
     handleScale: { axisPressedMouseMove: true, mouseWheel: true },
   };
@@ -601,35 +664,22 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   // CHART SECTION — rebuilt from scratch
   // ════════════════════════════════════════════════════════════════════════════
 
-  // Recompute price-panel normalization factors from cached data (NIFTY OHLC + each leg's prices).
-  const computePriceFactors = useCallback((cache: ChartDataCache) => {
-    const uvals: number[] = [];
-    for (const b of cache.underlyingBars) { uvals.push(b.high, b.low); }
-    const legs = new Map<number, { mid: number; half: number }>();
-    for (const [refId, data] of cache.legPriceData) legs.set(refId, minMaxFactor(data.map(d => d.value)));
-    priceFactorsRef.current = { underlying: minMaxFactor(uvals), legs };
-  }, []);
-  const normU = useCallback((v: number) => { const f = priceFactorsRef.current.underlying; return (v - f.mid) / f.half; }, []);
-  const normLeg = useCallback((refId: number, v: number) => { const f = priceFactorsRef.current.legs.get(refId) || { mid: 0, half: 1 }; return (v - f.mid) / f.half; }, []);
-  const denormLeg = useCallback((refId: number, v: number) => { const f = priceFactorsRef.current.legs.get(refId) || { mid: 0, half: 1 }; return v * f.half + f.mid; }, []);
-
   // ── 1. Create price chart ──
   useEffect(() => {
     if (!priceChartContainerRef.current || !priceVisible) return;
     const isDark = theme === 'dark';
-    const chart = createChart(priceChartContainerRef.current, chartOpts(isDark));
+    const chart = createChart(priceChartContainerRef.current, chartOpts(isDark, true, true));
     priceChartRef.current = chart;
     setChartEpoch(e => e + 1);
 
-    // NIFTY candles + option legs all share the single 'right' axis, each min-max normalized to [-1,1]
-    // (like the Greeks panel) so dragging the axis scales everything together. Formatters de-normalize.
+    // NIFTY candles on primary right axis; option leg lines share left axis in ₹ (rupees).
     const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: '#22c55e', downColor: '#ef4444',
       borderUpColor: '#22c55e', borderDownColor: '#ef4444',
       wickUpColor: '#22c55e', wickDownColor: '#ef4444',
       priceLineVisible: true, lastValueVisible: true,
       title: underlying || 'Underlying',
-      priceFormat: { type: 'custom', minMove: 0.01, formatter: (p: number) => { const f = priceFactorsRef.current.underlying; return (p * f.half + f.mid).toFixed(2); } },
+      priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
     } as Partial<CandlestickSeriesOptions>);
     seriesRef.current.underlying = candleSeries;
 
@@ -642,48 +692,66 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         setPriceTooltipPos(null);
       }
       if (!param.seriesData) return;
-      const uf = priceFactorsRef.current.underlying;
-      const dn = (v: number) => v * uf.half + uf.mid;
       const bar = param.seriesData.get(candleSeries) as any;
       if (bar) {
-        if (bar.open != null) setOhlc({ o: dn(bar.open), h: dn(bar.high), l: dn(bar.low), c: dn(bar.close) });
-        else if (bar.value != null) setOhlc({ o: dn(bar.value), h: dn(bar.value), l: dn(bar.value), c: dn(bar.value) });
+        if (bar.open != null) setOhlc({ o: bar.open, h: bar.high, l: bar.low, c: bar.close });
+        else if (bar.value != null) setOhlc({ o: bar.value, h: bar.value, l: bar.value, c: bar.value });
       }
       const legs: Array<{ name: string; color: string; value: number }> = [];
       for (const [refId, s] of seriesRef.current.legPrice) {
         const d = param.seriesData.get(s) as any;
         if (d?.value != null) {
           const meta = legMetasRef.current.find(l => l.refId === refId);
-          if (meta) legs.push({ name: meta.displayName, color: meta.color, value: denormLeg(refId, d.value) });
+          if (meta) legs.push({ name: meta.displayName, color: meta.color, value: d.value });
         }
       }
       setLegPrices(legs);
     });
 
-    // Restore cached data (handles theme change without re-fetch)
+    // Draw horizontal strike price lines on NIFTY candlestick chart
+    for (const leg of legMetasRef.current) {
+      const pos = allPositionsRef.current.find(p => p.ref_id === leg.refId);
+      if (pos) {
+        const opt = parsePositionOption(pos);
+        if (opt.strike && opt.strike > 0) {
+          try {
+            candleSeries.createPriceLine({
+              price: opt.strike,
+              color: leg.color,
+              lineWidth: 1,
+              lineStyle: 2, // Dashed
+              axisLabelVisible: true,
+              title: `${opt.optionType || 'Leg'} ${opt.strike}`,
+            });
+          } catch {}
+        }
+      }
+    }
+
+    // Restore cached data
     const cached = chartDataRef.current;
     if (cached) {
-      computePriceFactors(cached);
-      candleSeries.setData(cached.underlyingBars.map(b => ({ time: b.time, open: normU(b.open), high: normU(b.high), low: normU(b.low), close: normU(b.close) })) as any);
+      candleSeries.setData(cached.underlyingBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })) as any);
       for (const leg of legMetasRef.current) {
         const s = chart.addSeries(LineSeries, {
-          color: leg.color, lineWidth: 1, priceScaleId: 'right',
+          color: leg.color, lineWidth: 2, priceScaleId: 'left',
           title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
-          priceFormat: { type: 'custom', minMove: 0.01, formatter: (p: number) => { const f = priceFactorsRef.current.legs.get(leg.refId) || { mid: 0, half: 1 }; return (p * f.half + f.mid).toFixed(2); } },
+          priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
         });
         seriesRef.current.legPrice.set(leg.refId, s);
         const data = cached.legPriceData.get(leg.refId);
-        if (data) s.setData(data.map(d => ({ time: d.time, value: normLeg(leg.refId, d.value) })));
+        if (data) s.setData(data.map(d => ({ time: d.time, value: d.value })));
       }
-      try { chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } }); } catch {}
+      try { chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } }); } catch {}
+      try { chart.priceScale('left').applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } }); } catch {}
       requestAnimationFrame(() => chart.timeScale().fitContent());
     }
 
     return () => {
       seriesRef.current.underlying = null;
       seriesRef.current.legPrice.clear();
-      chart.remove();
       priceChartRef.current = null;
+      try { chart.remove(); } catch {}
       setChartEpoch(e => e + 1);
     };
   }, [theme, underlying, priceVisible]);
@@ -692,21 +760,23 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   useEffect(() => {
     if (!pnlChartContainerRef.current || !pnlVisible) return;
     const isDark = theme === 'dark';
-    const chart = createChart(pnlChartContainerRef.current, chartOpts(isDark));
+    const chart = createChart(pnlChartContainerRef.current, chartOpts(isDark, true));
     pnlChartRef.current = chart;
     setChartEpoch(e => e + 1);
 
     const basketSeries = chart.addSeries(LineSeries, {
-      color: '#ffffff', lineWidth: 3,
+      color: '#38bdf8', lineWidth: 3,
       title: 'Total P&L', lastValueVisible: true, priceLineVisible: true,
+      priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
     });
     seriesRef.current.basketPnl = basketSeries;
 
     // Create all leg P&L series
     for (const leg of legMetasRef.current) {
       const s = chart.addSeries(LineSeries, {
-        color: leg.color, lineWidth: 1,
+        color: leg.color, lineWidth: 2,
         title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
+        priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
       });
       seriesRef.current.legPnl.set(leg.refId, s);
     }
@@ -746,8 +816,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     return () => {
       seriesRef.current.legPnl.clear();
       seriesRef.current.basketPnl = null;
-      chart.remove();
       pnlChartRef.current = null;
+      try { chart.remove(); } catch {}
       setChartEpoch(e => e + 1);
     };
   }, [theme, pnlVisible]);
@@ -852,7 +922,13 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
                   const points: Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }> = [];
                   const dArr = fields.delta || [], gArr = fields.gamma || [], tArr = fields.theta || [], vArr = fields.vega || [];
                   for (let i = 0; i < dArr.length; i++) {
-                    const t = toChartTime(BigInt(String(dArr[i].ts)), '1m') as number;
+                    const rawTs = dArr[i].ts;
+                    let t = 0;
+                    if (typeof rawTs === 'string' && rawTs.includes('T')) {
+                      t = Math.floor(Date.parse(rawTs) / 1000) + IST_OFFSET;
+                    } else {
+                      t = toChartTime(BigInt(String(rawTs)), '1m') as number;
+                    }
                     if (t < sessionOpen || t > sessionClose) continue;
                     points.push({ time: t, delta: dArr[i].v, gamma: gArr[i]?.v || 0, theta: tArr[i]?.v || 0, vega: vArr[i]?.v || 0 });
                   }
@@ -911,25 +987,23 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   // ── 3b. Apply fetched data to existing charts ──
   useEffect(() => {
 
-    if (!chartData) return;
-
     const priceChart = priceChartRef.current;
     if (priceChart && seriesRef.current.underlying) {
-      computePriceFactors(chartData);
-      seriesRef.current.underlying.setData(chartData.underlyingBars.map(b => ({ time: b.time, open: normU(b.open), high: normU(b.high), low: normU(b.low), close: normU(b.close) })) as any);
+      seriesRef.current.underlying.setData(chartData.underlyingBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })) as any);
       for (const leg of legMetasRef.current) {
         if (!seriesRef.current.legPrice.has(leg.refId)) {
           const s = priceChart.addSeries(LineSeries, {
-            color: leg.color, lineWidth: 1, priceScaleId: 'right',
+            color: leg.color, lineWidth: 2, priceScaleId: 'left',
             title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
-            priceFormat: { type: 'custom', minMove: 0.01, formatter: (p: number) => { const f = priceFactorsRef.current.legs.get(leg.refId) || { mid: 0, half: 1 }; return (p * f.half + f.mid).toFixed(2); } },
+            priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
           seriesRef.current.legPrice.set(leg.refId, s);
         }
         const data = chartData.legPriceData.get(leg.refId);
-        if (data) seriesRef.current.legPrice.get(leg.refId)?.setData(data.map(d => ({ time: d.time, value: normLeg(leg.refId, d.value) })));
+        if (data) seriesRef.current.legPrice.get(leg.refId)?.setData(data.map(d => ({ time: d.time, value: d.value })));
       }
-      try { priceChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } }); } catch {}
+      try { priceChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } }); } catch {}
+      try { priceChart.priceScale('left').applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } }); } catch {}
 
       if (!hasInitialFittedRef.current) {
         requestAnimationFrame(() => priceChart.timeScale().fitContent());
@@ -944,20 +1018,24 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       for (const leg of legMetasRef.current) {
         if (!seriesRef.current.legPnl.has(leg.refId)) {
           const s = pnlChart.addSeries(LineSeries, {
-            color: leg.color, lineWidth: 1,
+            color: leg.color, lineWidth: 2,
             title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
+            priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
           seriesRef.current.legPnl.set(leg.refId, s);
         }
         const data = chartData.legPnlData.get(leg.refId);
-        if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(padToGrid(grid, data) as any);
+        if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(fillPnlToGrid(grid, data) as any);
       }
       if (chartData.basketPnlData.length > 0) {
-        seriesRef.current.basketPnl?.setData(padToGrid(grid, chartData.basketPnlData) as any);
+        seriesRef.current.basketPnl?.setData(fillPnlToGrid(grid, chartData.basketPnlData) as any);
       }
-      if (!hasInitialFittedRef.current) {
-        requestAnimationFrame(() => pnlChart.timeScale().fitContent());
-        hasInitialFittedRef.current = true;
+      const pc = priceChartRef.current;
+      if (pc) {
+        try {
+          const r = pc.timeScale().getVisibleLogicalRange();
+          if (r) safeSetVisibleLogicalRange(pnlChartRef.current, r);
+        } catch (e) {}
       }
     }
   }, [chartData]);
@@ -969,18 +1047,39 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     const gc = greeksChartRef.current;
     const charts = [pc, nc, gc].filter(Boolean) as IChartApi[];
     if (charts.length < 2) return;
-    const unsubs: (() => void)[] = [];
 
-    for (let i = 0; i < charts.length; i++) {
-      for (let j = i + 1; j < charts.length; j++) {
-        const a = charts[i], b = charts[j];
-        let syncing = false;
-        const h1 = (range: any) => { if (syncing || !range) return; syncing = true; try { b.timeScale().setVisibleLogicalRange(range); } catch {} syncing = false; };
-        const h2 = (range: any) => { if (syncing || !range) return; syncing = true; try { a.timeScale().setVisibleLogicalRange(range); } catch {} syncing = false; };
-        a.timeScale().subscribeVisibleLogicalRangeChange(h1);
-        b.timeScale().subscribeVisibleLogicalRangeChange(h2);
-        unsubs.push(() => { try { a.timeScale().unsubscribeVisibleLogicalRangeChange(h1); } catch {} try { b.timeScale().unsubscribeVisibleLogicalRangeChange(h2); } catch {} });
-      }
+    // Synchronize initial visible logical range from master price chart to all secondary charts
+    const master = pc || charts[0];
+    if (master) {
+      try {
+        const masterRange = master.timeScale().getVisibleLogicalRange();
+        if (masterRange) {
+          for (const c of charts) {
+            if (c !== master) safeSetVisibleLogicalRange(c, masterRange);
+          }
+        }
+      } catch (e) {}
+    }
+
+    const unsubs: (() => void)[] = [];
+    let isSyncingRange = false;
+
+    for (const c of charts) {
+      const onRangeChange = (range: any) => {
+        if (isSyncingRange || !range) return;
+        isSyncingRange = true;
+        try {
+          for (const target of charts) {
+            if (target !== c) safeSetVisibleLogicalRange(target, range);
+          }
+        } catch (e) {} finally {
+          isSyncingRange = false;
+        }
+      };
+      try {
+        c.timeScale().subscribeVisibleLogicalRangeChange(onRangeChange);
+        unsubs.push(() => { try { c.timeScale().unsubscribeVisibleLogicalRangeChange(onRangeChange); } catch (e) {} });
+      } catch (e) {}
     }
 
     let syncingCrosshair = false;
@@ -1032,33 +1131,62 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         }
       };
 
-      sourceChart.subscribeCrosshairMove(onCrosshairMove);
-      unsubs.push(() => { try { sourceChart.unsubscribeCrosshairMove(onCrosshairMove); } catch {} });
+      try {
+        sourceChart.subscribeCrosshairMove(onCrosshairMove);
+        unsubs.push(() => { try { sourceChart.unsubscribeCrosshairMove(onCrosshairMove); } catch {} });
+      } catch (e) {}
     }
 
     return () => unsubs.forEach(u => u());
   }, [priceVisible, pnlVisible, greeksVisible, chartEpoch]);
 
-  // ── 5. Resize observer ──
+  // ── 5. Resize observer & persistent layout range sync ──
   useEffect(() => {
+    const syncAll = () => {
+      try {
+        const pc = priceChartRef.current;
+        if (!pc) return;
+        const r = pc.timeScale().getVisibleLogicalRange();
+        if (!r) return;
+        safeSetVisibleLogicalRange(pnlChartRef.current, r);
+        safeSetVisibleLogicalRange(greeksChartRef.current, r);
+      } catch (e) {}
+    };
+
     const ro = new ResizeObserver(() => {
-      if (priceChartContainerRef.current && priceChartRef.current) {
-        const { width, height } = priceChartContainerRef.current.getBoundingClientRect();
-        priceChartRef.current.resize(width, height);
-      }
-      if (pnlChartContainerRef.current && pnlChartRef.current) {
-        const { width, height } = pnlChartContainerRef.current.getBoundingClientRect();
-        pnlChartRef.current.resize(width, height);
-      }
-      if (greeksChartContainerRef.current && greeksChartRef.current) {
-        const { width, height } = greeksChartContainerRef.current.getBoundingClientRect();
-        greeksChartRef.current.resize(width, height);
-      }
+      try {
+        if (priceChartContainerRef.current && priceChartRef.current) {
+          const { width, height } = priceChartContainerRef.current.getBoundingClientRect();
+          priceChartRef.current.resize(width, height);
+        }
+        if (pnlChartContainerRef.current && pnlChartRef.current) {
+          const { width, height } = pnlChartContainerRef.current.getBoundingClientRect();
+          pnlChartRef.current.resize(width, height);
+        }
+        if (greeksChartContainerRef.current && greeksChartRef.current) {
+          const { width, height } = greeksChartContainerRef.current.getBoundingClientRect();
+          greeksChartRef.current.resize(width, height);
+        }
+        syncAll();
+      } catch (e) {}
     });
+
     if (priceChartContainerRef.current) ro.observe(priceChartContainerRef.current);
     if (pnlChartContainerRef.current) ro.observe(pnlChartContainerRef.current);
     if (greeksChartContainerRef.current) ro.observe(greeksChartContainerRef.current);
-    return () => ro.disconnect();
+
+    // Actively enforce range sync across DOM reflow & layout animations for 300ms after toggle/mount
+    let count = 0;
+    const pollTimer = setInterval(() => {
+      syncAll();
+      count++;
+      if (count > 10) clearInterval(pollTimer);
+    }, 30);
+
+    return () => {
+      clearInterval(pollTimer);
+      ro.disconnect();
+    };
   }, [priceVisible, pnlVisible, greeksVisible, chartEpoch]);
 
   // ── 6. Live WebSocket updates (charts) ──
@@ -1074,7 +1202,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (cached && (t < cached.sessionOpen || t > cached.sessionClose)) return;
       const o = parseFloat(idx.open || '0') / 100, h = parseFloat(idx.high || '0') / 100;
       const l = parseFloat(idx.low || '0') / 100, c = parseFloat(idx.close || '0') / 100;
-      seriesRef.current.underlying.update({ time: t as any, open: normU(o), high: normU(h), low: normU(l), close: normU(c) });
+      seriesRef.current.underlying.update({ time: t as any, open: o, high: h, low: l, close: c });
       if (cached) upsertBar(cached.underlyingBars, { time: t, open: o, high: h, low: l, close: c }); // keep cache complete for snapshots
     });
 
@@ -1090,7 +1218,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       for (const p of positionsRef.current) {
         const ltp = ltpMap.get(p.ref_id);
         if (ltp == null || ltp <= 0) continue;
-        seriesRef.current.legPrice.get(p.ref_id)?.update({ time: t as any, value: normLeg(p.ref_id, ltp / 100) });
+        seriesRef.current.legPrice.get(p.ref_id)?.update({ time: t as any, value: ltp / 100 });
         const side = (p.order_side || '').includes('BUY') ? 1 : -1;
         const pnl = side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
         seriesRef.current.legPnl.get(p.ref_id)?.update({ time: t as any, value: pnl });
@@ -1162,7 +1290,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (!ltp || ltp <= 0) continue;
       lastLtpRef.current.set(p.ref_id, ltp);
 
-      seriesRef.current.legPrice.get(p.ref_id)?.update({ time: t as any, value: normLeg(p.ref_id, ltp / 100) });
+      seriesRef.current.legPrice.get(p.ref_id)?.update({ time: t as any, value: ltp / 100 });
 
       const side = (p.order_side || '').includes('BUY') ? 1 : -1;
       const pnl = side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
@@ -1332,7 +1460,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       for (const k of greekKeys) {
         const key = `${src}_${k}`;
         const s = chart.addSeries(LineSeries, {
-          color: GREEK_COLORS[k], lineWidth: GREEK_LINE_WIDTHS[src], lineStyle: GREEK_LINE_STYLES[src],
+          color: GREEK_COLORS[k], lineWidth: Math.max(2, GREEK_LINE_WIDTHS[src]), lineStyle: GREEK_LINE_STYLES[src],
           priceScaleId: k, title: src === 'net' ? k.charAt(0).toUpperCase() + k.slice(1) : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
           lastValueVisible: true, priceLineVisible: false, visible: false,
           priceFormat: { type: 'custom', minMove: 0.00001, formatter: (price: number) => {
@@ -1375,7 +1503,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     if (!hasInitialFittedRef.current) {
       requestAnimationFrame(() => chart.timeScale().fitContent());
     }
-    return () => { greeksSeriesRef.current = {}; chart.remove(); greeksChartRef.current = null; setChartEpoch(e => e + 1); };
+    return () => { greeksSeriesRef.current = {}; greeksChartRef.current = null; try { chart.remove(); } catch {} setChartEpoch(e => e + 1); };
   }, [theme, greeksVisible, greeksLegFilter]);
 
   // ── 10b. Apply Greeks data / recompute on mode, selection, or leg filter change ──
@@ -1475,7 +1603,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (!s) continue;
         if (isActive && selectedGreeks.has(k) && times.length > 0) {
           const f = factors[k];
-          s.setData(padToGrid(grid, times.map(t => ({ time: t as any, value: (byTime.get(t)![k] - f.mid) / f.half }))) as any);
+          s.setData(fillGreeksToGrid(grid, byTime, k, f) as any);
           s.applyOptions({ visible: true });
         } else {
           s.setData([]);
@@ -1484,9 +1612,16 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
     }
 
-    if (!hasInitialFittedRef.current) {
+    const pc = priceChartRef.current;
+    if (pc) {
+      const r = pc.timeScale().getVisibleLogicalRange();
+      if (r) {
+        try { greeksChartRef.current?.timeScale().setVisibleLogicalRange(r); } catch {}
+      } else {
+        requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
+      }
+    } else {
       requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
-      hasInitialFittedRef.current = true;
     }
   }, [chartData, greeksMode, lotSizeOverride, selectedGreeks, greeksVisible, underlying, greeksLegFilter]);
 

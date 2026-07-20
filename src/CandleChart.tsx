@@ -194,13 +194,13 @@ export default function CandleChart({ instrument, theme }: Props) {
         fontFamily:  "'Inter', 'Segoe UI', sans-serif",
       },
       grid: {
-        vertLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-        horzLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
+        vertLines: { color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)', style: 1 as const },
+        horzLines: { color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)', style: 1 as const },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: '#4b5563', width: 1, style: 0, labelBackgroundColor: isDark ? '#22262b' : '#e8ecf5' },
-        horzLine: { color: '#4b5563', width: 1, style: 0, labelBackgroundColor: '#2962ff' },
+        vertLine: { color: isDark ? '#4b5563' : '#9ca3af', width: 1, style: 2 as const, labelBackgroundColor: isDark ? '#22262b' : '#e8ecf5' },
+        horzLine: { color: isDark ? '#3b82f6' : '#2563eb', width: 1, style: 2 as const, labelBackgroundColor: '#2563eb' },
       },
       rightPriceScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', minimumWidth: 72 },
       timeScale: {
