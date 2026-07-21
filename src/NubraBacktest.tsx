@@ -72,8 +72,8 @@ const IST_OFFSET = 19800; // 5h 30m
 
 function chartOpts(isDark: boolean) {
   return {
-    autoSize: false,
-    devicePixelRatio: window.devicePixelRatio,
+    autoSize: true,
+    devicePixelRatio: Math.max(window.devicePixelRatio, 2),
     layout: {
       background: { color: isDark ? '#0d0f11' : '#ffffff' },
       textColor: isDark ? '#c9d1d9' : '#131722',
@@ -212,6 +212,10 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const [greeksHeight, setGreeksHeight] = useState(150);
   const [positionsHeight, setPositionsHeight] = useState(160);
   const [positionsCollapsed, setPositionsCollapsed] = useState(false);
+
+  const pnlPaneRef = useRef<HTMLDivElement>(null);
+  const greeksPaneRef = useRef<HTMLDivElement>(null);
+  const positionsPaneRef = useRef<HTMLDivElement>(null);
 
   // Greeks visible state
   const [greeksVisible, setGreeksVisible] = useState(false);
@@ -768,24 +772,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
     // Fit timescale layout
     activeCharts.forEach(c => c.timeScale().fitContent());
 
-    const ro = new ResizeObserver((entries) => {
-      try {
-        for (const entry of entries) {
-          const { width, height } = entry.contentRect;
-          if (entry.target === priceContainerRef.current) {
-            priceChartRef.current?.resize(width, height);
-          } else if (entry.target === pnlContainerRef.current) {
-            pnlChartRef.current?.resize(width, height);
-          } else if (entry.target === greeksContainerRef.current) {
-            greeksChartRef.current?.resize(width, height);
-          }
-        }
-      } catch (e) {}
-    });
-
-    if (priceContainerRef.current) ro.observe(priceContainerRef.current);
-    if (pnlContainerRef.current) ro.observe(pnlContainerRef.current);
-    if (greeksContainerRef.current) ro.observe(greeksContainerRef.current);
+    // ── autoSize: true handles chart resizing automatically ──
 
     const updateAllTooltips = (timeVal: number | null, x: number | null, activeChartY: number | null, currentActiveChart: 'price' | 'pnl' | 'greeks' | null) => {
       setActiveTime(timeVal);
@@ -1035,7 +1022,6 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
     }
 
     return () => {
-      ro.disconnect();
       priceChartRef.current = null;
       pnlChartRef.current = null;
       greeksChartRef.current = null;
@@ -1094,10 +1080,16 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
     const maxCombined = totalH - 8 - dividersH - 120;
     const maxPnl = greeksVisible ? Math.max(80, maxCombined - greeksHeight) : maxCombined;
 
+    let newH = startH;
     const onMove = (ev: MouseEvent) => {
-      setPnlHeight(Math.max(80, Math.min(maxPnl, startH - (ev.clientY - startY))));
+      newH = Math.max(80, Math.min(maxPnl, startH - (ev.clientY - startY)));
+      if (pnlPaneRef.current) pnlPaneRef.current.style.height = `${newH}px`;
     };
-    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    const onUp = () => { 
+      document.removeEventListener('mousemove', onMove); 
+      document.removeEventListener('mouseup', onUp); 
+      setPnlHeight(newH);
+    };
     document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
   }, [pnlHeight, greeksHeight, greeksVisible]);
 
@@ -1109,18 +1101,32 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
     const maxCombined = totalH - 8 - dividersH - 120;
     const maxGreeks = Math.max(80, maxCombined - pnlHeight);
 
+    let newH = startH;
     const onMove = (ev: MouseEvent) => {
-      setGreeksHeight(Math.max(80, Math.min(maxGreeks, startH - (ev.clientY - startY))));
+      newH = Math.max(80, Math.min(maxGreeks, startH - (ev.clientY - startY)));
+      if (greeksPaneRef.current) greeksPaneRef.current.style.height = `${newH}px`;
     };
-    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    const onUp = () => { 
+      document.removeEventListener('mousemove', onMove); 
+      document.removeEventListener('mouseup', onUp); 
+      setGreeksHeight(newH);
+    };
     document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
   }, [greeksHeight, pnlHeight, greeksVisible]);
 
   const onPositionsDividerDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     const startY = e.clientY; const startH = positionsHeight;
-    const onMove = (ev: MouseEvent) => setPositionsHeight(Math.max(40, startH - (ev.clientY - startY)));
-    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+    let newH = startH;
+    const onMove = (ev: MouseEvent) => {
+      newH = Math.max(40, startH - (ev.clientY - startY));
+      if (positionsPaneRef.current) positionsPaneRef.current.style.height = `${newH}px`;
+    };
+    const onUp = () => { 
+      document.removeEventListener('mousemove', onMove); 
+      document.removeEventListener('mouseup', onUp); 
+      setPositionsHeight(newH);
+    };
     document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
   }, [positionsHeight]);
 
@@ -1858,7 +1864,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
                 />
 
                 {/* P&L Chart Container */}
-                <div style={{
+                <div ref={pnlPaneRef} style={{
                   height: pnlHeight,
                   minHeight: 80,
                   position: 'relative',
@@ -1881,7 +1887,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
                 )}
 
                 {/* Greeks Chart Container */}
-                <div style={{
+                <div ref={greeksPaneRef} style={{
                   height: greeksHeight,
                   minHeight: 80,
                   position: 'relative',
@@ -1906,7 +1912,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
 
               {/* Simulated Positions Table */}
               {!chartsExpanded && (
-                <div style={{ flexShrink: 0, height: positionsCollapsed ? 28 : positionsHeight, display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)', overflow: 'hidden' }}>
+                <div ref={positionsPaneRef} style={{ flexShrink: 0, height: positionsCollapsed ? 28 : positionsHeight, display: 'flex', flexDirection: 'column', borderTop: '1px solid var(--border)', background: 'var(--bg-secondary)', overflow: 'hidden' }}>
                   <div style={{ height: 28, display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--border)', background: 'var(--bg-secondary)', padding: '0 12px', userSelect: 'none' }}>
                     <button
                       onClick={() => setPositionsCollapsed(v => !v)}

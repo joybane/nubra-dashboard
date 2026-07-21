@@ -281,8 +281,8 @@ async function fetchHistorical(symbol: string, type: string, interval: string, s
 
 function chartOpts(isDark: boolean, hideTimeScale: boolean = false, showLeftScale: boolean = false) {
   return {
-    autoSize: false,
-    devicePixelRatio: window.devicePixelRatio,
+    autoSize: true,
+    devicePixelRatio: Math.max(window.devicePixelRatio, 2),
     layout: {
       background: { color: isDark ? '#0d0f11' : '#ffffff' },
       textColor: isDark ? '#c9d1d9' : '#131722',
@@ -450,6 +450,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   // ── Chart display state ──
   const [pnlHeight, setPnlHeight] = useState(200);
   const [orderBookHeight, setOrderBookHeight] = useState(200);
+
+  const positionsPaneRef = useRef<HTMLDivElement>(null);
   const [priceVisible, setPriceVisible] = useState(true);
   const [pnlVisible, setPnlVisible] = useState(true);
   const [orderBookCollapsed, setOrderBookCollapsed] = useState(false);
@@ -1241,18 +1243,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       } catch (e) {}
     };
 
-    const ro = new ResizeObserver((entries) => {
+    const ro = new ResizeObserver(() => {
       try {
-        for (const entry of entries) {
-          const { width, height } = entry.contentRect;
-          if (entry.target === priceChartContainerRef.current) {
-            priceChartRef.current?.resize(width, height);
-          } else if (entry.target === pnlChartContainerRef.current) {
-            pnlChartRef.current?.resize(width, height);
-          } else if (entry.target === greeksChartContainerRef.current) {
-            greeksChartRef.current?.resize(width, height);
-          }
-        }
         syncAll();
       } catch (e) {}
     });
@@ -1793,32 +1785,48 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   // ── Divider drag handlers ──
   const onPnlDividerDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    const startY = e.clientY; const startH = pnlHeight;
+    const startY = e.clientY;
+    const startH = pnlHeight;
     const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
-    const dividersH = greeksVisible ? 16 : 8;
-    const maxCombined = totalH - dividersH - 120;
-    const maxPnl = greeksVisible ? Math.max(80, maxCombined - greeksChartHeight) : maxCombined;
+    const dividersH = greeksVisible ? 12 : 6;
+    const maxCombined = totalH - 8 - dividersH - 80;
+    const maxPnl = greeksVisible ? Math.max(40, maxCombined - greeksChartHeight) : maxCombined;
 
+    let newH = startH;
     const onMove = (ev: MouseEvent) => {
-      setPnlHeight(Math.max(80, Math.min(maxPnl, startH - (ev.clientY - startY))));
+      newH = Math.max(40, Math.min(maxPnl, startH - (ev.clientY - startY)));
+      if (pnlChartContainerRef.current) pnlChartContainerRef.current.style.height = `${newH}px`;
     };
-    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
-    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      setPnlHeight(newH);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
   }, [pnlHeight, greeksChartHeight, greeksVisible]);
 
   const onGreeksDividerDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    const startY = e.clientY; const startH = greeksChartHeight;
+    const startY = e.clientY;
+    const startH = greeksChartHeight;
     const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
-    const dividersH = greeksVisible ? 16 : 8;
-    const maxCombined = totalH - dividersH - 120;
-    const maxGreeks = Math.max(80, maxCombined - pnlHeight);
+    const dividersH = greeksVisible ? 12 : 6;
+    const maxCombined = totalH - 8 - dividersH - 80;
+    const maxGreeks = Math.max(40, maxCombined - pnlHeight);
 
+    let newH = startH;
     const onMove = (ev: MouseEvent) => {
-      setGreeksChartHeight(Math.max(80, Math.min(maxGreeks, startH - (ev.clientY - startY))));
+      newH = Math.max(40, Math.min(maxGreeks, startH - (ev.clientY - startY)));
+      if (greeksChartContainerRef.current) greeksChartContainerRef.current.style.height = `${newH}px`;
     };
-    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
-    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      setGreeksChartHeight(newH);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
   }, [greeksChartHeight, pnlHeight, greeksVisible]);
 
   const onObDividerDown = useCallback((e: React.MouseEvent) => {
@@ -2128,9 +2136,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
               <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[var(--accent)]" />
             </div>
             )}
-            <div ref={pnlChartContainerRef} className={`relative bg-[var(--bg-primary)] ${primaryPanel === 'pnl' ? 'flex-1 min-h-[80px]' : 'shrink-0'}`} style={primaryPanel === 'pnl' ? undefined : { height: pnlHeight }}>
+            <div ref={pnlChartContainerRef} style={{ height: pnlHeight, minHeight: 40, position: 'relative', borderBottom: greeksVisible ? '1px solid var(--border)' : 'none', flexShrink: 0, display: pnlVisible ? 'block' : 'none' }}>
               <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
-                {/* fallback removed for clarity, or kept if needed. The tooltip replaces the dynamic part */}
               </div>
               <PnlTooltip ref={pnlTooltipRef} strategyMargin={strategyMargin > 0 ? strategyMargin : 0} />
             </div>
@@ -2144,9 +2151,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
               <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[#a78bfa]" />
             </div>
             )}
-            <div ref={greeksChartContainerRef} className={`relative bg-[var(--bg-primary)] ${primaryPanel === 'greeks' ? 'flex-1 min-h-[80px]' : 'shrink-0'}`} style={primaryPanel === 'greeks' ? undefined : { height: greeksChartHeight }}>
+            <div ref={greeksChartContainerRef} style={{ height: greeksChartHeight, minHeight: 40, position: 'relative', display: greeksVisible ? 'block' : 'none', flexShrink: 0 }}>
               <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
-                {/* fallback removed for clarity, or kept if needed. */}
               </div>
               <GreeksTooltip ref={greeksTooltipRef} selectedGreeks={selectedGreeks} greeksLegFilter={greeksLegFilter} colors={GREEK_COLORS} />
             </div>
