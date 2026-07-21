@@ -6,6 +6,7 @@ import type { Instrument } from './types';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
 import { payoffAtExpiry, blackScholes, impliedVolatility } from './lib/GexService';
 import { fmtPrice } from './lib/utils';
+import { PriceTooltip, PnlTooltip, GreeksTooltip, PriceTooltipRef, PnlTooltipRef, GreeksTooltipRef } from './components/ChartTooltips';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -71,6 +72,8 @@ const IST_OFFSET = 19800; // 5h 30m
 
 function chartOpts(isDark: boolean) {
   return {
+    autoSize: false,
+    devicePixelRatio: window.devicePixelRatio,
     layout: {
       background: { color: isDark ? '#0d0f11' : '#ffffff' },
       textColor: isDark ? '#c9d1d9' : '#131722',
@@ -180,6 +183,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const [spot, setSpot] = useState(0);
   const [chainLoading, setChainLoading] = useState(false);
   const [chainError, setChainError] = useState<string | null>(null);
+
   const [activeExpiry, setActiveExpiry] = useState('');
   const [activeFlag, setActiveFlag] = useState('');
 
@@ -192,17 +196,6 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const [evalError, setEvalError] = useState<string | null>(null);
 
   // Chart hover & crosshair states
-  const [hoverPriceData, setHoverPriceData] = useState<{
-    timeStr: string;
-    spot: number | null;
-    legs: Array<{ strike: number; optionType: 'CE' | 'PE'; side: 'BUY' | 'SELL'; value: number }>;
-  } | null>(null);
-
-  const [hoverPnlData, setHoverPnlData] = useState<{
-    timeStr: string;
-    total: number;
-    legs: Array<{ strike: number; optionType: 'CE' | 'PE'; side: 'BUY' | 'SELL'; value: number }>;
-  } | null>(null);
 
   // Refs for lightweight-charts
   const priceContainerRef = useRef<HTMLDivElement>(null);
@@ -246,17 +239,11 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   } | null>(null);
 
   // Hover Greek data
-  const [hoverGreekData, setHoverGreekData] = useState<{
-    timeStr: string;
-    net?: { delta: number; gamma: number; theta: number; vega: number };
-    CE?: { delta: number; gamma: number; theta: number; vega: number };
-    PE?: { delta: number; gamma: number; theta: number; vega: number };
-  } | null>(null);
 
-  // Hover pointer positions
-  const [hoverPricePos, setHoverPricePos] = useState<{ x: number; y: number } | null>(null);
-  const [hoverPnlPos, setHoverPnlPos] = useState<{ x: number; y: number } | null>(null);
-  const [hoverGreekPos, setHoverGreekPos] = useState<{ x: number; y: number } | null>(null);
+
+  const priceTooltipRef = useRef<PriceTooltipRef>(null);
+  const pnlTooltipRef = useRef<PnlTooltipRef>(null);
+  const greeksTooltipRef = useRef<GreeksTooltipRef>(null);
   const [activeChartType, setActiveChartType] = useState<'price' | 'pnl' | 'greeks' | null>(null);
 
   // Greeks Chart Refs
@@ -781,44 +768,57 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
     // Fit timescale layout
     activeCharts.forEach(c => c.timeScale().fitContent());
 
-    // ── Resize observer ──
-    const handleResize = () => {
-      if (priceContainerRef.current && priceChartRef.current) {
-        const { width, height } = priceContainerRef.current.getBoundingClientRect();
-        priceChartRef.current.resize(width, height);
-      }
-      if (pnlContainerRef.current && pnlChartRef.current) {
-        const { width, height } = pnlContainerRef.current.getBoundingClientRect();
-        pnlChartRef.current.resize(width, height);
-      }
-      if (greeksContainerRef.current && greeksChartRef.current) {
-        const { width, height } = greeksContainerRef.current.getBoundingClientRect();
-        greeksChartRef.current.resize(width, height);
-      }
-    };
-    const observer = new ResizeObserver(handleResize);
-    if (priceContainerRef.current) observer.observe(priceContainerRef.current);
-    if (pnlContainerRef.current) observer.observe(pnlContainerRef.current);
-    if (greeksContainerRef.current) observer.observe(greeksContainerRef.current);
+    const ro = new ResizeObserver((entries) => {
+      try {
+        for (const entry of entries) {
+          const { width, height } = entry.contentRect;
+          if (entry.target === priceContainerRef.current) {
+            priceChartRef.current?.resize(width, height);
+          } else if (entry.target === pnlContainerRef.current) {
+            pnlChartRef.current?.resize(width, height);
+          } else if (entry.target === greeksContainerRef.current) {
+            greeksChartRef.current?.resize(width, height);
+          }
+        }
+      } catch (e) {}
+    });
 
-    const updateAllTooltips = (timeVal: number | null, x: number | null, activeChartY: number | null) => {
+    if (priceContainerRef.current) ro.observe(priceContainerRef.current);
+    if (pnlContainerRef.current) ro.observe(pnlContainerRef.current);
+    if (greeksContainerRef.current) ro.observe(greeksContainerRef.current);
+
+    const updateAllTooltips = (timeVal: number | null, x: number | null, activeChartY: number | null, currentActiveChart: 'price' | 'pnl' | 'greeks' | null) => {
       setActiveTime(timeVal);
       if (timeVal === null || x === null) {
-        setHoverPriceData(null);
-        setHoverPricePos(null);
-        setHoverPnlData(null);
-        setHoverPnlPos(null);
-        setHoverGreekData(null);
-        setHoverGreekPos(null);
+        priceTooltipRef.current?.setVisibility(false);
+        pnlTooltipRef.current?.setVisibility(false);
+        greeksTooltipRef.current?.setVisibility(false);
         return null;
       }
 
       const timeStr = formatCrosshairTime(timeVal);
       const minuteKey = Math.floor(timeVal / 60) * 60;
 
+      const findLatest = <T extends { time: any }>(arr: T[] | undefined, targetTime: number): T | undefined => {
+        if (!arr || arr.length === 0) return undefined;
+        let l = 0, r = arr.length - 1;
+        let res: T | undefined = undefined;
+        while (l <= r) {
+          const m = (l + r) >> 1;
+          const time = arr[m].time as number;
+          if (time <= targetTime) {
+            res = arr[m];
+            l = m + 1;
+          } else {
+            r = m - 1;
+          }
+        }
+        return res;
+      };
+
       // 1. Price Tooltip Data
       const indexBars = evalResult.underlyingBars || [];
-      const spotBar = indexBars.find(b => Math.floor(b.time / 60) * 60 === minuteKey);
+      const spotBar = findLatest(indexBars, timeVal);
       const spot = spotBar?.close ?? null;
 
       const priceLegs: Array<{ strike: number; optionType: 'CE' | 'PE'; side: 'BUY' | 'SELL'; value: number }> = [];
@@ -826,7 +826,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
         evalResult.legPriceData.forEach((ld) => {
           const leg = legs[ld.legIndex];
           if (!leg) return;
-          const match = ld.data.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
+          const match = findLatest(ld.data, timeVal);
           if (match && match.value > 0) {
             priceLegs.push({
               strike: leg.strike,
@@ -840,7 +840,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
 
       // 2. PNL Tooltip Data
       const pnlPoints = evalResult.basketPnlData || [];
-      const pnlPoint = pnlPoints.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
+      const pnlPoint = findLatest(pnlPoints, timeVal);
       const totalPnl = pnlPoint?.value ?? 0;
 
       const pnlLegs: Array<{ strike: number; optionType: 'CE' | 'PE'; side: 'BUY' | 'SELL'; value: number }> = [];
@@ -848,7 +848,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
         evalResult.legPnlData.forEach((ld) => {
           const leg = legs[ld.legIndex];
           if (!leg) return;
-          const match = ld.data.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
+          const match = findLatest(ld.data, timeVal);
           if (match) {
             pnlLegs.push({
               strike: leg.strike,
@@ -868,10 +868,10 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
       let delta = 0; // fallback delta for syncing
       if (greeksData) {
         const getPts = (src: 'net' | 'CE' | 'PE') => {
-          const dPt = greeksData[src]?.delta.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
-          const gPt = greeksData[src]?.gamma.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
-          const tPt = greeksData[src]?.theta.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
-          const vPt = greeksData[src]?.vega.find(d => Math.floor(d.time / 60) * 60 === minuteKey);
+          const dPt = findLatest(greeksData[src]?.delta, timeVal);
+          const gPt = findLatest(greeksData[src]?.gamma, timeVal);
+          const tPt = findLatest(greeksData[src]?.theta, timeVal);
+          const vPt = findLatest(greeksData[src]?.vega, timeVal);
           return {
             delta: dPt?.value ?? 0,
             gamma: gPt?.value ?? 0,
@@ -894,14 +894,42 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
         }
       }
 
-      setHoverPriceData({ timeStr, spot, legs: priceLegs });
-      setHoverPnlData({ timeStr, total: totalPnl, legs: pnlLegs });
-      setHoverGreekData({ timeStr, net: netG, CE: ceG, PE: peG });
+      const priceMappedLegs = priceLegs.map(leg => ({
+        name: (leg.side === 'BUY' ? 'B ' : 'S ') + leg.strike + ' ' + leg.optionType,
+        color: leg.optionType === 'CE' ? '#22c55e' : '#ef4444',
+        value: leg.value
+      }));
+      priceTooltipRef.current?.setData(timeStr, spot ? { o: spot, h: spot, l: spot, c: spot } : null, priceMappedLegs, underlying);
+      
+      const pnlMappedLegs = pnlLegs.map(leg => ({
+        name: (leg.side === 'BUY' ? 'B ' : 'S ') + leg.strike + ' ' + leg.optionType,
+        color: leg.optionType === 'CE' ? '#22c55e' : '#ef4444',
+        value: leg.value
+      }));
+      pnlTooltipRef.current?.setData(timeStr, { legs: pnlMappedLegs, total: totalPnl });
+
+      greeksTooltipRef.current?.setData(timeStr, { net: netG, CE: ceG, PE: peG });
 
       const defaultY = 40;
-      setHoverPricePos({ x, y: activeChartY !== null ? activeChartY : defaultY });
-      setHoverPnlPos({ x, y: activeChartY !== null ? activeChartY : defaultY });
-      setHoverGreekPos({ x, y: activeChartY !== null ? activeChartY : defaultY });
+      
+      if (priceContainerRef.current && priceTooltipRef.current) {
+        const w = priceContainerRef.current.clientWidth || 800;
+        const h = priceContainerRef.current.clientHeight || 400;
+        priceTooltipRef.current.setPosition(x > w * 0.5 ? x - 180 : x + 25, currentActiveChart === 'price' ? Math.max(8, Math.min((activeChartY ?? defaultY) - 80, h - 100)) : 8);
+        priceTooltipRef.current.setVisibility(true);
+      }
+      if (pnlContainerRef.current && pnlTooltipRef.current) {
+        const w = pnlContainerRef.current.clientWidth || 800;
+        const h = pnlContainerRef.current.clientHeight || 400;
+        pnlTooltipRef.current.setPosition(x > w * 0.5 ? x - 230 : x + 25, currentActiveChart === 'pnl' ? Math.max(8, Math.min((activeChartY ?? defaultY) - 80, h - 100)) : 8);
+        pnlTooltipRef.current.setVisibility(true);
+      }
+      if (greeksContainerRef.current && greeksTooltipRef.current) {
+        const w = greeksContainerRef.current.clientWidth || 800;
+        const h = greeksContainerRef.current.clientHeight || 400;
+        greeksTooltipRef.current.setPosition(x > w * 0.5 ? x - 180 : x + 25, currentActiveChart === 'greeks' ? Math.max(8, Math.min((activeChartY ?? defaultY) - 80, h - 100)) : 8);
+        greeksTooltipRef.current.setVisibility(true);
+      }
 
       return { spot, totalPnl, delta };
     };
@@ -911,7 +939,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
       priceChart.subscribeCrosshairMove((param) => {
         if (param.point && param.time != null) {
           setActiveChartType('price');
-          const res = updateAllTooltips(param.time as number, param.point.x, param.point.y);
+          const res = updateAllTooltips(param.time as number, param.point.x, param.point.y, 'price');
           if (res) {
             if (pnlChart && basketSeries) pnlChart.setCrosshairPosition(res.totalPnl, param.time, basketSeries);
             if (greeksChart) {
@@ -924,7 +952,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
           // Programmatic sync, ignore
         } else {
           setActiveChartType(null);
-          updateAllTooltips(null, null, null);
+          updateAllTooltips(null, null, null, null);
           if (pnlChart) pnlChart.clearCrosshairPosition();
           if (greeksChart) greeksChart.clearCrosshairPosition();
         }
@@ -936,7 +964,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
       pnlChart.subscribeCrosshairMove((param) => {
         if (param.point && param.time != null) {
           setActiveChartType('pnl');
-          const res = updateAllTooltips(param.time as number, param.point.x, param.point.y);
+          const res = updateAllTooltips(param.time as number, param.point.x, param.point.y, 'pnl');
           if (res) {
             if (priceChart && indexSeries) priceChart.setCrosshairPosition(res.spot ?? 0, param.time, indexSeries);
             if (greeksChart) {
@@ -949,7 +977,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
           // Programmatic sync, ignore
         } else {
           setActiveChartType(null);
-          updateAllTooltips(null, null, null);
+          updateAllTooltips(null, null, null, null);
           if (priceChart) priceChart.clearCrosshairPosition();
           if (greeksChart) greeksChart.clearCrosshairPosition();
         }
@@ -961,7 +989,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
       greeksChart.subscribeCrosshairMove((param) => {
         if (param.point && param.time != null) {
           setActiveChartType('greeks');
-          const res = updateAllTooltips(param.time as number, param.point.x, param.point.y);
+          const res = updateAllTooltips(param.time as number, param.point.x, param.point.y, 'greeks');
           if (res) {
             if (priceChart && indexSeries) priceChart.setCrosshairPosition(res.spot ?? 0, param.time, indexSeries);
             if (pnlChart && basketSeries) pnlChart.setCrosshairPosition(res.totalPnl, param.time, basketSeries);
@@ -970,7 +998,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
           // Programmatic sync, ignore
         } else {
           setActiveChartType(null);
-          updateAllTooltips(null, null, null);
+          updateAllTooltips(null, null, null, null);
           if (priceChart) priceChart.clearCrosshairPosition();
           if (pnlChart) pnlChart.clearCrosshairPosition();
         }
@@ -1007,7 +1035,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
     }
 
     return () => {
-      observer.disconnect();
+      ro.disconnect();
       priceChartRef.current = null;
       pnlChartRef.current = null;
       greeksChartRef.current = null;
@@ -1108,6 +1136,8 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
+
+  const isDark = theme === 'dark';
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-primary)', color: 'var(--text-primary)', overflow: 'hidden', fontVariantNumeric: 'tabular-nums' }}>
@@ -1816,48 +1846,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
                 }}>
                   <div ref={priceContainerRef} style={{ width: '100%', height: '100%' }} />
 
-                  {hoverPricePos && hoverPriceData && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        zIndex: 50,
-                        pointerEvents: 'none',
-                        borderRadius: 6,
-                        border: '1px solid rgba(255,255,255,0.08)',
-                        background: 'rgba(10, 12, 16, 0.45)',
-                        padding: '4px 8px',
-                        boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-                        minWidth: 120,
-                        fontSize: '9.5px',
-                        left: hoverPricePos.x > (priceContainerRef.current?.clientWidth ?? 800) * 0.5
-                          ? hoverPricePos.x - 180
-                          : hoverPricePos.x + 25,
-                        top: activeChartType === 'price'
-                          ? Math.max(8, Math.min(hoverPricePos.y - 80, (priceContainerRef.current?.clientHeight ?? 400) - 100))
-                          : 8,
-                      }}
-                    >
-                      <div style={{ fontSize: '9px', color: 'var(--text-muted)', borderBottom: '1px solid #ffffff0a', paddingBottom: 2, marginBottom: 4, fontFamily: 'monospace' }}>
-                        {hoverPriceData.timeStr}
-                      </div>
-                      {hoverPriceData.spot !== null && (
-                        <div style={{ fontSize: '10px', marginBottom: 3, fontWeight: 600, color: '#fbbf24' }}>
-                          Spot: ₹{fmtPrice(hoverPriceData.spot)}
-                        </div>
-                      )}
-                      {hoverPriceData.legs.map((leg, i) => (
-                        <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '1px 0' }}>
-                          <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-secondary)' }}>
-                            <span style={{ display: 'inline-block', width: 4, height: 4, borderRadius: '50%', backgroundColor: leg.optionType === 'CE' ? '#22c55e' : '#ef4444' }} />
-                            {leg.side === 'BUY' ? 'B' : 'S'} {leg.strike} {leg.optionType}
-                          </span>
-                          <span style={{ fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'monospace' }}>
-                            ₹{fmtPrice(leg.value)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <PriceTooltip ref={priceTooltipRef} />
                 </div>
 
                 {/* Divider 1: Price / PNL */}
@@ -1878,49 +1867,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
                 }}>
                   <div ref={pnlContainerRef} style={{ width: '100%', height: '100%' }} />
 
-                  {hoverPnlPos && hoverPnlData && (
-                    <div
-                      style={{
-                        position: 'absolute',
-                        zIndex: 50,
-                        pointerEvents: 'none',
-                        borderRadius: 6,
-                        border: '1px solid rgba(255,255,255,0.08)',
-                        background: 'rgba(10, 12, 16, 0.45)',
-                        padding: '4px 8px',
-                        boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-                        minWidth: 120,
-                        fontSize: '9.5px',
-                        left: hoverPnlPos.x > (pnlContainerRef.current?.clientWidth ?? 800) * 0.5
-                          ? hoverPnlPos.x - 180
-                          : hoverPnlPos.x + 25,
-                        top: activeChartType === 'pnl'
-                          ? Math.max(8, Math.min(hoverPnlPos.y - 80, (pnlContainerRef.current?.clientHeight ?? 400) - 100))
-                          : 8,
-                      }}
-                    >
-                      <div style={{ fontSize: '9px', color: 'var(--text-muted)', borderBottom: '1px solid #ffffff0a', paddingBottom: 2, marginBottom: 4, fontFamily: 'monospace' }}>
-                        {hoverPnlData.timeStr}
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #ffffff0a', paddingBottom: 2, marginBottom: 3, fontWeight: 700, fontSize: '10px' }}>
-                        <span style={{ color: 'white' }}>Total P&L</span>
-                        <span style={{ color: hoverPnlData.total >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                          {hoverPnlData.total >= 0 ? '+' : ''}₹{fmtPrice(hoverPnlData.total)}
-                        </span>
-                      </div>
-                      {hoverPnlData.legs.map((leg, i) => (
-                        <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '1px 0' }}>
-                          <span style={{ display: 'flex', alignItems: 'center', gap: 4, color: 'var(--text-secondary)' }}>
-                            <span style={{ display: 'inline-block', width: 4, height: 4, borderRadius: '50%', backgroundColor: leg.optionType === 'CE' ? '#22c55e' : '#ef4444' }} />
-                            {leg.side === 'BUY' ? 'B' : 'S'} {leg.strike} {leg.optionType}
-                          </span>
-                          <span style={{ fontWeight: 600, color: leg.value >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: 'monospace' }}>
-                            {leg.value >= 0 ? '+' : ''}₹{fmtPrice(leg.value)}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <PnlTooltip ref={pnlTooltipRef} strategyMargin={0} />
                 </div>
 
                 {/* Divider 2: PNL / Greeks */}
@@ -1943,99 +1890,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
                 }}>
                   <div ref={greeksContainerRef} style={{ width: '100%', height: '100%' }} />
 
-                  {hoverGreekPos && hoverGreekData && (() => {
-                    const activeSources = Array.from(greeksLegFilter);
-                    const useTable = activeSources.length > 1;
-                    const tooltipWidth = useTable ? 180 : 130;
-                    return (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          zIndex: 50,
-                          pointerEvents: 'none',
-                          borderRadius: 6,
-                          border: '1px solid rgba(255,255,255,0.08)',
-                          background: 'rgba(10, 12, 16, 0.45)',
-                          padding: '4px 8px',
-                          boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-                          minWidth: tooltipWidth,
-                          fontSize: '9.5px',
-                          left: hoverGreekPos.x > (greeksContainerRef.current?.clientWidth ?? 800) * 0.5
-                            ? hoverGreekPos.x - (useTable ? 220 : 180)
-                            : hoverGreekPos.x + 25,
-                          top: activeChartType === 'greeks'
-                            ? Math.max(8, Math.min(hoverGreekPos.y - 80, (greeksContainerRef.current?.clientHeight ?? 400) - 100))
-                            : 8,
-                        }}
-                      >
-                        <div style={{ fontSize: '9px', color: 'var(--text-muted)', borderBottom: '1px solid #ffffff0a', paddingBottom: 2, marginBottom: 4, fontFamily: 'monospace' }}>
-                          {hoverGreekData.timeStr}
-                        </div>
-                        {useTable ? (
-                          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 4, fontSize: '9px', minWidth: 180 }}>
-                            <thead>
-                              <tr style={{ borderBottom: '1px solid rgba(255,255,255,0.08)', color: 'var(--text-muted)' }}>
-                                <th style={{ textAlign: 'left', padding: '2px 4px', fontWeight: 500 }}>Ref</th>
-                                {['delta', 'gamma', 'theta', 'vega'].map(g => {
-                                  if (!selectedGreeks.has(g)) return null;
-                                  const gColors: Record<string, string> = { delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' };
-                                  return (
-                                    <th key={g} style={{ textAlign: 'right', padding: '2px 4px', fontWeight: 500, color: gColors[g] }}>
-                                      {g.charAt(0).toUpperCase() + g.slice(1)}
-                                    </th>
-                                  );
-                                })}
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {(['net', 'CE', 'PE'] as const).map(src => {
-                                const data = hoverGreekData[src];
-                                if (!data) return null;
-                                const label = src === 'net' ? 'Net' : `${src} Leg`;
-                                return (
-                                  <tr key={src} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
-                                    <td style={{ fontWeight: 600, color: '#a78bfa', padding: '3px 4px' }}>{label}</td>
-                                    {['delta', 'gamma', 'theta', 'vega'].map(g => {
-                                      if (!selectedGreeks.has(g)) return null;
-                                      const val = (data as any)[g] ?? 0;
-                                      const formatted = g === 'gamma' ? val.toFixed(4) : val.toFixed(2);
-                                      return (
-                                        <td key={g} style={{ textAlign: 'right', padding: '3px 4px', fontWeight: 600, color: val >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: 'monospace' }}>
-                                          {val >= 0 ? '+' : ''}{formatted}
-                                        </td>
-                                      );
-                                    })}
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        ) : (
-                          (() => {
-                            const activeSrc = (activeSources[0] || 'net') as 'net' | 'CE' | 'PE';
-                            const data = hoverGreekData[activeSrc] || { delta: 0, gamma: 0, theta: 0, vega: 0 };
-                            return ['delta', 'gamma', 'theta', 'vega'].map(k => {
-                              if (!selectedGreeks.has(k)) return null;
-                              const val = (data as any)[k] ?? 0;
-                              const formatted = k === 'gamma' ? val.toFixed(4) : val.toFixed(2);
-                              const gColors: Record<string, string> = { delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' };
-                              return (
-                                <div key={k} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, padding: '2px 0' }}>
-                                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-secondary)' }}>
-                                    <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', backgroundColor: gColors[k] }} />
-                                    {k.charAt(0).toUpperCase() + k.slice(1)}
-                                  </span>
-                                  <span style={{ marginLeft: 'auto', fontWeight: 600, color: val >= 0 ? 'var(--green)' : 'var(--red)', fontFamily: 'monospace' }}>
-                                    {val >= 0 ? '+' : ''}{formatted}
-                                  </span>
-                                </div>
-                              );
-                            });
-                          })()
-                        )}
-                      </div>
-                    );
-                  })()}
+                  <GreeksTooltip ref={greeksTooltipRef} selectedGreeks={selectedGreeks} greeksLegFilter={greeksLegFilter} colors={{ delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' }} />
                 </div>
               </div>
 

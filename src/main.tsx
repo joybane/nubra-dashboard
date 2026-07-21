@@ -20,6 +20,16 @@ if (typeof window !== 'undefined') {
   }, true);
 }
 
+// Force high-DPI rendering for Canvas/Lightweight-Charts on 100% scale displays
+if (typeof window !== 'undefined') {
+  const originalDPR = window.devicePixelRatio || 1;
+  if (originalDPR < 2) {
+    Object.defineProperty(window, 'devicePixelRatio', {
+      get: () => 2
+    });
+  }
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />

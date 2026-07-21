@@ -62,6 +62,7 @@ function fmtInr(v: number): string {
 
 function chartOpts() {
   return {
+    autoSize: true,
     layout: { background: { color: '#0d0f11' }, textColor: '#c9d1d9', fontSize: 11, fontFamily: "'Inter', 'Segoe UI', sans-serif" },
     grid: { vertLines: { color: '#1a1d21' }, horzLines: { color: '#1a1d21' } },
     crosshair: {
@@ -334,14 +335,9 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
     };
     for (const c of charts) c.subscribeCrosshairMove(onMove);
 
-    const ro = new ResizeObserver(() => {
-      if (priceRef.current) pc.resize(priceRef.current.clientWidth, priceRef.current.clientHeight);
-      if (pnlRef.current) nc.resize(pnlRef.current.clientWidth, pnlRef.current.clientHeight);
-      if (greeksRef.current) gc.resize(greeksRef.current.clientWidth, greeksRef.current.clientHeight);
-    });
-    [priceRef, pnlRef, greeksRef].forEach((r) => r.current && ro.observe(r.current));
+    // autoSize: true handles chart resizing automatically
 
-    return () => { ro.disconnect(); unsubs.forEach((u) => u()); pc.remove(); nc.remove(); gc.remove(); };
+    return () => { unsubs.forEach((u) => u()); pc.remove(); nc.remove(); gc.remove(); };
   }, [bars, series, legs, frames, trade.date, underlying]);
 
   if (status === 'loading') return <div className="flex items-center justify-center h-[300px] text-[11px] text-[var(--text-muted)]">Loading chart data…</div>;

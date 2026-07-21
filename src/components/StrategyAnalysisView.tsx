@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, memo, forwardRef, useImperativeHandle } from 'react';
 import {
   createChart,
   createSeriesMarkers,
@@ -281,6 +281,8 @@ async function fetchHistorical(symbol: string, type: string, interval: string, s
 
 function chartOpts(isDark: boolean, hideTimeScale: boolean = false, showLeftScale: boolean = false) {
   return {
+    autoSize: false,
+    devicePixelRatio: window.devicePixelRatio,
     layout: {
       background: { color: isDark ? '#0d0f11' : '#ffffff' },
       textColor: isDark ? '#c9d1d9' : '#131722',
@@ -362,6 +364,7 @@ function minMaxFactor(values: number[]): { mid: number; half: number } {
   const mid = (max + min) / 2, half = (max - min) / 2;
   return { mid, half: half > 0 ? half : 1 };
 }
+import { PriceTooltip, PnlTooltip, GreeksTooltip, PriceTooltipRef, PnlTooltipRef, GreeksTooltipRef } from './ChartTooltips';
 
 export default function StrategyAnalysisView({ basketGroupId, strategyName, theme, onBack, snapshotId }: StrategyAnalysisViewProps) {
   const { subscribe, subscribeChart, unsubscribeChart, subscribeOC, unsubscribeOC } = useWs();
@@ -436,14 +439,13 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     delta: { mid: 0, half: 1 }, gamma: { mid: 0, half: 1 }, theta: { mid: 0, half: 1 }, vega: { mid: 0, half: 1 },
   });
   const [greeksChartHeight, setGreeksChartHeight] = useState(150);
-  const [greeksTooltipPos, setGreeksTooltipPos] = useState<{ x: number; y: number } | null>(null);
-  const [greeksTooltipValues, setGreeksTooltipValues] = useState<Record<string, Record<string, number>> | null>(null);
+  const greeksTooltipRef = useRef<GreeksTooltipRef>(null);
   const [currentGreeksBySource, setCurrentGreeksBySource] = useState<Record<GreekSource, Record<GreekKey, number>>>({
     net: { delta: 0, gamma: 0, theta: 0, vega: 0 },
     CE: { delta: 0, gamma: 0, theta: 0, vega: 0 },
     PE: { delta: 0, gamma: 0, theta: 0, vega: 0 },
   });
-  const [greeksCrosshairTime, setGreeksCrosshairTime] = useState('');
+
 
   // ── Chart display state ──
   const [pnlHeight, setPnlHeight] = useState(200);
@@ -454,15 +456,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const [chartsPopupOpen, setChartsPopupOpen] = useState(false);
   const [pnlPopupOpen, setPnlPopupOpen] = useState(false);
 
-  const [ohlc, setOhlc] = useState<{ o: number; h: number; l: number; c: number } | null>(null);
-  const [legPrices, setLegPrices] = useState<Array<{ name: string; color: string; value: number }>>([]);
-  const [pnlValues, setPnlValues] = useState<{ legs: Array<{ name: string; color: string; value: number }>; total: number } | null>(null);
   const [strategyMarginPaise, setStrategyMarginPaise] = useState(0);
 
-  const [priceTooltipPos, setPriceTooltipPos] = useState<{ x: number; y: number } | null>(null);
-  const [pnlTooltipPos, setPnlTooltipPos] = useState<{ x: number; y: number } | null>(null);
-  const [crosshairTimeStr, setCrosshairTimeStr] = useState('');
-  const [pnlCrosshairTimeStr, setPnlCrosshairTimeStr] = useState('');
+  const priceTooltipRef = useRef<PriceTooltipRef>(null);
+  const pnlTooltipRef = useRef<PnlTooltipRef>(null);
 
   const [visibility, setVisibility] = useState<Record<string, boolean>>({
     underlying: true,
@@ -687,19 +684,24 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     } as Partial<CandlestickSeriesOptions>);
     seriesRef.current.underlying = candleSeries;
 
-    // Crosshair → tooltip state
+    // Crosshair '+' tooltip state
     chart.subscribeCrosshairMove((param) => {
       if (param.point) {
-        setPriceTooltipPos({ x: param.point.x, y: param.point.y });
-        if (param.time != null) setCrosshairTimeStr(fmtChartTime(param.time as number));
+        if (priceTooltipRef.current) {
+          const w = priceChartContainerRef.current?.clientWidth ?? 800;
+          const h = priceChartContainerRef.current?.clientHeight ?? 400;
+          priceTooltipRef.current.setPosition(param.point.x > w * 0.6 ? param.point.x - 230 : param.point.x + 20, Math.max(20, Math.min(param.point.y - 30, h - 140)));
+        }
+        priceTooltipRef.current?.setVisibility(true);
       } else {
-        setPriceTooltipPos(null);
+        priceTooltipRef.current?.setVisibility(false);
       }
       if (!param.seriesData) return;
       const bar = param.seriesData.get(candleSeries) as any;
+      let newOhlc = null;
       if (bar) {
-        if (bar.open != null) setOhlc({ o: bar.open, h: bar.high, l: bar.low, c: bar.close });
-        else if (bar.value != null) setOhlc({ o: bar.value, h: bar.value, l: bar.value, c: bar.value });
+        if (bar.open != null) newOhlc = { o: bar.open, h: bar.high, l: bar.low, c: bar.close };
+        else if (bar.value != null) newOhlc = { o: bar.value, h: bar.value, l: bar.value, c: bar.value };
       }
       const legs: Array<{ name: string; color: string; value: number }> = [];
       for (const [refId, s] of seriesRef.current.legPrice) {
@@ -709,7 +711,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           if (meta) legs.push({ name: meta.displayName, color: meta.color, value: d.value });
         }
       }
-      setLegPrices(legs);
+      priceTooltipRef.current?.setData(param.time ? fmtChartTime(param.time as number) : '', newOhlc, legs, underlying || '');
     });
 
     // Draw horizontal strike price lines on NIFTY candlestick chart
@@ -796,13 +798,12 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       requestAnimationFrame(() => chart.timeScale().fitContent());
     }
 
-    // Crosshair → tooltip state
+    // Crosshair '+' tooltip state
     chart.subscribeCrosshairMove((param) => {
       if (param.point) {
-        setPnlTooltipPos({ x: param.point.x, y: param.point.y });
-        if (param.time != null) setPnlCrosshairTimeStr(fmtChartTime(param.time as number));
+        pnlTooltipRef.current?.setVisibility(true);
       } else {
-        setPnlTooltipPos(null);
+        pnlTooltipRef.current?.setVisibility(false);
       }
       const basketD = param.seriesData?.get(basketSeries) as any;
       const total = basketD?.value ?? 0;
@@ -814,7 +815,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           if (meta) legs.push({ name: meta.displayName, color: meta.color, value: d.value });
         }
       }
-      setPnlValues({ legs, total });
+      pnlTooltipRef.current?.setData(param.time ? fmtChartTime(param.time as number) : '', { legs, total });
     });
 
     return () => {
@@ -990,6 +991,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
   // ── 3b. Apply fetched data to existing charts ──
   useEffect(() => {
+    if (!chartData) return;
 
     const priceChart = priceChartRef.current;
     if (priceChart && seriesRef.current.underlying) {
@@ -1093,9 +1095,9 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         syncingCrosshair = true;
         try {
           if (!param.point || param.time == null) {
-            setPriceTooltipPos(null);
-            setPnlTooltipPos(null);
-            setGreeksTooltipPos(null);
+            priceTooltipRef.current?.setVisibility(false);
+            pnlTooltipRef.current?.setVisibility(false);
+            greeksTooltipRef.current?.setVisibility(false);
             for (const c of charts) {
               if (c !== sourceChart) {
                 try { c.clearCrosshairPosition(); } catch {}
@@ -1108,13 +1110,27 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           const xPos = param.point.x;
           const tStr = fmtChartTime(t);
 
-          setCrosshairTimeStr(tStr);
-          setPnlCrosshairTimeStr(tStr);
-          setGreeksCrosshairTime(tStr);
-
-          if (pc) setPriceTooltipPos({ x: xPos, y: 20 });
-          if (nc) setPnlTooltipPos({ x: xPos, y: 20 });
-          if (gc) setGreeksTooltipPos({ x: xPos, y: 20 });
+          if (pc) {
+            priceTooltipRef.current?.setVisibility(true);
+            if (priceTooltipRef.current) {
+              const w = priceChartContainerRef.current?.clientWidth ?? 800;
+              priceTooltipRef.current.setPosition(xPos > w * 0.6 ? xPos - 230 : xPos + 20, 20);
+            }
+          }
+          if (nc) {
+            pnlTooltipRef.current?.setVisibility(true);
+            if (pnlTooltipRef.current) {
+              const w = pnlChartContainerRef.current?.clientWidth ?? 800;
+              pnlTooltipRef.current.setPosition(xPos > w * 0.6 ? xPos - 230 : xPos + 20, 8);
+            }
+          }
+          if (gc) {
+            greeksTooltipRef.current?.setVisibility(true);
+            if (greeksTooltipRef.current) {
+              const w = greeksChartContainerRef.current?.clientWidth ?? 800;
+              greeksTooltipRef.current.setPosition(xPos > w * 0.6 ? xPos - 210 : xPos + 20, 8);
+            }
+          }
 
           for (const c of charts) {
             if (c !== sourceChart) {
@@ -1122,21 +1138,77 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
                 let s: ISeriesApi<any> | null = null;
                 let val = 0;
                 const cd = chartDataRef.current;
+                const findLatest = <T extends { time: any }>(arr: T[] | undefined, targetTime: number): T | undefined => {
+                  if (!arr || arr.length === 0) return undefined;
+                  let l = 0, r = arr.length - 1;
+                  let res: T | undefined = undefined;
+                  while (l <= r) {
+                    const m = (l + r) >> 1;
+                    const time = arr[m].time as number;
+                    if (time <= targetTime) {
+                      res = arr[m];
+                      l = m + 1;
+                    } else {
+                      r = m - 1;
+                    }
+                  }
+                  return res;
+                };
                 if (c === pc) {
                   s = seriesRef.current.underlying;
                   if (cd) {
-                    const b = cd.underlyingBars.find(bar => bar.time === t);
-                    if (b) val = b.close;
+                    let newOhlc = null;
+                    const b = findLatest(cd.underlyingBars, t);
+                    if (b) {
+                      val = b.close;
+                      newOhlc = { o: b.open, h: b.high, l: b.low, c: b.close };
+                    }
+                    const legs: Array<{ name: string; color: string; value: number }> = [];
+                    for (const leg of legMetasRef.current) {
+                      const d = findLatest(cd.legPriceData.get(leg.refId), t);
+                      if (d) legs.push({ name: leg.displayName, color: leg.color, value: d.value });
+                    }
+                    priceTooltipRef.current?.setData(tStr, newOhlc, legs, underlying || '');
                   }
                 } else if (c === nc) {
                   s = seriesRef.current.basketPnl;
                   if (cd) {
-                    const p = cd.basketPnlData.find(pt => pt.time === t);
+                    const p = findLatest(cd.basketPnlData, t);
                     if (p) val = p.value;
+                    const legs: Array<{ name: string; color: string; value: number }> = [];
+                    for (const leg of legMetasRef.current) {
+                      const d = findLatest(cd.legPnlData.get(leg.refId), t);
+                      if (d) legs.push({ name: leg.displayName, color: leg.color, value: d.value });
+                    }
+                    pnlTooltipRef.current?.setData(tStr, { legs, total: val });
                   }
                 } else if (c === gc) {
                   const firstKey = Object.keys(greeksSeriesRef.current).find(k => greeksSeriesRef.current[k]);
                   if (firstKey) s = greeksSeriesRef.current[firstKey];
+                  if (cd) {
+                    const tv: Record<string, Record<string, number>> = {};
+                    for (const src of ['net', 'CE', 'PE'] as const) {
+                      tv[src] = { delta: 0, gamma: 0, theta: 0, vega: 0 };
+                    }
+                    for (const leg of legMetasRef.current) {
+                      const pts = cd.legGreeksHist.get(leg.refId);
+                      const pt = findLatest(pts, t);
+                      if (!pt) continue;
+                      const mult = lotSizeOverride || 1;
+                      const pos = allPositionsRef.current.find(p => p.ref_id === leg.refId);
+                      const side = pos ? (pos.order_side?.includes('BUY') ? 1 : -1) : 0;
+                      const qty = pos ? (pos.qty || 0) : 0;
+                      const weight = greeksMode === 'lot' ? qty : side * mult;
+                      const src = positionGreekSource(pos || {} as any);
+                      tv.net.delta += pt.delta * weight; tv.net.gamma += pt.gamma * weight;
+                      tv.net.theta += pt.theta * weight; tv.net.vega += pt.vega * weight;
+                      if (src) {
+                        tv[src].delta += pt.delta * weight; tv[src].gamma += pt.gamma * weight;
+                        tv[src].theta += pt.theta * weight; tv[src].vega += pt.vega * weight;
+                      }
+                    }
+                    greeksTooltipRef.current?.setData(tStr, tv);
+                  }
                 }
                 if (s) c.setCrosshairPosition(val, t as any, s);
               } catch {}
@@ -1169,19 +1241,17 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       } catch (e) {}
     };
 
-    const ro = new ResizeObserver(() => {
+    const ro = new ResizeObserver((entries) => {
       try {
-        if (priceChartContainerRef.current && priceChartRef.current) {
-          const { width, height } = priceChartContainerRef.current.getBoundingClientRect();
-          priceChartRef.current.resize(width, height);
-        }
-        if (pnlChartContainerRef.current && pnlChartRef.current) {
-          const { width, height } = pnlChartContainerRef.current.getBoundingClientRect();
-          pnlChartRef.current.resize(width, height);
-        }
-        if (greeksChartContainerRef.current && greeksChartRef.current) {
-          const { width, height } = greeksChartContainerRef.current.getBoundingClientRect();
-          greeksChartRef.current.resize(width, height);
+        for (const entry of entries) {
+          const { width, height } = entry.contentRect;
+          if (entry.target === priceChartContainerRef.current) {
+            priceChartRef.current?.resize(width, height);
+          } else if (entry.target === pnlChartContainerRef.current) {
+            pnlChartRef.current?.resize(width, height);
+          } else if (entry.target === greeksChartContainerRef.current) {
+            greeksChartRef.current?.resize(width, height);
+          }
         }
         syncAll();
       } catch (e) {}
@@ -1476,7 +1546,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       for (const k of greekKeys) {
         const key = `${src}_${k}`;
         const s = chart.addSeries(LineSeries, {
-          color: GREEK_COLORS[k], lineWidth: Math.max(2, GREEK_LINE_WIDTHS[src]), lineStyle: GREEK_LINE_STYLES[src],
+          color: GREEK_COLORS[k], lineWidth: Math.max(2, GREEK_LINE_WIDTHS[src]) as any, lineStyle: GREEK_LINE_STYLES[src],
           priceScaleId: k, title: src === 'net' ? k.charAt(0).toUpperCase() + k.slice(1) : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
           lastValueVisible: true, priceLineVisible: false, visible: false,
           priceFormat: { type: 'custom', minMove: 0.00001, formatter: (price: number) => {
@@ -1493,9 +1563,18 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     }
     chart.subscribeCrosshairMove((param) => {
       if (param.point) {
-        setGreeksTooltipPos({ x: param.point.x, y: param.point.y });
-        if (param.time != null) setGreeksCrosshairTime(fmtChartTime(param.time as number));
-      } else { setGreeksTooltipPos(null); }
+        greeksTooltipRef.current?.setVisibility(true);
+        if (greeksTooltipRef.current) {
+          const w = greeksChartContainerRef.current?.clientWidth ?? 800;
+          const h = greeksChartContainerRef.current?.clientHeight ?? 400;
+          greeksTooltipRef.current.setPosition(
+            param.point.x > w * 0.6 ? param.point.x - (Array.from(greeksLegFilter).length > 1 ? 250 : 200) : param.point.x + 20,
+            Math.max(10, Math.min(param.point.y - 40, h - 100))
+          );
+        }
+      } else {
+        greeksTooltipRef.current?.setVisibility(false);
+      }
       const vals: Record<string, Record<string, number>> = {};
       let hasData = false;
       for (const src of GREEK_SOURCES) {
@@ -1514,7 +1593,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           vals[src] = srcVals;
         }
       }
-      setGreeksTooltipValues(hasData ? vals : null);
+      greeksTooltipRef.current?.setData(param.time ? fmtChartTime(param.time as number) : '', hasData ? vals : null);
     });
     if (!hasInitialFittedRef.current) {
       requestAnimationFrame(() => chart.timeScale().fitContent());
@@ -2035,47 +2114,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         {/* Price chart */}
         {priceVisible && (
         <div ref={priceChartContainerRef} className="relative flex-1 min-h-[120px] bg-[var(--bg-primary)]">
-          <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px] text-[var(--text-muted)]">
-            {ohlc
-              ? <span><span className="text-[#fbbf24] font-semibold mr-1">{underlying}</span> O <span className={ohlc.c >= ohlc.o ? 'text-[var(--green)]' : 'text-[var(--red)]'}>{fmtPrice(ohlc.o)}</span> H <span className="text-[var(--green)]">{fmtPrice(ohlc.h)}</span> L <span className="text-[var(--red)]">{fmtPrice(ohlc.l)}</span> C <span className={ohlc.c >= ohlc.o ? 'text-[var(--green)]' : 'text-[var(--red)]'}>{fmtPrice(ohlc.c)}</span>
-                  {legPrices.map(l => <span key={l.name} className="ml-2"><span className="inline-block w-2 h-2 rounded-full align-middle mr-1" style={{ backgroundColor: l.color }} />{l.name} <span className="text-[var(--text-primary)] font-medium">₹{fmtPrice(l.value)}</span></span>)}
-                </span>
-              : <span className="text-[var(--text-muted)]">Hover over chart for details</span>
-            }
+          <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
+            {/* fallback removed */}
           </div>
-          {priceTooltipPos && (ohlc || legPrices.length > 0) && (
-            <div
-              className="absolute z-50 pointer-events-none"
-              style={{
-                left: priceTooltipPos.x > (priceChartContainerRef.current?.clientWidth ?? 800) * 0.6
-                  ? priceTooltipPos.x - 230
-                  : priceTooltipPos.x + 20,
-                top: Math.max(20, Math.min(priceTooltipPos.y - 30, (priceChartContainerRef.current?.clientHeight ?? 400) - 140)),
-              }}
-            >
-              <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
-                {crosshairTimeStr && <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">{crosshairTimeStr}</div>}
-                {ohlc && (
-                  <div className="text-[11px] mb-1">
-                    <span className="text-[#fbbf24] font-semibold mr-2">{underlying}</span>
-                    <span className="text-[var(--text-muted)]">O</span> <span className={ohlc.c >= ohlc.o ? 'text-[var(--green)]' : 'text-[var(--red)]'}>{fmtPrice(ohlc.o)}</span>
-                    {' '}<span className="text-[var(--text-muted)]">H</span> <span className="text-[var(--green)]">{fmtPrice(ohlc.h)}</span>
-                    {' '}<span className="text-[var(--text-muted)]">L</span> <span className="text-[var(--red)]">{fmtPrice(ohlc.l)}</span>
-                    {' '}<span className="text-[var(--text-muted)]">C</span> <span className={ohlc.c >= ohlc.o ? 'text-[var(--green)]' : 'text-[var(--red)]'}>{fmtPrice(ohlc.c)}</span>
-                  </div>
-                )}
-                {legPrices.map(l => (
-                  <div key={l.name} className="flex items-center justify-between gap-4 text-[11px] py-0.5">
-                    <span className="flex items-center gap-1.5 text-[var(--text-secondary)]">
-                      <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: l.color }} />
-                      <span className="truncate max-w-[120px]">{l.name}</span>
-                    </span>
-                    <span className="text-[var(--text-primary)] font-medium tabular-nums">₹{fmtPrice(l.value)}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          <PriceTooltip ref={priceTooltipRef} />
         </div>
         )}
 
@@ -2086,63 +2128,11 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
               <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[var(--accent)]" />
             </div>
             )}
-            {/* P&L chart */}
             <div ref={pnlChartContainerRef} className={`relative bg-[var(--bg-primary)] ${primaryPanel === 'pnl' ? 'flex-1 min-h-[80px]' : 'shrink-0'}`} style={primaryPanel === 'pnl' ? undefined : { height: pnlHeight }}>
               <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
-                {pnlValues
-                  ? <span>
-                      {pnlValues.legs.map(l => <span key={l.name} className="mr-2"><span className="inline-block w-2 h-2 rounded-full align-middle mr-1" style={{ backgroundColor: l.color }} />{l.name}: <span className={l.value >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>{l.value >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(l.value))}</span></span>)}
-                      <span className="font-semibold ml-1">Total: <span className={pnlValues.total >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>{pnlValues.total >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnlValues.total))}</span></span>
-                    </span>
-                  : <span className="text-[var(--text-muted)]">P&L details on hover</span>
-                }
+                {/* fallback removed for clarity, or kept if needed. The tooltip replaces the dynamic part */}
               </div>
-              {pnlTooltipPos && pnlValues && (pnlValues.legs.length > 0 || pnlValues.total !== 0) && (
-                <div
-                  className="absolute z-50 pointer-events-none"
-                  style={{
-                    left: pnlTooltipPos.x > (pnlChartContainerRef.current?.clientWidth ?? 800) * 0.6
-                      ? pnlTooltipPos.x - 230
-                      : pnlTooltipPos.x + 20,
-                    top: Math.max(8, Math.min(pnlTooltipPos.y - 30, pnlHeight - 110)),
-                  }}
-                >
-                  <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
-                    {pnlCrosshairTimeStr && <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">{pnlCrosshairTimeStr}</div>}
-                    {pnlValues.legs.map(l => (
-                      <div key={l.name} className="flex items-center justify-between gap-4 text-[11px] py-0.5">
-                        <span className="flex items-center gap-1.5 text-[var(--text-secondary)]">
-                          <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: l.color }} />
-                          <span className="truncate max-w-[120px]">{l.name}</span>
-                        </span>
-                        <span className={`font-medium tabular-nums ${l.value >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                          {l.value >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(l.value))}
-                        </span>
-                      </div>
-                    ))}
-                    <div className="flex items-center justify-between gap-4 text-[11px] pt-1 mt-1 border-t border-[#ffffff0a] font-semibold">
-                      <span className="text-[var(--text-secondary)]">Total P&L</span>
-                      <span className={pnlValues.total >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>
-                        {pnlValues.total >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnlValues.total))}
-                      </span>
-                    </div>
-                    {strategyMargin > 0 && (
-                      <>
-                        <div className="flex items-center justify-between gap-4 text-[11px] pt-0.5">
-                          <span className="text-[var(--text-muted)]">Margin</span>
-                          <span className="text-[var(--text-secondary)] tabular-nums">₹{fmtPrice(strategyMargin)}</span>
-                        </div>
-                        <div className="flex items-center justify-between gap-4 text-[11px] pt-0.5">
-                          <span className="text-[var(--text-muted)]">ROI</span>
-                          <span className={`font-medium tabular-nums ${pnlValues.total >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                            {(pnlValues.total / strategyMargin * 100).toFixed(2)}%
-                          </span>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </div>
-              )}
+              <PnlTooltip ref={pnlTooltipRef} strategyMargin={strategyMargin > 0 ? strategyMargin : 0} />
             </div>
           </>
         )}
@@ -2156,94 +2146,9 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
             )}
             <div ref={greeksChartContainerRef} className={`relative bg-[var(--bg-primary)] ${primaryPanel === 'greeks' ? 'flex-1 min-h-[80px]' : 'shrink-0'}`} style={primaryPanel === 'greeks' ? undefined : { height: greeksChartHeight }}>
               <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
-                {greeksTooltipValues
-                  ? <span>{(['delta', 'gamma', 'theta', 'vega'] as const).filter(k => selectedGreeks.has(k) && greeksTooltipValues.net?.[k] != null).map(k => (
-                      <span key={k} className="mr-3">
-                        <span className="inline-block w-2 h-2 rounded-full align-middle mr-1" style={{ backgroundColor: GREEK_COLORS[k] }} />
-                        <span className="text-[var(--text-muted)]">{k.charAt(0).toUpperCase() + k.slice(1)}</span>{' '}
-                        <span className={`font-medium ${(greeksTooltipValues.net[k] ?? 0) >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                          {(greeksTooltipValues.net[k] ?? 0) >= 0 ? '+' : ''}{k === 'gamma' ? (greeksTooltipValues.net[k] ?? 0).toFixed(4) : (greeksTooltipValues.net[k] ?? 0).toFixed(2)}
-                        </span>
-                      </span>
-                    ))}</span>
-                  : <span className="text-[var(--text-muted)]">Greeks over time</span>
-                }
+                {/* fallback removed for clarity, or kept if needed. */}
               </div>
-              {greeksTooltipPos && greeksTooltipValues && (() => {
-                const activeSources = Array.from(greeksLegFilter);
-                const useTable = activeSources.length > 1;
-                const tooltipWidth = useTable ? 200 : 150;
-                return (
-                  <div className="absolute z-50 pointer-events-none"
-                    style={{
-                      left: greeksTooltipPos.x > (greeksChartContainerRef.current?.clientWidth ?? 800) * 0.5 ? greeksTooltipPos.x - (tooltipWidth + 20) : greeksTooltipPos.x + 25,
-                      top: Math.max(8, Math.min(greeksTooltipPos.y - 80, greeksChartHeight - (useTable ? 100 : 80))),
-                    }}>
-                    <div className="bg-[#1a1e24]/85 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md text-[10px]" style={{ minWidth: tooltipWidth }}>
-                      {greeksCrosshairTime && <div className="text-[9px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">{greeksCrosshairTime}</div>}
-                      {useTable ? (
-                        <table className="w-full border-collapse">
-                          <thead>
-                            <tr className="border-b border-[#ffffff0a] text-[var(--text-muted)] text-[9px]">
-                              <th className="text-left font-medium pb-1">Ref</th>
-                              {(['delta', 'gamma', 'theta', 'vega'] as const).map(g => {
-                                if (!selectedGreeks.has(g)) return null;
-                                return (
-                                  <th key={g} className="text-right font-medium pb-1" style={{ color: GREEK_COLORS[g] }}>
-                                    {g.charAt(0).toUpperCase() + g.slice(1)}
-                                  </th>
-                                );
-                              })}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {(['net', 'CE', 'PE'] as const).map(src => {
-                              const data = greeksTooltipValues[src];
-                              if (!data) return null;
-                              const label = src === 'net' ? 'Net' : `${src} Leg`;
-                              return (
-                                <tr key={src} className="border-b border-[#ffffff05] last:border-b-0">
-                                  <td className="font-semibold text-[#a78bfa] py-1">{label}</td>
-                                  {(['delta', 'gamma', 'theta', 'vega'] as const).map(g => {
-                                    if (!selectedGreeks.has(g)) return null;
-                                    const val = data[g] ?? 0;
-                                    const formatted = g === 'gamma' ? val.toFixed(4) : val.toFixed(2);
-                                    return (
-                                      <td key={g} className={`text-right font-semibold py-1 font-mono ${val >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                                        {val >= 0 ? '+' : ''}{formatted}
-                                      </td>
-                                    );
-                                  })}
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      ) : (
-                        (() => {
-                          const activeSrc = activeSources[0] || 'net';
-                          const data = greeksTooltipValues[activeSrc] || { delta: 0, gamma: 0, theta: 0, vega: 0 };
-                          return (['delta', 'gamma', 'theta', 'vega'] as const).filter(k => selectedGreeks.has(k) && data[k] != null).map(k => {
-                            const val = data[k] ?? 0;
-                            const formatted = k === 'gamma' ? val.toFixed(4) : val.toFixed(2);
-                            return (
-                              <div key={k} className="flex items-center justify-between gap-4 text-[11px] py-0.5">
-                                <span className="flex items-center gap-1.5 text-[var(--text-secondary)]">
-                                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: GREEK_COLORS[k] }} />
-                                  {k.charAt(0).toUpperCase() + k.slice(1)}
-                                </span>
-                                <span className={`font-semibold tabular-nums ${val >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                                  {val >= 0 ? '+' : ''}{formatted}
-                                </span>
-                              </div>
-                            );
-                          });
-                        })()
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
+              <GreeksTooltip ref={greeksTooltipRef} selectedGreeks={selectedGreeks} greeksLegFilter={greeksLegFilter} colors={GREEK_COLORS} />
             </div>
           </>
         )}

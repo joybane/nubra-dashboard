@@ -208,6 +208,9 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
       deltasOut: oiDeltasRef.current,
       isToday,
     });
+    } catch (e) {
+      console.warn('[OI] Draw error:', e);
+    }
   }
   drawOIRef.current = drawOI;
 
