@@ -60,7 +60,7 @@ function fmtInr(v: number): string {
   return `${sign}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`;
 }
 
-function chartOpts() {
+function chartOpts(isDark = false, hideTimeScale = false, hideLeftScale = false) {
   return {
     autoSize: true,
     layout: { background: { color: '#0d0f11' }, textColor: '#9ca3af', fontSize: 12, fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, Roboto, sans-serif" },
@@ -70,8 +70,9 @@ function chartOpts() {
       vertLine: { color: 'rgba(156, 163, 175, 0.4)', width: 1 as const, style: 0 as const, labelBackgroundColor: '#374151' },
       horzLine: { color: 'rgba(156, 163, 175, 0.4)', width: 1 as const, style: 0 as const, labelBackgroundColor: '#374151' },
     },
-    rightPriceScale: { borderVisible: false, minimumWidth: 64 },
-    timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, fixLeftEdge: true, fixRightEdge: true, shiftVisibleRangeOnNewBar: true },
+    leftPriceScale: { visible: !hideLeftScale, borderVisible: false, minimumWidth: 75 },
+    rightPriceScale: { visible: true, borderVisible: false, minimumWidth: 75 },
+    timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, shiftVisibleRangeOnNewBar: true },
     handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
     handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
     kineticScroll: { touch: true, mouse: true },
@@ -228,7 +229,7 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
     if (!priceRef.current || !pnlRef.current || !greeksRef.current || !bars || bars.under.length === 0) return;
 
     const pc = createChart(priceRef.current, chartOpts());
-    const nc = createChart(pnlRef.current, chartOpts());
+    const nc = createChart(pnlRef.current, chartOpts(false, false, true));
     const gc = createChart(greeksRef.current, chartOpts());
 
     // price pane — candles (right) + each leg premium on its own overlay scale
@@ -274,7 +275,7 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
       const legData = series.map((p) => { const lp = p.legs.find((x) => x.legId === lm.legId); return { time: toUnix(trade.date, p.hhmm) as Time, value: lp ? lp.pnl : NaN }; }).filter((d) => Number.isFinite(d.value as number));
       s.setData(pad(legData));
     }
-    const totalS = nc.addSeries(LineSeries, { color: '#ffffff', lineWidth: 3, crosshairMarkerRadius: 4, title: 'Total P&L', lastValueVisible: true, priceLineVisible: true, priceFormat: { type: 'price', precision: 0, minMove: 1 } });
+    const totalS = nc.addSeries(LineSeries, { color: '#ffffff', lineWidth: 3, crosshairMarkerRadius: 4,  lastValueVisible: true, priceLineVisible: true, priceFormat: { type: 'price', precision: 0, minMove: 1 } });
     const totalData = series.map((p) => ({ time: toUnix(trade.date, p.hhmm) as Time, value: p.total }));
     totalS.setData(pad(totalData));
     totalS.createPriceLine({ price: 0, color: '#2a2d42', lineWidth: 1, lineStyle: 0, axisLabelVisible: false, title: '' });
@@ -367,7 +368,7 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
           <span className="text-white font-semibold">Total {fmtInr(hf && Number.isFinite(hf.total) ? hf.total : trade.grossPnl)}</span>
           {legs.map((l) => <span key={l.legId} style={{ color: l.color }}>{l.label} {hf && hf.legPnl[l.legId] != null ? fmtInr(hf.legPnl[l.legId]) : '—'}</span>)}
         </div>
-        <div ref={pnlRef} className="h-[170px] w-full border border-[var(--border)] rounded bg-[#0d0f11]" />
+        <div ref={pnlRef} className="h-[170px] w-full border border-[var(--border)] rounded bg-[#0d0f11]" style={{ paddingLeft: 75, boxSizing: 'border-box' }} />
       </div>
 
       {/* Greeks pane (Black-Scholes, net) */}

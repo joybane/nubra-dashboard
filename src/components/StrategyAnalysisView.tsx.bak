@@ -696,7 +696,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   useEffect(() => {
     if (!priceChartContainerRef.current || !priceVisible) return;
     const isDark = theme === 'dark';
-    const chart = createChart(priceChartContainerRef.current, chartOpts(isDark, false, true));
+    const chart = createChart(priceChartContainerRef.current, chartOpts(isDark, true, true));
     priceChartRef.current = chart;
     setChartEpoch(e => e + 1);
 
@@ -713,7 +713,6 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
     // Crosshair '+' tooltip state
     chart.subscribeCrosshairMove((param) => {
-      try {
       if (param.point) {
         if (priceTooltipRef.current) {
           const w = priceChartContainerRef.current?.clientWidth ?? 800;
@@ -740,7 +739,6 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         }
       }
       priceTooltipRef.current?.setData(param.time ? fmtChartTime(param.time as number) : '', newOhlc, legs, underlying || '');
-      } catch (e) {}
     });
 
     // Draw horizontal strike price lines on NIFTY candlestick chart
@@ -779,14 +777,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
       try { chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } }); } catch {}
       try { chart.priceScale('left').applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } }); } catch {}
-      requestAnimationFrame(() => { try { chart.timeScale().fitContent(); } catch {} });
+      requestAnimationFrame(() => chart.timeScale().fitContent());
     }
 
     return () => {
       seriesRef.current.underlying = null;
       seriesRef.current.legPrice.clear();
       priceChartRef.current = null;
-      setTimeout(() => { try { chart.remove(); } catch {} }, 100);
+      try { chart.remove(); } catch {}
       setChartEpoch(e => e + 1);
     };
   }, [theme, underlying, priceVisible]);
@@ -795,7 +793,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   useEffect(() => {
     if (!pnlChartContainerRef.current || !pnlVisible) return;
     const isDark = theme === 'dark';
-    const chart = createChart(pnlChartContainerRef.current, chartOpts(isDark, false));
+    const chart = createChart(pnlChartContainerRef.current, chartOpts(isDark, true));
     pnlChartRef.current = chart;
     setChartEpoch(e => e + 1);
 
@@ -824,12 +822,11 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(data);
       }
       if (cached.basketPnlData.length > 0) basketSeries.setData(cached.basketPnlData);
-      requestAnimationFrame(() => { try { chart.timeScale().fitContent(); } catch {} });
+      requestAnimationFrame(() => chart.timeScale().fitContent());
     }
 
     // Crosshair '+' tooltip state
     chart.subscribeCrosshairMove((param) => {
-      try {
       if (param.point) {
         pnlTooltipRef.current?.setVisibility(true);
       } else {
@@ -846,14 +843,13 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         }
       }
       pnlTooltipRef.current?.setData(param.time ? fmtChartTime(param.time as number) : '', { legs, total });
-      } catch (e) {}
     });
 
     return () => {
       seriesRef.current.legPnl.clear();
       seriesRef.current.basketPnl = null;
       pnlChartRef.current = null;
-      setTimeout(() => { try { chart.remove(); } catch {} }, 100);
+      try { chart.remove(); } catch {}
       setChartEpoch(e => e + 1);
     };
   }, [theme, pnlVisible]);
@@ -1022,7 +1018,6 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   // ── 3b. Apply fetched data to existing charts ──
   useEffect(() => {
     if (!chartData) return;
-    const grid = chartData.underlyingBars.map(b => b.time as number);
 
     const priceChart = priceChartRef.current;
     if (priceChart && seriesRef.current.underlying) {
@@ -1033,14 +1028,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       for (const leg of legMetasRef.current) {
         if (!seriesRef.current.legPrice.has(leg.refId)) {
           const s = priceChart.addSeries(LineSeries, {
-            color: leg.color, lineWidth: 2, priceScaleId: 'left',
+            color: leg.color, lineWidth: 2, priceScaleId: 'right',
             title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
             priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
           seriesRef.current.legPrice.set(leg.refId, s);
         }
         const data = chartData.legPriceData.get(leg.refId);
-        if (data) seriesRef.current.legPrice.get(leg.refId)?.setData(fillPnlToGrid(grid, data.map(d => ({ time: d.time, value: d.value }))) as any);
+        if (data) seriesRef.current.legPrice.get(leg.refId)?.setData(data.map(d => ({ time: d.time, value: d.value })));
       }
       try { priceChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } }); } catch {}
       try { priceChart.priceScale('left').applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } }); } catch {}
@@ -1048,12 +1043,12 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (savedRange) {
         try { priceChart.timeScale().setVisibleLogicalRange(savedRange); } catch {}
       } else if (!hasInitialFittedRef.current) {
-        requestAnimationFrame(() => { try { priceChart.timeScale().fitContent(); } catch {} });
+        requestAnimationFrame(() => priceChart.timeScale().fitContent());
       }
     }
 
-
-
+    // Shared full-session grid
+    const grid = chartData.underlyingBars.map(b => b.time as number);
 
     const pnlChart = pnlChartRef.current;
     if (pnlChart) {
@@ -1249,7 +1244,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
               } catch {}
             }
           }
-        } catch (e) {} finally {
+        } finally {
           syncingCrosshair = false;
         }
       };
@@ -1546,7 +1541,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
             if (!hist) { hist = []; cached.legGreeksHist.set(refId, hist); }
             upsertGreekPoint(hist, { time: t, delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega });
           }
-          // setChartData({ ...cached, legGreeksHist: new Map(cached.legGreeksHist) });
+          setChartData({ ...cached, legGreeksHist: new Map(cached.legGreeksHist) });
         }
         setLegGreeks(prev => {
           const next = new Map(prev);
@@ -1587,7 +1582,6 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       chart.priceScale(k).applyOptions({ scaleMargins: { top: 0.12, bottom: 0.12 }, visible: false });
     }
     chart.subscribeCrosshairMove((param) => {
-      try {
       if (param.point) {
         greeksTooltipRef.current?.setVisibility(true);
         if (greeksTooltipRef.current) {
@@ -1620,12 +1614,11 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         }
       }
       greeksTooltipRef.current?.setData(param.time ? fmtChartTime(param.time as number) : '', hasData ? vals : null);
-      } catch (e) {}
     });
     if (!hasInitialFittedRef.current) {
-      requestAnimationFrame(() => { try { chart.timeScale().fitContent(); } catch {} });
+      requestAnimationFrame(() => chart.timeScale().fitContent());
     }
-    return () => { greeksSeriesRef.current = {}; greeksChartRef.current = null; setTimeout(() => { try { chart.remove(); } catch {} }, 100); setChartEpoch(e => e + 1); };
+    return () => { greeksSeriesRef.current = {}; greeksChartRef.current = null; try { chart.remove(); } catch {} setChartEpoch(e => e + 1); };
   }, [theme, greeksVisible, greeksLegFilter]);
 
   // ── 10b. Apply Greeks data ──
@@ -1713,7 +1706,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     greekFactorsRef.current = factors;
 
     // Same full-session grid as the P&L pane so greeks time-align with the other charts (whitespace pad).
-    const greeksGrid = chartData.underlyingBars.map(b => b.time as number);
+    const grid = chartData.underlyingBars.map(b => b.time as number);
 
     for (const src of GREEK_SOURCES) {
       const byTime = sourceData[src];
@@ -1725,7 +1718,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (!s) continue;
         if (isActive && selectedGreeks.has(k) && times.length > 0) {
           const f = factors[k];
-          s.setData(fillGreeksToGrid(greeksGrid, byTime, k, f) as any);
+          s.setData(fillGreeksToGrid(grid, byTime, k, f) as any);
           s.applyOptions({ visible: true });
         } else {
           s.setData([]);
@@ -1740,10 +1733,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (r) {
         try { greeksChartRef.current?.timeScale().setVisibleLogicalRange(r); } catch {}
       } else {
-        requestAnimationFrame(() => { try { greeksChartRef.current?.timeScale().fitContent(); } catch {} });
+        requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
       }
     } else {
-      requestAnimationFrame(() => { try { greeksChartRef.current?.timeScale().fitContent(); } catch {} });
+      requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
     }
   }, [chartData, greeksMode, lotSizeOverride, selectedGreeks, greeksVisible, underlying, greeksLegFilter]);
 

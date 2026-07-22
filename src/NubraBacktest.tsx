@@ -70,7 +70,7 @@ interface Props { instrument: Instrument | null; theme?: 'light' | 'dark'; }
 
 const IST_OFFSET = 19800; // 5h 30m
 
-function chartOpts(isDark: boolean) {
+function chartOpts(isDark: boolean, hideLeftScale: boolean = false) {
   return {
     autoSize: true,
     devicePixelRatio: Math.max(window.devicePixelRatio, 2),
@@ -89,14 +89,12 @@ function chartOpts(isDark: boolean) {
       vertLine: { color: isDark ? 'rgba(156, 163, 175, 0.4)' : 'rgba(75, 85, 99, 0.4)', width: 1 as const, style: 0 as const, labelBackgroundColor: isDark ? '#374151' : '#e5e7eb' },
       horzLine: { color: isDark ? 'rgba(156, 163, 175, 0.4)' : 'rgba(75, 85, 99, 0.4)', width: 1 as const, style: 0 as const, labelBackgroundColor: isDark ? '#374151' : '#e5e7eb' },
     },
-    leftPriceScale: { visible: true, borderVisible: false, minimumWidth: 72 },
-    rightPriceScale: { borderVisible: false, minimumWidth: 72 },
+    leftPriceScale: { visible: !hideLeftScale, borderVisible: false, minimumWidth: 75 },
+    rightPriceScale: { visible: true, borderVisible: false, minimumWidth: 75 },
     timeScale: {
       borderVisible: false,
       timeVisible: true,
       secondsVisible: false,
-      fixLeftEdge: true,
-      fixRightEdge: true,
       shiftVisibleRangeOnNewBar: true,
     },
     handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
@@ -701,7 +699,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
     const legPnlSeriesList: Array<{ legIndex: number; series: ISeriesApi<'Line'> }> = [];
 
     if (pnlContainerRef.current) {
-      pnlChart = createChart(pnlContainerRef.current, chartOpts(isDark));
+      pnlChart = createChart(pnlContainerRef.current, chartOpts(isDark, true));
       pnlChartRef.current = pnlChart;
       activeCharts.push(pnlChart);
 
@@ -712,9 +710,11 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
       basketSeries = pnlChart.addSeries(LineSeries, {
         color: '#ffffff', lineWidth: 3,
         crosshairMarkerRadius: 4,
-        title: 'Total P&L', lastValueVisible: true, priceLineVisible: true,
+         lastValueVisible: true, priceLineVisible: true,
         visible: showTotalPnl,
       });
+    
+
       if (evalResult.basketPnlData) {
         basketSeries.setData(padToGrid(grid, evalResult.basketPnlData as any) as any);
       }
@@ -767,7 +767,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
             lineStyle: gLineStyles[src],
             crosshairMarkerRadius: 4,
             priceScaleId: k,
-            title: src === 'net' ? k.charAt(0).toUpperCase() + k.slice(1) : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
+            
             lastValueVisible: true,
             priceLineVisible: false,
             visible: srcVisible && selectedGreeks.has(k),
@@ -1893,7 +1893,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
                   borderBottom: greeksVisible ? '1px solid var(--border)' : 'none',
                   flexShrink: 0
                 }}>
-                  <div ref={pnlContainerRef} style={{ width: '100%', height: '100%' }} />
+                  <div ref={pnlContainerRef} style={{ width: '100%', height: '100%', paddingLeft: 75, boxSizing: 'border-box' }} />
 
                   <PnlTooltip ref={pnlTooltipRef} strategyMargin={0} />
                 </div>
