@@ -53,6 +53,9 @@ body {
   font-size:  13px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
 }
 
 /* ─── Scrollbars ────────────────────────────────────────── */
@@ -64,10 +67,16 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
 
+/* ─── Vector Graphics Rendering ─────────────────────────── */
+svg {
+  shape-rendering: geometricPrecision;
+}
+
 /* ─── Option chain table ────────────────────────────────── */
 .oc-table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
   font-size: 12px;
 }
 
@@ -205,7 +214,8 @@ body {
   color: var(--text-secondary);
   pointer-events: none;
   white-space: nowrap;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  will-change: transform;
 }
 
 /* ─── Misc helpers ──────────────────────────────────────── */

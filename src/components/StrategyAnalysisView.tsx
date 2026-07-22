@@ -285,37 +285,41 @@ function chartOpts(isDark: boolean, hideTimeScale: boolean = false, showLeftScal
     devicePixelRatio: Math.max(window.devicePixelRatio, 2),
     layout: {
       background: { color: isDark ? '#0d0f11' : '#ffffff' },
-      textColor: isDark ? '#c9d1d9' : '#131722',
-      fontSize: 11,
-      fontFamily: "'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif",
+      textColor: isDark ? '#9ca3af' : '#4b5563',
+      fontSize: 12,
+      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, Roboto, sans-serif",
     },
     grid: {
-      vertLines: { color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)', style: 1 as const },
-      horzLines: { color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)', style: 1 as const },
+      vertLines: { color: isDark ? 'rgba(255, 255, 255, 0.03)' : 'rgba(0, 0, 0, 0.03)', style: 0 as const },
+      horzLines: { color: isDark ? 'rgba(255, 255, 255, 0.03)' : 'rgba(0, 0, 0, 0.03)', style: 0 as const },
     },
     crosshair: {
       mode: CrosshairMode.Normal,
-      vertLine: { color: isDark ? '#4b5563' : '#9ca3af', width: 1 as const, style: 2 as const, labelBackgroundColor: isDark ? '#22262b' : '#e8ecf5' },
-      horzLine: { color: isDark ? '#3b82f6' : '#2563eb', width: 1 as const, style: 2 as const, labelBackgroundColor: '#2563eb' },
+      vertLine: { color: isDark ? 'rgba(156, 163, 175, 0.4)' : 'rgba(75, 85, 99, 0.4)', width: 1 as const, style: 0 as const, labelBackgroundColor: isDark ? '#374151' : '#e5e7eb' },
+      horzLine: { color: isDark ? 'rgba(156, 163, 175, 0.4)' : 'rgba(75, 85, 99, 0.4)', width: 1 as const, style: 0 as const, labelBackgroundColor: isDark ? '#374151' : '#e5e7eb' },
     },
     leftPriceScale: {
       visible: showLeftScale,
-      borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+      borderVisible: false,
       minimumWidth: 60,
     },
     rightPriceScale: {
       visible: true,
-      borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+      borderVisible: false,
       minimumWidth: 72,
     },
     timeScale: {
       visible: !hideTimeScale,
-      borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+      borderVisible: false,
       timeVisible: !hideTimeScale,
       secondsVisible: false,
+      fixLeftEdge: true,
+      fixRightEdge: true,
+      shiftVisibleRangeOnNewBar: true,
     },
-    handleScroll: { mouseWheel: true, pressedMouseMove: true },
-    handleScale: { axisPressedMouseMove: true, mouseWheel: true },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+    handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+    kineticScroll: { touch: true, mouse: true },
   };
 }
 
@@ -680,6 +684,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       upColor: '#22c55e', downColor: '#ef4444',
       borderUpColor: '#22c55e', borderDownColor: '#ef4444',
       wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+      borderVisible: false,
       priceLineVisible: true, lastValueVisible: true,
       title: underlying || 'Underlying',
       priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
@@ -727,7 +732,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
               price: opt.strike,
               color: leg.color,
               lineWidth: 1,
-              lineStyle: 2, // Dashed
+              lineStyle: 3, // Dotted
               axisLabelVisible: true,
               title: `${opt.optionType || 'Leg'} ${opt.strike}`,
             });
@@ -743,6 +748,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       for (const leg of legMetasRef.current) {
         const s = chart.addSeries(LineSeries, {
           color: leg.color, lineWidth: 2, priceScaleId: 'left',
+          crosshairMarkerRadius: 4,
           title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
           priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
         });
@@ -773,7 +779,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     setChartEpoch(e => e + 1);
 
     const basketSeries = chart.addSeries(LineSeries, {
-      color: '#38bdf8', lineWidth: 3,
+      color: '#ffffff', lineWidth: 3,
+      crosshairMarkerRadius: 4,
       title: 'Total P&L', lastValueVisible: true, priceLineVisible: true,
       priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
     });
@@ -783,6 +790,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     for (const leg of legMetasRef.current) {
       const s = chart.addSeries(LineSeries, {
         color: leg.color, lineWidth: 2,
+        crosshairMarkerRadius: 4,
         title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
         priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
       });
@@ -1002,6 +1010,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (!seriesRef.current.legPrice.has(leg.refId)) {
           const s = priceChart.addSeries(LineSeries, {
             color: leg.color, lineWidth: 2, priceScaleId: 'left',
+            crosshairMarkerRadius: 4,
             title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
             priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
@@ -1027,6 +1036,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (!seriesRef.current.legPnl.has(leg.refId)) {
           const s = pnlChart.addSeries(LineSeries, {
             color: leg.color, lineWidth: 2,
+            crosshairMarkerRadius: 4,
             title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
             priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
@@ -1243,10 +1253,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       } catch (e) {}
     };
 
+    let rafId: number;
     const ro = new ResizeObserver(() => {
-      try {
-        syncAll();
-      } catch (e) {}
+      cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        try {
+          syncAll();
+        } catch (e) {}
+      });
     });
 
     if (priceChartContainerRef.current) ro.observe(priceChartContainerRef.current);
@@ -1263,6 +1277,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
     return () => {
       clearInterval(pollTimer);
+      cancelAnimationFrame(rafId);
       ro.disconnect();
     };
   }, [priceVisible, pnlVisible, greeksVisible, chartEpoch]);
@@ -1539,6 +1554,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         const key = `${src}_${k}`;
         const s = chart.addSeries(LineSeries, {
           color: GREEK_COLORS[k], lineWidth: Math.max(2, GREEK_LINE_WIDTHS[src]) as any, lineStyle: GREEK_LINE_STYLES[src],
+          crosshairMarkerRadius: 4,
           priceScaleId: k, title: src === 'net' ? k.charAt(0).toUpperCase() + k.slice(1) : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
           lastValueVisible: true, priceLineVisible: false, visible: false,
           priceFormat: { type: 'custom', minMove: 0.00001, formatter: (price: number) => {

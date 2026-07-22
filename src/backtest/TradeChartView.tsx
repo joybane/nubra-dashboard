@@ -63,17 +63,18 @@ function fmtInr(v: number): string {
 function chartOpts() {
   return {
     autoSize: true,
-    layout: { background: { color: '#0d0f11' }, textColor: '#c9d1d9', fontSize: 11, fontFamily: "'Inter', 'Segoe UI', sans-serif" },
-    grid: { vertLines: { color: '#1a1d21' }, horzLines: { color: '#1a1d21' } },
+    layout: { background: { color: '#0d0f11' }, textColor: '#9ca3af', fontSize: 12, fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, Roboto, sans-serif" },
+    grid: { vertLines: { color: 'rgba(255, 255, 255, 0.03)', style: 0 as const }, horzLines: { color: 'rgba(255, 255, 255, 0.03)', style: 0 as const } },
     crosshair: {
       mode: CrosshairMode.Normal,
-      vertLine: { color: '#4b5563', width: 1 as const, style: 0 as const, labelBackgroundColor: '#22262b' },
-      horzLine: { color: '#4b5563', width: 1 as const, style: 0 as const, labelBackgroundColor: '#2962ff' },
+      vertLine: { color: 'rgba(156, 163, 175, 0.4)', width: 1 as const, style: 0 as const, labelBackgroundColor: '#374151' },
+      horzLine: { color: 'rgba(156, 163, 175, 0.4)', width: 1 as const, style: 0 as const, labelBackgroundColor: '#374151' },
     },
-    rightPriceScale: { borderColor: '#2a2d32', minimumWidth: 64 },
-    timeScale: { borderColor: '#2a2d32', timeVisible: true, secondsVisible: false },
-    handleScroll: { mouseWheel: true, pressedMouseMove: true },
-    handleScale: { axisPressedMouseMove: true, mouseWheel: true },
+    rightPriceScale: { borderVisible: false, minimumWidth: 64 },
+    timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false, fixLeftEdge: true, fixRightEdge: true, shiftVisibleRangeOnNewBar: true },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+    handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+    kineticScroll: { touch: true, mouse: true },
   };
 }
 
@@ -234,6 +235,7 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
     const candle = pc.addSeries(CandlestickSeries, {
       upColor: '#22c55e', downColor: '#ef4444', borderUpColor: '#22c55e', borderDownColor: '#ef4444',
       wickUpColor: '#22c55e', wickDownColor: '#ef4444', title: underlying,
+      borderVisible: false,
       priceFormat: { type: 'price', precision: 0, minMove: 1 },
     });
     candle.setData(bars.under.map((b) => ({ time: b.time as Time, open: b.open, high: b.high, low: b.low, close: b.close })));
@@ -259,6 +261,7 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
       if (!lb) continue;
       const s = pc.addSeries(LineSeries, {
         color: lm.color, lineWidth: 1, priceScaleId: `lp-${lm.legId}`,
+        crosshairMarkerRadius: 4,
         title: lm.label, lastValueVisible: true, priceLineVisible: false,
         priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
       });
@@ -267,11 +270,11 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
 
     // P&L pane — per-leg + total (authoritative backtest series)
     for (const lm of legs) {
-      const s = nc.addSeries(LineSeries, { color: lm.color, lineWidth: 1, title: lm.label, lastValueVisible: true, priceLineVisible: false, priceFormat: { type: 'price', precision: 0, minMove: 1 } });
+      const s = nc.addSeries(LineSeries, { color: lm.color, lineWidth: 1, crosshairMarkerRadius: 4, title: lm.label, lastValueVisible: true, priceLineVisible: false, priceFormat: { type: 'price', precision: 0, minMove: 1 } });
       const legData = series.map((p) => { const lp = p.legs.find((x) => x.legId === lm.legId); return { time: toUnix(trade.date, p.hhmm) as Time, value: lp ? lp.pnl : NaN }; }).filter((d) => Number.isFinite(d.value as number));
       s.setData(pad(legData));
     }
-    const totalS = nc.addSeries(LineSeries, { color: '#ffffff', lineWidth: 3, title: 'Total P&L', lastValueVisible: true, priceLineVisible: true, priceFormat: { type: 'price', precision: 0, minMove: 1 } });
+    const totalS = nc.addSeries(LineSeries, { color: '#ffffff', lineWidth: 3, crosshairMarkerRadius: 4, title: 'Total P&L', lastValueVisible: true, priceLineVisible: true, priceFormat: { type: 'price', precision: 0, minMove: 1 } });
     const totalData = series.map((p) => ({ time: toUnix(trade.date, p.hhmm) as Time, value: p.total }));
     totalS.setData(pad(totalData));
     totalS.createPriceLine({ price: 0, color: '#2a2d42', lineWidth: 1, lineStyle: 0, axisLabelVisible: false, title: '' });
@@ -281,7 +284,7 @@ export default function TradeChartView({ trade, series, underlying }: { trade: D
     for (const [t, f] of frames) if (Number.isFinite(f.spot)) greekArr.push([t, f.greeks.delta, f.greeks.gamma, f.greeks.theta, f.greeks.vega]);
     greekArr.sort((a, b) => a[0] - b[0]);
     (['delta', 'gamma', 'theta', 'vega'] as const).forEach((gk, idx) => {
-      const s = gc.addSeries(LineSeries, { color: GREEK_COLORS[gk], lineWidth: 1, priceScaleId: `gk-${gk}`, title: gk, lastValueVisible: true, priceLineVisible: false });
+      const s = gc.addSeries(LineSeries, { color: GREEK_COLORS[gk], lineWidth: 1, crosshairMarkerRadius: 4, priceScaleId: `gk-${gk}`, title: gk, lastValueVisible: true, priceLineVisible: false });
       s.setData(pad(greekArr.map((r) => ({ time: r[0] as Time, value: r[idx + 1] }))));
     });
 

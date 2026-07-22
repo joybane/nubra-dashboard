@@ -19,8 +19,7 @@ export const PriceTooltip = memo(forwardRef<PriceTooltipRef, {}>((props, ref) =>
     setData: (timeStr, ohlc, legPrices, underlying) => setData({timeStr, ohlc, legPrices, underlying}),
     setPosition: (x, y) => {
       if (containerRef.current) {
-        containerRef.current.style.left = x + 'px';
-        containerRef.current.style.top = y + 'px';
+        containerRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
       }
     },
     setVisibility: (v) => setVisible(v)
@@ -29,7 +28,7 @@ export const PriceTooltip = memo(forwardRef<PriceTooltipRef, {}>((props, ref) =>
   const { timeStr, ohlc, legPrices, underlying } = data;
 
   return (
-    <div ref={containerRef} className="absolute z-50 pointer-events-none" style={{ display: visible && (ohlc || legPrices.length > 0) ? 'block' : 'none' }}>
+    <div ref={containerRef} className="absolute z-50 pointer-events-none top-0 left-0" style={{ display: visible && (ohlc || legPrices.length > 0) ? 'block' : 'none' }}>
       <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
         {timeStr && <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">{timeStr}</div>}
         {ohlc && (
@@ -70,8 +69,7 @@ export const PnlTooltip = memo(forwardRef<PnlTooltipRef, { strategyMargin: numbe
     setData: (timeStr, values) => setData({timeStr, values}),
     setPosition: (x, y) => {
       if (containerRef.current) {
-        containerRef.current.style.left = x + 'px';
-        containerRef.current.style.top = y + 'px';
+        containerRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
       }
     },
     setVisibility: (v) => setVisible(v)
@@ -80,7 +78,7 @@ export const PnlTooltip = memo(forwardRef<PnlTooltipRef, { strategyMargin: numbe
   const { timeStr, values } = data;
 
   return (
-    <div ref={containerRef} className="absolute z-50 pointer-events-none" style={{ display: visible && values ? 'block' : 'none' }}>
+    <div ref={containerRef} className="absolute z-50 pointer-events-none top-0 left-0" style={{ display: visible && values ? 'block' : 'none' }}>
       <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
         {timeStr && <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">{timeStr}</div>}
         {values && values.legs.map((l: any) => (
@@ -138,8 +136,7 @@ export const GreeksTooltip = memo(forwardRef<GreeksTooltipRef, { selectedGreeks:
     setData: (timeStr, values) => setData({timeStr, values}),
     setPosition: (x, y) => {
       if (containerRef.current) {
-        containerRef.current.style.left = x + 'px';
-        containerRef.current.style.top = y + 'px';
+        containerRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
       }
     },
     setVisibility: (v) => setVisible(v)
@@ -150,7 +147,7 @@ export const GreeksTooltip = memo(forwardRef<GreeksTooltipRef, { selectedGreeks:
 
   const show = visible && values && Object.keys(values).length > 0;
   return (
-    <div ref={containerRef} className="absolute z-50 pointer-events-none" style={{ display: show ? 'block' : 'none' }}>
+    <div ref={containerRef} className="absolute z-50 pointer-events-none top-0 left-0" style={{ display: show ? 'block' : 'none' }}>
       <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md">
         {timeStr && <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-2 font-mono tracking-wide">{timeStr}</div>}
         {values && (

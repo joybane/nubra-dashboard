@@ -76,24 +76,32 @@ function chartOpts(isDark: boolean) {
     devicePixelRatio: Math.max(window.devicePixelRatio, 2),
     layout: {
       background: { color: isDark ? '#0d0f11' : '#ffffff' },
-      textColor: isDark ? '#c9d1d9' : '#131722',
-      fontSize: 10,
-      fontFamily: "'Inter', 'Segoe UI', sans-serif",
+      textColor: isDark ? '#9ca3af' : '#4b5563',
+      fontSize: 12,
+      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, Roboto, sans-serif",
     },
     grid: {
-      vertLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-      horzLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
+      vertLines: { color: isDark ? 'rgba(255, 255, 255, 0.03)' : 'rgba(0, 0, 0, 0.03)', style: 0 as const },
+      horzLines: { color: isDark ? 'rgba(255, 255, 255, 0.03)' : 'rgba(0, 0, 0, 0.03)', style: 0 as const },
     },
     crosshair: {
       mode: CrosshairMode.Normal,
-      vertLine: { color: '#4b5563', width: 1 as const, style: 0 as const, labelBackgroundColor: isDark ? '#22262b' : '#e8ecf5' },
-      horzLine: { color: '#4b5563', width: 1 as const, style: 0 as const, labelBackgroundColor: '#2962ff' },
+      vertLine: { color: isDark ? 'rgba(156, 163, 175, 0.4)' : 'rgba(75, 85, 99, 0.4)', width: 1 as const, style: 0 as const, labelBackgroundColor: isDark ? '#374151' : '#e5e7eb' },
+      horzLine: { color: isDark ? 'rgba(156, 163, 175, 0.4)' : 'rgba(75, 85, 99, 0.4)', width: 1 as const, style: 0 as const, labelBackgroundColor: isDark ? '#374151' : '#e5e7eb' },
     },
-    leftPriceScale: { visible: true, borderColor: isDark ? '#2a2d32' : '#e0e3eb', minimumWidth: 72 },
-    rightPriceScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', minimumWidth: 72 },
-    timeScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', timeVisible: true, secondsVisible: false },
-    handleScroll: { mouseWheel: true, pressedMouseMove: true },
-    handleScale: { axisPressedMouseMove: true, mouseWheel: true },
+    leftPriceScale: { visible: true, borderVisible: false, minimumWidth: 72 },
+    rightPriceScale: { borderVisible: false, minimumWidth: 72 },
+    timeScale: {
+      borderVisible: false,
+      timeVisible: true,
+      secondsVisible: false,
+      fixLeftEdge: true,
+      fixRightEdge: true,
+      shiftVisibleRangeOnNewBar: true,
+    },
+    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+    handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+    kineticScroll: { touch: true, mouse: true },
   };
 }
 
@@ -289,7 +297,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const [hiddenLegPnls, setHiddenLegPnls] = useState<Set<string>>(() => new Set());
 
   // Greeks options
-  const [greeksMode, setGreeksMode] = useState<'unit' | 'lot'>('lot');
+  const [greeksMode, setGreeksMode] = useState<'unit' | 'lot'>('unit');
   const [selectedGreeks, setSelectedGreeks] = useState<Set<string>>(() => new Set(['delta', 'gamma', 'theta', 'vega']));
   const [greeksLegFilter, setGreeksLegFilter] = useState<Set<string>>(() => new Set(['net'])); // 'net', 'CE', 'PE'
   const [greeksExpanded, setGreeksExpanded] = useState(false);
@@ -303,6 +311,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
   // Lot Size State
   const [lotSize, setLotSize] = useState(65);
+  const [editingLotSize, setEditingLotSize] = useState(false);
 
   // Sync lot default value when underlying or instrument changes
   useEffect(() => {
@@ -652,6 +661,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
         priceScaleId: 'left',
         color: '#2962ff',
         lineWidth: 2,
+        crosshairMarkerRadius: 4,
         priceLineVisible: true,
         lastValueVisible: true,
         visible: showSpotPrice,
@@ -672,6 +682,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
           const s = priceChart!.addSeries(LineSeries, {
             priceScaleId: 'right',
             color, lineWidth: 1,
+            crosshairMarkerRadius: 4,
             title: `${leg.side === 'BUY' ? 'B' : 'S'} ${leg.strike} ${leg.optionType}`,
             lastValueVisible: true, priceLineVisible: false,
             visible: !hiddenLegPrices.has(ld.legIndex.toString()),
@@ -700,6 +711,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
       // Total Basket P&L (White line, width 3)
       basketSeries = pnlChart.addSeries(LineSeries, {
         color: '#ffffff', lineWidth: 3,
+        crosshairMarkerRadius: 4,
         title: 'Total P&L', lastValueVisible: true, priceLineVisible: true,
         visible: showTotalPnl,
       });
@@ -715,6 +727,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
           const color = leg.optionType === 'CE' ? '#22c55e' : '#ef4444';
           const s = pnlChart!.addSeries(LineSeries, {
             color, lineWidth: 1,
+            crosshairMarkerRadius: 4,
             title: `${leg.side === 'BUY' ? 'B' : 'S'} ${leg.strike} ${leg.optionType}`,
             lastValueVisible: true, priceLineVisible: false,
             visible: !hiddenLegPnls.has(ld.legIndex.toString()),
@@ -752,6 +765,7 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
             color: gColors[k],
             lineWidth: gLineWidths[src],
             lineStyle: gLineStyles[src],
+            crosshairMarkerRadius: 4,
             priceScaleId: k,
             title: src === 'net' ? k.charAt(0).toUpperCase() + k.slice(1) : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
             lastValueVisible: true,
@@ -1562,8 +1576,16 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
                       </div>
                       {greeksMode === 'lot' && (
                         <div className="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
-                          <span>Lot Size:</span>
-                          <span className="text-[var(--text-primary)] font-semibold">{lotSize}</span>
+                          <span>Lot:</span>
+                          {editingLotSize ? (
+                            <input type="number" autoFocus defaultValue={lotSize}
+                              className="w-12 bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1 py-0 text-[10px] text-[var(--text-primary)] outline-none focus:border-[#a78bfa]"
+                              onBlur={(e) => { const v = parseInt(e.target.value); if (v > 0) setLotSize(v); setEditingLotSize(false); }}
+                              onKeyDown={(e) => { if (e.key === 'Enter') { const v = parseInt((e.target as HTMLInputElement).value); if (v > 0) setLotSize(v); setEditingLotSize(false); } if (e.key === 'Escape') setEditingLotSize(false); }}
+                            />
+                          ) : (
+                            <button onClick={() => setEditingLotSize(true)} className="text-[var(--text-primary)] hover:text-[#a78bfa] transition-colors underline decoration-dotted font-semibold">{lotSize}</button>
+                          )}
                         </div>
                       )}
                     </div>
