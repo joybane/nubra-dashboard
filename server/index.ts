@@ -1685,7 +1685,7 @@ function buildV3MarginOrders(orders: BasketMarginBody['orders']): Array<Record<s
       side: v3Side(o.order_side),
       deliveryType: v3Delivery(o.order_delivery_type),
       priceType: o.order_price ? 'LIMIT' : 'MARKET',
-      validityType: 'DAY',
+      validityType: 'IOC',
       isMultiLeg: false,
       executionMode: 'ENTRY',
       entryPrice: o.order_price ?? 0,
