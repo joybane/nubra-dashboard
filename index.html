@@ -7,6 +7,16 @@
   <script>document.documentElement.setAttribute('data-theme', localStorage.getItem('nubra-theme') || 'dark');</script>
   <script>
     window.onerror = function(message, source, lineno, colno, error) {
+      // lightweight-charts tears down a chart's canvas synchronously on unmount, but the
+      // browser's own ResizeObserver/paint scheduling can already have a repaint queued for
+      // that canvas. When it fires a tick later, the library throws "Object is disposed" from
+      // its internal paint loop — asynchronously, outside any of our try/catch blocks, so it
+      // can't be caught at the call site. It's a known upstream race (autoSize + frequent
+      // React-driven remounts), it doesn't corrupt chart state, and it's the only error this
+      // banner should ignore — everything else still surfaces normally.
+      if (typeof message === 'string' && message.indexOf('Object is disposed') !== -1 && source && source.indexOf('/charts-') !== -1) {
+        return true;
+      }
       const div = document.createElement('div');
       div.style.position = 'fixed';
       div.style.top = '0';

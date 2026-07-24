@@ -6,7 +6,7 @@ function fmtPrice(p: number) {
 
 export interface PriceTooltipRef {
   setData: (timeStr: string, ohlc: any, legPrices: any[], underlying: string) => void;
-  setPosition: (x: number, y: number) => void;
+  setPosition: (x: number, y: number, alignLeft?: boolean) => void;
   setVisibility: (visible: boolean) => void;
 }
 
@@ -17,9 +17,13 @@ export const PriceTooltip = memo(forwardRef<PriceTooltipRef, {}>((props, ref) =>
 
   useImperativeHandle(ref, () => ({
     setData: (timeStr, ohlc, legPrices, underlying) => setData({timeStr, ohlc, legPrices, underlying}),
-    setPosition: (x, y) => {
+    setPosition: (x, y, alignLeft?: boolean) => {
       if (containerRef.current) {
-        containerRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        if (alignLeft) {
+          containerRef.current.style.transform = `translate3d(calc(${x}px - 100%), ${y}px, 0)`;
+        } else {
+          containerRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        }
       }
     },
     setVisibility: (v) => setVisible(v)
@@ -56,7 +60,7 @@ export const PriceTooltip = memo(forwardRef<PriceTooltipRef, {}>((props, ref) =>
 
 export interface PnlTooltipRef {
   setData: (timeStr: string, values: { legs: any[], total: number } | null) => void;
-  setPosition: (x: number, y: number) => void;
+  setPosition: (x: number, y: number, alignLeft?: boolean) => void;
   setVisibility: (visible: boolean) => void;
 }
 
@@ -67,9 +71,13 @@ export const PnlTooltip = memo(forwardRef<PnlTooltipRef, { strategyMargin: numbe
 
   useImperativeHandle(ref, () => ({
     setData: (timeStr, values) => setData({timeStr, values}),
-    setPosition: (x, y) => {
+    setPosition: (x, y, alignLeft?: boolean) => {
       if (containerRef.current) {
-        containerRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        if (alignLeft) {
+          containerRef.current.style.transform = `translate3d(calc(${x}px - 100%), ${y}px, 0)`;
+        } else {
+          containerRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        }
       }
     },
     setVisibility: (v) => setVisible(v)
@@ -123,7 +131,7 @@ export const PnlTooltip = memo(forwardRef<PnlTooltipRef, { strategyMargin: numbe
 
 export interface GreeksTooltipRef {
   setData: (timeStr: string, values: Record<string, any> | null) => void;
-  setPosition: (x: number, y: number) => void;
+  setPosition: (x: number, y: number, alignLeft?: boolean) => void;
   setVisibility: (visible: boolean) => void;
 }
 
@@ -134,9 +142,13 @@ export const GreeksTooltip = memo(forwardRef<GreeksTooltipRef, { selectedGreeks:
 
   useImperativeHandle(ref, () => ({
     setData: (timeStr, values) => setData({timeStr, values}),
-    setPosition: (x, y) => {
+    setPosition: (x, y, alignLeft?: boolean) => {
       if (containerRef.current) {
-        containerRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        if (alignLeft) {
+          containerRef.current.style.transform = `translate3d(calc(${x}px - 100%), ${y}px, 0)`;
+        } else {
+          containerRef.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+        }
       }
     },
     setVisibility: (v) => setVisible(v)

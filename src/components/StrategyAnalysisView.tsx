@@ -142,7 +142,7 @@ function fillGreeksToGrid(
   return result;
 }
 
-function safeSetVisibleTimeRange(chart: IChartApi | null | undefined, range: any): void {
+function safeSetVisibleLogicalRange(chart: IChartApi | null | undefined, range: any): void {
   if (!chart || !range) return;
   try {
     chart.timeScale().setVisibleLogicalRange(range);
@@ -305,13 +305,15 @@ function chartOpts(isDark: boolean, hideTimeScale: boolean = false, showLeftScal
       horzLine: { color: isDark ? '#3b82f6' : '#2563eb', width: 1 as const, style: 2 as const, labelBackgroundColor: '#2563eb' },
     },
     leftPriceScale: {
-        visible: showLeftScale,
-        borderColor: isDark ? '#2a2d32' : '#e0e3eb',
-      },
+      visible: showLeftScale,
+      borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+      minimumWidth: 60,
+    },
     rightPriceScale: {
       visible: true,
       borderColor: isDark ? '#2a2d32' : '#e0e3eb',
-      },
+      minimumWidth: 75,
+    },
     timeScale: {
       visible: !hideTimeScale,
       borderColor: isDark ? '#2a2d32' : '#e0e3eb',
@@ -322,6 +324,7 @@ function chartOpts(isDark: boolean, hideTimeScale: boolean = false, showLeftScal
     handleScale: { axisPressedMouseMove: true, mouseWheel: true },
   };
 }
+
 // ─── Cached chart data (survives chart recreation on toggle/theme change) ────
 interface ChartDataCache {
   underlyingBars: HistBar[];
@@ -359,8 +362,7 @@ function istDateFromNs(ns: number): string {
 
 const GREEK_COLORS: Record<string, string> = { delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' };
 
-
-// Min-max normalization factor: maps a series' [min,max] to [-1,1]. True value = plotted � half + mid.
+// Min-max normalization factor: maps a series' [min,max] to [-1,1]. True value = plotted × half + mid.
 function minMaxFactor(values: number[]): { mid: number; half: number } {
   let min = Infinity, max = -Infinity;
   for (const v of values) { if (v < min) min = v; if (v > max) max = v; }
@@ -371,31 +373,10 @@ function minMaxFactor(values: number[]): { mid: number; half: number } {
 import { PriceTooltip, PnlTooltip, GreeksTooltip, PriceTooltipRef, PnlTooltipRef, GreeksTooltipRef } from './ChartTooltips';
 
 export default function StrategyAnalysisView({ basketGroupId, strategyName, theme, onBack, snapshotId }: StrategyAnalysisViewProps) {
-  // Suppress lightweight-charts "Object is disposed" rogue animation frame errors
-  useEffect(() => {
-    const handler = (e: ErrorEvent) => {
-      if (e.message && e.message.includes('Object is disposed')) {
-        e.preventDefault(); // Stop the error from crashing the UI / showing overlay
-        e.stopPropagation();
-      }
-    };
-    const unhandledHandler = (e: PromiseRejectionEvent) => {
-      if (e.reason && e.reason.message && e.reason.message.includes('Object is disposed')) {
-        e.preventDefault();
-      }
-    };
-    window.addEventListener('error', handler, true);
-    window.addEventListener('unhandledrejection', unhandledHandler, true);
-    return () => {
-      window.removeEventListener('error', handler, true);
-      window.removeEventListener('unhandledrejection', unhandledHandler, true);
-    };
-  }, []);
-
   const { subscribe, subscribeChart, unsubscribeChart, subscribeOC, unsubscribeOC } = useWs();
   const isSnapshot = !!snapshotId;
 
-  // -- Position / order state --
+  // ── Position / order state ──
   const [positions, setPositions] = useState<PaperPosition[]>([]);
   const [closedPositions, setClosedPositions] = useState<PaperPosition[]>([]);
   const [orders, setOrders] = useState<PaperOrder[]>([]);
@@ -408,6 +389,11 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const chartsWrapperRef = useRef<HTMLDivElement>(null);
   const priceChartRef = useRef<IChartApi | null>(null);
   const pnlChartRef = useRef<IChartApi | null>(null);
+  // Tracks which pane the OS cursor is actually over. Live data updates (series.update())
+  // make lightweight-charts internally re-fire crosshairMove on any pane holding a saved
+  // crosshair position (including the synthetic one we push onto the other two panes) —
+  // this ref lets onCrosshairMove tell a real hover from that spurious self-echo.
+  const hoveredChartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<{
     underlying: ISeriesApi<'Candlestick'> | null;
     legPrice: Map<number, ISeriesApi<'Line'>>;
@@ -731,35 +717,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     } as Partial<CandlestickSeriesOptions>);
     seriesRef.current.underlying = candleSeries;
 
-    // Crosshair '+' tooltip state
-    chart.subscribeCrosshairMove((param) => {
-      if (param.point) {
-        if (priceTooltipRef.current) {
-          const w = priceChartContainerRef.current?.clientWidth ?? 800;
-          const h = priceChartContainerRef.current?.clientHeight ?? 400;
-          priceTooltipRef.current.setPosition(param.point.x > w * 0.6 ? param.point.x - 230 : param.point.x + 20, Math.max(20, Math.min(param.point.y - 30, h - 140)));
-        }
-        priceTooltipRef.current?.setVisibility(true);
-      } else {
-        priceTooltipRef.current?.setVisibility(false);
-      }
-      if (!param.seriesData) return;
-      const bar = param.seriesData.get(candleSeries) as any;
-      let newOhlc = null;
-      if (bar) {
-        if (bar.open != null) newOhlc = { o: bar.open, h: bar.high, l: bar.low, c: bar.close };
-        else if (bar.value != null) newOhlc = { o: bar.value, h: bar.value, l: bar.value, c: bar.value };
-      }
-      const legs: Array<{ name: string; color: string; value: number }> = [];
-      for (const [refId, s] of seriesRef.current.legPrice) {
-        const d = param.seriesData.get(s) as any;
-        if (d?.value != null) {
-          const meta = legMetasRef.current.find(l => l.refId === refId);
-          if (meta) legs.push({ name: meta.displayName, color: meta.color, value: d.value });
-        }
-      }
-      priceTooltipRef.current?.setData(param.time ? fmtChartTime(param.time as number) : '', newOhlc, legs, underlying || '');
-    });
+    // Crosshair '+' tooltip is driven centrally by the crosshair-sync effect (section 4).
 
     // Draw horizontal strike price lines on NIFTY candlestick chart
     for (const leg of legMetasRef.current) {
@@ -797,14 +755,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
       try { chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } }); } catch {}
       try { chart.priceScale('left').applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } }); } catch {}
-      requestAnimationFrame(() => { try { chart.timeScale().fitContent(); } catch (e) {} });
+      requestAnimationFrame(() => chart.timeScale().fitContent());
     }
 
     return () => {
       seriesRef.current.underlying = null;
       seriesRef.current.legPrice.clear();
       priceChartRef.current = null;
-      try { chart.remove(); } catch (e) { console.error("chart.remove failed:", e); }
+      try { chart.remove(); } catch {}
       setChartEpoch(e => e + 1);
     };
   }, [theme, underlying, priceVisible]);
@@ -842,34 +800,16 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(data);
       }
       if (cached.basketPnlData.length > 0) basketSeries.setData(cached.basketPnlData);
-      requestAnimationFrame(() => { try { chart.timeScale().fitContent(); } catch (e) {} });
+      requestAnimationFrame(() => chart.timeScale().fitContent());
     }
 
-    // Crosshair '+' tooltip state
-    chart.subscribeCrosshairMove((param) => {
-      if (param.point) {
-        pnlTooltipRef.current?.setVisibility(true);
-      } else {
-        pnlTooltipRef.current?.setVisibility(false);
-      }
-      const basketD = param.seriesData?.get(basketSeries) as any;
-      const total = basketD?.value ?? 0;
-      const legs: Array<{ name: string; color: string; value: number }> = [];
-      for (const [refId, s] of seriesRef.current.legPnl) {
-        const d = param.seriesData?.get(s) as any;
-        if (d?.value != null) {
-          const meta = legMetasRef.current.find(l => l.refId === refId);
-          if (meta) legs.push({ name: meta.displayName, color: meta.color, value: d.value });
-        }
-      }
-      pnlTooltipRef.current?.setData(param.time ? fmtChartTime(param.time as number) : '', { legs, total });
-    });
+    // Crosshair '+' tooltip is driven centrally by the crosshair-sync effect (section 4).
 
     return () => {
       seriesRef.current.legPnl.clear();
       seriesRef.current.basketPnl = null;
       pnlChartRef.current = null;
-      try { chart.remove(); } catch (e) { console.error("chart.remove failed:", e); }
+      try { chart.remove(); } catch {}
       setChartEpoch(e => e + 1);
     };
   }, [theme, pnlVisible]);
@@ -1048,7 +988,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       for (const leg of legMetasRef.current) {
         if (!seriesRef.current.legPrice.has(leg.refId)) {
           const s = priceChart.addSeries(LineSeries, {
-              color: leg.color, lineWidth: 2, priceScaleId: 'left',
+            color: leg.color, lineWidth: 2, priceScaleId: 'left',
             title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
             priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
@@ -1063,7 +1003,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (savedRange) {
         try { priceChart.timeScale().setVisibleLogicalRange(savedRange); } catch {}
       } else if (!hasInitialFittedRef.current) {
-        requestAnimationFrame(() => { try { priceChart.timeScale().fitContent(); } catch (e) {} });
+        requestAnimationFrame(() => priceChart.timeScale().fitContent());
       }
     }
 
@@ -1091,7 +1031,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (pc) {
         try {
           const r = pc.timeScale().getVisibleLogicalRange();
-          if (r) safeSetVisibleTimeRange(pnlChartRef.current, r);
+          if (r) safeSetVisibleLogicalRange(pnlChartRef.current, r);
         } catch (e) {}
       }
     }
@@ -1103,7 +1043,27 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     const nc = pnlChartRef.current;
     const gc = greeksChartRef.current;
     const charts = [pc, nc, gc].filter(Boolean) as IChartApi[];
-    if (charts.length < 2) return;
+    if (charts.length === 0) return;
+
+    // Native hover tracking (see hoveredChartRef declaration) — independent of the
+    // library's own event stream, which can misreport the active pane during live updates.
+    const hoverTargets: Array<[HTMLDivElement | null, IChartApi]> = [
+      [priceChartContainerRef.current, pc as IChartApi],
+      [pnlChartContainerRef.current, nc as IChartApi],
+      [greeksChartContainerRef.current, gc as IChartApi],
+    ];
+    const hoverCleanups: Array<() => void> = [];
+    for (const [el, chart] of hoverTargets) {
+      if (!el || !chart) continue;
+      const onEnter = () => { hoveredChartRef.current = chart; };
+      const onLeave = () => { if (hoveredChartRef.current === chart) hoveredChartRef.current = null; };
+      el.addEventListener('mouseenter', onEnter);
+      el.addEventListener('mouseleave', onLeave);
+      hoverCleanups.push(() => {
+        el.removeEventListener('mouseenter', onEnter);
+        el.removeEventListener('mouseleave', onLeave);
+      });
+    }
 
     const master = pc || charts[0];
     if (master) {
@@ -1111,7 +1071,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         const masterRange = master.timeScale().getVisibleLogicalRange();
         if (masterRange) {
           for (const c of charts) {
-            if (c !== master) safeSetVisibleTimeRange(c, masterRange);
+            if (c !== master) safeSetVisibleLogicalRange(c, masterRange);
           }
         }
       } catch (e) {}
@@ -1126,7 +1086,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         isSyncingRange = true;
         try {
           for (const target of charts) {
-            if (target !== c) safeSetVisibleTimeRange(target, range);
+            if (target !== c) safeSetVisibleLogicalRange(target, range);
           }
         } catch (e) {} finally {
           isSyncingRange = false;
@@ -1138,134 +1098,147 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       } catch (e) {}
     }
 
-    let syncingCrosshair = false;
+    // Single-owner crosshair sync (mirrors NubraBacktest): the hovered pane drives all
+    // three tooltips (data + position + visibility) and pushes the crosshair onto the
+    // other panes with real in-range values. No shared re-entrancy flag — programmatic
+    // crosshair echoes are recognised by the (point === undefined, time !== undefined) branch.
+    const findLatest = <T extends { time: any }>(arr: T[] | undefined, targetTime: number): T | undefined => {
+      if (!arr || arr.length === 0) return undefined;
+      let l = 0, r = arr.length - 1;
+      let res: T | undefined = undefined;
+      while (l <= r) {
+        const m = (l + r) >> 1;
+        const time = arr[m].time as number;
+        if (time <= targetTime) { res = arr[m]; l = m + 1; } else { r = m - 1; }
+      }
+      return res;
+    };
+
+    const activeGreekSeries = (): ISeriesApi<any> | null => {
+      const g = greeksSeriesRef.current;
+      if (g['net_delta']) return g['net_delta'];
+      const k = Object.keys(g).find(kk => g[kk]);
+      return k ? g[k] : null;
+    };
+
+    // Places a tooltip so it is never under the cursor: offset horizontally by GAP,
+    // flipping to the left of the cursor once past the pane's horizontal midpoint.
+    // lightweight-charts reports crosshair x relative to the PLOT area, excluding any
+    // visible left price scale — but the tooltip is positioned relative to the whole
+    // pane div (which includes that left-scale gutter), so we fold the scale's actual
+    // rendered width back in before doing the midpoint/flip math.
+    const GAP = 24;
+    const place = (
+      tip: PriceTooltipRef | PnlTooltipRef | GreeksTooltipRef | null,
+      chart: IChartApi | null, containerW: number, containerH: number, x: number, activeY: number | null, isActive: boolean,
+    ) => {
+      if (!tip) return;
+      let xAdj = x;
+      try { xAdj = x + (chart?.priceScale('left').width() ?? 0); } catch {}
+      const alignLeft = xAdj > containerW * 0.5;
+      const y = isActive ? Math.max(8, Math.min((activeY ?? 40) - 80, containerH - 100)) : 8;
+      tip.setPosition(alignLeft ? xAdj - GAP : xAdj + GAP, y, alignLeft);
+      tip.setVisibility(true);
+    };
+
+    const updateAllTooltips = (t: number | null, x: number | null, activeY: number | null, activeChart: IChartApi | null) => {
+      if (t == null || x == null) {
+        priceTooltipRef.current?.setVisibility(false);
+        pnlTooltipRef.current?.setVisibility(false);
+        greeksTooltipRef.current?.setVisibility(false);
+        return null;
+      }
+      const cd = chartDataRef.current;
+      const tStr = fmtChartTime(t);
+      let spot = 0, totalPnl = 0, greekNorm = 0;
+
+      if (pc) {
+        let newOhlc = null;
+        const legs: Array<{ name: string; color: string; value: number }> = [];
+        if (cd) {
+          const b = findLatest(cd.underlyingBars, t);
+          if (b) { spot = b.close; newOhlc = { o: b.open, h: b.high, l: b.low, c: b.close }; }
+          for (const leg of legMetasRef.current) {
+            const d = findLatest(cd.legPriceData.get(leg.refId), t);
+            if (d) legs.push({ name: leg.displayName, color: leg.color, value: d.value });
+          }
+        }
+        priceTooltipRef.current?.setData(tStr, newOhlc, legs, underlying || '');
+        place(priceTooltipRef.current, pc, priceChartContainerRef.current?.clientWidth ?? 800, priceChartContainerRef.current?.clientHeight ?? 400, x, activeY, activeChart === pc);
+      }
+
+      if (nc) {
+        const legs: Array<{ name: string; color: string; value: number }> = [];
+        if (cd) {
+          const p = findLatest(cd.basketPnlData, t);
+          if (p) totalPnl = p.value;
+          for (const leg of legMetasRef.current) {
+            const d = findLatest(cd.legPnlData.get(leg.refId), t);
+            if (d) legs.push({ name: leg.displayName, color: leg.color, value: d.value });
+          }
+        }
+        pnlTooltipRef.current?.setData(tStr, { legs, total: totalPnl });
+        place(pnlTooltipRef.current, nc, pnlChartContainerRef.current?.clientWidth ?? 800, pnlChartContainerRef.current?.clientHeight ?? 400, x, activeY, activeChart === nc);
+      }
+
+      if (gc) {
+        const tv: Record<string, Record<string, number>> = {};
+        for (const src of ['net', 'CE', 'PE'] as const) tv[src] = { delta: 0, gamma: 0, theta: 0, vega: 0 };
+        if (cd) {
+          for (const leg of legMetasRef.current) {
+            const pt = findLatest(cd.legGreeksHist.get(leg.refId), t);
+            if (!pt) continue;
+            const mult = lotSizeOverride || 1;
+            const pos = allPositionsRef.current.find(p => p.ref_id === leg.refId);
+            const side = pos ? (pos.order_side?.includes('BUY') ? 1 : -1) : 0;
+            const qty = pos ? (pos.qty || 0) : 0;
+            const weight = greeksMode === 'lot' ? qty : side * mult;
+            const src = positionGreekSource(pos || {} as any);
+            tv.net.delta += pt.delta * weight; tv.net.gamma += pt.gamma * weight;
+            tv.net.theta += pt.theta * weight; tv.net.vega += pt.vega * weight;
+            if (src) {
+              tv[src].delta += pt.delta * weight; tv[src].gamma += pt.gamma * weight;
+              tv[src].theta += pt.theta * weight; tv[src].vega += pt.vega * weight;
+            }
+          }
+        }
+        greeksTooltipRef.current?.setData(tStr, tv);
+        const f = greekFactorsRef.current['delta'] || { mid: 0, half: 1 };
+        greekNorm = f.half ? (tv.net.delta - f.mid) / f.half : 0;
+        place(greeksTooltipRef.current, gc, greeksChartContainerRef.current?.clientWidth ?? 800, greeksChartContainerRef.current?.clientHeight ?? 400, x, activeY, activeChart === gc);
+      }
+
+      return { spot, totalPnl, greekNorm };
+    };
+
     for (const sourceChart of charts) {
       const onCrosshairMove = (param: any) => {
-        if (syncingCrosshair) return;
-        syncingCrosshair = true;
-        try {
-          if (!param.point || param.time == null) {
-            priceTooltipRef.current?.setVisibility(false);
-            pnlTooltipRef.current?.setVisibility(false);
-            greeksTooltipRef.current?.setVisibility(false);
-            for (const c of charts) {
-              if (c !== sourceChart) {
-                try { c.clearCrosshairPosition(); } catch {}
-              }
-            }
-            return;
-          }
-
+        if (param.point && param.time != null) {
+          // Live data updates (series.update()) make lightweight-charts internally
+          // re-fire crosshairMove on whichever pane last held a crosshair position —
+          // including panes we only positioned synthetically via setCrosshairPosition.
+          // Ignore any such event that didn't originate from the pane the cursor is
+          // actually over, or tooltips jitter/relocate on every tick with no mouse motion.
+          if (sourceChart !== hoveredChartRef.current) return;
           const t = param.time as number;
-          const xPos = param.point.x;
-          const tStr = fmtChartTime(t);
-
-          if (pc) {
-            priceTooltipRef.current?.setVisibility(true);
-            if (priceTooltipRef.current) {
-              const w = priceChartContainerRef.current?.clientWidth ?? 800;
-              priceTooltipRef.current.setPosition(xPos > w * 0.6 ? xPos - 230 : xPos + 20, 20);
-            }
-          }
-          if (nc) {
-            pnlTooltipRef.current?.setVisibility(true);
-            if (pnlTooltipRef.current) {
-              const w = pnlChartContainerRef.current?.clientWidth ?? 800;
-              pnlTooltipRef.current.setPosition(xPos > w * 0.6 ? xPos - 230 : xPos + 20, 8);
-            }
-          }
-          if (gc) {
-            greeksTooltipRef.current?.setVisibility(true);
-            if (greeksTooltipRef.current) {
-              const w = greeksChartContainerRef.current?.clientWidth ?? 800;
-              greeksTooltipRef.current.setPosition(xPos > w * 0.6 ? xPos - 210 : xPos + 20, 8);
-            }
-          }
-
-          for (const c of charts) {
-            if (c !== sourceChart) {
+          const res = updateAllTooltips(t, param.point.x, param.point.y, sourceChart);
+          if (res) {
+            for (const c of charts) {
+              if (c === sourceChart) continue;
               try {
-                let s: ISeriesApi<any> | null = null;
-                let val = 0;
-                const cd = chartDataRef.current;
-                const findLatest = <T extends { time: any }>(arr: T[] | undefined, targetTime: number): T | undefined => {
-                  if (!arr || arr.length === 0) return undefined;
-                  let l = 0, r = arr.length - 1;
-                  let res: T | undefined = undefined;
-                  while (l <= r) {
-                    const m = (l + r) >> 1;
-                    const time = arr[m].time as number;
-                    if (time <= targetTime) {
-                      res = arr[m];
-                      l = m + 1;
-                    } else {
-                      r = m - 1;
-                    }
-                  }
-                  return res;
-                };
-                if (c === pc) {
-                  s = seriesRef.current.underlying;
-                  if (cd) {
-                    let newOhlc = null;
-                    const b = findLatest(cd.underlyingBars, t);
-                    if (b) {
-                      val = b.close;
-                      newOhlc = { o: b.open, h: b.high, l: b.low, c: b.close };
-                    }
-                    const legs: Array<{ name: string; color: string; value: number }> = [];
-                    for (const leg of legMetasRef.current) {
-                      const d = findLatest(cd.legPriceData.get(leg.refId), t);
-                      if (d) legs.push({ name: leg.displayName, color: leg.color, value: d.value });
-                    }
-                    priceTooltipRef.current?.setData(tStr, newOhlc, legs, underlying || '');
-                  }
-                } else if (c === nc) {
-                  s = seriesRef.current.basketPnl;
-                  if (cd) {
-                    const p = findLatest(cd.basketPnlData, t);
-                    if (p) val = p.value;
-                    const legs: Array<{ name: string; color: string; value: number }> = [];
-                    for (const leg of legMetasRef.current) {
-                      const d = findLatest(cd.legPnlData.get(leg.refId), t);
-                      if (d) legs.push({ name: leg.displayName, color: leg.color, value: d.value });
-                    }
-                    pnlTooltipRef.current?.setData(tStr, { legs, total: val });
-                  }
-                } else if (c === gc) {
-                  const firstKey = Object.keys(greeksSeriesRef.current).find(k => greeksSeriesRef.current[k]);
-                  if (firstKey) s = greeksSeriesRef.current[firstKey];
-                  if (cd) {
-                    const tv: Record<string, Record<string, number>> = {};
-                    for (const src of ['net', 'CE', 'PE'] as const) {
-                      tv[src] = { delta: 0, gamma: 0, theta: 0, vega: 0 };
-                    }
-                    for (const leg of legMetasRef.current) {
-                      const pts = cd.legGreeksHist.get(leg.refId);
-                      const pt = findLatest(pts, t);
-                      if (!pt) continue;
-                      const mult = lotSizeOverride || 1;
-                      const pos = allPositionsRef.current.find(p => p.ref_id === leg.refId);
-                      const side = pos ? (pos.order_side?.includes('BUY') ? 1 : -1) : 0;
-                      const qty = pos ? (pos.qty || 0) : 0;
-                      const weight = greeksMode === 'lot' ? qty : side * mult;
-                      const src = positionGreekSource(pos || {} as any);
-                      tv.net.delta += pt.delta * weight; tv.net.gamma += pt.gamma * weight;
-                      tv.net.theta += pt.theta * weight; tv.net.vega += pt.vega * weight;
-                      if (src) {
-                        tv[src].delta += pt.delta * weight; tv[src].gamma += pt.gamma * weight;
-                        tv[src].theta += pt.theta * weight; tv[src].vega += pt.vega * weight;
-                      }
-                    }
-                    greeksTooltipRef.current?.setData(tStr, tv);
-                  }
-                }
-                if (s) c.setCrosshairPosition(val, t as any, s);
+                if (c === pc && seriesRef.current.underlying) c.setCrosshairPosition(res.spot, t as any, seriesRef.current.underlying);
+                else if (c === nc && seriesRef.current.basketPnl) c.setCrosshairPosition(res.totalPnl, t as any, seriesRef.current.basketPnl);
+                else if (c === gc) { const gs = activeGreekSeries(); if (gs) c.setCrosshairPosition(res.greekNorm, t as any, gs); }
               } catch {}
             }
           }
-        } finally {
-          syncingCrosshair = false;
+        } else if (param.point === undefined && param.time !== undefined) {
+          // Programmatic crosshair echo from setCrosshairPosition — ignore.
+        } else {
+          updateAllTooltips(null, null, null, null);
+          for (const c of charts) {
+            if (c !== sourceChart) { try { c.clearCrosshairPosition(); } catch {} }
+          }
         }
       };
 
@@ -1275,7 +1248,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       } catch (e) {}
     }
 
-    return () => unsubs.forEach(u => u());
+    return () => { unsubs.forEach(u => u()); hoverCleanups.forEach(u => u()); hoveredChartRef.current = null; };
   }, [priceVisible, pnlVisible, greeksVisible, chartEpoch]);
 
   // ── 5. Resize observer & persistent layout range sync ──
@@ -1286,8 +1259,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (!pc) return;
         const r = pc.timeScale().getVisibleLogicalRange();
         if (!r) return;
-        safeSetVisibleTimeRange(pnlChartRef.current, r);
-        safeSetVisibleTimeRange(greeksChartRef.current, r);
+        safeSetVisibleLogicalRange(pnlChartRef.current, r);
+        safeSetVisibleLogicalRange(greeksChartRef.current, r);
       } catch (e) {}
     };
 
@@ -1310,8 +1283,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
     return () => {
       clearInterval(pollTimer);
-        ro.disconnect();
-        
+      ro.disconnect();
     };
   }, [priceVisible, pnlVisible, greeksVisible, chartEpoch]);
 
@@ -1583,12 +1555,22 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     setChartEpoch(e => e + 1);
     const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
     greeksSeriesRef.current = {};
+    // All 4 greeks are min-max normalized to a shared [-1,1] range before setData (see the
+    // "Apply Greeks data" effect below), so they can plot together on one visible axis. That
+    // axis's tick labels take the format of whichever series on it has the lowest z-order —
+    // this invisible, dataless anchor series claims that slot with plain numbers, so the axis
+    // reads as a generic reference scale instead of being denormalized into one greek's units.
+    // The colored last-value badges are unaffected — those use each series' own priceFormat.
+    chart.addSeries(LineSeries, {
+      priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false, visible: false,
+      priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+    }).setData([]);
     for (const src of GREEK_SOURCES) {
       for (const k of greekKeys) {
         const key = `${src}_${k}`;
         const s = chart.addSeries(LineSeries, {
           color: GREEK_COLORS[k], lineWidth: Math.max(2, GREEK_LINE_WIDTHS[src]) as any, lineStyle: GREEK_LINE_STYLES[src],
-          priceScaleId: k, title: src === 'net' ? k.charAt(0).toUpperCase() + k.slice(1) : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
+          priceScaleId: 'right', title: src === 'net' ? k.charAt(0).toUpperCase() + k.slice(1) : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
           lastValueVisible: true, priceLineVisible: false, visible: false,
           priceFormat: { type: 'custom', minMove: 0.00001, formatter: (price: number) => {
             const f = greekFactorsRef.current[k] || { mid: 0, half: 1 };
@@ -1599,47 +1581,12 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         greeksSeriesRef.current[key] = s;
       }
     }
-    for (const k of greekKeys) {
-      chart.priceScale(k).applyOptions({ scaleMargins: { top: 0.12, bottom: 0.12 }, visible: false });
-    }
-    chart.subscribeCrosshairMove((param) => {
-      if (param.point) {
-        greeksTooltipRef.current?.setVisibility(true);
-        if (greeksTooltipRef.current) {
-          const w = greeksChartContainerRef.current?.clientWidth ?? 800;
-          const h = greeksChartContainerRef.current?.clientHeight ?? 400;
-          greeksTooltipRef.current.setPosition(
-            param.point.x > w * 0.6 ? param.point.x - (Array.from(greeksLegFilter).length > 1 ? 250 : 200) : param.point.x + 20,
-            Math.max(10, Math.min(param.point.y - 40, h - 100))
-          );
-        }
-      } else {
-        greeksTooltipRef.current?.setVisibility(false);
-      }
-      const vals: Record<string, Record<string, number>> = {};
-      let hasData = false;
-      for (const src of GREEK_SOURCES) {
-        const srcVals: Record<string, number> = {};
-        for (const k of greekKeys) {
-          const s = greeksSeriesRef.current[`${src}_${k}`];
-          if (!s) continue;
-          const d = param.seriesData?.get(s) as any;
-          if (d?.value != null) {
-            const f = greekFactorsRef.current[k] || { mid: 0, half: 1 };
-            srcVals[k] = d.value * f.half + f.mid;
-            hasData = true;
-          }
-        }
-        if (Object.keys(srcVals).length > 0) {
-          vals[src] = srcVals;
-        }
-      }
-      greeksTooltipRef.current?.setData(param.time ? fmtChartTime(param.time as number) : '', hasData ? vals : null);
-    });
+    chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.12, bottom: 0.12 } });
+    // Crosshair '+' tooltip is driven centrally by the crosshair-sync effect (section 4).
     if (!hasInitialFittedRef.current) {
-      requestAnimationFrame(() => { try { chart.timeScale().fitContent(); } catch (e) {} });
+      requestAnimationFrame(() => chart.timeScale().fitContent());
     }
-    return () => { greeksSeriesRef.current = {}; greeksChartRef.current = null; try { chart.remove(); } catch (e) { console.error("chart.remove failed:", e); } setChartEpoch(e => e + 1); };
+    return () => { greeksSeriesRef.current = {}; greeksChartRef.current = null; try { chart.remove(); } catch {} setChartEpoch(e => e + 1); };
   }, [theme, greeksVisible, greeksLegFilter]);
 
   // ── 10b. Apply Greeks data ──
@@ -1754,10 +1701,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (r) {
         try { greeksChartRef.current?.timeScale().setVisibleLogicalRange(r); } catch {}
       } else {
-        requestAnimationFrame(() => { try { greeksChartRef.current?.timeScale().fitContent(); } catch (e) {} });
+        requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
       }
     } else {
-      requestAnimationFrame(() => { try { greeksChartRef.current?.timeScale().fitContent(); } catch (e) {} });
+      requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
     }
   }, [chartData, greeksMode, lotSizeOverride, selectedGreeks, greeksVisible, underlying, greeksLegFilter]);
 

@@ -896,14 +896,14 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
       }
 
       const priceMappedLegs = priceLegs.map(leg => ({
-        name: (leg.side === 'BUY' ? 'B ' : 'S ') + leg.strike + ' ' + leg.optionType,
+        name: `${underlying} ${leg.strike} ${leg.optionType}`,
         color: leg.optionType === 'CE' ? '#22c55e' : '#ef4444',
         value: leg.value
       }));
-      priceTooltipRef.current?.setData(timeStr, spot ? { o: spot, h: spot, l: spot, c: spot } : null, priceMappedLegs, underlying);
-      
+      priceTooltipRef.current?.setData(timeStr, spotBar ? { o: spotBar.open, h: spotBar.high, l: spotBar.low, c: spotBar.close } : null, priceMappedLegs, underlying);
+
       const pnlMappedLegs = pnlLegs.map(leg => ({
-        name: (leg.side === 'BUY' ? 'B ' : 'S ') + leg.strike + ' ' + leg.optionType,
+        name: `${underlying} ${leg.strike} ${leg.optionType}`,
         color: leg.optionType === 'CE' ? '#22c55e' : '#ef4444',
         value: leg.value
       }));
@@ -912,23 +912,36 @@ function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
       greeksTooltipRef.current?.setData(timeStr, { net: netG, CE: ceG, PE: peG });
 
       const defaultY = 40;
-      
+
+      // lightweight-charts reports param.point.x relative to the PLOT area, excluding
+      // any visible left price scale — but our tooltip containers are positioned
+      // relative to the whole pane div (which includes that left-scale gutter). Query
+      // each chart's actual rendered left-scale width and fold it into x so the
+      // midpoint/flip decision and final offset both operate in the pane's own
+      // coordinate space. The PNL pane additionally has a CSS paddingLeft:75 hack
+      // (its own native left scale is hidden) that needs the same kind of correction.
       if (priceContainerRef.current && priceTooltipRef.current) {
         const w = priceContainerRef.current.clientWidth || 800;
         const h = priceContainerRef.current.clientHeight || 400;
-        priceTooltipRef.current.setPosition(x > w * 0.5 ? x - 180 : x + 25, currentActiveChart === 'price' ? Math.max(8, Math.min((activeChartY ?? defaultY) - 80, h - 100)) : 8);
+        const xAdj = x + (priceChart?.priceScale('left').width() ?? 0);
+        const alignLeft = xAdj > w * 0.5;
+        priceTooltipRef.current.setPosition(alignLeft ? xAdj - 20 : xAdj + 25, currentActiveChart === 'price' ? Math.max(8, Math.min((activeChartY ?? defaultY) - 80, h - 100)) : 8, alignLeft);
         priceTooltipRef.current.setVisibility(true);
       }
       if (pnlContainerRef.current && pnlTooltipRef.current) {
         const w = pnlContainerRef.current.clientWidth || 800;
         const h = pnlContainerRef.current.clientHeight || 400;
-        pnlTooltipRef.current.setPosition(x > w * 0.5 ? x - 230 : x + 25, currentActiveChart === 'pnl' ? Math.max(8, Math.min((activeChartY ?? defaultY) - 80, h - 100)) : 8);
+        const xAdj = x + 75 + (pnlChart?.priceScale('left').width() ?? 0);
+        const alignLeft = xAdj > w * 0.5;
+        pnlTooltipRef.current.setPosition(alignLeft ? xAdj - 20 : xAdj + 25, currentActiveChart === 'pnl' ? Math.max(8, Math.min((activeChartY ?? defaultY) - 80, h - 100)) : 8, alignLeft);
         pnlTooltipRef.current.setVisibility(true);
       }
       if (greeksContainerRef.current && greeksTooltipRef.current) {
         const w = greeksContainerRef.current.clientWidth || 800;
         const h = greeksContainerRef.current.clientHeight || 400;
-        greeksTooltipRef.current.setPosition(x > w * 0.5 ? x - 180 : x + 25, currentActiveChart === 'greeks' ? Math.max(8, Math.min((activeChartY ?? defaultY) - 80, h - 100)) : 8);
+        const xAdj = x + (greeksChart?.priceScale('left').width() ?? 0);
+        const alignLeft = xAdj > w * 0.5;
+        greeksTooltipRef.current.setPosition(alignLeft ? xAdj - 20 : xAdj + 25, currentActiveChart === 'greeks' ? Math.max(8, Math.min((activeChartY ?? defaultY) - 80, h - 100)) : 8, alignLeft);
         greeksTooltipRef.current.setVisibility(true);
       }
 
