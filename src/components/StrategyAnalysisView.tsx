@@ -719,26 +719,6 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
     // Crosshair '+' tooltip is driven centrally by the crosshair-sync effect (section 4).
 
-    // Draw horizontal strike price lines on NIFTY candlestick chart
-    for (const leg of legMetasRef.current) {
-      const pos = allPositionsRef.current.find(p => p.ref_id === leg.refId);
-      if (pos) {
-        const opt = parsePositionOption(pos);
-        if (opt.strike && opt.strike > 0) {
-          try {
-            candleSeries.createPriceLine({
-              price: opt.strike,
-              color: leg.color,
-              lineWidth: 1,
-              lineStyle: 2, // Dashed
-              axisLabelVisible: true,
-              title: `${opt.optionType || 'Leg'} ${opt.strike}`,
-            });
-          } catch {}
-        }
-      }
-    }
-
     // Restore cached data
     const cached = chartDataRef.current;
     if (cached) {
@@ -746,7 +726,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       for (const leg of legMetasRef.current) {
         const s = chart.addSeries(LineSeries, {
           color: leg.color, lineWidth: 2, priceScaleId: 'left',
-          title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
+          title: leg.displayName, lastValueVisible: true, priceLineVisible: true,
           priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
         });
         seriesRef.current.legPrice.set(leg.refId, s);
@@ -786,7 +766,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     for (const leg of legMetasRef.current) {
       const s = chart.addSeries(LineSeries, {
         color: leg.color, lineWidth: 2,
-        title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
+        title: leg.displayName, lastValueVisible: true, priceLineVisible: true,
         priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
       });
       seriesRef.current.legPnl.set(leg.refId, s);
@@ -989,7 +969,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (!seriesRef.current.legPrice.has(leg.refId)) {
           const s = priceChart.addSeries(LineSeries, {
             color: leg.color, lineWidth: 2, priceScaleId: 'left',
-            title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
+            title: leg.displayName, lastValueVisible: true, priceLineVisible: true,
             priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
           seriesRef.current.legPrice.set(leg.refId, s);
@@ -1016,7 +996,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (!seriesRef.current.legPnl.has(leg.refId)) {
           const s = pnlChart.addSeries(LineSeries, {
             color: leg.color, lineWidth: 2,
-            title: leg.displayName, lastValueVisible: true, priceLineVisible: false,
+            title: leg.displayName, lastValueVisible: true, priceLineVisible: true,
             priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
           seriesRef.current.legPnl.set(leg.refId, s);
