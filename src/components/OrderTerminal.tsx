@@ -1,10 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Instrument, PaperHolding, PaperOrder, PaperPosition, WsMessage, OptionChainData, OptionLeg } from '../types';
+import type {
+  Instrument, PaperHolding, PaperOrder, PaperPosition, WsMessage, OptionChainData, OptionLeg,
+  PositionRule, LegPositionRule, GroupPositionRule,
+} from '../types';
 import { fmtPrice } from '../lib/utils';
 import { usePaperTrading } from '../hooks/usePaperTrading';
 import { useWorkspaceState } from '../workspace/useWorkspaceState';
 import { useWs } from '../hooks/useWsContext';
 import SavedStrategiesTab from './SavedStrategiesTab';
+import PositionRuleEditor from './PositionRuleEditor';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 function paise(v: number | undefined | null): string {
@@ -470,9 +474,23 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
   const [groupMargins, setGroupMargins] = useState<Record<string, { total: number; estimated: boolean }>>({});
   const groupMarginsRef = useRef<Record<string, { total: number; estimated: boolean }>>({});
   const marginRequestsRef = useRef<Set<string>>(new Set());
+  const [rules, setRules] = useState<PositionRule[]>([]);
+  const [ruleEditor, setRuleEditor] = useState<
+    | { mode: 'LEG'; refId: number; basketGroupId: string; displayName: string }
+    | { mode: 'GROUP'; basketGroupId: string; strategyName: string }
+    | null
+  >(null);
   const { subscribe } = useWs();
 
   const posExitKey = (p: PaperPosition) => `${p.ref_id}:${p.basket_group_id || ''}`;
+  const legRuleFor = useCallback((p: PaperPosition): LegPositionRule | null => {
+    const r = rules.find(r => r.scope === 'LEG' && r.ref_id === p.ref_id && (r.basket_group_id || '') === (p.basket_group_id || ''));
+    return (r as LegPositionRule) ?? null;
+  }, [rules]);
+  const groupRuleFor = useCallback((gid: string): GroupPositionRule | null => {
+    const r = rules.find(r => r.scope === 'GROUP' && r.basket_group_id === gid);
+    return (r as GroupPositionRule) ?? null;
+  }, [rules]);
 
   const toggleExpand = useCallback((gid: string) => {
     setExpanded(prev => {
@@ -485,9 +503,10 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
   const fetch_ = useCallback(async () => {
     if (!uatAuth) return;
     try {
-      const [openRes, closedRes] = await Promise.all([
+      const [openRes, closedRes, rulesRes] = await Promise.all([
         fetch('/paper/positions'),
         fetch('/paper/positions/closed'),
+        fetch('/paper/positions/rules'),
       ]);
       if (openRes.ok) {
         const d = await openRes.json() as { portfolio?: { stock_positions?: PaperPosition[] } } | PaperPosition[];
@@ -498,8 +517,23 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
         const d = await closedRes.json() as PaperPosition[];
         setClosedPositions(Array.isArray(d) ? d : []);
       }
+      if (rulesRes.ok) {
+        const d = await rulesRes.json() as { rules?: PositionRule[] };
+        setRules(d.rules ?? []);
+      }
     } catch (e) { console.warn('[Positions] fetch failed:', e); }
   }, [uatAuth]);
+
+  const toggleExitAllOnLegHit = useCallback(async (gid: string, current: GroupPositionRule | null, checked: boolean) => {
+    await fetch('/paper/positions/rules/group', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        basket_group_id: gid, maxProfit: current?.maxProfit, maxLoss: current?.maxLoss,
+        trail: current?.trail, exitAllOnLegHit: checked,
+      }),
+    });
+    fetch_();
+  }, [fetch_]);
 
   const commitRename = useCallback(async (basketGroupId: string) => {
     const name = editingName.trim();
@@ -566,8 +600,15 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
       });
     });
 
-    return () => { unsub1(); unsub2(); };
-  }, [subscribe]);
+    // A server-side SL/target/trailing rule fired — refresh immediately instead
+    // of waiting up to 2s for the next poll to notice the position closed.
+    const unsub3 = subscribe('position_rule_fired', (msg: WsMessage) => {
+      if (msg.type !== 'position_rule_fired') return;
+      fetch_();
+    });
+
+    return () => { unsub1(); unsub2(); unsub3(); };
+  }, [subscribe, fetch_]);
 
   const exitDirect = useCallback(async (p: PaperPosition) => {
     const ek = posExitKey(p);
@@ -677,9 +718,13 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
     const pnl  = calcPnl(p);
     const ek   = posExitKey(p);
+    const legRule = legRuleFor(p);
     return (
       <tr key={ek} className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`} onClick={() => setDetailPos(p)}>
-        <td className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] ${indent ? 'pl-8' : ''}`}>{p.display_name || p.zanskar_name || p.ref_id}</td>
+        <td className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] ${indent ? 'pl-8' : ''}`}>
+          {p.display_name || p.zanskar_name || p.ref_id}
+          {legRule && <span className="text-[var(--accent)] ml-1" title="Auto SL/Target active">●</span>}
+        </td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.product || 'NRML'}</td>
         <td className={`px-3 py-1.5 font-semibold ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{side}</td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.qty}</td>
@@ -708,6 +753,13 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                 Chart
               </button>
             )}
+            <button
+              onClick={e => { e.stopPropagation(); setRuleEditor({ mode: 'LEG', refId: p.ref_id, basketGroupId: p.basket_group_id || '', displayName: p.display_name || p.zanskar_name || String(p.ref_id) }); }}
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors border ${legRule ? 'text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border-[var(--accent)]/30' : 'text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border-white/30'}`}
+              title="Set SL/Target"
+            >
+              SL/T
+            </button>
             <button
               onClick={() => exitDirect(p)}
               disabled={exiting.has(ek)}
@@ -869,6 +921,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
               const gMarginInfo = resolvedGroupMarginInfo(g);
               const gMarginRs = gMarginInfo.paise / 100;
               const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
+              const groupRule = groupRuleFor(g.basket_group_id);
               return (
                 <React.Fragment key={g.basket_group_id}>
                   <tr
@@ -878,6 +931,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                     <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
                       <span className="inline-flex items-center gap-1.5">
                         <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">{isOpen ? '▾' : '▸'}</span>
+                        {groupRule && <span className="text-[var(--accent)]" title="Group auto SL/Target active">●</span>}
                         {editingGroup === g.basket_group_id ? (
                           <input
                             type="text" value={editingName} autoFocus
@@ -925,6 +979,20 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                       </>)}
                     </td>
                     <td className="px-3 py-1.5" onClick={e => e.stopPropagation()}>
+                      <label className="inline-flex items-center gap-1 mr-1.5 cursor-pointer align-middle" title="Exit all legs if any single leg hits its own SL/Target">
+                        <input
+                          type="checkbox"
+                          checked={!!groupRule?.exitAllOnLegHit}
+                          onChange={e => toggleExitAllOnLegHit(g.basket_group_id, groupRule, e.target.checked)}
+                        />
+                      </label>
+                      <button
+                        onClick={() => setRuleEditor({ mode: 'GROUP', basketGroupId: g.basket_group_id, strategyName: g.strategy_name })}
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors border mr-1 ${groupRule ? 'text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border-[var(--accent)]/30' : 'text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border-white/30'}`}
+                        title="Set group SL/Target"
+                      >
+                        SL/T
+                      </button>
                       <button
                         onClick={() => exitAllInGroup(g.positions)}
                         disabled={allExiting}
@@ -1073,6 +1141,28 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
           </div>
         );
       })()}
+
+      {ruleEditor && ruleEditor.mode === 'LEG' && (
+        <PositionRuleEditor
+          mode="LEG"
+          refId={ruleEditor.refId}
+          basketGroupId={ruleEditor.basketGroupId}
+          displayName={ruleEditor.displayName}
+          initial={(rules.find(r => r.scope === 'LEG' && r.ref_id === ruleEditor.refId && (r.basket_group_id || '') === ruleEditor.basketGroupId) as LegPositionRule | undefined) ?? null}
+          onClose={() => setRuleEditor(null)}
+          onSaved={fetch_}
+        />
+      )}
+      {ruleEditor && ruleEditor.mode === 'GROUP' && (
+        <PositionRuleEditor
+          mode="GROUP"
+          basketGroupId={ruleEditor.basketGroupId}
+          strategyName={ruleEditor.strategyName}
+          initial={(rules.find(r => r.scope === 'GROUP' && r.basket_group_id === ruleEditor.basketGroupId) as GroupPositionRule | undefined) ?? null}
+          onClose={() => setRuleEditor(null)}
+          onSaved={fetch_}
+        />
+      )}
     </div>
   );
 }

@@ -127,28 +127,30 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
       if ((data.asset || '').toUpperCase() !== oiWsAssetRef.current) return;
       if ((data.expiry || '') !== oiWsExpiryRef.current) return;
 
-      const ceOiMap: Record<number, number> = {};
-      const peOiMap: Record<number, number> = {};
+      const ceOiMap: Record<number, { oi: number; prevOi: number }> = {};
+      const peOiMap: Record<number, { oi: number; prevOi: number }> = {};
       for (const leg of (data.ce || [])) {
         const sp = normalizeStrike(Number(leg.sp));
         const oi = Number(leg.oi ?? (leg as { open_interest?: number }).open_interest) || 0;
-        if (sp > 0 && oi > 0) ceOiMap[sp] = oi;
+        const prevOi = Number((leg as { prevOi?: number; prev_oi?: number }).prevOi ?? (leg as { prevOi?: number; prev_oi?: number }).prev_oi) || 0;
+        if (sp > 0 && oi > 0) ceOiMap[sp] = { oi, prevOi };
       }
       for (const leg of (data.pe || [])) {
         const sp = normalizeStrike(Number(leg.sp));
         const oi = Number(leg.oi ?? (leg as { open_interest?: number }).open_interest) || 0;
-        if (sp > 0 && oi > 0) peOiMap[sp] = oi;
+        const prevOi = Number((leg as { prevOi?: number; prev_oi?: number }).prevOi ?? (leg as { prevOi?: number; prev_oi?: number }).prev_oi) || 0;
+        if (sp > 0 && oi > 0) peOiMap[sp] = { oi, prevOi };
       }
       if (!Object.keys(ceOiMap).length && !Object.keys(peOiMap).length) return;
 
       oiChainRef.current = {
         ce: oiChainRef.current.ce.map(leg => {
           const spRs = normalizeStrike(Number(leg.sp));
-          return spRs in ceOiMap ? { ...leg, oi: ceOiMap[spRs] } : leg;
+          return spRs in ceOiMap ? { ...leg, oi: ceOiMap[spRs].oi, prevOi: ceOiMap[spRs].prevOi } : leg;
         }),
         pe: oiChainRef.current.pe.map(leg => {
           const spRs = normalizeStrike(Number(leg.sp));
-          return spRs in peOiMap ? { ...leg, oi: peOiMap[spRs] } : leg;
+          return spRs in peOiMap ? { ...leg, oi: peOiMap[spRs].oi, prevOi: peOiMap[spRs].prevOi } : leg;
         }),
       };
       requestDraw();
@@ -241,6 +243,8 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     const sym = getSymbol(currentInstRef.current);
     const ceMap: Record<number, number> = {};
     const peMap: Record<number, number> = {};
+    const cePrevMap: Record<number, number> = {};
+    const pePrevMap: Record<number, number> = {};
     const ceSymMap = new Map<number, string>();
     const peSymMap = new Map<number, string>();
 
@@ -257,12 +261,14 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
         const sp = normalizeStrike(Number(ce.sp));
         const oi = Number(ce.oi ?? ce.open_interest) || 0;
         ceMap[sp] = (ceMap[sp] || 0) + oi;
+        cePrevMap[sp] = (cePrevMap[sp] || 0) + (Number(ce.prev_oi) || 0);
         if (ce.symbol && !ceSymMap.has(Number(ce.sp))) ceSymMap.set(Number(ce.sp), String(ce.symbol));
       }
       for (const pe of (data.chain.pe || [])) {
         const sp = normalizeStrike(Number(pe.sp));
         const oi = Number(pe.oi ?? pe.open_interest) || 0;
         peMap[sp] = (peMap[sp] || 0) + oi;
+        pePrevMap[sp] = (pePrevMap[sp] || 0) + (Number(pe.prev_oi) || 0);
         if (pe.symbol && !peSymMap.has(Number(pe.sp))) peSymMap.set(Number(pe.sp), String(pe.symbol));
       }
     }
@@ -270,8 +276,8 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     const hasData = Object.values(ceMap).some(v => v > 0) || Object.values(peMap).some(v => v > 0);
     if (hasData) {
       oiChainRef.current = {
-        ce: Object.entries(ceMap).map(([sp, oi]) => ({ sp: Number(sp) * 100, oi })),
-        pe: Object.entries(peMap).map(([sp, oi]) => ({ sp: Number(sp) * 100, oi })),
+        ce: Object.entries(ceMap).map(([sp, oi]) => ({ sp: Number(sp) * 100, oi, prevOi: cePrevMap[Number(sp)] || 0 })),
+        pe: Object.entries(peMap).map(([sp, oi]) => ({ sp: Number(sp) * 100, oi, prevOi: pePrevMap[Number(sp)] || 0 })),
       };
     }
     oiHistoricalRef.current = new Map();

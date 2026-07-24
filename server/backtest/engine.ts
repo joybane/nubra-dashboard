@@ -197,7 +197,7 @@ function chooseStrike(
 }
 
 // ── premium-based SL / target levels ─────────────────────────────────────────
-function premiumLevels(side: Side, entry: number, sl: Leg['stopLoss'], tgt: Leg['target']) {
+export function premiumLevels(side: Side, entry: number, sl: Leg['stopLoss'], tgt: Leg['target']) {
   let slPrice: number | null = null, tgtPrice: number | null = null;
   const pct = (v: number, up: boolean) => up ? entry * (1 + v / 100) : entry * (1 - v / 100);
   const slV = num(sl.value), tgtV = num(tgt.value);

@@ -17,6 +17,13 @@
       if (typeof message === 'string' && message.indexOf('Object is disposed') !== -1 && source && source.indexOf('/charts-') !== -1) {
         return true;
       }
+      // "ResizeObserver loop completed with undelivered notifications" is the browser
+      // telling itself its own resize-callback batching fell a frame behind — it isn't
+      // caused by app code (no source/stack, fires with Line 0:0) and never indicates a
+      // real bug. Chrome/Firefox both treat it as a non-fatal advisory; we do the same.
+      if (typeof message === 'string' && message.indexOf('ResizeObserver loop') !== -1) {
+        return true;
+      }
       const div = document.createElement('div');
       div.style.position = 'fixed';
       div.style.top = '0';

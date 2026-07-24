@@ -115,6 +115,17 @@ export function initDb(): Database.Database {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS idx_snap_basket_date ON saved_strategies(basket_group_id, trade_date);
 
+    -- Live auto-exit rules attached to a paper position (LEG scope, key = "ref_id:basket_group_id")
+    -- or a whole strategy group (GROUP scope, key = basket_group_id). rule_json holds the
+    -- SLTarget/TrailStop/maxProfit-maxLoss payload (server/positionRules.ts).
+    CREATE TABLE IF NOT EXISTS position_rules (
+      rule_key    TEXT PRIMARY KEY,
+      scope       TEXT NOT NULL,
+      rule_json   TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_pnl_ref_ts ON pnl_ticks(ref_id, ts);
     CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_id);
     CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(order_status);
@@ -417,4 +428,26 @@ export function dbRenameSavedBasket(basketId: string, newName: string): { basket
     db.prepare('UPDATE positions SET strategy_name = ? WHERE basket_group_id = ?').run(newName, bgId);
   }
   return { basket_group_id: bgId };
+}
+
+// ── Position auto-exit rules (SL/Target on live positions) ────────────────────
+
+export interface PositionRuleRow {
+  rule_key: string; scope: string; rule_json: string; created_at: number; updated_at: number;
+}
+
+export function dbUpsertPositionRule(ruleKey: string, scope: string, ruleJson: string): void {
+  const now = Date.now();
+  db.prepare(`INSERT INTO position_rules (rule_key, scope, rule_json, created_at, updated_at)
+      VALUES (@rule_key, @scope, @rule_json, @now, @now)
+    ON CONFLICT(rule_key) DO UPDATE SET rule_json=@rule_json, updated_at=@now
+  `).run({ rule_key: ruleKey, scope, rule_json: ruleJson, now });
+}
+
+export function dbLoadPositionRules(): PositionRuleRow[] {
+  return db.prepare('SELECT * FROM position_rules').all() as PositionRuleRow[];
+}
+
+export function dbDeletePositionRule(ruleKey: string): boolean {
+  return db.prepare('DELETE FROM position_rules WHERE rule_key = ?').run(ruleKey).changes > 0;
 }

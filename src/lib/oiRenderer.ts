@@ -62,13 +62,6 @@ function getHistOI(
   return best?.v ?? 0;
 }
 
-function firstHistTs(historicalMap: Map<string, { ts: number; v: number }[]>): number | null {
-  for (const series of historicalMap.values()) {
-    if (series.length) return series[0].ts / 1_000_000;
-  }
-  return null;
-}
-
 export function drawOI(p: DrawOIParams): void {
   const { canvas, containerW: w, containerH: h, priceToCoordinate } = p;
 
@@ -89,9 +82,11 @@ export function drawOI(p: DrawOIParams): void {
 
   if (p.mode === 'oi_change' && p.histFetched) {
     const ceOiBysp = new Map<number, number>();
-    for (const c of p.oiChain.ce) ceOiBysp.set(Number(c.sp), Number(c.oi) || 0);
+    const cePrevOiBysp = new Map<number, number>();
+    for (const c of p.oiChain.ce) { ceOiBysp.set(Number(c.sp), Number(c.oi) || 0); cePrevOiBysp.set(Number(c.sp), Number(c.prevOi) || 0); }
     const peOiBysp = new Map<number, number>();
-    for (const pe of p.oiChain.pe) peOiBysp.set(Number(pe.sp), Number(pe.oi) || 0);
+    const pePrevOiBysp = new Map<number, number>();
+    for (const pe of p.oiChain.pe) { peOiBysp.set(Number(pe.sp), Number(pe.oi) || 0); pePrevOiBysp.set(Number(pe.sp), Number(pe.prevOi) || 0); }
 
     const deltas: Record<number, { ceDelta: number; peDelta: number }> = {};
     const seen = new Set<number>();
@@ -102,9 +97,10 @@ export function drawOI(p: DrawOIParams): void {
       const ceName = p.symbolMap.ce.get(sp) || '';
       const peName = p.symbolMap.pe.get(sp) || '';
       if (!ceName && !peName) continue;
-      const defaultFrom = p.fromMs ?? firstHistTs(p.historicalMap);
-      const ceBase = getHistOI(p.historicalMap, ceName, defaultFrom);
-      const peBase = getHistOI(p.historicalMap, peName, defaultFrom);
+      // No custom "from" time picked: baseline is the broker's own previous-close OI
+      // (prev_oi), not an approximated first-intraday-bar snapshot.
+      const ceBase = p.fromMs !== null ? getHistOI(p.historicalMap, ceName, p.fromMs) : (cePrevOiBysp.get(sp) || 0);
+      const peBase = p.fromMs !== null ? getHistOI(p.historicalMap, peName, p.fromMs) : (pePrevOiBysp.get(sp) || 0);
       const ceEnd = p.toMs !== null
         ? getHistOI(p.historicalMap, ceName, p.toMs)
         : p.isToday

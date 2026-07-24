@@ -81,8 +81,17 @@ export interface WsOcMsg     { type: 'option_chain'; data: OptionChainData }
 export interface WsStatusMsg { type: 'ws_status';    connected: boolean }
 export interface WsAuthMsg   { type: 'auth_status';  status: string }
 export interface WsPosLtpMsg { type: 'position_ltp'; data: { ref_id: number; ltp: number }[] }
+export interface WsRuleFiredMsg {
+  type: 'position_rule_fired';
+  data: {
+    scope: 'LEG' | 'GROUP';
+    reason: 'STOPLOSS' | 'TARGET' | 'PORTFOLIO_TP' | 'PORTFOLIO_SL';
+    ref_ids: number[];
+    basket_group_id?: string;
+  }[];
+}
 
-export type WsMessage = WsOhlcvMsg | WsTickMsg | WsOcMsg | WsStatusMsg | WsAuthMsg | WsPosLtpMsg;
+export type WsMessage = WsOhlcvMsg | WsTickMsg | WsOcMsg | WsStatusMsg | WsAuthMsg | WsPosLtpMsg | WsRuleFiredMsg;
 
 export interface OhlcvData {
   indexes?:     OhlcvBucket[];
@@ -259,6 +268,35 @@ export interface PaperPosition {
   margin_required?:   number;
   lot_size?:          number;
 }
+
+// ── Live position auto-exit rules (Positions tab SL/Target) ──────────────────
+// v1 supports only these two SL/target types for live monitoring (mirrors the
+// restriction enforced server-side in server/positionRules.ts).
+export type LiveSLTargetType = 'NONE' | 'PREMIUM_PERCENT' | 'PREMIUM_ABSOLUTE';
+export interface LiveSLTarget { type: LiveSLTargetType; value?: number; }
+
+export type LiveTrailType = 'NONE' | 'LOCK' | 'TRAIL' | 'LOCK_AND_TRAIL' | 'TO_COST';
+export interface LiveTrailStop {
+  type: LiveTrailType; trigger?: number; lock?: number; step?: number; trail?: number;
+}
+
+export interface LegPositionRule {
+  scope: 'LEG';
+  ref_id: number;
+  basket_group_id: string;
+  stopLoss?: LiveSLTarget;
+  target?:   LiveSLTarget;
+  trail?:    LiveTrailStop;
+}
+export interface GroupPositionRule {
+  scope: 'GROUP';
+  basket_group_id: string;
+  maxProfit?: number;
+  maxLoss?:   number;
+  trail?:     LiveTrailStop;
+  exitAllOnLegHit?: boolean;
+}
+export type PositionRule = LegPositionRule | GroupPositionRule;
 
 export interface PaperHolding {
   ref_id:             number;

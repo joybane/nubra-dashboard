@@ -21,6 +21,11 @@ import { buildBasketSnapshot, istDateString, type SnapPosition } from './snapsho
 import { getMeta as btGetMeta, runBacktest, runDayDetail, validateConfig, validateSweep, runSweep, validateWalkForward, runWalkForward } from './backtest/index.ts';
 import type { BacktestConfig, SweepRequest, WalkForwardRequest } from './backtest/types.ts';
 import { calculateLocalBasketMargin } from './marginEngine.ts';
+import {
+  loadPositionRules, upsertLegRule, upsertGroupRule, deleteLegRule, deleteGroupRule,
+  listPositionRules, evaluateAndFire, sanitizeSLTarget, legRuleKey,
+  type LegRule, type GroupRule, type SLTarget, type TrailStop,
+} from './positionRules.ts';
 import protobuf from 'protobufjs';
 
 dotenv.config();
@@ -30,7 +35,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
 const BASE_URL               = process.env.NUBRA_BASE_URL || 'https://api2.nubra.io';
-const LEGACY_MARGIN_BASE_URL = 'https://api.nubra.io';
 const MARGIN_BASE_URL        = process.env.NUBRA_MARGIN_BASE_URL || BASE_URL;
 const PORT            = Number(process.env.SERVER_PORT || 3000);
 
@@ -595,6 +599,45 @@ async function loadProto(): Promise<void> {
   }
 }
 
+// Per-leg last-seen tick timestamp for the option-chain WS feed. Nubra occasionally
+// delivers a slightly-stale re-sync item right after a fresher per-leg tick for the
+// same strike; without this guard the UI flashes the newer price and then reverts to
+// the older one for a moment. Keyed by ref_id when present (stable across resubscribes),
+// falling back to asset|expiry|exchange|side|strike.
+const ocLastTs = new Map<string, number>();
+
+function ocItemKey(asset: string, expiry: string, exchange: string, side: 'ce' | 'pe', item: { refId?: string; sp?: string }): string {
+  // protobufjs .toObject() camelCases proto field names (ref_id → refId) by default.
+  const refId = Number(item.refId);
+  if (refId) return `r:${refId}`;
+  return `${asset}|${expiry}|${exchange}|${side}|${item.sp}`;
+}
+
+function dropStaleOcItems(data: Record<string, unknown>): void {
+  const asset    = String(data.asset || '').toUpperCase();
+  const expiry   = String(data.expiry || '');
+  const exchange = String(data.exchange || 'NSE');
+  for (const side of ['ce', 'pe'] as const) {
+    const list = Array.isArray(data[side]) ? data[side] as Record<string, unknown>[] : [];
+    data[side] = list.filter((item) => {
+      const ts = Number(item.ts);
+      if (!(ts > 0)) return true; // no usable timestamp — pass through unfiltered
+      const key  = ocItemKey(asset, expiry, exchange, side, item as { refId?: string; sp?: string });
+      const last = ocLastTs.get(key);
+      if (last != null && ts < last) return false; // older than what we already showed — drop
+      ocLastTs.set(key, ts);
+      return true;
+    });
+  }
+}
+
+// Reset the strike-keyed (non-ref_id) staleness guard when a client (re)subscribes,
+// so switching away and back to an asset/expiry can't wrongly reject its first ticks.
+function clearOcTsGuard(asset: string, expiry: string, exchange: string): void {
+  const prefix = `${asset.toUpperCase()}|${expiry}|${exchange}|`;
+  for (const key of ocLastTs.keys()) if (key.startsWith(prefix)) ocLastTs.delete(key);
+}
+
 function decodeBinaryMsg(rawBuffer: Buffer): { type: string; data: unknown } | null {
   if (!pbAny) return null;
   try {
@@ -613,8 +656,10 @@ function decodeBinaryMsg(rawBuffer: Buffer): { type: string; data: unknown } | n
       return { type: 'index_tick', data: pbBatchIndex.toObject(msg, { longs: String, enums: String }) };
     }
     if (typeUrl.includes('OptionChainUpdate') && pbOptionChainUpdate) {
-      const msg = pbOptionChainUpdate.decode(innerObj.value);
-      return { type: 'option_chain', data: pbOptionChainUpdate.toObject(msg, { longs: String, enums: String, defaults: true }) };
+      const msg  = pbOptionChainUpdate.decode(innerObj.value);
+      const data = pbOptionChainUpdate.toObject(msg, { longs: String, enums: String, defaults: true }) as Record<string, unknown>;
+      dropStaleOcItems(data);
+      return { type: 'option_chain', data };
     }
   } catch { /* unknown message */ }
   return null;
@@ -722,6 +767,7 @@ wss.on('connection', (ws) => {
         const payload = JSON.stringify([{ exchange: msg.exchange || 'NSE', asset, expiry }]);
         const cmd     = `${verb} ${token} option ${payload}`;
         if (msg.action === 'subscribe_oc' && asset && expiry) {
+          clearOcTsGuard(asset, expiry, msg.exchange || 'NSE');
           const key = `${asset}:${expiry}`;
           if (!simOcSubs.has(key)) { simOcSubs.add(key); dbUpsertOcSub(key); }
         }
@@ -1140,6 +1186,7 @@ class SimBroker {
 
 const simBroker   = new SimBroker();
 simBroker.restore();
+loadPositionRules();
 
 // ─── End-of-day auto-snapshot ────────────────────────────────────────────────
 // After market close, freeze a chart snapshot for every basket that traded today and doesn't already
@@ -1300,6 +1347,14 @@ function queuePosLtp(changes: { ref_id: number; ltp: number }[]): void {
   if (!_posLtpTimer) _posLtpTimer = setTimeout(flushPosLtp, 200);
 }
 
+// Evaluate SL/target/trailing rules for a position whose LTP just changed, and
+// broadcast anything that fired so the browser can refresh without waiting on
+// the 2s position poll.
+function fireRules(refId: number): void {
+  const events = evaluateAndFire(simBroker, refId);
+  if (events.length) broadcast({ type: 'position_rule_fired', data: events });
+}
+
 function routeTickToSim(decoded: { type: string; data: unknown }): void {
   if (decoded.type === 'option_chain') {
     const d = decoded.data as { ce?: unknown[]; pe?: unknown[] };
@@ -1317,6 +1372,7 @@ function routeTickToSim(decoded: { type: string; data: unknown }): void {
       if (refId && ltp) {
         const changes = simBroker.onLtp(Number(refId), Number(ltp));
         queuePosLtp(changes);
+        if (changes.length) fireRules(Number(refId));
       }
     }
   } else if (decoded.type === 'index_tick') {
@@ -1325,7 +1381,11 @@ function routeTickToSim(decoded: { type: string; data: unknown }): void {
       const t = tick as Record<string, unknown>;
       const name = t.indexname as string | undefined;
       const val  = t.indexValue ?? t.index_value;
-      if (name && val) queuePosLtp(simBroker.onNamedLtp(name, Number(val)));
+      if (name && val) {
+        const changes = simBroker.onNamedLtp(name, Number(val));
+        queuePosLtp(changes);
+        if (changes.length) fireRules(changes[0].ref_id);
+      }
     }
   } else if (decoded.type === 'ohlcv') {
     const d = decoded.data as { indexes?: unknown[]; instruments?: unknown[] };
@@ -1333,7 +1393,11 @@ function routeTickToSim(decoded: { type: string; data: unknown }): void {
       const bucket = b as Record<string, unknown>;
       const name  = bucket.indexname as string | undefined;
       const close = bucket.close;
-      if (name && close) queuePosLtp(simBroker.onNamedLtp(name, Number(close)));
+      if (name && close) {
+        const changes = simBroker.onNamedLtp(name, Number(close));
+        queuePosLtp(changes);
+        if (changes.length) fireRules(changes[0].ref_id);
+      }
     }
   }
 }
@@ -1435,6 +1499,59 @@ fastify.post<{ Body: { orders: MultiOrderLeg[] } }>('/paper/orders/multi', async
   } catch (err: unknown) {
     return reply.status(500).send({ error: (err as Error).message });
   }
+});
+
+// ─── Position auto-exit rules (SL/Target/Trailing on live positions) ──────────
+
+fastify.get('/paper/positions/rules', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  return reply.send({ rules: listPositionRules() });
+});
+
+interface LegRuleBody {
+  ref_id: number; basket_group_id?: string;
+  stopLoss?: SLTarget;
+  target?:   SLTarget;
+  trail?:    TrailStop;
+}
+fastify.put<{ Body: LegRuleBody }>('/paper/positions/rules/leg', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  const { ref_id, basket_group_id, stopLoss, target, trail } = req.body;
+  if (!ref_id) return reply.status(400).send({ error: 'ref_id is required' });
+  const rule: LegRule = {
+    scope: 'LEG', ref_id, basket_group_id: basket_group_id || '',
+    stopLoss: sanitizeSLTarget(stopLoss), target: sanitizeSLTarget(target), trail,
+  };
+  upsertLegRule(rule);
+  return reply.send({ ok: true, rule_key: legRuleKey(ref_id, basket_group_id) });
+});
+
+interface GroupRuleBody { basket_group_id: string; maxProfit?: number; maxLoss?: number; trail?: TrailStop; exitAllOnLegHit?: boolean; }
+fastify.put<{ Body: GroupRuleBody }>('/paper/positions/rules/group', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  const { basket_group_id, maxProfit, maxLoss, trail, exitAllOnLegHit } = req.body;
+  if (!basket_group_id) return reply.status(400).send({ error: 'basket_group_id is required' });
+  const rule: GroupRule = {
+    scope: 'GROUP', basket_group_id, maxProfit: maxProfit || undefined, maxLoss: maxLoss || undefined,
+    trail, exitAllOnLegHit: exitAllOnLegHit || undefined,
+  };
+  upsertGroupRule(rule);
+  return reply.send({ ok: true });
+});
+
+fastify.delete<{ Querystring: { ref_id?: string; basket_group_id?: string } }>('/paper/positions/rules/leg', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  const refId = Number(req.query.ref_id);
+  if (!refId) return reply.status(400).send({ error: 'ref_id is required' });
+  deleteLegRule(refId, req.query.basket_group_id);
+  return reply.send({ ok: true });
+});
+
+fastify.delete<{ Querystring: { basket_group_id?: string } }>('/paper/positions/rules/group', async (req, reply) => {
+  if (!requireAuth(reply)) return;
+  if (!req.query.basket_group_id) return reply.status(400).send({ error: 'basket_group_id is required' });
+  deleteGroupRule(req.query.basket_group_id);
+  return reply.send({ ok: true });
 });
 
 fastify.post('/paper/orders/basket', async (req, reply) => {
@@ -1801,49 +1918,6 @@ fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, rep
       }
     }
 
-    const apiOrders = orders.map(o => ({
-      ref_id:              o.ref_id,
-      order_type:          'ORDER_TYPE_REGULAR',
-      price_type:          'MARKET',
-      order_qty:           o.order_qty,
-      order_price:         o.order_price ?? 0,
-      order_side:          o.order_side,
-      order_delivery_type: o.order_delivery_type,
-      validity_type:       'IOC',
-      request_type:        'ORDER_REQUEST_NEW',
-    }));
-
-    const payload = {
-      with_portfolio: true,
-      with_legs: true,
-      is_basket: true,
-      order_req: {
-        exchange,
-        orders: apiOrders,
-      },
-    };
-    console.log('[basket-margin] request:', JSON.stringify(payload));
-    const v2Errors: string[] = [];
-    const v2BaseUrls = Array.from(new Set([MARGIN_BASE_URL, LEGACY_MARGIN_BASE_URL]));
-    for (const baseUrl of v2BaseUrls) {
-      try {
-        const data = await nubraPostAt(
-          baseUrl,
-          '/orders/v2/margin_required',
-          payload,
-          { Authorization: `Bearer ${authState.sessionToken!}` },
-        );
-        const normalized = normalizeMarginResponse(data);
-        console.log(`[basket-margin] response from ${baseUrl}:`, JSON.stringify(normalized));
-        return reply.send({ ...normalized, resolved_legs: resolvedLegs });
-      } catch (err) {
-        const msg = `${baseUrl}: ${(err as Error).message}`;
-        v2Errors.push(msg);
-        console.warn('[basket-margin] v2 failed:', msg);
-      }
-    }
-    console.warn('[basket-margin] all v2 bases failed, trying v3:', v2Errors.join(' | '));
-
     const v3Payload = {
       requestType: 'NEW',
       orders: buildV3MarginOrders(orders),
@@ -1868,16 +1942,16 @@ fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, rep
         console.warn('[basket-margin] broker unavailable, using local margin:', JSON.stringify({
           source: localMargin.source,
           total_margin: normalizedLocal.total_margin,
-          broker_error: `V2: ${v2Errors.join(' | ') || 'not attempted'}. V3: ${v3Error}`,
+          broker_error: `V3: ${v3Error}`,
         }));
         return reply.send({
           ...normalizedLocal,
           resolved_legs: resolvedLegs,
-          broker_error: `Broker margin unavailable. V2: ${v2Errors.join(' | ') || 'not attempted'}. V3: ${v3Error}`,
+          broker_error: `Broker margin unavailable. V3: ${v3Error}`,
         });
       }
       return reply.status(502).send({
-        error: `Broker margin unavailable. V2: ${v2Errors.join(' | ') || 'not attempted'}. V3: ${v3Error}`,
+        error: `Broker margin unavailable. V3: ${v3Error}`,
       });
     }
   } catch (err: unknown) {
@@ -1988,7 +2062,7 @@ fastify.delete<{ Params: { id: string } }>('/paper/strategy/snapshot/:id', async
 fastify.post<{ Body: MarginBody }>('/paper/margin', async (req, reply) => {
   if (!requireAuth(reply)) return;
   try {
-    const { liveRefId, order_qty, order_side, order_type, order_price, order_delivery_type, exchange = 'NSE' } = req.body;
+    const { liveRefId, order_qty, order_side, order_type, order_price, order_delivery_type } = req.body;
     // Nubra API: ORDER_TYPE_MARKET is deprecated — use REGULAR + price_type
     const isMarket  = order_type === 'ORDER_TYPE_MARKET' || !order_price;
     const priceType = isMarket ? 'MARKET' : 'LIMIT';
@@ -2017,32 +2091,10 @@ fastify.post<{ Body: MarginBody }>('/paper/margin', async (req, reply) => {
       );
       const normalized = normalizeMarginResponse(v3Data);
       console.log('[margin-v3] response:', JSON.stringify(normalized));
-      if (Number(normalized.total_margin ?? 0) > 0) return reply.send(normalized);
+      return reply.send(normalized);
     } catch (err) {
-      console.warn('[margin-v3] failed, trying v2:', (err as Error).message);
+      return reply.status(502).send({ error: `Broker margin unavailable. V3: ${(err as Error).message}` });
     }
-    const order = {
-      ref_id:              liveRefId,
-      order_side,
-      order_qty,
-      order_type:          'ORDER_TYPE_REGULAR',
-      price_type:          priceType,
-      order_price:         order_price ?? 0,
-      order_delivery_type,
-      validity_type:       'IOC',
-      request_type:        'ORDER_REQUEST_NEW',
-    };
-    const payload = { with_portfolio: true, with_legs: false, is_basket: false, order_req: { exchange, orders: [order] } };
-    console.log('[margin] request:', JSON.stringify(payload));
-    const data = await nubraPostAt(
-      MARGIN_BASE_URL,
-      '/orders/v2/margin_required',
-      payload,
-      { Authorization: `Bearer ${authState.sessionToken!}` },
-    );
-    const normalized = normalizeMarginResponse(data);
-    console.log('[margin] response:', JSON.stringify(normalized));
-    return reply.send(normalized);
   } catch (err: unknown) {
     return reply.status(500).send({ error: (err as Error).message });
   }
