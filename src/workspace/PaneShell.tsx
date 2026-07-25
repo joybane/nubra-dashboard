@@ -1,25 +1,28 @@
+import { lazy, Suspense } from 'react';
 import type { Instrument, PaneState, ViewType } from '../types';
-import CandleChart from '../CandleChart';
-import OptionChain from '../OptionChain';
-import StraddleChart from '../StraddleChart';
-import StrategyChart from '../StrategyChart';
-import BasketOrder from '../BasketOrder';
-import Backtest from '../Backtest';
-import NubraBacktest from '../NubraBacktest';
-import Watchlist from '../Watchlist';
-import Tracker from '../Tracker';
+import ErrorBoundary from '../components/ErrorBoundary';
+import { VIEW_LABELS } from './viewConfig';
 
-const VIEW_LABELS: Record<ViewType, string> = {
-  chart:       'Chart',
-  optionchain: 'Option Chain',
-  straddle:    'Straddle',
-  strategy:    'Strategy',
-  basket:      'Basket',
-  backtest:    'Backtest',
-  nubrabacktest: 'Nubra BT',
-  watchlist:   'Watchlist',
-  tracker:     'Tracker',
-};
+// Each view is code-split: the initial bundle only ships the shell, and a pane's
+// view module is fetched the first time that view is shown (then cached). This
+// keeps first paint fast even though the views total ~450 KB of source.
+const CandleChart = lazy(() => import('../CandleChart'));
+const OptionChain = lazy(() => import('../OptionChain'));
+const StraddleChart = lazy(() => import('../StraddleChart'));
+const StrategyChart = lazy(() => import('../StrategyChart'));
+const BasketOrder = lazy(() => import('../BasketOrder'));
+const Backtest = lazy(() => import('../Backtest'));
+const NubraBacktest = lazy(() => import('../NubraBacktest'));
+const Watchlist = lazy(() => import('../Watchlist'));
+const Tracker = lazy(() => import('../Tracker'));
+
+function PaneLoading() {
+  return (
+    <div className="flex h-full w-full items-center justify-center">
+      <div className="spinner" />
+    </div>
+  );
+}
 
 interface PaneShellProps {
   pane:               PaneState;
@@ -59,6 +62,7 @@ export default function PaneShell({
 
   return (
     <div
+      onMouseDown={onActivate}
       className={`flex flex-col h-full overflow-hidden transition-all ${
         isActive ? 'outline outline-1 outline-[var(--accent)] outline-offset-[-1px]' : ''
       }`}
@@ -67,7 +71,11 @@ export default function PaneShell({
 
       {/* Content area */}
       <div className="flex-1 overflow-hidden min-h-0">
-        {viewEl}
+        <ErrorBoundary label={VIEW_LABELS[pane.view]}>
+          <Suspense fallback={<PaneLoading />}>
+            {viewEl}
+          </Suspense>
+        </ErrorBoundary>
       </div>
     </div>
   );

@@ -1,9 +1,8 @@
 import { useCallback, useState } from 'react';
-import type { Instrument, LayoutType, ViewType } from '../types';
+import type { Instrument, ViewType } from '../types';
 import { useWorkspaceState } from './useWorkspaceState';
 import PaneShell from './PaneShell';
 import SplitDivider from './SplitDivider';
-import LayoutPicker from './LayoutPicker';
 
 interface WorkspaceRootProps {
   theme: 'dark' | 'light';
@@ -11,7 +10,7 @@ interface WorkspaceRootProps {
 
 export default function WorkspaceRoot({ theme }: WorkspaceRootProps) {
   const {
-    state, setLayout, setPaneView, setActivePane, loadInstrumentInActivePane,
+    state, setPaneView, setActivePane, loadInstrumentInActivePane,
   } = useWorkspaceState();
 
   const [sizes, setSizes] = useState<number[]>([50, 50]);

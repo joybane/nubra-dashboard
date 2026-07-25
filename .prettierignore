@@ -1,0 +1,10 @@
+dist/
+node_modules/
+_archive/
+scratch/
+public/
+*.db
+*.db-shm
+*.db-wal
+package-lock.json
+nubra.proto

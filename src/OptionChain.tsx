@@ -288,6 +288,15 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
     return unsub;
   }, [subscribe]);
 
+  // Tear down the live feed on unmount: stops the REST poll, sends the OC
+  // unsubscribe, and clears the WS-activity timeout. Without this, closing the
+  // Option Chain pane leaks a network poll + a server-side subscription forever.
+  useEffect(() => () => {
+    stopLiveFeed();
+    if (wsActiveTimerRef.current) clearTimeout(wsActiveTimerRef.current);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function startPoll(sym: string, exch: string, exp: string) {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = window.setInterval(async () => {

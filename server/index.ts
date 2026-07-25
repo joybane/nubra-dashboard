@@ -1891,7 +1891,7 @@ fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, rep
           const list = (o.option_type.toUpperCase() === 'CE' ? chain.ce : chain.pe) || [];
           const matched = list.find((c: any) => {
             const sp = Number(c.sp);
-            return sp === o.strike || sp === o.strike * 100;
+            return o.strike != null && (sp === o.strike || sp === o.strike * 100);
           });
           if (matched) {
             o.ref_id = Number(matched.ref_id || matched.refId);
@@ -2478,12 +2478,14 @@ fastify.get<{ Querystring: { underlying?: string; date?: string; time?: string; 
       const peOpt = expiryOptions.find(x => x.strike_price === strike * 100 && x.option_type === 'PE');
       
       if (ceOpt?.stock_name) {
-        symbolsToFetch.push(ceOpt.stock_name);
-        symbolsMap.set(ceOpt.stock_name, { strike, type: 'CE' });
+        const name = String(ceOpt.stock_name);
+        symbolsToFetch.push(name);
+        symbolsMap.set(name, { strike, type: 'CE' });
       }
       if (peOpt?.stock_name) {
-        symbolsToFetch.push(peOpt.stock_name);
-        symbolsMap.set(peOpt.stock_name, { strike, type: 'PE' });
+        const name = String(peOpt.stock_name);
+        symbolsToFetch.push(name);
+        symbolsMap.set(name, { strike, type: 'PE' });
       }
     }
 
@@ -2577,7 +2579,7 @@ fastify.post<{ Body: NbEvalBody }>('/api/nubra-backtest/evaluate', async (req, r
     for (const leg of legs) {
       const opt = expiryOptions.find(x => x.strike_price === leg.strike * 100 && x.option_type === (leg.optionType === 'CALL' ? 'CE' : 'PE'));
       if (opt?.stock_name) {
-        legSymbols.push(opt.stock_name);
+        legSymbols.push(String(opt.stock_name));
       } else {
         return { ok: false, error: `Leg strike ${leg.strike} ${leg.optionType} not found in refdata for expiry ${expiry}.` };
       }

@@ -20,3 +20,13 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Archived one-off patch scripts / backups / logs (kept locally, not tracked)
+_archive/
+
+# Runtime logs & editor scratch files
+*.log
+*.bak
+*.tmp
+*.tmp.*
+StrategyAnalysisView.tsx.*

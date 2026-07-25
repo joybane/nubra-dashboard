@@ -158,6 +158,15 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     return unsub;
   }, [subscribe]);
 
+  // Release the OI snapshot interval and server-side OI subscription on unmount —
+  // otherwise an enabled overlay leaks a 30s timer and a live feed after the host
+  // chart is gone (both stop functions are ref-based, so the mount-time closure is safe).
+  useEffect(() => () => {
+    stopSnapshotTimer();
+    unsubscribeOiWs();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function safePriceToCoordinate(s: ISeriesApi<'Candlestick'> | null, p: number): number | null {
     if (!s) return null;
     try {

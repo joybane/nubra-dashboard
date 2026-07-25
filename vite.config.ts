@@ -24,10 +24,16 @@ export default defineConfig({
     outDir: 'dist',
     rollupOptions: {
       output: {
-        manualChunks: {
-          react:   ['react', 'react-dom'],
-          charts:  ['lightweight-charts'],
-          radix:   ['@radix-ui/react-dialog', '@radix-ui/react-dropdown-menu', '@radix-ui/react-select', '@radix-ui/react-tooltip'],
+        // Split long-lived vendor code into stable, cacheable chunks. Using a
+        // function (not the object form) so it also captures subpath imports like
+        // `react/jsx-runtime` and `react-dom/client` — the object form matched the
+        // bare specifiers only and left react-dom in the main bundle.
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return;
+          if (id.includes('lightweight-charts')) return 'charts';
+          if (id.includes('@radix-ui')) return 'radix';
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) return 'react';
+          return 'vendor';
         },
       },
     },

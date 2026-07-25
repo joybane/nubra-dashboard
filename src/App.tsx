@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { WsProvider, useWs } from './hooks/useWsContext';
 import { PaperTradingProvider } from './hooks/usePaperTrading';
 import { WatchlistProvider } from './hooks/useWatchlistContext';
@@ -8,9 +8,13 @@ import LoginOverlay from './components/LoginOverlay';
 import OrderTerminal from './components/OrderTerminal';
 import OrderTicket from './components/OrderTicket';
 import WorkspaceRoot from './workspace/WorkspaceRoot';
-import StrategyAnalysisView from './components/StrategyAnalysisView';
+import ErrorBoundary from './components/ErrorBoundary';
 import { WorkspaceProvider } from './workspace/WorkspaceProvider';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
+
+// The strategy analysis view is the single largest module and is only shown when
+// a saved strategy is opened — load it on demand.
+const StrategyAnalysisView = lazy(() => import('./components/StrategyAnalysisView'));
 
 export interface StrategyChartTarget {
   basketGroupId: string;
@@ -58,8 +62,9 @@ function AppInner() {
 
   if (auth === 'unknown') {
     return (
-      <div className="h-screen bg-[var(--bg-primary)] flex items-center justify-center">
-        <div className="text-[var(--text-muted)] animate-pulse">Loading...</div>
+      <div className="h-screen bg-[var(--bg-primary)] flex flex-col items-center justify-center gap-3">
+        <div className="spinner" />
+        <div className="text-[13px] text-[var(--text-muted)]">Connecting…</div>
       </div>
     );
   }
@@ -67,13 +72,23 @@ function AppInner() {
   if (strategyChart) {
     return (
       <div className="h-screen flex flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
-        <StrategyAnalysisView
-          basketGroupId={strategyChart.basketGroupId}
-          strategyName={strategyChart.strategyName}
-          snapshotId={strategyChart.snapshotId}
-          theme={theme}
-          onBack={() => setStrategyChart(null)}
-        />
+        <ErrorBoundary label="Strategy Analysis">
+          <Suspense
+            fallback={
+              <div className="flex flex-1 items-center justify-center">
+                <div className="spinner" />
+              </div>
+            }
+          >
+            <StrategyAnalysisView
+              basketGroupId={strategyChart.basketGroupId}
+              strategyName={strategyChart.strategyName}
+              snapshotId={strategyChart.snapshotId}
+              theme={theme}
+              onBack={() => setStrategyChart(null)}
+            />
+          </Suspense>
+        </ErrorBoundary>
         {auth === 'unauthenticated' && (
           <LoginOverlay onAuthenticated={() => setAuth('authenticated')} />
         )}

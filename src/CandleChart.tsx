@@ -261,7 +261,9 @@ export default function CandleChart({ instrument, theme }: Props) {
     });
 
     const observer = new ResizeObserver(() => {
-      chart.resize(containerRef.current!.clientWidth, containerRef.current!.clientHeight);
+      const el = containerRef.current;
+      if (!el) return;
+      chart.resize(el.clientWidth, el.clientHeight);
     });
     observer.observe(containerRef.current);
 
@@ -275,6 +277,7 @@ export default function CandleChart({ instrument, theme }: Props) {
     return () => {
       containerRef.current?.removeEventListener('dblclick', onDblClick);
       observer.disconnect();
+      stopCountdown();          // otherwise the 1s countdown interval keeps ticking after unmount
       chart.remove();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps

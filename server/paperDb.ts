@@ -238,12 +238,16 @@ export function dbLoadOrders(): Array<Record<string, unknown>> {
 
 // ── Fills ───────────────────────────────────────────────────────────────────
 
+let _stmtInsertFill: ReturnType<typeof db.prepare> | null = null;
+const _insertFill = () => _stmtInsertFill ??= db.prepare(
+  `INSERT INTO fills (order_id, ref_id, fill_price, fill_qty, fill_time, side)
+   VALUES (@order_id, @ref_id, @fill_price, @fill_qty, @fill_time, @side)`);
+
 export function dbInsertFill(f: {
   order_id: number; ref_id: number; fill_price: number;
   fill_qty: number; fill_time: number; side: string;
 }): void {
-  db.prepare(`INSERT INTO fills (order_id, ref_id, fill_price, fill_qty, fill_time, side)
-    VALUES (@order_id, @ref_id, @fill_price, @fill_qty, @fill_time, @side)`).run(f);
+  _insertFill().run(f);
 }
 
 // ── Positions ───────────────────────────────────────────────────────────────
@@ -285,14 +289,18 @@ export function dbLoadClosedPositions(): Array<Record<string, unknown>> {
 
 // ── PnL Ticks ───────────────────────────────────────────────────────────────
 
+let _stmtInsertPnlTick: ReturnType<typeof db.prepare> | null = null;
+const _insertPnlTick = () => _stmtInsertPnlTick ??= db.prepare(
+  `INSERT INTO pnl_ticks (ts, ref_id, ltp, qty, avg_price,
+    unrealized_pnl, realized_pnl, total_pnl)
+   VALUES (@ts, @ref_id, @ltp, @qty, @avg_price,
+    @unrealized_pnl, @realized_pnl, @total_pnl)`);
+
 export function dbInsertPnlTick(t: {
   ts: number; ref_id: number; ltp: number; qty: number;
   avg_price: number; unrealized_pnl: number; realized_pnl: number; total_pnl: number;
 }): void {
-  db.prepare(`INSERT INTO pnl_ticks (ts, ref_id, ltp, qty, avg_price,
-    unrealized_pnl, realized_pnl, total_pnl)
-    VALUES (@ts, @ref_id, @ltp, @qty, @avg_price,
-    @unrealized_pnl, @realized_pnl, @total_pnl)`).run(t);
+  _insertPnlTick().run(t);
 }
 
 // ── Name Map ────────────────────────────────────────────────────────────────

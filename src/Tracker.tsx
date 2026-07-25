@@ -186,7 +186,9 @@ export default function Tracker({ instrument, theme }: Props) {
     lineRef.current = line;
 
     const observer = new ResizeObserver(() => {
-      chart.resize(containerRef.current!.clientWidth, containerRef.current!.clientHeight);
+      const el = containerRef.current;
+      if (!el) return;
+      chart.resize(el.clientWidth, el.clientHeight);
     });
     observer.observe(containerRef.current);
 

@@ -20,6 +20,11 @@ const WsContext = createContext<WsContextValue | null>(null);
 export function WsProvider({ children }: { children: React.ReactNode }) {
   const wsRef     = useRef<WebSocket | null>(null);
   const listeners = useRef(new Map<string, Set<Listener>>());
+  // Reconnect bookkeeping: `reconnectRef` holds the pending retry timer so we can
+  // cancel it, and `stoppedRef` marks intentional teardown so a `close` event
+  // triggered by *us* (unmount) does not schedule a resurrecting reconnect.
+  const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stoppedRef   = useRef(false);
   const [wsReady, setWsReady] = useState(false);
 
   const dispatch = useCallback((msg: WsMessage) => {
@@ -30,6 +35,7 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const connect = useCallback(() => {
+    if (stoppedRef.current) return;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     wsRef.current = ws;
@@ -44,16 +50,31 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
     });
 
     ws.addEventListener('close', () => {
+      // Ignore a stale socket's close (a newer connection already replaced it —
+      // e.g. StrictMode's dev remount, or an overlapping reconnect).
+      if (wsRef.current !== ws) return;
       setWsReady(false);
-      setTimeout(connect, 3000);
+      // Only auto-reconnect after an *unexpected* drop, never after teardown.
+      if (stoppedRef.current) return;
+      reconnectRef.current = setTimeout(connect, 3000);
     });
 
     ws.addEventListener('error', () => ws.close());
   }, [dispatch]);
 
   useEffect(() => {
+    stoppedRef.current = false;
     connect();
-    return () => wsRef.current?.close();
+    return () => {
+      stoppedRef.current = true;
+      if (reconnectRef.current) {
+        clearTimeout(reconnectRef.current);
+        reconnectRef.current = null;
+      }
+      const ws = wsRef.current;
+      wsRef.current = null;
+      ws?.close();
+    };
   }, [connect]);
 
   const send = useCallback((msg: object) => {

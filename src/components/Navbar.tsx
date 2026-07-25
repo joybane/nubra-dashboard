@@ -1,35 +1,17 @@
 import { useEffect, useState, useRef } from 'react';
 import { useWs } from '../hooks/useWsContext';
-import type { Instrument, Theme, ViewType, LayoutType } from '../types';
+import type { Instrument, Theme, LayoutType } from '../types';
 import InstrumentSearch from './InstrumentSearch';
+import ConfirmDialog from './ConfirmDialog';
+import { logger } from '../lib/logger';
 import { useWorkspaceState } from '../workspace/useWorkspaceState';
+import { VIEW_LABELS, VIEW_ORDER, LAYOUT_OPTIONS } from '../workspace/viewConfig';
 
 interface NavbarProps {
   onInstrumentSelect: (item: Instrument) => void;
   theme: Theme;
   onThemeToggle: () => void;
 }
-
-const VIEW_LABELS: Record<ViewType, string> = {
-  chart:       'Chart',
-  optionchain: 'Option Chain',
-  straddle:    'Straddle',
-  strategy:    'Strategy',
-  basket:      'Basket',
-  backtest:    'Backtest',
-  nubrabacktest: 'Nubra BT',
-  watchlist:   'Watchlist',
-  tracker:     'Tracker',
-};
-
-const LAYOUT_OPTIONS: { id: LayoutType; label: string }[] = [
-  { id: 'single', label: 'Single Pane' },
-  { id: 'hsplit', label: 'Horizontal Split' },
-  { id: 'vsplit', label: 'Vertical Split' },
-  { id: 'grid',   label: '2×2 Grid' },
-  { id: 'tleft',  label: 'T-Left Layout' },
-  { id: 'tright', label: 'T-Right Layout' },
-];
 
 function renderLayoutIcon(type: LayoutType, active = false) {
   const bgClass = active ? 'bg-[var(--accent)]' : 'bg-current opacity-40 group-hover:opacity-80 transition-opacity';
@@ -92,7 +74,21 @@ export default function Navbar({ onInstrumentSelect, theme, onThemeToggle }: Nav
   const { layout, panes, activePane } = state;
 
   const [layoutOpen, setLayoutOpen] = useState(false);
+  const [logoutOpen, setLogoutOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const doLogout = async () => {
+    setLoggingOut(true);
+    try {
+      const res = await fetch('/auth/logout', { method: 'POST' });
+      if (res.ok) window.location.reload();
+      else setLoggingOut(false);
+    } catch (e) {
+      logger.error('Logout failed:', e);
+      setLoggingOut(false);
+    }
+  };
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -123,7 +119,7 @@ export default function Navbar({ onInstrumentSelect, theme, onThemeToggle }: Nav
 
         {/* View selector tabs */}
         <div className="flex items-center gap-1 overflow-x-auto min-w-0 py-1">
-          {(Object.keys(VIEW_LABELS) as ViewType[]).map((v) => (
+          {VIEW_ORDER.map((v) => (
             <button
               key={v}
               onClick={() => {
@@ -156,6 +152,9 @@ export default function Navbar({ onInstrumentSelect, theme, onThemeToggle }: Nav
             onClick={() => setLayoutOpen(!layoutOpen)}
             className="w-8 h-8 rounded-full bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-secondary)] flex items-center justify-center hover:border-[var(--accent)] hover:text-[var(--text-primary)] transition-all cursor-pointer"
             title="Choose layout"
+            aria-label="Choose workspace layout"
+            aria-haspopup="menu"
+            aria-expanded={layoutOpen}
           >
             {renderLayoutIcon(layout as LayoutType, true)}
           </button>
@@ -182,7 +181,7 @@ export default function Navbar({ onInstrumentSelect, theme, onThemeToggle }: Nav
                   >
                     {renderLayoutIcon(opt.id, layout === opt.id)}
                     <span className="text-[9px] font-medium text-center truncate w-full">
-                      {opt.id === 'single' ? 'Single' : opt.id === 'hsplit' ? 'H-Split' : opt.id === 'vsplit' ? 'V-Split' : opt.id === 'grid' ? 'Grid' : opt.id === 'tleft' ? 'T-Left' : 'T-Right'}
+                      {opt.short}
                     </span>
                   </button>
                 ))}
@@ -194,27 +193,27 @@ export default function Navbar({ onInstrumentSelect, theme, onThemeToggle }: Nav
         {/* Theme toggle */}
         <button
           onClick={onThemeToggle}
-          title="Toggle theme"
-          className="w-8 h-8 rounded-full bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-secondary)] flex items-center justify-center hover:border-[var(--accent)] hover:text-[var(--text-primary)] transition-all"
+          title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          className="w-8 h-8 rounded-full bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-secondary)] flex items-center justify-center hover:border-[var(--accent)] hover:text-[var(--text-primary)] transition-all cursor-pointer"
         >
-          {theme === 'dark' ? '☀' : '☾'}
+          {theme === 'dark' ? (
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="4" />
+              <path strokeLinecap="round" d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41" />
+            </svg>
+          ) : (
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />
+            </svg>
+          )}
         </button>
 
         {/* Logout */}
         <button
-          onClick={async () => {
-            if (confirm('Are you sure you want to log out of Nubra?')) {
-              try {
-                const res = await fetch('/auth/logout', { method: 'POST' });
-                if (res.ok) {
-                  window.location.reload();
-                }
-              } catch (e) {
-                console.error('Logout failed:', e);
-              }
-            }
-          }}
+          onClick={() => setLogoutOpen(true)}
           title="Logout"
+          aria-label="Log out"
           className="w-8 h-8 rounded-full bg-[var(--bg-card)] border border-[var(--border)] text-red-400 hover:text-red-500 hover:border-red-500/50 flex items-center justify-center transition-all cursor-pointer"
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
@@ -222,6 +221,17 @@ export default function Navbar({ onInstrumentSelect, theme, onThemeToggle }: Nav
           </svg>
         </button>
       </div>
+
+      <ConfirmDialog
+        open={logoutOpen}
+        title="Log out?"
+        message="You'll need to sign in again with OTP and MPIN to resume trading."
+        confirmLabel="Log out"
+        danger
+        busy={loggingOut}
+        onConfirm={doLogout}
+        onCancel={() => setLogoutOpen(false)}
+      />
     </nav>
   );
 }

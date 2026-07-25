@@ -59,7 +59,7 @@ export function useWorkspaceStateCore() {
   const update = useCallback((updater: (prev: WorkspaceState) => WorkspaceState) => {
     setState((prev) => {
       const next = updater(prev);
-      saveState(next);
+      if (next !== prev) saveState(next); // only persist real changes
       return next;
     });
   }, []);
@@ -91,7 +91,9 @@ export function useWorkspaceStateCore() {
   }, [update]);
 
   const setActivePane = useCallback((paneId: string) => {
-    update((prev) => ({ ...prev, activePane: paneId }));
+    // Skip redundant updates: clicking inside the already-active pane must not
+    // churn state (and re-render/persist) on every mousedown.
+    update((prev) => (prev.activePane === paneId ? prev : { ...prev, activePane: paneId }));
   }, [update]);
 
   const loadInstrumentInActivePane = useCallback((instrument: Instrument) => {
