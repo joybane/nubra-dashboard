@@ -324,6 +324,10 @@ export function dbLoadOcSubs(): string[] {
   return (db.prepare('SELECT key FROM oc_subs').all() as Array<{ key: string }>).map(r => r.key);
 }
 
+export function dbDeleteOcSub(key: string): void {
+  db.prepare('DELETE FROM oc_subs WHERE key=?').run(key);
+}
+
 // ── Meta ────────────────────────────────────────────────────────────────────
 
 export function dbGetMeta(key: string): string | undefined {

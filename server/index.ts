@@ -14,13 +14,17 @@ import {
   dbInsertPnlTick, dbUpsertName, dbLoadNameMap,
   dbGetMeta, dbSetMeta,
   dbInsertBasket, dbLoadBaskets, dbDeleteBasket, dbUpdateBasket, dbRenameStrategy, dbRenameSavedBasket,
-  dbUpsertOcSub, dbLoadOcSubs,
+  dbUpsertOcSub, dbLoadOcSubs, dbDeleteOcSub,
   dbUpsertSnapshot, dbListSnapshots, dbGetSnapshot, dbDeleteSnapshot,
 } from './paperDb.ts';
 import { buildBasketSnapshot, istDateString, type SnapPosition } from './snapshotBuilder.ts';
 import { getMeta as btGetMeta, runBacktest, runDayDetail, validateConfig, validateSweep, runSweep, validateWalkForward, runWalkForward } from './backtest/index.ts';
 import type { BacktestConfig, SweepRequest, WalkForwardRequest } from './backtest/types.ts';
 import { calculateLocalBasketMargin } from './marginEngine.ts';
+import {
+  feedKey, requiredFeedKeys, staleRequiredFeeds, isMarketHours, pruneOcSubKeys, istToday,
+  type FeedIndex,
+} from './ocFeedGuard.ts';
 import {
   loadPositionRules, upsertLegRule, upsertGroupRule, deleteLegRule, deleteGroupRule,
   listPositionRules, evaluateAndFire, sanitizeSLTarget, legRuleKey,
@@ -670,6 +674,65 @@ let nubraWs: WebSocket | null      = null;
 const browserClients               = new Set<WebSocket>();
 const pendingSubs: string[]        = [];
 
+// Browser option-chain interest, reference counted here rather than written into
+// the persisted `simOcSubs`. Panes refcount within a tab (src/lib/ocSubRegistry),
+// but two tabs used to fight — one closing a chain unsubscribed it from under the
+// other — and every chain ever opened was persisted forever. This is transient by
+// design: a reconnecting browser replays its own subscriptions.
+const browserOcSubs = new Map<string, number>();                 // key → total holders
+const clientOcSubs  = new Map<WebSocket, Map<string, number>>(); // per client, to release on close
+
+/** @returns true on the 0 → 1 transition, i.e. the caller should subscribe upstream. */
+function acquireBrowserOc(ws: WebSocket, key: string): boolean {
+  let own = clientOcSubs.get(ws);
+  if (!own) { own = new Map(); clientOcSubs.set(ws, own); }
+  own.set(key, (own.get(key) ?? 0) + 1);
+  const total = (browserOcSubs.get(key) ?? 0) + 1;
+  browserOcSubs.set(key, total);
+  return total === 1;
+}
+
+/** @returns true on the 1 → 0 transition. Unbalanced releases are ignored. */
+function releaseBrowserOc(ws: WebSocket, key: string): boolean {
+  const own = clientOcSubs.get(ws);
+  const held = own?.get(key) ?? 0;
+  if (held <= 0) return false;
+  if (held === 1) own!.delete(key); else own!.set(key, held - 1);
+  const total = (browserOcSubs.get(key) ?? 0) - 1;
+  if (total <= 0) { browserOcSubs.delete(key); return true; }
+  browserOcSubs.set(key, total);
+  return false;
+}
+
+/** Release everything a disconnecting client held. @returns keys that reached 0. */
+function releaseAllBrowserOc(ws: WebSocket): string[] {
+  const own = clientOcSubs.get(ws);
+  clientOcSubs.delete(ws);
+  if (!own) return [];
+  const freed: string[] = [];
+  for (const [key, n] of own) {
+    const total = (browserOcSubs.get(key) ?? 0) - n;
+    if (total <= 0) { browserOcSubs.delete(key); freed.push(key); }
+    else browserOcSubs.set(key, total);
+  }
+  return freed;
+}
+
+function sendOcCmd(
+  verb: 'batch_subscribe' | 'batch_unsubscribe',
+  asset: string, expiry: string, exchange = 'NSE',
+): void {
+  const token = authState.sessionToken;
+  if (!token) return;
+  const cmd = `${verb} ${token} option ${JSON.stringify([{ exchange, asset, expiry }])}`;
+  if (nubraWs && nubraWs.readyState === WebSocket.OPEN) {
+    nubraWs.send(cmd);
+  } else if (verb === 'batch_subscribe') {
+    pendingSubs.push(cmd);
+    connectNubraWs();
+  }
+}
+
 const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
 
 function connectNubraWs(): void {
@@ -725,11 +788,23 @@ function connectNubraWs(): void {
 // invisible until this was exposed on /paper/debug.
 const ocLastTick = new Map<string, number>();
 
+// ref_id → the "ASSET:EXPIRY" feed that actually delivers its price, learned from
+// the ticks themselves (see ocFeedGuard — an instrument name like
+// NIFTY26JUL23850PE does not carry the weekly expiry it trades on). Held in
+// memory only: `bootstrapPositionSubs` re-subscribes every open position's
+// candidate expiries on each Nubra connect, so it is relearned within a second.
+const posFeedIndex: FeedIndex = new Map();
+
+/** Feeds at least one open position depends on for P&L and rule evaluation. */
+function requiredOcFeeds(): Set<string> {
+  return requiredFeedKeys(posFeedIndex, simBroker.getPositions().map(p => p.ref_id));
+}
+
 function noteOcTick(decoded: { type: string; data: unknown }): void {
   if (decoded.type !== 'option_chain') return;
   const d = decoded.data as { asset?: string; expiry?: string };
   if (!d.asset || !d.expiry) return;
-  ocLastTick.set(`${String(d.asset).toUpperCase()}:${d.expiry}`, Date.now());
+  ocLastTick.set(feedKey(String(d.asset), d.expiry), Date.now());
 }
 
 function broadcast(obj: unknown): void {
@@ -774,22 +849,31 @@ wss.on('connection', (ws) => {
       }
 
       if (msg.action === 'subscribe_oc' || msg.action === 'unsubscribe_oc') {
-        const verb    = msg.action === 'subscribe_oc' ? 'batch_subscribe' : 'batch_unsubscribe';
-        const token   = authState.sessionToken!;
-        const asset   = msg.asset || '';
-        const expiry  = msg.expiry || '';
-        const payload = JSON.stringify([{ exchange: msg.exchange || 'NSE', asset, expiry }]);
-        const cmd     = `${verb} ${token} option ${payload}`;
-        if (msg.action === 'subscribe_oc' && asset && expiry) {
+        const asset  = msg.asset || '';
+        const expiry = msg.expiry || '';
+        if (!asset || !expiry) return;
+        const key = feedKey(asset, expiry);
+
+        if (msg.action === 'subscribe_oc') {
           clearOcTsGuard(asset, expiry, msg.exchange || 'NSE');
-          const key = `${asset}:${expiry}`;
-          if (!simOcSubs.has(key)) { simOcSubs.add(key); dbUpsertOcSub(key); }
-        }
-        if (nubraWs && nubraWs.readyState === WebSocket.OPEN) {
-          nubraWs.send(cmd);
-        } else if (msg.action === 'subscribe_oc') {
-          pendingSubs.push(cmd);
-          connectNubraWs();
+          // Always relay: the feed may have lapsed upstream even while another
+          // client still holds a reference, and a duplicate batch_subscribe is
+          // harmless. Only the bookkeeping is conditional.
+          acquireBrowserOc(ws, key);
+          sendOcCmd('batch_subscribe', asset, expiry, msg.exchange);
+        } else {
+          const lastHolder = releaseBrowserOc(ws, key);
+          if (!lastHolder) return;
+          // The server has its own stake in these feeds: `routeTickToSim` turns
+          // option_chain ticks into `position_ltp` and into SL/target evaluation.
+          // Relaying the last pane's unsubscribe used to kill both for every open
+          // position on that expiry — frozen P&L and, worse, stop-losses that
+          // quietly stopped firing.
+          if (requiredOcFeeds().has(key) || simOcSubs.has(key)) {
+            console.log(`[OC] Keeping ${key} — the simulator needs it`);
+            return;
+          }
+          sendOcCmd('batch_unsubscribe', asset, expiry, msg.exchange);
         }
       }
     } catch (e) {
@@ -797,7 +881,16 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => browserClients.delete(ws));
+  ws.on('close', () => {
+    browserClients.delete(ws);
+    // A tab that closes without unsubscribing must not leak its holds, or the
+    // refcount never returns to zero and the feed is held for the session.
+    for (const key of releaseAllBrowserOc(ws)) {
+      if (requiredOcFeeds().has(key) || simOcSubs.has(key)) continue;
+      const [asset, expiry] = key.split(':');
+      sendOcCmd('batch_unsubscribe', asset, expiry);
+    }
+  });
 });
 
 setInterval(() => {
@@ -1299,19 +1392,47 @@ function subscribeForSim(nubraName: string, refId: number, derivativeType?: stri
   }
 }
 
+// Replay both the simulator's own feeds and whatever browsers currently hold.
+// Browser subscriptions are no longer persisted into `simOcSubs`, so upstream
+// reconnects have to restore them from the live refcounts instead — a browser
+// only replays when *its* socket reconnects, which is a different event.
 function sendAllOcSubs(): void {
   if (!nubraWs || nubraWs.readyState !== WebSocket.OPEN || !authState.sessionToken) return;
-  for (const key of simOcSubs) {
+  const keys = new Set([...simOcSubs, ...browserOcSubs.keys()]);
+  for (const key of keys) {
     const [asset, expiry] = key.split(':');
-    const payload = JSON.stringify([{ exchange: 'NSE', asset, expiry }]);
-    nubraWs.send(`batch_subscribe ${authState.sessionToken} option ${payload}`);
+    sendOcCmd('batch_subscribe', asset, expiry);
   }
-  if (simOcSubs.size > 0) console.log(`[WS] Subscribed ${simOcSubs.size} OC feeds`);
+  if (keys.size > 0) console.log(`[WS] Subscribed ${keys.size} OC feeds (${simOcSubs.size} simulator, ${browserOcSubs.size} browser)`);
+}
+
+// Drop persisted feeds nothing needs any more: expired, malformed, or belonging
+// to an asset with no open position and no live order. Without this the set only
+// grew — every chain ever opened stayed in it, and `sendAllOcSubs` re-subscribed
+// all of them on every reconnect.
+function reconcileOcSubs(): void {
+  const liveAssets = new Set<string>();
+  const addAsset = (displayName: string) => {
+    const m = displayName.match(/^([A-Z]+)/);
+    if (m) liveAssets.add(m[1]);
+  };
+  for (const p of simBroker.getPositions()) addAsset(p.display_name);
+  for (const o of simBroker.getOrders('live')) addAsset(o.display_name);
+
+  const { drop } = pruneOcSubKeys(simOcSubs, {
+    liveAssets,
+    todayIst: istToday(Date.now()),
+    pinned: requiredOcFeeds(),
+  });
+  if (drop.length === 0) return;
+  for (const { key } of drop) { simOcSubs.delete(key); dbDeleteOcSub(key); }
+  console.log(`[OC] Pruned ${drop.length} stale OC sub(s): ${drop.map(d => `${d.key} (${d.reason})`).join(', ')}`);
 }
 
 async function bootstrapPositionSubs(): Promise<void> {
+  reconcileOcSubs();
   const positions = simBroker.getPositions();
-  if (positions.length === 0) return;
+  if (positions.length === 0) { sendAllOcSubs(); return; }
   const assets = new Set<string>();
   for (const p of positions) {
     const m = p.display_name.match(/^([A-Z]+)/);
@@ -1339,6 +1460,39 @@ async function bootstrapPositionSubs(): Promise<void> {
   }
   sendAllOcSubs();
 }
+
+// Watchdog: re-arm any feed an open position depends on that has gone silent.
+// `simOcSubs` only records what we asked for — upstream can stop delivering a
+// feed (or a relayed unsubscribe from an older build can have killed it) with no
+// close, no error, and no way to tell from inside the process except that the
+// ticks stop. Without this, P&L and stop-losses stay dead until someone happens
+// to open a pane on that expiry.
+const _ocResubCount = new Map<string, number>();
+
+// Hourly, so expiry rollover and closed positions release their feeds without a
+// restart. `bootstrapPositionSubs` also runs it on every upstream reconnect.
+setInterval(reconcileOcSubs, 60 * 60 * 1000);
+
+setInterval(() => {
+  if (!nubraWs || nubraWs.readyState !== WebSocket.OPEN || !authState.sessionToken) return;
+  const now = Date.now();
+  // Outside the session a silent feed is expected, not broken.
+  if (!isMarketHours(now)) return;
+
+  const stale = staleRequiredFeeds(requiredOcFeeds(), ocLastTick, now);
+  for (const key of _ocResubCount.keys()) if (!stale.includes(key)) _ocResubCount.delete(key);
+
+  for (const key of stale) {
+    const [asset, expiry] = key.split(':');
+    const payload = JSON.stringify([{ exchange: 'NSE', asset, expiry }]);
+    nubraWs.send(`batch_subscribe ${authState.sessionToken} option ${payload}`);
+    const n = (_ocResubCount.get(key) ?? 0) + 1;
+    _ocResubCount.set(key, n);
+    const last = ocLastTick.get(key);
+    const age  = last ? `${Math.round((now - last) / 1000)}s` : 'never';
+    console.warn(`[OC] Feed ${key} silent (${age}) but needed by an open position — re-subscribed (attempt ${n})`);
+  }
+}, 20_000);
 
 // Route decoded PROD WebSocket ticks into SimBroker for fill evaluation.
 // Broadcasts position LTP changes to browser clients for tick-by-tick P&L.
@@ -1371,8 +1525,12 @@ function fireRules(refId: number): void {
 
 function routeTickToSim(decoded: { type: string; data: unknown }): void {
   if (decoded.type === 'option_chain') {
-    const d = decoded.data as { ce?: unknown[]; pe?: unknown[] };
+    const d = decoded.data as { asset?: string; expiry?: string; ce?: unknown[]; pe?: unknown[] };
     const allItems = [...(d.ce ?? []), ...(d.pe ?? [])];
+    // Record which feed serves each open position, so the unsubscribe guard and
+    // the staleness watchdog below know which feeds are load bearing.
+    const key    = d.asset && d.expiry ? feedKey(String(d.asset), d.expiry) : null;
+    const openIds = key ? new Set(simBroker.getPositions().map(p => p.ref_id)) : null;
     if (!_ocFieldLogDone && allItems.length > 0) {
       const sample = allItems[0] as Record<string, unknown>;
       console.log('[SimBroker] OC item field names:', Object.keys(sample).join(', '));
@@ -1384,6 +1542,7 @@ function routeTickToSim(decoded: { type: string; data: unknown }): void {
       const refId = i.refId ?? i.ref_id;
       const ltp   = i.ltp;
       if (refId && ltp) {
+        if (key && openIds?.has(Number(refId))) posFeedIndex.set(Number(refId), key);
         const changes = simBroker.onLtp(Number(refId), Number(ltp));
         queuePosLtp(changes);
         if (changes.length) fireRules(Number(refId));
@@ -1694,16 +1853,24 @@ fastify.get('/paper/debug', async (_req, reply) => {
   const now = Date.now();
   // A key in ocSubs with no ocFeeds entry (or a large ageSec) means we believe we
   // are subscribed but nothing is coming — the feed needs re-subscribing.
-  const ocFeeds = [...new Set([...simOcSubs, ...ocLastTick.keys()])]
+  const required = requiredOcFeeds();
+  const ocFeeds = [...new Set([...simOcSubs, ...browserOcSubs.keys(), ...ocLastTick.keys()])]
     .map(key => ({
       key,
       subscribed: simOcSubs.has(key),
+      // `required` feeds are the ones open positions need for live P&L and for
+      // SL/target evaluation. A required feed with a large ageSec is an outage,
+      // not idleness — the watchdog re-subscribes those every 20s in session.
+      required: required.has(key),
+      browserHolds: browserOcSubs.get(key) ?? 0,
       ageSec: ocLastTick.has(key) ? Math.round((now - ocLastTick.get(key)!) / 1000) : null,
     }))
     .sort((a, b) => (a.ageSec ?? Infinity) - (b.ageSec ?? Infinity));
   return reply.send({
     ocSubs: [...simOcSubs],
     ocFeeds,
+    posFeedIndex: Object.fromEntries(posFeedIndex),
+    marketHours: isMarketHours(now),
     positionRefIds: posRefIds,
     wsConnected: nubraWs?.readyState === WebSocket.OPEN,
     ocFieldLogDone: _ocFieldLogDone,
