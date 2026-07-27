@@ -271,10 +271,11 @@ export interface PaperPosition {
 }
 
 // ── Live position auto-exit rules (Positions tab SL/Target) ──────────────────
-// v1 supports only these two SL/target types for live monitoring (mirrors the
-// restriction enforced server-side in server/positionRules.ts).
-export type LiveSLTargetType = 'NONE' | 'PREMIUM_PERCENT' | 'PREMIUM_ABSOLUTE';
-export interface LiveSLTarget { type: LiveSLTargetType; value?: number; }
+// The SL/target vocabulary and the level math live in src/lib/positionRuleLevels.ts,
+// which server/positionRules.ts imports too — one definition, so the trigger price
+// the editor previews is exactly the one that fires.
+import type { LiveSLTarget } from './lib/positionRuleLevels';
+export type { LiveSLTargetType, LiveSLTarget, LiveSide } from './lib/positionRuleLevels';
 
 export type LiveTrailType = 'NONE' | 'LOCK' | 'TRAIL' | 'LOCK_AND_TRAIL' | 'TO_COST';
 export interface LiveTrailStop {

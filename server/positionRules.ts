@@ -9,11 +9,16 @@
 // group (GROUP, combined ₹ P&L) level. Underlying/delta-based SL are deferred
 // (would need live spot + reconstructed greeks piped into this loop).
 // ─────────────────────────────────────────────────────────────────────────────
-import { premiumLevels } from './backtest/engine.ts';
-import type { SLTarget, TrailStop } from './backtest/types.ts';
+import { liveLevels, type LiveSLTarget } from '../src/lib/positionRuleLevels.ts';
+import type { TrailStop } from './backtest/types.ts';
 import { dbUpsertPositionRule, dbLoadPositionRules, dbDeletePositionRule } from './paperDb.ts';
 
-export type { SLTarget, TrailStop };
+// The live rule vocabulary is a subset of the backtest's (premium-only) plus
+// PREMIUM_PRICE, which is live-specific: a backtest leg has no single "current
+// price" a user could name up front. Exported under the historical `SLTarget`
+// name so server/index.ts's API types keep working unchanged.
+export type SLTarget = LiveSLTarget;
+export type { TrailStop };
 
 export interface LegRule {
   scope: 'LEG';
@@ -37,9 +42,9 @@ export function legRuleKey(refId: number, basketGroupId?: string): string {
   return `${refId}:${basketGroupId || ''}`;
 }
 
-// Only these SL/target types are supported for live monitoring in v1 — anything
-// else (underlying/delta) is silently downgraded to NONE at the API boundary.
-const ALLOWED_SL_TYPES = new Set(['NONE', 'PREMIUM_PERCENT', 'PREMIUM_ABSOLUTE']);
+// Only these SL/target types are supported for live monitoring — anything else
+// (underlying/delta) is silently downgraded to NONE at the API boundary.
+const ALLOWED_SL_TYPES = new Set(['NONE', 'PREMIUM_PRICE', 'PREMIUM_PERCENT', 'PREMIUM_ABSOLUTE']);
 export function sanitizeSLTarget(v: SLTarget | undefined): SLTarget {
   if (!v || !ALLOWED_SL_TYPES.has(v.type)) return { type: 'NONE' };
   return { type: v.type, value: v.value };
@@ -213,7 +218,7 @@ export function evaluateAndFire(broker: RuleBroker, changedRefId: number): RuleF
     const ltpRs   = pos.last_traded_price / 100;
     const sl  = sanitizeSLTarget(rule.stopLoss);
     const tgt = sanitizeSLTarget(rule.target);
-    const { slPrice, tgtPrice } = premiumLevels(side, entryRs, sl, tgt);
+    const { slPrice, tgtPrice } = liveLevels(side, entryRs, sl, tgt);
 
     let hitReason: 'STOPLOSS' | 'TARGET' | null = null;
     if (slPrice != null && (sell ? ltpRs >= slPrice : ltpRs <= slPrice)) hitReason = 'STOPLOSS';

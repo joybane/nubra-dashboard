@@ -1696,6 +1696,10 @@ fastify.put<{ Body: LegRuleBody }>('/paper/positions/rules/leg', async (req, rep
     stopLoss: sanitizeSLTarget(stopLoss), target: sanitizeSLTarget(target), trail,
   };
   upsertLegRule(rule);
+  // Evaluate straight away. Rules are otherwise only checked when routeTickToSim
+  // sees the LTP *change*, so a level the price has already passed would sit idle
+  // until the next differing tick — and never fire at all outside market hours.
+  fireRules(ref_id);
   return reply.send({ ok: true, rule_key: legRuleKey(ref_id, basket_group_id) });
 });
 
@@ -1709,6 +1713,10 @@ fastify.put<{ Body: GroupRuleBody }>('/paper/positions/rules/group', async (req,
     trail, exitAllOnLegHit: exitAllOnLegHit || undefined,
   };
   upsertGroupRule(rule);
+  // Same immediate evaluation as the leg route. evaluateAndFire keys off a
+  // changed ref_id, so nominate any member of the group to stand in for the tick.
+  const member = simBroker.getPositions().find(p => p.basket_group_id === basket_group_id);
+  if (member) fireRules(member.ref_id);
   return reply.send({ ok: true });
 });
 

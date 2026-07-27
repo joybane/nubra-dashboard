@@ -4,6 +4,7 @@ import type {
   PositionRule, LegPositionRule, GroupPositionRule,
 } from '../types';
 import { fmtPrice } from '../lib/utils';
+import { liveLevels } from '../lib/positionRuleLevels';
 import { usePaperTrading } from '../hooks/usePaperTrading';
 import { useWorkspaceState } from '../workspace/useWorkspaceState';
 import { useWs } from '../hooks/useWsContext';
@@ -714,6 +715,19 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     return side * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0) / 100;
   }
 
+  // Spell the armed levels out on the ● marker. Uses qty's sign for the side and
+  // the same liveLevels() the server fires on, so the tooltip reports the real
+  // trigger prices — a rule whose value means something other than the user
+  // expected is then visible on hover instead of only after it fails to fire.
+  function legRuleTitle(p: PaperPosition, rule: LegPositionRule): string {
+    const { slPrice, tgtPrice } = liveLevels(p.qty < 0 ? 'SELL' : 'BUY', (p.avg_price || 0) / 100, rule.stopLoss, rule.target);
+    const parts: string[] = [];
+    if (slPrice  != null) parts.push(`SL ₹${slPrice.toFixed(2)}`);
+    if (tgtPrice != null) parts.push(`Target ₹${tgtPrice.toFixed(2)}`);
+    if (rule.trail && rule.trail.type !== 'NONE') parts.push('trailing');
+    return parts.length ? `Auto-exit — ${parts.join(' · ')}` : 'Auto SL/Target active';
+  }
+
   function renderPositionRow(p: PaperPosition, indent = false) {
     const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
     const pnl  = calcPnl(p);
@@ -723,7 +737,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
       <tr key={ek} className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`} onClick={() => setDetailPos(p)}>
         <td className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] ${indent ? 'pl-8' : ''}`}>
           {p.display_name || p.zanskar_name || p.ref_id}
-          {legRule && <span className="text-[var(--accent)] ml-1" title="Auto SL/Target active">●</span>}
+          {legRule && <span className="text-[var(--accent)] ml-1" title={legRuleTitle(p, legRule)}>●</span>}
         </td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.product || 'NRML'}</td>
         <td className={`px-3 py-1.5 font-semibold ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{side}</td>
@@ -1142,17 +1156,26 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
         );
       })()}
 
-      {ruleEditor && ruleEditor.mode === 'LEG' && (
-        <PositionRuleEditor
-          mode="LEG"
-          refId={ruleEditor.refId}
-          basketGroupId={ruleEditor.basketGroupId}
-          displayName={ruleEditor.displayName}
-          initial={(rules.find(r => r.scope === 'LEG' && r.ref_id === ruleEditor.refId && (r.basket_group_id || '') === ruleEditor.basketGroupId) as LegPositionRule | undefined) ?? null}
-          onClose={() => setRuleEditor(null)}
-          onSaved={fetch_}
-        />
-      )}
+      {ruleEditor && ruleEditor.mode === 'LEG' && (() => {
+        // Resolve the position at render time rather than snapshotting it into
+        // ruleEditor state, so the dialog's entry/LTP readout stays live while
+        // it is open — that readout is what the trigger-price preview is built on.
+        const rp = positions.find(p => p.ref_id === ruleEditor.refId && (p.basket_group_id || '') === ruleEditor.basketGroupId);
+        return (
+          <PositionRuleEditor
+            mode="LEG"
+            refId={ruleEditor.refId}
+            basketGroupId={ruleEditor.basketGroupId}
+            displayName={ruleEditor.displayName}
+            entryPriceRs={(rp?.avg_price ?? 0) / 100}
+            side={(rp?.qty ?? 0) < 0 ? 'SELL' : 'BUY'}
+            ltpRs={rp?.last_traded_price ? rp.last_traded_price / 100 : undefined}
+            initial={(rules.find(r => r.scope === 'LEG' && r.ref_id === ruleEditor.refId && (r.basket_group_id || '') === ruleEditor.basketGroupId) as LegPositionRule | undefined) ?? null}
+            onClose={() => setRuleEditor(null)}
+            onSaved={fetch_}
+          />
+        );
+      })()}
       {ruleEditor && ruleEditor.mode === 'GROUP' && (
         <PositionRuleEditor
           mode="GROUP"
