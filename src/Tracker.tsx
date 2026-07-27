@@ -12,6 +12,7 @@ import { useWs } from './hooks/useWsContext';
 import { useGreekOverlay } from './hooks/useGreekOverlay';
 import { GreekButton } from './components/GreekControls';
 import { fetchRange, nubraType } from './CandleChart';
+import { isChartLive, removeChart } from './lib/chartLifecycle';
 import type { Instrument, OhlcBar, OhlcvData, WsMessage } from './types';
 import { getSymbol } from './types';
 import { IST_OFFSET, chartTimeDayKey, fmtPrice, isNseMarketSessionChartTime, sortKey } from './lib/utils';
@@ -34,6 +35,10 @@ const CHUNK_DAYS = 5;            // load-more chunk when scrolling further back
 const TICK_VIEW_BARS = 5_400;    // initial visible window when today is 1s (~90 min)
 const DETAIL_WINDOW_SEC = 2 * 60 * 60;
 type Resolution = '1m' | '1s';
+
+function normalizeChartName(name: string): string {
+  return name.toUpperCase().replace(/^(NSE|BSE)_/, '').replace(/\s+/g, '');
+}
 
 /** True if an IST-baked chart-time (seconds) falls on the same IST calendar day as `nowMs`. */
 function isSameISTDay(chartTimeSec: unknown, nowMs: number): boolean {
@@ -247,7 +252,7 @@ export default function Tracker({ instrument, theme }: Props) {
     return () => {
       containerRef.current?.removeEventListener('dblclick', onDblClick);
       observer.disconnect();
-      chart.remove();
+      removeChart(chart);
       chartRef.current = null;
       lineRef.current = null;
     };
@@ -363,11 +368,11 @@ export default function Tracker({ instrument, theme }: Props) {
     const unsub = subscribe('ohlcv', (msg: WsMessage) => {
       if (msg.type !== 'ohlcv' || !lineRef.current) return;
       const data = msg.data as OhlcvData;
-      const want = sym.toUpperCase();
+      const want = normalizeChartName(sym);
       const buckets = [...(data.indexes || []), ...(data.instruments || [])];
       for (const b of buckets) {
-        const bname = (b.indexname || '').toUpperCase();
-        if (bname === want || want.startsWith(bname) || bname.startsWith(want)) { applyBucket(b as Record<string, string>); break; }
+        const bname = normalizeChartName(b.indexname || '');
+        if (bname === want) { applyBucket(b as Record<string, string>); break; }
       }
     });
     return unsub;
@@ -450,6 +455,10 @@ export default function Tracker({ instrument, theme }: Props) {
           secondTail = true;
         }
       } catch { /* sub-minute unavailable → keep the 1m history */ }
+
+      // Two awaits happened above; the pane may have closed in the meantime. Writing
+      // to a removed chart throws a frame later from inside lightweight-charts.
+      if (!isChartLive(chartRef.current) || !lineRef.current) return;
 
       minuteBarsRef.current = bars;
       secondBarsRef.current = secondTail ? combined : [];

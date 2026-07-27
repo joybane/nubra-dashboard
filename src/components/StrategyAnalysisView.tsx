@@ -12,6 +12,7 @@ import {
 import type { PaperPosition, PaperOrder, WsMessage, OptionChainData, OptionLeg } from '../types';
 import { fmtPrice, IST_OFFSET, toChartTime } from '../lib/utils';
 import { useWs } from '../hooks/useWsContext';
+import { chartFrame, isChartLive, removeChart } from '../lib/chartLifecycle';
 import { blackScholes, impliedVolatility } from '../lib/GexService';
 
 interface StrategyAnalysisViewProps {
@@ -143,11 +144,14 @@ function fillGreeksToGrid(
 }
 
 function safeSetVisibleLogicalRange(chart: IChartApi | null | undefined, range: any): void {
-  if (!chart || !range) return;
+  // isChartLive, not try/catch: a removed chart does not throw here. It queues a
+  // repaint and throws from inside lightweight-charts on the *next* frame, where no
+  // catch of ours can reach it. See lib/chartLifecycle.
+  if (!isChartLive(chart) || !range) return;
   try {
     chart.timeScale().setVisibleLogicalRange(range);
   } catch (e) {
-    // Ignore disposed chart calls safely
+    // Ignore genuinely bad ranges
   }
 }
 
@@ -720,6 +724,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     // Crosshair '+' tooltip is driven centrally by the crosshair-sync effect (section 4).
 
     // Restore cached data
+    let cancelFit = () => {};
     const cached = chartDataRef.current;
     if (cached) {
       candleSeries.setData(cached.underlyingBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })) as any);
@@ -735,14 +740,15 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
       try { chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } }); } catch {}
       try { chart.priceScale('left').applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } }); } catch {}
-      requestAnimationFrame(() => chart.timeScale().fitContent());
+      cancelFit = chartFrame(chart, c => c.timeScale().fitContent());
     }
 
     return () => {
+      cancelFit();
       seriesRef.current.underlying = null;
       seriesRef.current.legPrice.clear();
       priceChartRef.current = null;
-      try { chart.remove(); } catch {}
+      removeChart(chart);
       setChartEpoch(e => e + 1);
     };
   }, [theme, underlying, priceVisible]);
@@ -773,6 +779,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     }
 
     // Restore cached data (handles toggle off→on and theme change)
+    let cancelFit = () => {};
     const cached = chartDataRef.current;
     if (cached) {
       for (const leg of legMetasRef.current) {
@@ -780,16 +787,17 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(data);
       }
       if (cached.basketPnlData.length > 0) basketSeries.setData(cached.basketPnlData);
-      requestAnimationFrame(() => chart.timeScale().fitContent());
+      cancelFit = chartFrame(chart, c => c.timeScale().fitContent());
     }
 
     // Crosshair '+' tooltip is driven centrally by the crosshair-sync effect (section 4).
 
     return () => {
+      cancelFit();
       seriesRef.current.legPnl.clear();
       seriesRef.current.basketPnl = null;
       pnlChartRef.current = null;
-      try { chart.remove(); } catch {}
+      removeChart(chart);
       setChartEpoch(e => e + 1);
     };
   }, [theme, pnlVisible]);
@@ -983,7 +991,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (savedRange) {
         try { priceChart.timeScale().setVisibleLogicalRange(savedRange); } catch {}
       } else if (!hasInitialFittedRef.current) {
-        requestAnimationFrame(() => priceChart.timeScale().fitContent());
+        // The chart belongs to the create-effect above, so there is no canceller to
+        // hold here — chartFrame's liveness check is what covers it being torn down
+        // (theme flip, pane toggle) before this frame lands.
+        chartFrame(priceChart, c => c.timeScale().fitContent());
       }
     }
 
@@ -1204,7 +1215,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           const res = updateAllTooltips(t, param.point.x, param.point.y, sourceChart);
           if (res) {
             for (const c of charts) {
-              if (c === sourceChart) continue;
+              // `charts` is captured at effect setup, so a pane recreated since then
+              // (theme flip, toggle) leaves a removed chart in here. Pushing a
+              // crosshair onto it queues a paint that throws a frame later.
+              if (c === sourceChart || !isChartLive(c)) continue;
               try {
                 if (c === pc && seriesRef.current.underlying) c.setCrosshairPosition(res.spot, t as any, seriesRef.current.underlying);
                 else if (c === nc && seriesRef.current.basketPnl) c.setCrosshairPosition(res.totalPnl, t as any, seriesRef.current.basketPnl);
@@ -1217,7 +1231,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         } else {
           updateAllTooltips(null, null, null, null);
           for (const c of charts) {
-            if (c !== sourceChart) { try { c.clearCrosshairPosition(); } catch {} }
+            if (c !== sourceChart && isChartLive(c)) { try { c.clearCrosshairPosition(); } catch {} }
           }
         }
       };
@@ -1563,10 +1577,17 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     }
     chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.12, bottom: 0.12 } });
     // Crosshair '+' tooltip is driven centrally by the crosshair-sync effect (section 4).
+    let cancelFit = () => {};
     if (!hasInitialFittedRef.current) {
-      requestAnimationFrame(() => chart.timeScale().fitContent());
+      cancelFit = chartFrame(chart, c => c.timeScale().fitContent());
     }
-    return () => { greeksSeriesRef.current = {}; greeksChartRef.current = null; try { chart.remove(); } catch {} setChartEpoch(e => e + 1); };
+    return () => {
+      cancelFit();
+      greeksSeriesRef.current = {};
+      greeksChartRef.current = null;
+      removeChart(chart);
+      setChartEpoch(e => e + 1);
+    };
   }, [theme, greeksVisible, greeksLegFilter]);
 
   // ── 10b. Apply Greeks data ──

@@ -10,12 +10,36 @@ import { fmtPrice, fmtLakh, formatExpiry, strikeRs } from './lib/utils';
 
 const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
 
+function normalizeIndiaVix(input: string): string | null {
+  const key = input.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return key === 'INDIAVIX' ? 'INDIA_VIX' : null;
+}
+
+function isOptionChainUnavailableError(input: unknown): boolean {
+  const msg = String(input instanceof Error ? input.message : input || '').toLowerCase();
+  return msg.includes('not fno') || msg.includes('not f&o') || msg.includes('option chain') || msg.includes('no chain');
+}
+
+function inferChartType(symbol: string, fallback?: Instrument): Instrument['derivative_type'] {
+  const existing = (fallback?.derivative_type || fallback?.asset_type || '').toUpperCase();
+  if (existing === 'INDEX' || existing === 'STOCK' || existing === 'ETF') return existing;
+  const key = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (
+    key.includes('VIX') ||
+    ['NIFTY', 'NIFTY50', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX'].includes(key)
+  ) return 'INDEX';
+  return 'STOCK';
+}
+
 function extractUnderlying(input: string): string {
+  const special = normalizeIndiaVix(input);
+  if (special) return special;
   if (input.includes('_')) {
     const parts = input.split('_');
     if (['STOCK', 'INDEX', 'FUT', 'OPT'].includes(parts[0].toUpperCase()) && parts.length >= 2) {
       return parts[1].split('.')[0].toUpperCase();
     }
+    return input.toUpperCase();
   }
   const m = input.match(/^([A-Za-z]+)/);
   return m ? m[1].toUpperCase() : input.toUpperCase();
@@ -52,6 +76,13 @@ function g(row: unknown, field: string): number | null {
     if (v !== undefined && v !== null) return Number(v);
   }
   return null;
+}
+
+function optionLegRefId(leg: OptionLeg | null): number | undefined {
+  if (!leg) return undefined;
+  const raw = leg as unknown as Record<string, unknown>;
+  const refId = Number(raw.ref_id ?? raw.refId);
+  return refId > 0 ? refId : undefined;
 }
 
 interface Props {
@@ -275,13 +306,13 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
     } else {
       sym = getSymbol(instrument).toUpperCase();
     }
-    // Safety: always strip expiry/strike suffixes so we pass just the index/stock name
+    // Safety: always strip expiry/strike suffixes so we pass just the index/stock name.
     sym = extractUnderlying(sym) || sym;
     const exch = instrument.exchange || 'NSE';
     setSymInput(sym);
     setSymbol(sym);
     setExchange(exch);
-    loadExpiryThenChain(sym, exch);
+    loadExpiryThenChain(sym, exch, instrument);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instrument]);
 
@@ -364,7 +395,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
     }
   }
 
-  async function loadExpiryThenChain(sym: string, exch: string) {
+  async function loadExpiryThenChain(sym: string, exch: string, fallbackInstrument?: Instrument) {
     stopLiveFeed();
     cellMapRef.current.clear();
     setLoading(true);
@@ -392,6 +423,17 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       feedSrcRef.current  = 'poll';
       startLiveFeed(sym, firstExp, exch);
     } catch (err: unknown) {
+      if (isOptionChainUnavailableError(err) && onNavigateToChart) {
+        onNavigateToChart({
+          ...(fallbackInstrument || {}),
+          stock_name:      fallbackInstrument?.stock_name || fallbackInstrument?.display_name || sym,
+          nubra_name:      fallbackInstrument?.nubra_name || fallbackInstrument?.zanskar_name || sym,
+          exchange:        fallbackInstrument?.exchange || exch,
+          derivative_type: inferChartType(sym, fallbackInstrument),
+          asset_type:      inferChartType(sym, fallbackInstrument),
+        });
+        return;
+      }
       setError((err as Error).message);
     } finally {
       setLoading(false);
@@ -552,11 +594,61 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
     setActiveQuick(null);
     setSuggestions([]);
     setShowSug(false);
-    loadExpiryThenChain(sym, item.exchange || 'NSE');
+    loadExpiryThenChain(sym, item.exchange || 'NSE', item);
   }
 
-  async function navigateToChart(strike: number, optType: 'CE' | 'PE') {
+  async function navigateToChart(strike: number, optType: 'CE' | 'PE', leg: OptionLeg | null) {
     if (!onNavigateToChart) return;
+
+    const fromLeg = (): Instrument => {
+      const raw = (leg || {}) as unknown as Record<string, unknown>;
+      const exactSymbol = String(raw.symbol || raw.stock_name || raw.zanskar_name || raw.nubra_name || '').trim();
+      const exp  = currentExpRef.current;
+      const yr   = exp.slice(2, 4);
+      const mo   = exp.length >= 6 ? MONTHS[parseInt(exp.slice(4, 6)) - 1] : '';
+      const fallbackName = `${currentSymRef.current}${yr}${mo}${strike}${optType}`;
+      return {
+        stock_name:      exactSymbol || fallbackName,
+        zanskar_name:    String(raw.zanskar_name || raw.nubra_name || '').trim() || undefined,
+        exchange:        currentExchRef.current,
+        derivative_type: 'OPT',
+        asset:           currentSymRef.current,
+        option_type:     optType,
+        strike_price:    strike * 100,
+        expiry:          currentExpRef.current,
+        ref_id:          optionLegRefId(leg),
+        lot_size:        Number(raw.ls || raw.lot_size || 0) || undefined,
+      };
+    };
+
+    const refId = optionLegRefId(leg);
+    if (refId) {
+      try {
+        const params = new URLSearchParams({ ref_id: String(refId), exchange: currentExchRef.current });
+        const res = await fetch(`/api/instruments/lookup?${params}`);
+        const data = await res.json() as { instrument?: Instrument | null };
+        if (data.instrument) {
+          onNavigateToChart({
+            ...data.instrument,
+            ref_id:          refId,
+            exchange:        data.instrument.exchange || currentExchRef.current,
+            derivative_type: 'OPT',
+            option_type:     data.instrument.option_type || optType,
+            strike_price:    Number(data.instrument.strike_price) || strike * 100,
+            expiry:          data.instrument.expiry ?? currentExpRef.current,
+            asset:           data.instrument.asset || currentSymRef.current,
+          });
+          return;
+        }
+      } catch (e) { console.warn('[OC] navigateToChart ref_id lookup failed:', e); }
+    }
+
+    const legInstrument = fromLeg();
+    if (legInstrument.ref_id || getSymbol(legInstrument)) {
+      onNavigateToChart(legInstrument);
+      return;
+    }
+
     try {
       const q   = `${symbol}${strike}${optType}`;
       const res  = await fetch(`/api/instruments/search?q=${encodeURIComponent(q)}&limit=50`);
@@ -571,11 +663,6 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       });
       if (match) { onNavigateToChart(match); return; }
     } catch (e) { console.warn('[OC] navigateToChart lookup failed:', e); }
-    const exp  = currentExpRef.current;
-    const yr   = exp.slice(2, 4);
-    const mo   = exp.length >= 6 ? MONTHS[parseInt(exp.slice(4, 6)) - 1] : '';
-    const name = `${symbol}${yr}${mo}${strike}${optType}`;
-    onNavigateToChart({ stock_name: name, nubra_name: name, exchange: currentExchRef.current, derivative_type: 'OPT', asset: currentSymRef.current });
   }
 
   // ── Render rows ────────────────────────────────────────────────────────────
@@ -671,7 +758,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
                     onClick={(e) => { e.stopPropagation(); basketMode ? addToBasketLeg(sp, 'CE', 'SELL', ce) : openOrderTicket(sp, 'CE', 'SELL', ce); }}>S</button>
                 </div>
               )}
-              <div className="cursor-pointer text-right" onClick={() => navigateToChart(sp, 'CE')}>
+              <div className="cursor-pointer text-right" onClick={() => navigateToChart(sp, 'CE', ce)}>
                 <div ref={registerCell(sp, 'ce-ltp')}>{fmtLtp(g(ce, 'ltp'))}</div>
                 <div
                   ref={registerCell(sp, 'ce-ltpchg')}
@@ -718,7 +805,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
           {/* PE LTP — live price + B/S buttons revealed on row hover */}
           <td className="pe-side ltp-cell px-2 py-1.5 text-[12px] font-semibold">
             <div className="flex items-center justify-start gap-0.5">
-              <div className="cursor-pointer flex-1 text-right" onClick={() => navigateToChart(sp, 'PE')}>
+              <div className="cursor-pointer flex-1 text-right" onClick={() => navigateToChart(sp, 'PE', pe)}>
                 <div ref={registerCell(sp, 'pe-ltp')}>{fmtLtp(g(pe, 'ltp'))}</div>
                 <div
                   ref={registerCell(sp, 'pe-ltpchg')}

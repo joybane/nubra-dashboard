@@ -462,8 +462,8 @@ fastify.get<{ Querystring: { q?: string; exchange?: string; type?: string; limit
       }
 
       function matchScore(item: Record<string, unknown>): number {
-        const name = ((item.stock_name || item.asset || '') as string).toLowerCase();
-        const sym  = ((item.zanskar_name || item.nubra_name || item.symbol || '') as string).toLowerCase();
+        const name = ((item.stock_name || item.asset || item.display_name || '') as string).toLowerCase();
+        const sym  = ((item.zanskar_name || item.nubra_name || item.symbol || item.trading_symbol || '') as string).toLowerCase();
         if (name === q2 || sym === q2) return 0;
         if (name.startsWith(q2) || sym.startsWith(q2)) return 1;
         return 2;
@@ -471,7 +471,7 @@ fastify.get<{ Querystring: { q?: string; exchange?: string; type?: string; limit
 
       const filtered = arr
         .filter((item) => {
-          const name = ((item.stock_name || item.asset || item.symbol || '') as string).toLowerCase();
+          const name = ((item.stock_name || item.asset || item.symbol || item.display_name || '') as string).toLowerCase();
           const sym  = ((item.zanskar_name || item.nubra_name || item.symbol || item.trading_symbol || '') as string).toLowerCase();
           const tm   = !type || ((item.derivative_type || item.asset_type || '') as string).toUpperCase() === type.toUpperCase();
           return tm && (name.includes(q2) || sym.includes(q2));

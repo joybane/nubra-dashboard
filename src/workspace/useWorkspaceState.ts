@@ -24,13 +24,6 @@ function loadState(): WorkspaceState {
     if (saved) {
       const parsed = JSON.parse(saved) as WorkspaceState;
       if (parsed && typeof parsed === 'object' && Array.isArray(parsed.panes) && parsed.layout) {
-        parsed.panes = parsed.panes.map(p => {
-          const sym = (p.instrument?.nubra_name || p.instrument?.stock_name || p.instrument?.symbol || '').toUpperCase();
-          if (!p.instrument || (!sym.includes('NIFTY') && !sym.includes('SENSEX'))) {
-            return { ...p, instrument: DEFAULT_NIFTY };
-          }
-          return p;
-        });
         return parsed;
       }
     }

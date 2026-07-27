@@ -32,10 +32,18 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
   const [wsReady, setWsReady] = useState(false);
 
   const dispatch = useCallback((msg: WsMessage) => {
+    // Every listener is isolated. A single consumer throwing used to abort the loop,
+    // so every listener registered after it stopped receiving that message type for
+    // the rest of the session — and the caller's try/catch around JSON.parse
+    // swallowed the error, so it failed silently. Live prices would just stop.
+    const notify = (cb: Listener) => {
+      try { cb(msg); }
+      catch (err) { console.error(`[ws] listener for "${msg.type}" threw:`, err); }
+    };
     const typed = listeners.current.get(msg.type);
-    if (typed) for (const cb of typed) cb(msg);
+    if (typed) for (const cb of typed) notify(cb);
     const all = listeners.current.get('*');
-    if (all) for (const cb of all) cb(msg);
+    if (all) for (const cb of all) notify(cb);
   }, []);
 
   const connect = useCallback(() => {

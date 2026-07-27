@@ -7,6 +7,7 @@ export interface Instrument {
   display_name?:    string;
   asset?:           string;
   symbol?:          string;
+  trading_symbol?:  string;
   exchange?:        string;
   derivative_type?: string;
   asset_type?:      string;
@@ -29,7 +30,7 @@ export function getInstrumentType(item: Instrument): InstrumentType {
 }
 
 export function getSymbol(item: Instrument): string {
-  return item.nubra_name || item.stock_name || item.asset || item.zanskar_name || item.symbol || '';
+  return item.nubra_name || item.stock_name || item.asset || item.zanskar_name || item.symbol || item.trading_symbol || item.display_name || '';
 }
 
 // ─── Chart / OHLCV ───────────────────────────────────────────────────────────

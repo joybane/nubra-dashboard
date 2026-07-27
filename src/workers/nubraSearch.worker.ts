@@ -23,8 +23,8 @@ function typePriority(item: Instrument): number {
 }
 
 function matchScore(item: Instrument, q: string): number {
-  const name = (item.stock_name || item.asset || '').toLowerCase();
-  const sym  = (item.nubra_name || item.zanskar_name || item.symbol || '').toLowerCase();
+  const name = (item.stock_name || item.asset || item.display_name || '').toLowerCase();
+  const sym  = (item.nubra_name || item.zanskar_name || item.symbol || item.trading_symbol || '').toLowerCase();
   if (name === q || sym === q) return 0;
   if (name.startsWith(q) || sym.startsWith(q)) return 1;
   return 2;
@@ -36,8 +36,8 @@ function search(q: string, typeFilter: string, limit: number): Instrument[] {
 
   return cachedItems
     .filter((item) => {
-      const name = (item.stock_name || item.asset || item.symbol || '').toLowerCase();
-      const sym  = (item.nubra_name || item.zanskar_name || item.symbol || '').toLowerCase();
+      const name = (item.stock_name || item.asset || item.symbol || item.display_name || '').toLowerCase();
+      const sym  = (item.nubra_name || item.zanskar_name || item.symbol || item.trading_symbol || '').toLowerCase();
       const tm   = !typeFilter || getType(item).toUpperCase() === typeFilter.toUpperCase();
       return tm && (name.includes(qLow) || sym.includes(qLow));
     })

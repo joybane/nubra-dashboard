@@ -69,8 +69,16 @@ export default function InstrumentSearch({ placeholder = 'Search symbol…', onS
       }
     };
 
-    // Load NSE refdata into worker
-    fetchRefdata('NSE').then((items) => {
+    // Load major exchange refdata into worker so chart search can find indices,
+    // equities, futures, and options across NSE/BSE.
+    Promise.all([fetchRefdata('NSE'), fetchRefdata('BSE')]).then(([nse, bse]) => {
+      const seen = new Set<string>();
+      const items = ([...(nse as Instrument[]), ...(bse as Instrument[])]).filter((item) => {
+        const key = `${item.exchange || ''}:${item.ref_id || item.stock_name || item.nubra_name || item.zanskar_name || item.symbol || ''}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
       worker.postMessage({ type: 'load', items });
     }).catch(console.error);
 
@@ -80,14 +88,27 @@ export default function InstrumentSearch({ placeholder = 'Search symbol…', onS
 
   const doSearch = useCallback((q: string) => {
     if (!workerRef.current || !workerReady) {
-      // Fallback: server search
-      fetch(`/api/instruments/search?q=${encodeURIComponent(q)}&limit=20`)
-        .then((r) => r.json() as Promise<{ results: Instrument[] }>)
-        .then(({ results: r }) => setResults([...POPULAR_INDICES.filter((p) =>
-          (p.stock_name || '').toLowerCase().includes(q.toLowerCase()) ||
-          (p.nubra_name || '').toLowerCase().includes(q.toLowerCase()),
-        ), ...r]))
-        .catch(() => setResults([]));
+      // Fallback: server search while the worker is still warming up.
+      Promise.all(['NSE', 'BSE'].map((exchange) =>
+        fetch(`/api/instruments/search?q=${encodeURIComponent(q)}&exchange=${exchange}&limit=20`)
+          .then((r) => r.json() as Promise<{ results: Instrument[] }>)
+          .then(({ results: r }) => r)
+          .catch(() => [] as Instrument[]),
+      )).then((sets) => {
+        const q2 = q.toLowerCase();
+        const matched = POPULAR_INDICES.filter((p) =>
+          (p.stock_name || '').toLowerCase().includes(q2) ||
+          (p.nubra_name || '').toLowerCase().includes(q2),
+        );
+        const seen = new Set(matched.map((m) => `${m.exchange || ''}:${m.nubra_name || m.stock_name}`));
+        const merged = sets.flat().filter((item) => {
+          const key = `${item.exchange || ''}:${item.ref_id || item.stock_name || item.nubra_name || item.zanskar_name || item.symbol || ''}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        setResults([...matched, ...merged]);
+      }).catch(() => setResults([]));
       return;
     }
     workerRef.current.postMessage({ type: 'search', q, limit: 30 });

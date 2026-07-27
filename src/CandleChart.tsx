@@ -15,6 +15,7 @@ import { useWatchlist } from './hooks/useWatchlistContext';
 import { useOIProfile } from './hooks/useOIProfile';
 import { useGreekOverlay } from './hooks/useGreekOverlay';
 import { GreekButton } from './components/GreekControls';
+import { isChartLive, removeChart } from './lib/chartLifecycle';
 import type { Instrument, OhlcBar, OhlcvData, VolBar, WsMessage } from './types';
 import { getSymbol } from './types';
 import {
@@ -139,6 +140,10 @@ function OiTimeSlider({ fromTime, toTime, onChange, onReset, isChangeMode }: {
       </div>
     </div>
   );
+}
+
+function normalizeChartName(name: string): string {
+  return name.toUpperCase().replace(/^(NSE|BSE)_/, '').replace(/\s+/g, '');
 }
 
 interface Props {
@@ -278,7 +283,13 @@ export default function CandleChart({ instrument, theme }: Props) {
       containerRef.current?.removeEventListener('dblclick', onDblClick);
       observer.disconnect();
       stopCountdown();          // otherwise the 1s countdown interval keeps ticking after unmount
-      chart.remove();
+      removeChart(chart);
+      // Clear the refs too: an in-flight history fetch resolving after this point
+      // would otherwise call setData on a removed chart, which throws one frame
+      // later from inside lightweight-charts (see lib/chartLifecycle).
+      chartRef.current  = null;
+      candleRef.current = null;
+      volRef.current    = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -334,11 +345,11 @@ export default function CandleChart({ instrument, theme }: Props) {
     const unsub = subscribe('ohlcv', (msg: WsMessage) => {
       if (msg.type !== 'ohlcv' || !currentInstRef.current) return;
       const data = msg.data as OhlcvData;
-      const sym = getSymbol(currentInstRef.current).toUpperCase();
+      const sym = normalizeChartName(getSymbol(currentInstRef.current));
       const buckets = [...(data.indexes || []), ...(data.instruments || [])];
       for (const b of buckets) {
-        const bname = (b.indexname || '').toUpperCase();
-        if (bname === sym || sym.startsWith(bname) || bname.startsWith(sym)) {
+        const bname = normalizeChartName(b.indexname || '');
+        if (bname === sym) {
           applyBucket(b as Record<string,string>);
           break;
         }
@@ -388,6 +399,7 @@ export default function CandleChart({ instrument, theme }: Props) {
 
   const hasReachedEarliestRef = useRef(false);
   const lastLoadTimeRef       = useRef(0);
+  const loadTicketRef         = useRef(0);
 
 function sanitizeCandles(bars: OhlcBar[]): OhlcBar[] {
   if (!bars || !bars.length) return [];
@@ -416,6 +428,13 @@ function dedupeAndSortBars<T extends { time: any }>(bars: T[]): T[] {
   const loadInstrument = useCallback(async (inst: Instrument, iv: Interval) => {
     if (!candleRef.current || !volRef.current || !chartRef.current) return;
 
+    // Every load takes a ticket. Switching symbol (or interval) while a fetch is in
+    // flight leaves that fetch running; without this it resumes afterwards and writes
+    // the *previous* instrument's bars over the new ones. loadMoreHistory checks the
+    // same ticket, so a background page-in can't merge old bars into a new symbol
+    // either — which leaves the series holding rows the renderer cannot resolve.
+    const ticket = ++loadTicketRef.current;
+
     if (currentInstRef.current) {
       const oldSym   = getSymbol(currentInstRef.current);
       const wasIndex = nubraType(currentInstRef.current) === 'INDEX';
@@ -437,11 +456,21 @@ function dedupeAndSortBars<T extends { time: any }>(bars: T[]): T[] {
     setLoading('Loading historical data…');
     setPriceDisplay(null);
     setOhlc(null);
+    // Drop the outgoing instrument's bars now rather than at the end of the fetch.
+    // Otherwise a live tick for the incoming symbol (currentInstRef already points at
+    // it) lands as an `update` against the outgoing symbol's series, and a failed load
+    // leaves the previous symbol's candles on screen under the new symbol's name.
+    candleRef.current.setData([]);
+    volRef.current.setData([]);
 
     try {
       const end   = new Date();
       const start = new Date(end.getTime() - historyDays(iv) * 86400000);
       const { bars, volBars } = await fetchRange(inst, iv, start, end);
+      // The pane can be closed (or the whole workspace swapped out for the strategy
+      // view) while this is in flight — re-check rather than write to a dead chart.
+      if (!isChartLive(chartRef.current) || !candleRef.current || !volRef.current) return;
+      if (ticket !== loadTicketRef.current) return;   // superseded by a newer load
       const sanitized = sanitizeCandles(bars);
       const cleanBars = dedupeAndSortBars(sanitized);
       const cleanVolBars = dedupeAndSortBars(volBars);
@@ -485,11 +514,16 @@ function dedupeAndSortBars<T extends { time: any }>(bars: T[]): T[] {
     if (now - lastLoadTimeRef.current < 500) return;
     isLoadingRef.current = true;
     lastLoadTimeRef.current = now;
+    const ticket = loadTicketRef.current;
     setLoadMore(true);
     try {
       const end   = new Date(earliestRef.current.getTime() - 60000);
       const start = new Date(end.getTime() - chunkDays(intervalRef.current) * 86400000);
       const { bars, volBars } = await fetchRange(currentInstRef.current, intervalRef.current, start, end);
+      // A symbol/interval switch during this fetch invalidates the page-in entirely:
+      // allBarsRef now belongs to a different instrument, so merging into it would
+      // splice two symbols' bars together.
+      if (ticket !== loadTicketRef.current) return;
       earliestRef.current = start;
       if (bars.length > 0) {
         const sanitizedNew = sanitizeCandles(bars);
@@ -498,14 +532,22 @@ function dedupeAndSortBars<T extends { time: any }>(bars: T[]): T[] {
         allBarsRef.current = mergedBars;
         allVolBarsRef.current = mergedVolBars;
         if (mergedBars.length > 0) dayOpenRef.current = mergedBars[0].open;
-        candleRef.current?.setData(mergedBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })) as Parameters<typeof candleRef.current.setData>[0]);
-        volRef.current?.setData(mergedVolBars.map(v => ({ time: v.time, value: v.value, color: v.color })) as Parameters<typeof volRef.current.setData>[0]);
+        // Guarded because this resumes after an await — the pane may be gone by now.
+        if (isChartLive(chartRef.current)) {
+          candleRef.current?.setData(mergedBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })) as Parameters<typeof candleRef.current.setData>[0]);
+          volRef.current?.setData(mergedVolBars.map(v => ({ time: v.time, value: v.value, color: v.color })) as Parameters<typeof volRef.current.setData>[0]);
+        }
       } else {
         hasReachedEarliestRef.current = true;
       }
-    } catch (e) { console.warn('[Chart] loadMoreHistory failed:', e); }
-    isLoadingRef.current = false;
-    setLoadMore(false);
+    } catch (e) {
+      console.warn('[Chart] loadMoreHistory failed:', e);
+    } finally {
+      // In a finally so the superseded-ticket return above cannot leave the
+      // page-in latch stuck on, which would block all further history loading.
+      isLoadingRef.current = false;
+      setLoadMore(false);
+    }
   }
 
   // ── Countdown ─────────────────────────────────────────────────────────────

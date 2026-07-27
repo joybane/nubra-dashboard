@@ -162,6 +162,7 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
   const drawPendingRef = useRef(false);
   const lastDrawMsRef  = useRef(0);
   const drawTimerRef   = useRef<number | null>(null);
+  const drawRafRef     = useRef<number | null>(null);
   const lastWsTickRef  = useRef(0);       // last time a live WS option_chain tick was applied
   const pollTimerRef   = useRef<number | null>(null);
   const pollBusyRef    = useRef(false);
@@ -225,10 +226,11 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
       return;
     }
     drawPendingRef.current = true;
-    requestAnimationFrame(runDraw);
+    drawRafRef.current = requestAnimationFrame(runDraw);
   }
 
   function runDraw() {
+    drawRafRef.current = null;
     drawPendingRef.current = false;
     lastDrawMsRef.current = Date.now();
     redraw();
@@ -339,8 +341,10 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
     return unsub;
   }, [subscribe]);
 
-  // Stop the fallback poll on unmount (toggle/clear handle the normal teardown paths).
-  useEffect(() => () => stopLivePoll(), []);
+  // Stop the fallback poll and any queued redraw on unmount (toggle/clear handle the
+  // normal teardown paths). Without cancelDraw here, a redraw queued in the last frame
+  // before the host chart unmounts lands on a removed chart.
+  useEffect(() => () => { stopLivePoll(); cancelDraw(); }, []);
 
   function subscribeWsMulti(asset: string, expiriesSel: string[], exchange: string) {
     unsubscribeWsAll();
@@ -624,6 +628,10 @@ export function useGreekOverlay({ greek, chartRef, currentInstRef, allBarsRef, i
   // ── Public actions ──────────────────────────────────────────────────────
   function cancelDraw() {
     if (drawTimerRef.current != null) { clearTimeout(drawTimerRef.current); drawTimerRef.current = null; }
+    // The rAF has to go too. It calls setData on series owned by the host chart, so
+    // one landing after that chart was removed throws from inside lightweight-charts
+    // on the following frame (see lib/chartLifecycle).
+    if (drawRafRef.current != null) { cancelAnimationFrame(drawRafRef.current); drawRafRef.current = null; }
     drawPendingRef.current = false;
   }
 

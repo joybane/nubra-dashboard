@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import type { Instrument } from './types';
 import { WsProvider, useWs } from './hooks/useWsContext';
 import { PaperTradingProvider } from './hooks/usePaperTrading';
 import { WatchlistProvider } from './hooks/useWatchlistContext';
@@ -31,12 +32,21 @@ function AppInner() {
   const [auth, setAuth] = useState<AuthStatus>('unknown');
   const [strategyChart, setStrategyChart] = useState<StrategyChartTarget | null>(null);
 
-  const { loadInstrumentInActivePane } = useWorkspaceState();
+  const { state: workspaceState, setActivePane, setPaneView, loadInstrumentInActivePane } = useWorkspaceState();
   const { subscribe } = useWs();
 
   const openStrategyChart = useCallback((basketGroupId: string, strategyName: string, snapshotId?: string) => {
     setStrategyChart({ basketGroupId, strategyName, snapshotId });
   }, []);
+
+  const openInstrumentChart = useCallback((instrument: Instrument) => {
+    const paneId = workspaceState.activePane || workspaceState.panes[0]?.id;
+    if (paneId) {
+      setActivePane(paneId);
+      setPaneView(paneId, 'chart');
+    }
+    loadInstrumentInActivePane(instrument);
+  }, [workspaceState.activePane, workspaceState.panes, setActivePane, setPaneView, loadInstrumentInActivePane]);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -99,7 +109,7 @@ function AppInner() {
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       <Navbar
-        onInstrumentSelect={loadInstrumentInActivePane}
+        onInstrumentSelect={openInstrumentChart}
         theme={theme}
         onThemeToggle={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
       />
