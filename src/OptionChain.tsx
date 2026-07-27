@@ -5,6 +5,7 @@ import { getSymbol } from './types';
 import { useWatchlist } from './hooks/useWatchlistContext';
 import { usePaperTrading } from './hooks/usePaperTrading';
 import { useBasket } from './hooks/useBasketContext';
+import { legMtm, legQty, netGreeks, netPremium } from './lib/basketMath';
 import { fmtPrice, fmtLakh, formatExpiry, strikeRs } from './lib/utils';
 
 const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
@@ -57,9 +58,11 @@ interface Props {
   instrument:         Instrument | null;
   onNavigateToChart?: (inst: Instrument) => void;
   onChangeView?:      (view: ViewType) => void;
+  /** Rendered inside the Basket builder, which owns basket mode and shows the legs itself. */
+  embedded?:          boolean;
 }
 
-export default function OptionChain({ instrument, onNavigateToChart, onChangeView }: Props) {
+export default function OptionChain({ instrument, onNavigateToChart, onChangeView, embedded }: Props) {
   const [symbol,      setSymbol]      = useState('');
   const [exchange,    setExchange]    = useState('NSE');
   const [expiry,      setExpiry]      = useState('');
@@ -92,41 +95,52 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
   const { subscribe, subscribeOC, unsubscribeOC } = useWs();
   const { addItem: watchlistAdd } = useWatchlist();
   const { openTicket } = usePaperTrading();
-  const { basketMode, setBasketMode, legs, addLegFromChain, removeLeg, updateLegQty, clearBasket, legCount } = useBasket();
+  const {
+    basketMode, setBasketMode, legs, addLeg, removeLeg, updateLeg, clearBasket, legCount,
+    multiplier, applyMultiplier, margin, marginLoading, marginError, persistence, placeBasket,
+    registerViewer,
+  } = useBasket();
 
-  const netPrem = useMemo(() => {
-    return legs.reduce((acc, leg) => {
-      const qty = leg.qty || leg.lotSize || 65;
-      return acc + (leg.side === 'SELL' ? 1 : -1) * (leg.ltp || 0) * qty;
-    }, 0);
-  }, [legs]);
+  const drawerOpen = basketMode && !embedded;
+  useEffect(() => {
+    if (!drawerOpen) return;
+    return registerViewer();
+  }, [drawerOpen, registerViewer]);
 
-  const tradeBasketDirectly = useCallback(async () => {
-    if (!legs.length) return;
-    try {
-      for (const leg of legs) {
-        await fetch('/paper/orders', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            nubraName: leg.nubraName,
-            liveRefId: leg.refId,
-            display_name: `${leg.asset} ${formatExpiry(leg.expiry)} ${leg.strike} ${leg.optionType}`,
-            order_type: 'ORDER_TYPE_MARKET',
-            order_qty: leg.qty || leg.lotSize || 65,
-            order_side: leg.side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
-            order_delivery_type: 'ORDER_DELIVERY_TYPE_IDAY',
-            validity_type: 'DAY',
-          }),
-        });
-      }
-      clearBasket();
-      setBasketMode(false);
-      onChangeView?.('tracker');
-    } catch (e) {
-      console.warn('[OptionChain] Trade basket failed:', e);
-    }
-  }, [legs, clearBasket, setBasketMode, onChangeView]);
+  const [placed,        setPlaced]        = useState<{ ok: boolean; msg: string } | null>(null);
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [saveName,      setSaveName]      = useState('');
+  const [trading,       setTrading]       = useState(false);
+
+  const totalPremium = useMemo(() => netPremium(legs), [legs]);
+  const greeks       = useMemo(() => netGreeks(legs), [legs]);
+
+  const tradeBasket = useCallback(async () => {
+    if (!legs.length || trading) return;
+    setTrading(true);
+    setPlaced(null);
+    const result = await placeBasket();
+    setPlaced(result);
+    setTrading(false);
+    if (result.ok) setTimeout(() => setPlaced(null), 5000);
+  }, [legs.length, trading, placeBasket]);
+
+  // Arriving on this tab with a basket already built (from the Basket tab, or
+  // from an earlier visit here) should show it — mount only, so closing sticks.
+  useEffect(() => {
+    if (!embedded && legCount > 0) setBasketMode(true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const saveStrategy = useCallback(() => {
+    if (!saveName.trim() || !legs.length) return;
+    persistence.saveBasket(saveName, legs[0].asset, legs[0].expiry, legs).then(r => {
+      setPlaced(r);
+      setShowSaveModal(false);
+      setSaveName('');
+      setTimeout(() => setPlaced(null), 3000);
+    });
+  }, [saveName, legs, persistence]);
 
   const openOrderTicket = useCallback((
     sp: number, optType: 'CE' | 'PE', side: 'BUY' | 'SELL', leg: OptionLeg | null,
@@ -174,7 +188,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
   ) => {
     if (!leg) return;
     const la = leg as unknown as Record<string, unknown>;
-    addLegFromChain({
+    addLeg({
       strike:     sp,
       optionType: optType,
       side,
@@ -183,6 +197,8 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       nubraName:  String(la.zanskar_name || la.nubra_name || la.symbol || ''),
       lotSize:    Number(la.ls || la.lot_size || 1),
       asset:      currentSymRef.current,
+      symbol:     currentSymRef.current,
+      exchange:   currentExchRef.current,
       expiry:     currentExpRef.current,
       iv:         g(leg, 'iv'),
       delta:      g(leg, 'delta'),
@@ -190,7 +206,7 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       theta:      g(leg, 'theta'),
       vega:       g(leg, 'vega'),
     });
-  }, [addLegFromChain]);
+  }, [addLeg]);
 
   const addToBasketFn = useCallback(() => {
     onChangeView?.('basket');
@@ -272,6 +288,22 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
   const wsActiveRef = useRef(false);
   const wsActiveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Feed health. `lastTickRef` is stamped by whichever source last delivered data
+  // for the chain on screen; `feed` mirrors it into render once a second so a dead
+  // feed is visible instead of silently showing load-time prices.
+  const lastTickRef = useRef(0);
+  const feedSrcRef  = useRef<'ws' | 'poll'>('poll');
+  const [feed, setFeed] = useState<{ src: 'ws' | 'poll'; ageMs: number } | null>(null);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setFeed(lastTickRef.current
+        ? { src: feedSrcRef.current, ageMs: Date.now() - lastTickRef.current }
+        : null);
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
   // WS subscription for live updates
   useEffect(() => {
     const unsub = subscribe('option_chain', (msg: WsMessage) => {
@@ -281,6 +313,8 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       const exp   = data.expiry || '';
       if (asset !== currentSymRef.current || exp !== currentExpRef.current) return;
       wsActiveRef.current = true;
+      lastTickRef.current = Date.now();
+      feedSrcRef.current  = 'ws';
       if (wsActiveTimerRef.current) clearTimeout(wsActiveTimerRef.current);
       wsActiveTimerRef.current = setTimeout(() => { wsActiveRef.current = false; }, 10000);
       updateCells(data);
@@ -303,7 +337,11 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       if (!sym || !exp || wsActiveRef.current) return;
       try {
         const data = await fetchChainApi(sym, exch, exp);
-        if (data.chain) updateCells(data.chain);
+        if (data.chain) {
+          lastTickRef.current = Date.now();
+          feedSrcRef.current  = 'poll';
+          updateCells(data.chain);
+        }
       } catch (e) { console.warn('[OC] Poll failed:', e); }
     }, 5000);
   }
@@ -350,6 +388,8 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       setChain(data2.chain || null);
       const cp2 = data2.chain?.cp ?? data2.chain?.currentprice;
       if (cp2) setSpot(Number(cp2) / 100);
+      lastTickRef.current = Date.now();
+      feedSrcRef.current  = 'poll';
       startLiveFeed(sym, firstExp, exch);
     } catch (err: unknown) {
       setError((err as Error).message);
@@ -370,6 +410,8 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       setChain(data.chain || null);
       const cp = data.chain?.cp ?? data.chain?.currentprice;
       if (cp) setSpot(Number(cp) / 100);
+      lastTickRef.current = Date.now();
+      feedSrcRef.current  = 'poll';
       startLiveFeed(currentSymRef.current, exp, currentExchRef.current);
     } catch (err: unknown) {
       setError((err as Error).message);
@@ -404,27 +446,34 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
       const iv    = g(ce, 'iv') ?? g(pe, 'iv');
       const ceOi  = g(ce, 'oi') || 0;
       const cePct = Math.min(100, (ceOi / maxCeOiRef.current) * 100);
-      setCellHtml(`${sp}-ce-ltp`,   ltpHtml(ce, 'ce'));
-      setCellHtml(`${sp}-ce-iv`,    fmtIV(iv));
+      setLtpCells(sp, 'ce', ce);
+      setCellText(`${sp}-ce-iv`,    fmtIV(iv));
       setCellHtml(`${sp}-ce-oi`,    `<div>${fmtOI(ceOi)}</div><div class="oi-bar-wrap"><div class="oi-bar oi-bar-ce" style="width:${cePct}%"></div></div>`);
-      setCellHtml(`${sp}-ce-vol`,   fmtOI(g(ce, 'volume')));
-      setCellHtml(`${sp}-ce-delta`, fmtDec(g(ce, 'delta'), 4));
-      setCellHtml(`${sp}-ce-gamma`, fmtDec(g(ce, 'gamma'), 4));
-      setCellHtml(`${sp}-ce-theta`, fmtDec(g(ce, 'theta'), 2));
-      setCellHtml(`${sp}-ce-vega`,  fmtDec(g(ce, 'vega'), 4));
+      setCellText(`${sp}-ce-vol`,   fmtOI(g(ce, 'volume')));
+      setCellText(`${sp}-ce-delta`, fmtDec(g(ce, 'delta'), 4));
+      setCellText(`${sp}-ce-gamma`, fmtDec(g(ce, 'gamma'), 4));
+      setCellText(`${sp}-ce-theta`, fmtDec(g(ce, 'theta'), 2));
+      setCellText(`${sp}-ce-vega`,  fmtDec(g(ce, 'vega'), 4));
     }
     for (const pe of peList) {
       const sp    = strikeRs(pe);
       const peOi  = g(pe, 'oi') || 0;
       const pePct = Math.min(100, (peOi / maxPeOiRef.current) * 100);
-      setCellHtml(`${sp}-pe-ltp`,   ltpHtml(pe, 'pe'));
+      setLtpCells(sp, 'pe', pe);
       setCellHtml(`${sp}-pe-oi`,    `<div>${fmtOI(peOi)}</div><div class="oi-bar-wrap"><div class="oi-bar oi-bar-pe" style="width:${pePct}%"></div></div>`);
-      setCellHtml(`${sp}-pe-vol`,   fmtOI(g(pe, 'volume')));
-      setCellHtml(`${sp}-pe-delta`, fmtDec(g(pe, 'delta'), 4));
-      setCellHtml(`${sp}-pe-gamma`, fmtDec(g(pe, 'gamma'), 4));
-      setCellHtml(`${sp}-pe-theta`, fmtDec(g(pe, 'theta'), 2));
-      setCellHtml(`${sp}-pe-vega`,  fmtDec(g(pe, 'vega'), 4));
+      setCellText(`${sp}-pe-vol`,   fmtOI(g(pe, 'volume')));
+      setCellText(`${sp}-pe-delta`, fmtDec(g(pe, 'delta'), 4));
+      setCellText(`${sp}-pe-gamma`, fmtDec(g(pe, 'gamma'), 4));
+      setCellText(`${sp}-pe-theta`, fmtDec(g(pe, 'theta'), 2));
+      setCellText(`${sp}-pe-vega`,  fmtDec(g(pe, 'vega'), 4));
     }
+  }
+
+  // Plain-text cells. Used for every column except the two OI cells, which build
+  // a bar and therefore need markup.
+  function setCellText(key: string, text: string) {
+    const el = cellMapRef.current.get(key);
+    if (el && el.textContent !== text) el.textContent = text;
   }
 
   function setCellHtml(key: string, html: string) {
@@ -432,20 +481,35 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
     if (td && td.innerHTML !== html) td.innerHTML = html;
   }
 
-  function ltpHtml(row: OptionLeg, _side: string): string {
-    const ltp = g(row, 'ltp');
-    if (ltp == null) return '—';
-    const price = ltp / 100;
-    const chg   = g(row, 'ltpchg');
-    const up    = chg == null ? true : chg >= 0;
-    const pct   = chg != null
-      ? `<div style="font-size:10px;color:${up ? 'var(--green)' : 'var(--red)'}">${up ? '+' : ''}${chg.toFixed(2)}%</div>`
-      : '';
-    return `₹${fmtPrice(price)}${pct}`;
+  // Price and change % live in two separately registered text nodes so they update
+  // through the same mechanism as the other columns. They used to be one node
+  // written with dangerouslySetInnerHTML and then patched imperatively, which made
+  // this the only column whose live updates could silently stop landing.
+  function setLtpCells(sp: number, side: 'ce' | 'pe', row: OptionLeg) {
+    setCellText(`${sp}-${side}-ltp`, fmtLtp(g(row, 'ltp')));
+    const chgEl = cellMapRef.current.get(`${sp}-${side}-ltpchg`);
+    if (!chgEl) return;
+    const chg  = g(row, 'ltpchg');
+    const text = fmtChg(chg);
+    if (chgEl.textContent !== text) chgEl.textContent = text;
+    chgEl.style.color = chgColor(chg);
   }
 
   function fmtDec(v: number | null, dp: number): string {
     return v == null ? '—' : v.toFixed(dp);
+  }
+
+  // LTP arrives in paise on both the REST chain and the WS feed.
+  function fmtLtp(ltp: number | null): string {
+    return ltp == null ? '—' : `₹${fmtPrice(ltp / 100)}`;
+  }
+
+  function fmtChg(chg: number | null): string {
+    return chg == null ? '' : `${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%`;
+  }
+
+  function chgColor(chg: number | null): string {
+    return chg == null || chg >= 0 ? 'var(--green)' : 'var(--red)';
   }
 
   // API returns IV as decimal (0.1905); display as percentage (19.05)
@@ -607,12 +671,16 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
                     onClick={(e) => { e.stopPropagation(); basketMode ? addToBasketLeg(sp, 'CE', 'SELL', ce) : openOrderTicket(sp, 'CE', 'SELL', ce); }}>S</button>
                 </div>
               )}
-              <div
-                ref={(el) => { if (el) cellMapRef.current.set(`${sp}-ce-ltp`, el); }}
-                className="cursor-pointer text-right"
-                onClick={() => navigateToChart(sp, 'CE')}
-                dangerouslySetInnerHTML={{ __html: ce ? ltpHtml(ce, 'ce') : '—' }}
-              />
+              <div className="cursor-pointer text-right" onClick={() => navigateToChart(sp, 'CE')}>
+                <div ref={registerCell(sp, 'ce-ltp')}>{fmtLtp(g(ce, 'ltp'))}</div>
+                <div
+                  ref={registerCell(sp, 'ce-ltpchg')}
+                  className="text-[10px]"
+                  style={{ color: chgColor(g(ce, 'ltpchg')) }}
+                >
+                  {fmtChg(g(ce, 'ltpchg'))}
+                </div>
+              </div>
             </div>
           </td>
 
@@ -650,12 +718,16 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
           {/* PE LTP — live price + B/S buttons revealed on row hover */}
           <td className="pe-side ltp-cell px-2 py-1.5 text-[12px] font-semibold">
             <div className="flex items-center justify-start gap-0.5">
-              <div
-                ref={(el) => { if (el) cellMapRef.current.set(`${sp}-pe-ltp`, el); }}
-                className="cursor-pointer flex-1 text-right"
-                onClick={() => navigateToChart(sp, 'PE')}
-                dangerouslySetInnerHTML={{ __html: pe ? ltpHtml(pe, 'pe') : '—' }}
-              />
+              <div className="cursor-pointer flex-1 text-right" onClick={() => navigateToChart(sp, 'PE')}>
+                <div ref={registerCell(sp, 'pe-ltp')}>{fmtLtp(g(pe, 'ltp'))}</div>
+                <div
+                  ref={registerCell(sp, 'pe-ltpchg')}
+                  className="text-[10px]"
+                  style={{ color: chgColor(g(pe, 'ltpchg')) }}
+                >
+                  {fmtChg(g(pe, 'ltpchg'))}
+                </div>
+              </div>
               {pe && (
                 <div className="invisible group-hover:visible flex items-center gap-0.5 shrink-0">
                   <button className="px-1 py-0.5 rounded text-[9px] font-bold text-[var(--green)] bg-[var(--green)]/15 hover:bg-[var(--green)]/40 border border-[var(--green)]/30 leading-none"
@@ -801,30 +873,35 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
           {showGreeks ? 'Hide Greeks' : 'Show Greeks'}
         </button>
 
-        {/* Basket mode toggle */}
-        <button
-          onClick={() => setBasketMode(!basketMode)}
-          className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all shrink-0 flex items-center gap-1 ${
-            basketMode
-              ? 'bg-amber-500/20 border-amber-500/40 text-amber-400'
-              : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-          }`}
-          title="Basket mode: B/S buttons add to basket instead of placing orders"
-        >
-          <span className="text-[13px]">🧺</span>
-          Basket
-          {basketMode && legCount > 0 && (
-            <span className="ml-0.5 px-1.5 py-0 rounded-full bg-amber-500/30 text-amber-300 text-[9px] font-bold">
-              {legCount}
-            </span>
-          )}
-        </button>
-
-        {spot && (
-          <div className="ml-auto text-[13px] font-semibold text-[var(--text-primary)] shrink-0">
-            Spot: <span className="text-[var(--accent)]">₹{fmtPrice(spot)}</span>
-          </div>
+        {/* Basket mode toggle — the Basket builder owns the mode when embedded */}
+        {!embedded && (
+          <button
+            onClick={() => setBasketMode(!basketMode)}
+            className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all shrink-0 flex items-center gap-1 ${
+              basketMode
+                ? 'bg-amber-500/20 border-amber-500/40 text-amber-400'
+                : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+            }`}
+            title="Basket mode: B/S buttons add to basket instead of placing orders"
+          >
+            <span className="text-[13px]">🧺</span>
+            Basket
+            {legCount > 0 && (
+              <span className="ml-0.5 px-1.5 py-0 rounded-full bg-amber-500/30 text-amber-300 text-[9px] font-bold">
+                {legCount}
+              </span>
+            )}
+          </button>
         )}
+
+        <div className="ml-auto flex items-center gap-2 shrink-0">
+          <FeedBadge feed={feed} />
+          {spot && (
+            <div className="text-[13px] font-semibold text-[var(--text-primary)]">
+              Spot: <span className="text-[var(--accent)]">₹{fmtPrice(spot)}</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Main Container: Table + Optional Custom Basket Side Drawer */}
@@ -886,8 +963,8 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
           )}
         </div>
 
-        {/* Custom Basket Side Drawer (matching Nubra design) */}
-        {basketMode && (
+        {/* Custom Basket Side Drawer — the same basket the Basket tab builds */}
+        {basketMode && !embedded && (
           <div className="w-[310px] shrink-0 border-l border-[var(--border)] bg-[var(--bg-secondary)] flex flex-col h-full overflow-hidden shadow-2xl z-20">
             {/* Header */}
             <div className="p-3 border-b border-[var(--border)] flex items-center justify-between bg-[var(--bg-card)]">
@@ -930,28 +1007,33 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
                   </div>
                 </div>
               ) : (
-                legs.map((leg, idx) => {
+                legs.map((leg) => {
                   const isBuy = leg.side === 'BUY';
-                  const lotSize = leg.lotSize || 65;
-                  const currentQty = leg.qty || lotSize;
+                  const mtm   = legMtm(leg);
                   return (
                     <div
-                      key={leg.id || idx}
+                      key={leg.id}
                       className="p-2 rounded border border-[var(--border)] bg-[var(--bg-card)] hover:border-[var(--accent)]/40 transition-all text-xs"
                     >
-                      {/* Top Row: Side badge, Expiry, Strike & Type, Remove */}
+                      {/* Top Row: Side toggle, Expiry, Strike & Type, Remove */}
                       <div className="flex items-center justify-between mb-1.5">
                         <div className="flex items-center gap-1.5">
-                          <span className={`w-4 h-4 rounded flex items-center justify-center font-bold text-[9px] ${
-                            isBuy ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30'
-                          }`}>
+                          <button
+                            onClick={() => updateLeg(leg.id, { side: isBuy ? 'SELL' : 'BUY' })}
+                            title="Switch between buy and sell"
+                            className={`w-4 h-4 rounded flex items-center justify-center font-bold text-[9px] transition-colors ${
+                              isBuy
+                                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/40'
+                                : 'bg-red-500/20 text-red-400 border border-red-500/30 hover:bg-red-500/40'
+                            }`}
+                          >
                             {isBuy ? 'B' : 'S'}
-                          </span>
+                          </button>
                           <span className="text-[10px] text-[var(--text-muted)]">{formatExpiry(leg.expiry)}</span>
                           <span className="font-bold text-[var(--text-primary)]">{fmtPrice(leg.strike)} {leg.optionType}</span>
                         </div>
                         <button
-                          onClick={() => removeLeg(idx)}
+                          onClick={() => removeLeg(leg.id)}
                           className="w-4 h-4 rounded flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--red)] hover:bg-[var(--red)]/10 transition-colors text-xs"
                           title="Remove leg"
                         >
@@ -959,25 +1041,30 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
                         </button>
                       </div>
 
-                      {/* Bottom Row: Qty adjustment & Price */}
+                      {/* Bottom Row: Qty (lots × lot size), live LTP and MTM */}
                       <div className="flex items-center justify-between text-[11px] pt-1 border-t border-[var(--border)]/40">
                         <div className="flex items-center gap-1">
                           <button
-                            onClick={() => updateLegQty(idx, Math.max(lotSize, currentQty - lotSize))}
+                            onClick={() => updateLeg(leg.id, { lots: Math.max(1, leg.lots - 1) })}
                             className="w-4 h-4 rounded bg-[var(--bg-primary)] border border-[var(--border)] flex items-center justify-center text-[10px] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]"
+                            title="Remove one lot"
                           >
                             −
                           </button>
-                          <span className="font-semibold text-[var(--text-primary)] min-w-[28px] text-center">{currentQty}</span>
+                          <span className="font-semibold text-[var(--text-primary)] min-w-[28px] text-center">{legQty(leg)}</span>
                           <button
-                            onClick={() => updateLegQty(idx, currentQty + lotSize)}
+                            onClick={() => updateLeg(leg.id, { lots: leg.lots + 1 })}
                             className="w-4 h-4 rounded bg-[var(--bg-primary)] border border-[var(--border)] flex items-center justify-center text-[10px] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]"
+                            title="Add one lot"
                           >
                             +
                           </button>
                         </div>
-                        <div className="font-semibold text-[var(--text-primary)]">
-                          ₹{fmtPrice(leg.ltp)}
+                        <div className="flex items-center gap-2">
+                          <span className={`font-semibold ${mtm >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                            {mtm >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(mtm))}
+                          </span>
+                          <span className="font-semibold text-[var(--text-primary)]">₹{fmtPrice(leg.ltp)}</span>
                         </div>
                       </div>
                     </div>
@@ -990,12 +1077,94 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
             {legs.length > 0 && (
               <div className="p-2.5 border-t border-[var(--border)] bg-[var(--bg-card)] space-y-2">
                 <div className="flex items-center justify-between text-xs font-semibold">
-                  <span className="text-[var(--text-muted)]">Net Premium:</span>
-                  <span className={netPrem >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>
-                    {netPrem >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(netPrem))}
+                  <span className="text-[var(--text-muted)]">Total Premium:</span>
+                  <span className={totalPremium >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>
+                    {totalPremium >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(totalPremium))}
                   </span>
                 </div>
-                <div className="grid grid-cols-2 gap-2 pt-1">
+
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-[var(--text-muted)]">Lot Multiplier</span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => applyMultiplier(Math.max(1, multiplier - 1))}
+                      className="w-4 h-4 rounded bg-[var(--bg-primary)] border border-[var(--border)] flex items-center justify-center text-[10px] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]"
+                    >
+                      −
+                    </button>
+                    <span className="font-bold text-[var(--text-primary)] min-w-[14px] text-center">{multiplier}</span>
+                    <button
+                      onClick={() => applyMultiplier(multiplier + 1)}
+                      className="w-4 h-4 rounded bg-[var(--bg-primary)] border border-[var(--border)] flex items-center justify-center text-[10px] hover:bg-[var(--bg-hover)] text-[var(--text-secondary)]"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+
+                {legs.some(l => l.delta != null) && (
+                  <div className="grid grid-cols-4 gap-1 text-[10px] pt-1 border-t border-[var(--border)]/40">
+                    {([['Delta', greeks.delta.toFixed(2)], ['Theta', greeks.theta.toFixed(2)],
+                       ['Gamma', greeks.gamma.toFixed(4)], ['Vega', greeks.vega.toFixed(2)]] as const).map(([label, val]) => (
+                      <div key={label} className="text-center">
+                        <div className="text-[var(--text-muted)]">{label}</div>
+                        <div className="font-semibold text-[var(--text-primary)]">{val}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Margin — same figures the Basket tab shows */}
+                <div className="pt-1 border-t border-[var(--border)]/40 space-y-1">
+                  <div className="flex items-center justify-between text-[10px]">
+                    <span className="text-[var(--text-muted)] font-semibold">Margin</span>
+                    {marginLoading ? (
+                      <span className="text-[var(--text-muted)]">Calculating…</span>
+                    ) : margin ? (
+                      margin.estimated ? (
+                        <span
+                          className="px-1.5 rounded border border-yellow-500/30 bg-yellow-500/15 text-yellow-500 font-semibold cursor-help"
+                          title={margin.message || 'Broker margin unavailable. Calculated locally via exchange-style fallback / SPAN risk data.'}
+                        >
+                          ⚡ Local Est.
+                        </span>
+                      ) : (
+                        <span
+                          className="px-1.5 rounded border border-emerald-500/30 bg-emerald-500/15 text-emerald-500 font-semibold"
+                          title="Calculated live from Nubra API"
+                        >
+                          ✓ Nubra API
+                        </span>
+                      )
+                    ) : null}
+                  </div>
+                  {margin ? (
+                    <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[10px]">
+                      <div className="flex justify-between"><span className="text-[var(--text-muted)]">Span</span><span className="text-[var(--text-primary)]">{margin.span ? fmtPrice(margin.span) : '—'}</span></div>
+                      <div className="flex justify-between"><span className="text-[var(--text-muted)]">Exposure</span><span className="text-[var(--text-primary)]">{margin.exposure ? fmtPrice(margin.exposure) : '—'}</span></div>
+                      <div className="flex justify-between"><span className="text-[var(--text-muted)]">Premium</span><span className="text-[var(--text-primary)]">{margin.premium ? fmtPrice(margin.premium) : fmtPrice(Math.abs(totalPremium))}</span></div>
+                      <div className="flex justify-between font-semibold"><span className="text-[var(--text-muted)]">Total</span><span className="text-[var(--text-primary)]">{fmtPrice(margin.total)}</span></div>
+                    </div>
+                  ) : (
+                    <div className={`text-[10px] ${marginError ? 'text-[var(--red)]' : 'text-[var(--text-muted)]'}`}>
+                      {marginError ? `Margin unavailable: ${marginError}` : 'Calculating margin…'}
+                    </div>
+                  )}
+                </div>
+
+                {placed && (
+                  <div className={`text-[10px] leading-snug ${placed.ok ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                    {placed.msg}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-3 gap-1.5 pt-1">
+                  <button
+                    onClick={() => { setShowSaveModal(true); setSaveName(''); }}
+                    className="w-full py-1.5 rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-hover)] font-semibold text-xs transition-all"
+                  >
+                    Save
+                  </button>
                   <button
                     onClick={() => onChangeView?.('basket')}
                     className="w-full py-1.5 rounded border border-[var(--accent)] text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 font-semibold text-xs transition-all flex items-center justify-center gap-1"
@@ -1003,10 +1172,11 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
                     📊 Analyze
                   </button>
                   <button
-                    onClick={tradeBasketDirectly}
-                    className="w-full py-1.5 rounded bg-[var(--accent)] text-white hover:bg-[var(--accent-dim)] font-semibold text-xs shadow transition-all flex items-center justify-center gap-1"
+                    onClick={tradeBasket}
+                    disabled={trading}
+                    className="w-full py-1.5 rounded bg-[var(--accent)] text-white hover:bg-[var(--accent-dim)] font-semibold text-xs shadow transition-all flex items-center justify-center gap-1 disabled:opacity-50"
                   >
-                    ⚡ Trade
+                    {trading ? '…' : '⚡ Trade'}
                   </button>
                 </div>
               </div>
@@ -1014,6 +1184,81 @@ export default function OptionChain({ instrument, onNavigateToChart, onChangeVie
           </div>
         )}
       </div>
+
+      {/* Save modal — writes to the same /paper/baskets store as the Basket tab */}
+      {showSaveModal && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60"
+          onClick={() => setShowSaveModal(false)}
+        >
+          <div
+            className="w-[360px] rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <span className="text-base font-bold text-[var(--text-primary)]">Save Strategy</span>
+              <button onClick={() => setShowSaveModal(false)} className="text-lg text-[var(--text-muted)] hover:text-[var(--text-primary)]">✕</button>
+            </div>
+            <div className="text-xs text-[var(--text-secondary)] mb-2">Name your strategy</div>
+            <input
+              type="text"
+              value={saveName}
+              autoFocus
+              placeholder="e.g. NIFTY Iron Condor"
+              onChange={(e) => setSaveName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') saveStrategy(); }}
+              className="w-full px-3 py-2.5 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] text-[13px] text-[var(--text-primary)] outline-none"
+            />
+            <div className="flex gap-2.5 mt-4">
+              <button
+                onClick={() => setShowSaveModal(false)}
+                className="flex-1 py-2.5 rounded-lg border border-[var(--border)] text-[13px] font-semibold text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={saveStrategy}
+                disabled={!saveName.trim()}
+                className="flex-1 py-2.5 rounded-lg bg-[var(--accent)] text-[13px] font-semibold text-white hover:bg-[var(--accent-dim)] disabled:opacity-50"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Live-feed health for the chain on screen. The WS feed can go away silently —
+ * an unsubscribe from another consumer, a reconnect that was never replayed — and
+ * the table then keeps rendering whatever it last received. This makes that
+ * visible: green while ticks arrive over the socket, amber on the 5s REST
+ * fallback, red once nothing has landed for a while.
+ */
+function FeedBadge({ feed }: { feed: { src: 'ws' | 'poll'; ageMs: number } | null }) {
+  if (!feed) return null;
+  const age  = Math.round(feed.ageMs / 1000);
+  const live = feed.src === 'ws' && feed.ageMs < 3000;
+  const poll = !live && feed.ageMs < 15000;
+
+  const label = live ? 'LIVE' : poll ? 'POLL' : `STALE ${age}s`;
+  const tone  = live
+    ? 'bg-[var(--green)]/15 border-[var(--green)]/40 text-[var(--green)]'
+    : poll
+      ? 'bg-amber-500/15 border-amber-500/40 text-amber-400'
+      : 'bg-[var(--red)]/15 border-[var(--red)]/40 text-[var(--red)]';
+  const title = live
+    ? 'Streaming tick-by-tick over the WebSocket feed'
+    : poll
+      ? 'No WebSocket ticks — falling back to the 5s REST poll, so prices lag'
+      : `No update for ${age}s — prices on screen are stale`;
+
+  return (
+    <div className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-bold ${tone}`} title={title}>
+      <span className="text-[8px]">●</span>{label}
     </div>
   );
 }

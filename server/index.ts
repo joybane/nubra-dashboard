@@ -698,6 +698,7 @@ function connectNubraWs(): void {
     if (isBinary) {
       const decoded = decodeBinaryMsg(data);
       if (decoded) {
+        noteOcTick(decoded);
         broadcast(decoded);
         routeTickToSim(decoded);  // feed live prices into SimBroker for fill simulation
       }
@@ -716,6 +717,19 @@ function connectNubraWs(): void {
   nubraWs.on('error', (err: Error) => {
     console.error('Nubra WS error:', err.message);
   });
+}
+
+// Last time a tick actually arrived for each asset:expiry. `simOcSubs` records what
+// we *asked* for; this records what is *arriving*. The two diverging (subscribed but
+// silent) is what left the option chain rendering load-time prices, and it was
+// invisible until this was exposed on /paper/debug.
+const ocLastTick = new Map<string, number>();
+
+function noteOcTick(decoded: { type: string; data: unknown }): void {
+  if (decoded.type !== 'option_chain') return;
+  const d = decoded.data as { asset?: string; expiry?: string };
+  if (!d.asset || !d.expiry) return;
+  ocLastTick.set(`${String(d.asset).toUpperCase()}:${d.expiry}`, Date.now());
 }
 
 function broadcast(obj: unknown): void {
@@ -1677,8 +1691,19 @@ fastify.get('/paper/positions/closed', async (_req, reply) => {
 
 fastify.get('/paper/debug', async (_req, reply) => {
   const posRefIds = simBroker.getPositions().map(p => p.ref_id);
+  const now = Date.now();
+  // A key in ocSubs with no ocFeeds entry (or a large ageSec) means we believe we
+  // are subscribed but nothing is coming — the feed needs re-subscribing.
+  const ocFeeds = [...new Set([...simOcSubs, ...ocLastTick.keys()])]
+    .map(key => ({
+      key,
+      subscribed: simOcSubs.has(key),
+      ageSec: ocLastTick.has(key) ? Math.round((now - ocLastTick.get(key)!) / 1000) : null,
+    }))
+    .sort((a, b) => (a.ageSec ?? Infinity) - (b.ageSec ?? Infinity));
   return reply.send({
     ocSubs: [...simOcSubs],
+    ocFeeds,
     positionRefIds: posRefIds,
     wsConnected: nubraWs?.readyState === WebSocket.OPEN,
     ocFieldLogDone: _ocFieldLogDone,

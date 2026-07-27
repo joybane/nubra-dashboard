@@ -1,43 +1,19 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import SvgChart from './components/SvgChart';
 import type { Instrument } from './types';
 import { getSymbol } from './types';
 import { fmtPrice, generateId, formatExpiry } from './lib/utils';
 import { payoffAtExpiry, daysToExpiry } from './lib/GexService';
 import { STRATEGY_TEMPLATES, type Sentiment } from './lib/strategyTemplates';
-import { useWs } from './hooks/useWsContext';
-import { useBasket, type BasketLegInput } from './hooks/useBasketContext';
+import { useBasket, type BasketLeg } from './hooks/useBasketContext';
 import { useBasketChain, type ChainRow } from './hooks/useBasketChain';
-import { useBasketPersistence } from './hooks/useBasketPersistence';
-import { useMarginCalc } from './hooks/useMarginCalc';
+import { legMtm, netGreeks, netPremium, totalMtm as sumMtm, totalPrice as sumPrice } from './lib/basketMath';
 import OptionChain from './OptionChain';
 
 // Interfaces
 
-interface Leg {
-  id: string;
-  symbol: string;
-  optionType: 'CE' | 'PE';
-  side: 'BUY' | 'SELL';
-  strike: number;
-  expiry: string;
-  lots: number;
-  lotSize: number;
-  ltp: number;
-  entryLtp: number;
-  refId: number | null;
-  nubraName: string;
-  asset: string;
-  orderType: 'MKT' | 'LIMIT' | 'SL';
-  limitPrice: number | null;
-  triggerPrice: number | null;
-  deliveryType: 'IDAY' | 'CNC';
-  iv: number | null;
-  delta: number | null;
-  gamma: number | null;
-  theta: number | null;
-  vega: number | null;
-}
+/** Legs live in BasketProvider so the Option Chain drawer edits the same basket. */
+type Leg = BasketLeg;
 
 interface Props {
   instrument: Instrument | null;
@@ -46,19 +22,6 @@ interface Props {
 type ViewMode = 'prebuilt' | 'saved' | 'builder';
 
 // Helpers
-
-function numField(obj: Record<string, unknown>, ...keys: string[]): number | null {
-  for (const k of keys) {
-    if (obj[k] != null && !isNaN(Number(obj[k]))) return Number(obj[k]);
-  }
-  return null;
-}
-
-const ORDER_TYPE_MAP: Record<string, string> = {
-  MKT: 'ORDER_TYPE_MARKET',
-  LIMIT: 'ORDER_TYPE_REGULAR',
-  SL: 'ORDER_TYPE_STOPLOSS',
-};
 
 const SENTIMENT_COLORS: Record<Sentiment, string> = {
   Bullish: '#22c55e',
@@ -82,13 +45,10 @@ function miniPayoff(legs: Array<{ optionType: 'CE' | 'PE'; side: 'BUY' | 'SELL';
 // Component
 
 export default function BasketOrder({ instrument }: Props) {
-  const [legs, setLegs] = useState<Leg[]>([]);
   const [placed, setPlaced] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [multiplier, setMultiplier] = useState(1);
   const [viewMode, setViewMode] = useState<ViewMode>('prebuilt');
   const [sentimentFilter, setSentimentFilter] = useState<Sentiment | 'All'>('All');
   const [saveName, setSaveName] = useState('');
-  const [strategyName, setStrategyName] = useState<string>('Custom Strategy');
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [targetDays, setTargetDays] = useState(5);
   const [addScripQuery, setAddScripQuery] = useState('');
@@ -104,46 +64,25 @@ export default function BasketOrder({ instrument }: Props) {
   const symSearchTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const resizeRef = useRef<{ startX: number; startW: number } | null>(null);
   const addScripTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const { subscribe } = useWs();
-  const { onLegAdded, setBasketMode } = useBasket();
+  const {
+    legs, setLegs, addLeg: addBasketLeg, removeLeg, updateLeg, legCount,
+    multiplier, applyMultiplier, setStrategyName,
+    margin, marginLoading, marginError, persistence, placeBasket, setBasketMode,
+    registerViewer,
+  } = useBasket();
 
-  const sym = instrument
+  const instSym = instrument
     ? (instrument.asset || (instrument.stock_name || '').replace(/\s+\d+$/, '').replace(/\s+/g, '') || getSymbol(instrument).replace(/\d.*/, '') || getSymbol(instrument))
     : null;
-  const exch = instrument?.exchange || 'NSE';
+  // Legs may have been built on a symbol the chain was switched to (or arrived
+  // from the Option Chain tab), which need not match the pane's instrument.
+  const sym = legs[0]?.asset || instSym;
+  const exch = legs[0]?.exchange || instrument?.exchange || 'NSE';
   const instLotSize = instrument?.lot_size ?? 1;
 
   const legExpiries = useMemo(() => Array.from(new Set(legs.map(l => l.expiry).filter(Boolean))), [legs]);
 
   const chain = useBasketChain({ sym, exch, legExpiries });
-  const persistence = useBasketPersistence();
-  const { margin, loading: marginLoading, error: marginError } = useMarginCalc(legs, exch, multiplier, useCallback((resolved: any[]) => {
-    setLegs(prev => {
-      let changed = false;
-      const next = prev.map(leg => {
-        const found = resolved.find((r: any) => r.strike === leg.strike && r.optionType === leg.optionType && r.expiry === leg.expiry);
-        if (found) {
-          if (leg.refId !== found.refId || leg.delta !== found.delta || leg.ltp !== found.ltp || leg.nubraName !== found.nubraName) {
-            changed = true;
-            return {
-              ...leg,
-              refId: found.refId,
-              ltp: found.ltp,
-              iv: found.iv ?? leg.iv,
-              delta: found.delta ?? leg.delta,
-              gamma: found.gamma ?? leg.gamma,
-              theta: found.theta ?? leg.theta,
-              vega: found.vega ?? leg.vega,
-              nubraName: found.nubraName,
-              lotSize: found.lotSize || leg.lotSize
-            };
-          }
-        }
-        return leg;
-      });
-      return changed ? next : prev;
-    });
-  }, []));
 
   // Auto-enable basket mode when OC tab active in builder
   useEffect(() => {
@@ -153,95 +92,32 @@ export default function BasketOrder({ instrument }: Props) {
     }
   }, [viewMode, rightTab, setBasketMode]);
 
-  // Listen for legs added from OptionChain basket mode
+  // The builder shows margin, so it counts as a basket viewer.
   useEffect(() => {
-    const unsub = onLegAdded((input: BasketLegInput) => {
-      setLegs(prev => [...prev, {
-        id: generateId(), symbol: input.asset, optionType: input.optionType,
-        side: input.side, strike: input.strike, expiry: input.expiry,
-        lots: 1, lotSize: input.lotSize, ltp: input.ltp, entryLtp: input.ltp, refId: input.refId,
-        nubraName: input.nubraName, asset: input.asset, orderType: 'MKT',
-        limitPrice: null, triggerPrice: null, deliveryType: 'IDAY',
-        iv: input.iv, delta: input.delta, gamma: input.gamma,
-        theta: input.theta, vega: input.vega,
-      }]);
-      setViewMode('builder');
-    });
-    return unsub;
-  }, [onLegAdded]);
+    if (viewMode !== 'builder') return;
+    return registerViewer();
+  }, [viewMode, registerViewer]);
 
-  // WS leg LTP updates - option chain (primary) + position_ltp (secondary for traded legs)
+  // Legs added elsewhere (the Option Chain drawer) open the builder on arrival —
+  // including on mount, which is how "Analyze" hands a basket over to this tab.
+  const hadLegs = useRef(false);
   useEffect(() => {
-    if (!sym) return;
-    const unsub1 = subscribe('option_chain', (msg) => {
-      const d = (msg as any).data as Record<string, unknown> | undefined;
-      if (!d || String(d.asset || '').toUpperCase() !== sym.toUpperCase()) return;
-      const msgExpiry = String(d.expiry || '');
-      const ceArr = (d.ce || []) as Array<Record<string, unknown>>;
-      const peArr = (d.pe || []) as Array<Record<string, unknown>>;
-
-      const ltpMap = new Map<number, Record<string, number | undefined>>();
-      for (const ce of ceArr) {
-        const sp = Number(ce.sp) > 10000 ? Number(ce.sp) / 100 : Number(ce.sp);
-        ltpMap.set(sp, { ...ltpMap.get(sp), ce: ce.ltp != null ? Number(ce.ltp) / 100 : undefined,
-          ceIv: numField(ce, 'iv', 'implied_volatility') ?? undefined, ceDelta: numField(ce, 'delta') ?? undefined,
-          ceGamma: numField(ce, 'gamma') ?? undefined, ceTheta: numField(ce, 'theta') ?? undefined, ceVega: numField(ce, 'vega') ?? undefined });
-      }
-      for (const pe of peArr) {
-        const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
-        ltpMap.set(sp, { ...ltpMap.get(sp), pe: pe.ltp != null ? Number(pe.ltp) / 100 : undefined,
-          peIv: numField(pe, 'iv', 'implied_volatility') ?? undefined, peDelta: numField(pe, 'delta') ?? undefined,
-          peGamma: numField(pe, 'gamma') ?? undefined, peTheta: numField(pe, 'theta') ?? undefined, peVega: numField(pe, 'vega') ?? undefined });
-      }
-
-      setLegs(prev => prev.map(leg => {
-        if (leg.expiry !== msgExpiry) return leg;
-        const u = ltpMap.get(leg.strike); if (!u) return leg;
-        return { ...leg, ltp: (leg.optionType === 'CE' ? u.ce : u.pe) ?? leg.ltp,
-          iv: (leg.optionType === 'CE' ? u.ceIv : u.peIv) ?? leg.iv, delta: (leg.optionType === 'CE' ? u.ceDelta : u.peDelta) ?? leg.delta,
-          gamma: (leg.optionType === 'CE' ? u.ceGamma : u.peGamma) ?? leg.gamma, theta: (leg.optionType === 'CE' ? u.ceTheta : u.peTheta) ?? leg.theta,
-          vega: (leg.optionType === 'CE' ? u.ceVega : u.peVega) ?? leg.vega };
-      }));
-    });
-
-    const unsub2 = subscribe('position_ltp', (msg) => {
-      if (msg.type !== 'position_ltp') return;
-      const updates = msg.data as { ref_id: number; ltp: number }[];
-      if (!updates || updates.length === 0) return;
-      const ltpMap = new Map<number, number>();
-      for (const u of updates) ltpMap.set(u.ref_id, u.ltp / 100);
-      setLegs(prev => {
-        let changed = false;
-        const next = prev.map(leg => {
-          if (!leg.refId) return leg;
-          const newLtp = ltpMap.get(leg.refId);
-          if (newLtp != null && newLtp !== leg.ltp) { changed = true; return { ...leg, ltp: newLtp }; }
-          return leg;
-        });
-        return changed ? next : prev;
-      });
-    });
-
-    return () => { unsub1(); unsub2(); };
-  }, [subscribe, sym, chain.expiry]);
+    if (legCount > 0 && !hadLegs.current) setViewMode('builder');
+    hadLegs.current = legCount > 0;
+  }, [legCount]);
   // Leg CRUD
 
   function addLeg(strike: number, optionType: 'CE' | 'PE', side: 'BUY' | 'SELL', row: ChainRow) {
-    const ltp = optionType === 'CE' ? row.ceLtp : row.peLtp;
-    const refId = optionType === 'CE' ? row.ceRefId : row.peRefId;
-    const nubraName = optionType === 'CE' ? row.ceNubraName : row.peNubraName;
-    setLegs(prev => [...prev, {
-      id: generateId(), symbol: sym!, optionType, side, strike, expiry: chain.expiry,
-      lots: 1, lotSize: row.lotSize, ltp, entryLtp: ltp, refId, nubraName, asset: sym!,
-      orderType: 'MKT', limitPrice: null, triggerPrice: null, deliveryType: 'IDAY',
-      iv: optionType === 'CE' ? row.ceIv : row.peIv, delta: optionType === 'CE' ? row.ceDelta : row.peDelta,
-      gamma: optionType === 'CE' ? row.ceGamma : row.peGamma, theta: optionType === 'CE' ? row.ceTheta : row.peTheta,
-      vega: optionType === 'CE' ? row.ceVega : row.peVega,
-    }]);
+    const isCe = optionType === 'CE';
+    addBasketLeg({
+      symbol: sym!, asset: sym!, exchange: exch, optionType, side, strike, expiry: chain.expiry,
+      lotSize: row.lotSize, ltp: isCe ? row.ceLtp : row.peLtp,
+      refId: isCe ? row.ceRefId : row.peRefId, nubraName: isCe ? row.ceNubraName : row.peNubraName,
+      iv: isCe ? row.ceIv : row.peIv, delta: isCe ? row.ceDelta : row.peDelta,
+      gamma: isCe ? row.ceGamma : row.peGamma, theta: isCe ? row.ceTheta : row.peTheta,
+      vega: isCe ? row.ceVega : row.peVega,
+    });
   }
-
-  function removeLeg(id: string) { setLegs(prev => prev.filter(l => l.id !== id)); }
-  function updateLeg(id: string, u: Partial<Leg>) { setLegs(prev => prev.map(l => l.id === id ? { ...l, ...u } : l)); }
 
   function addEmptyOptLeg() {
     const atm = chain.spot ? chain.chainRows.reduce((best, r) => Math.abs(r.strike - chain.spot!) < Math.abs(best.strike - chain.spot!) ? r : best, chain.chainRows[0]) : chain.chainRows[Math.floor(chain.chainRows.length / 2)];
@@ -301,14 +177,13 @@ export default function BasketOrder({ instrument }: Props) {
     const lotSize = Number(inst.lot_size || inst.ls || instLotSize || 1);
     const ltp = inst.ltp != null ? Number(inst.ltp) / 100 : 0;
     const exp = String(inst.expiry || chain.expiry || '');
-    setLegs(prev => [...prev, {
-      id: generateId(), symbol: String(inst.asset || inst.stock_name || sym || ''),
+    const asset = String(inst.asset || inst.stock_name || sym || '');
+    addBasketLeg({
+      symbol: asset, asset, exchange: String(inst.exchange || exch),
       optionType: optType, side: 'BUY', strike, expiry: exp,
-      lots: 1, lotSize, ltp, entryLtp: ltp, refId, nubraName: name,
-      asset: String(inst.asset || inst.stock_name || sym || ''),
-      orderType: 'MKT', limitPrice: null, triggerPrice: null, deliveryType: 'IDAY',
+      lotSize, ltp, refId, nubraName: name,
       iv: null, delta: null, gamma: null, theta: null, vega: null,
-    }]);
+    });
     setShowAddScrip(false); setAddScripQuery(''); setAddScripResults([]);
   }
   // Strategy templates
@@ -323,17 +198,19 @@ export default function BasketOrder({ instrument }: Props) {
     const newLegs: Leg[] = tmpl.legs.map(tl => {
       const target = atm + tl.strikeDist * step;
       const row = chain.chainRows.reduce((best, r) => Math.abs(r.strike - target) < Math.abs(best.strike - target) ? r : best);
+      const isCe = tl.optionType === 'CE';
       return {
-        id: generateId(), symbol: sym!, optionType: tl.optionType, side: tl.side,
+        id: generateId(), symbol: sym!, asset: sym!, exchange: exch,
+        optionType: tl.optionType, side: tl.side,
         strike: row.strike, expiry: chain.expiry, lots: tl.lots, lotSize: row.lotSize,
-        ltp: tl.optionType === 'CE' ? row.ceLtp : row.peLtp,
-        entryLtp: tl.optionType === 'CE' ? row.ceLtp : row.peLtp,
-        refId: tl.optionType === 'CE' ? row.ceRefId : row.peRefId,
-        nubraName: tl.optionType === 'CE' ? row.ceNubraName : row.peNubraName,
-        asset: sym!, orderType: 'MKT' as const, limitPrice: null, triggerPrice: null, deliveryType: 'IDAY' as const,
-        iv: tl.optionType === 'CE' ? row.ceIv : row.peIv, delta: tl.optionType === 'CE' ? row.ceDelta : row.peDelta,
-        gamma: tl.optionType === 'CE' ? row.ceGamma : row.peGamma, theta: tl.optionType === 'CE' ? row.ceTheta : row.peTheta,
-        vega: tl.optionType === 'CE' ? row.ceVega : row.peVega,
+        ltp: isCe ? row.ceLtp : row.peLtp,
+        entryLtp: isCe ? row.ceLtp : row.peLtp,
+        refId: isCe ? row.ceRefId : row.peRefId,
+        nubraName: isCe ? row.ceNubraName : row.peNubraName,
+        orderType: 'MKT' as const, limitPrice: null, triggerPrice: null, deliveryType: 'IDAY' as const,
+        iv: isCe ? row.ceIv : row.peIv, delta: isCe ? row.ceDelta : row.peDelta,
+        gamma: isCe ? row.ceGamma : row.peGamma, theta: isCe ? row.ceTheta : row.peTheta,
+        vega: isCe ? row.ceVega : row.peVega,
       };
     });
     setLegs(newLegs);
@@ -341,31 +218,26 @@ export default function BasketOrder({ instrument }: Props) {
     setViewMode('builder');
   }
 
-  function applyMultiplier(newMult: number) {
-    if (newMult < 1 || newMult === multiplier) return;
-    const ratio = newMult / multiplier;
-    setLegs(prev => prev.map(l => ({ ...l, lots: Math.max(1, Math.round(l.lots * ratio)) })));
-    setMultiplier(newMult);
-  }
-
   function loadSavedBasket(basket: { name?: string; legs: Array<Record<string, unknown>>; expiry: string }) {
-    setLegs((basket.legs as unknown as Leg[]).map(l => ({ ...l, id: generateId(), entryLtp: l.entryLtp ?? l.ltp })));
+    setLegs((basket.legs as unknown as Leg[]).map(l => ({
+      ...l,
+      id: generateId(),
+      entryLtp: l.entryLtp ?? l.ltp,
+      // Older saved baskets predate these fields.
+      symbol: l.symbol || l.asset,
+      exchange: l.exchange || exch,
+      lots: l.lots || 1,
+    })));
     if (basket.expiry && basket.expiry !== chain.expiry) chain.changeExpiry(basket.expiry);
     setStrategyName(basket.name || 'Custom Strategy');
     setViewMode('builder');
   }
   // Computed values
 
-  const totalPrice = useMemo(() => legs.reduce((acc, l) => acc + (l.side === 'BUY' ? 1 : -1) * l.ltp, 0), [legs]);
-  const totalPremium = useMemo(() => legs.reduce((acc, l) => acc + (l.side === 'BUY' ? -1 : 1) * l.ltp * l.lots * l.lotSize, 0), [legs]);
-  const totalMtm = useMemo(() => legs.reduce((acc, l) => acc + (l.ltp - l.entryLtp) * l.lots * l.lotSize * (l.side === 'BUY' ? 1 : -1), 0), [legs]);
-
-  const netGreeks = useMemo(() => legs.reduce((acc, l) => {
-    const sign = l.side === 'BUY' ? 1 : -1;
-    const qty = l.lots * l.lotSize;
-    return { delta: acc.delta + (l.delta ?? 0) * qty * sign, gamma: acc.gamma + (l.gamma ?? 0) * qty * sign,
-      theta: acc.theta + (l.theta ?? 0) * qty * sign, vega: acc.vega + (l.vega ?? 0) * qty * sign };
-  }, { delta: 0, gamma: 0, theta: 0, vega: 0 }), [legs]);
+  const totalPrice = useMemo(() => sumPrice(legs), [legs]);
+  const totalPremium = useMemo(() => netPremium(legs), [legs]);
+  const totalMtm = useMemo(() => sumMtm(legs), [legs]);
+  const greeks = useMemo(() => netGreeks(legs), [legs]);
 
   const payoffData = useMemo(() => {
     if (!legs.length) return [];
@@ -393,64 +265,12 @@ export default function BasketOrder({ instrument }: Props) {
   const riskReward = maxLoss !== 0 ? Math.abs(maxProfit / maxLoss) : 0;
   // Place orders
 
-  async function fetchMarginRequiredPaise(orderLegs: Leg[]): Promise<number | undefined> {
-    const validLegs = orderLegs.filter(l => l.strike > 0 && l.lots > 0 && l.lotSize > 0);
-    if (!validLegs.length) return undefined;
-    const res = await fetch('/paper/margin/basket', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        exchange: exch,
-        multiplier,
-        orders: validLegs.map(l => ({
-          ref_id: l.refId,
-          order_qty: l.lots * l.lotSize,
-          strike: l.strike,
-          option_type: l.optionType,
-          ltp: l.ltp,
-          lot_size: l.lotSize,
-          expiry: l.expiry,
-          symbol: l.symbol,
-          order_side: l.side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
-          order_delivery_type: l.deliveryType === 'IDAY' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
-        })),
-      }),
-    });
-    if (!res.ok) return undefined;
-    const data = await res.json() as Record<string, unknown>;
-    const total = Number(data.total_margin ?? 0);
-    return total > 0 ? total : undefined;
-  }
-
   async function placeOrders() {
     if (!legs.length) return;
-    const missing = legs.filter(l => !l.refId && !l.nubraName);
-    if (missing.length) { setPlaced({ ok: false, msg: `${missing.length} leg(s) missing instrument IDs.` }); return; }
-    const sorted = [...legs].sort((a, b) => { if (a.side === 'BUY' && b.side === 'SELL') return -1; if (a.side === 'SELL' && b.side === 'BUY') return 1; return 0; });
     setPlaced(null);
-    const finalName = strategyName === 'Custom Strategy' ? persistence.getNextCustomName() : (strategyName || persistence.getNextCustomName());
-    try {
-      const marginRequired = margin?.total && margin.total > 0
-        ? Math.round(margin.total * 100)
-        : await fetchMarginRequiredPaise(sorted);
-      if (!marginRequired) throw new Error('Margin unavailable. Please wait for the margin calculation and try again.');
-      const res = await fetch('/paper/orders/basket', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ strategy_name: finalName, margin_required: marginRequired, orders: sorted.map(l => ({
-          nubraName: l.nubraName || `${l.symbol}${l.strike}${l.optionType}`, liveRefId: l.refId,
-          display_name: `${l.symbol} ${l.strike} ${l.optionType}`, order_type: ORDER_TYPE_MAP[l.orderType],
-          order_side: l.side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL', order_qty: l.lots * l.lotSize,
-          order_price: l.limitPrice ? Math.round(l.limitPrice * 100) : undefined,
-          trigger_price: l.triggerPrice ? Math.round(l.triggerPrice * 100) : undefined,
-          order_delivery_type: l.deliveryType === 'IDAY' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
-          validity_type: 'DAY', asset: l.asset, expiry: l.expiry, derivative_type: 'OPT',
-        })) }) });
-      const d = await res.json() as { orders?: Array<{ order_id: number }>; basket_group_id?: string; error?: string };
-      if (!res.ok || d.error) throw new Error(d.error || 'Basket placement failed');
-      persistence.saveBasket(finalName, sym, chain.expiry, legs, d.basket_group_id);
-      setStrategyName('Custom Strategy');
-      setPlaced({ ok: true, msg: `${d.orders?.length ?? legs.length} order(s) placed & saved as "${finalName}"` });
-      setTimeout(() => setPlaced(null), 5000);
-    } catch (e) { setPlaced({ ok: false, msg: (e as Error).message }); }
+    const result = await placeBasket({ symbol: sym, expiry: chain.expiry });
+    setPlaced(result);
+    if (result.ok) setTimeout(() => setPlaced(null), 5000);
   }
   // Render
 
@@ -725,7 +545,7 @@ style={{ width: 18, height: 18, borderRadius: 3, border: '1px solid var(--border
                 </div>
                 <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{fmtPrice(leg.ltp)}</span>
                 {(() => {
-                  const mtm = (leg.ltp - leg.entryLtp) * leg.lots * leg.lotSize * (leg.side === 'BUY' ? 1 : -1);
+                  const mtm = legMtm(leg);
 return <span style={{ fontSize: 11, fontWeight: 600, color: mtm >= 0 ? 'var(--green)' : 'var(--red)' }}>{mtm >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(mtm))}</span>;
                 })()}
                 <button onClick={() => removeLeg(leg.id)}
@@ -857,7 +677,7 @@ style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border
                 ))}
                 <div style={{ display: 'grid', gridTemplateColumns: '32px 90px 60px 40px 60px 60px 60px 60px', alignItems: 'center', padding: '8px 0', fontSize: 11, fontWeight: 700, color: 'var(--text-primary)' }}>
                   <span></span><span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Total × (Lot size × Lots)</span><span></span><span></span>
-                  <span>{netGreeks.delta.toFixed(2)}</span><span>{netGreeks.theta.toFixed(2)}</span><span>{netGreeks.gamma.toFixed(4)}</span><span>{netGreeks.vega.toFixed(2)}</span>
+                  <span>{greeks.delta.toFixed(2)}</span><span>{greeks.theta.toFixed(2)}</span><span>{greeks.gamma.toFixed(4)}</span><span>{greeks.vega.toFixed(2)}</span>
                 </div>
               </div>
             </div>
@@ -872,7 +692,7 @@ style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border
                   <span>B/S</span><span>Instrument</span><span>Strike</span><span>Qty</span><span style={{ textAlign: 'right' as const }}>Unrealized P&L</span>
                 </div>
                 {legs.map(leg => {
-                  const mtm = (leg.ltp - leg.entryLtp) * leg.lots * leg.lotSize * (leg.side === 'BUY' ? 1 : -1);
+                  const mtm = legMtm(leg);
                   return (
                     <div key={leg.id} style={{ display: 'grid', gridTemplateColumns: '32px 90px 80px 50px 1fr', alignItems: 'center', padding: '6px 0', borderBottom: '1px solid var(--bg-card)', fontSize: 11 }}>
                       <span style={{ width: 22, height: 18, borderRadius: 3, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 10,
@@ -973,7 +793,9 @@ style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid var(--border
           {rightTab === 'optionchain' && (
             <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
               <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', flexDirection: 'column' }}>
-                <OptionChain instrument={instrument} />
+                {/* The builder's own leg table is the basket view here, so the
+                    chain adds legs but does not render its drawer. */}
+                <OptionChain instrument={instrument} embedded />
               </div>
             </div>
           )}

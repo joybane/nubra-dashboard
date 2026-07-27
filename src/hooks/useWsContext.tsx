@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { WsMessage } from '../types';
+import { createOcSubRegistry, ocKey } from '../lib/ocSubRegistry';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Listener = (msg: WsMessage) => void;
@@ -25,6 +26,9 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
   // triggered by *us* (unmount) does not schedule a resurrecting reconnect.
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const stoppedRef   = useRef(false);
+  // Option-chain subscriptions are shared by many consumers, so they are
+  // reference counted here rather than sent per caller — see lib/ocSubRegistry.
+  const ocSubs       = useRef(createOcSubRegistry());
   const [wsReady, setWsReady] = useState(false);
 
   const dispatch = useCallback((msg: WsMessage) => {
@@ -40,7 +44,18 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     wsRef.current = ws;
 
-    ws.addEventListener('open', () => setWsReady(true));
+    ws.addEventListener('open', () => {
+      setWsReady(true);
+      // Replay every option-chain feed a consumer still wants. This covers both a
+      // reconnect (the server only replays its own position-derived subs) and the
+      // cold start, where a chain can finish loading and subscribe before the
+      // socket is OPEN — `send` drops those silently, leaving the chain on its
+      // 5s REST poll for the rest of the session.
+      for (const key of ocSubs.current.active()) {
+        const [asset, expiry, exchange] = key.split('|');
+        ws.send(JSON.stringify({ action: 'subscribe_oc', asset, expiry, exchange }));
+      }
+    });
 
     ws.addEventListener('message', (evt) => {
       try {
@@ -98,11 +113,18 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
   }, [send]);
 
   const subscribeOC = useCallback((asset: string, expiry: string, exchange = 'NSE') => {
-    send({ action: 'subscribe_oc', asset, expiry, exchange });
+    if (!asset || !expiry) return;
+    if (ocSubs.current.acquire(ocKey(asset, expiry, exchange))) {
+      send({ action: 'subscribe_oc', asset, expiry, exchange });
+    }
   }, [send]);
 
   const unsubscribeOC = useCallback((asset: string, expiry: string, exchange = 'NSE') => {
-    send({ action: 'unsubscribe_oc', asset, expiry, exchange });
+    if (!asset || !expiry) return;
+    // Only the last holder tears the feed down; everyone else just drops their claim.
+    if (ocSubs.current.release(ocKey(asset, expiry, exchange))) {
+      send({ action: 'unsubscribe_oc', asset, expiry, exchange });
+    }
   }, [send]);
 
   return (
