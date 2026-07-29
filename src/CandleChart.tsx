@@ -16,7 +16,7 @@ import { useOIProfile } from './hooks/useOIProfile';
 import { useGreekOverlay } from './hooks/useGreekOverlay';
 import { GreekButton } from './components/GreekControls';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
-import type { Instrument, OhlcBar, OhlcvData, VolBar, WsMessage } from './types';
+import type { Instrument, OhlcBar, OhlcvData, OptionChainData, OptionLeg, VolBar, WsMessage } from './types';
 import { getSymbol } from './types';
 import {
   toChartTime, snapToCandle, sortKey, historyDays, chunkDays,
@@ -169,6 +169,22 @@ export default function CandleChart({ instrument, theme }: Props) {
   const isLoadingRef    = useRef(false);
   const countdownRef    = useRef<number | null>(null);
 
+  // Match context for the currently loaded OPTION instrument, used to pick this
+  // contract's leg out of 'option_chain' broadcasts (see applyOptionTick below —
+  // the index_bucket/ohlcv feed never delivers ticks for individual options).
+  const optAssetRef  = useRef<string | null>(null);
+  const optExpiryRef = useRef<string | null>(null);
+  const optRefIdRef  = useRef<number | null>(null);
+  const optStrikeRef = useRef<number | null>(null);
+  const optTypeRef   = useRef<'CE' | 'PE' | null>(null);
+
+  // The option-chain WS subscription backing the above — independent of, and
+  // ref-counted alongside, any subscription OptionChain/Watchlist/useOIProfile
+  // already hold for the same asset/expiry (see lib/ocSubRegistry.ts).
+  const optTickAssetRef  = useRef<string | null>(null);
+  const optTickExpiryRef = useRef<string | null>(null);
+  const optTickExchRef   = useRef<string>('NSE');
+
   const [interval,   setInterval]   = useState<Interval>('5m');
   const [loading,    setLoading]    = useState<string | null>('Select a symbol to begin');
   const [showVol,    setShowVol]    = useState(false);
@@ -178,9 +194,26 @@ export default function CandleChart({ instrument, theme }: Props) {
   const [priceDisplay, setPriceDisplay] = useState<{ price:number; diff:number; pct:string; up:boolean } | null>(null);
   const [loadMore, setLoadMore] = useState(false);
 
-  const { subscribe, subscribeChart, unsubscribeChart } = useWs();
+  const { subscribe, subscribeChart, unsubscribeChart, subscribeOC, unsubscribeOC } = useWs();
   const intervalRef = useRef(interval);
   intervalRef.current = interval;
+
+  function subscribeOptTickWs(asset: string, expiry: string, exchange: string) {
+    if (optTickAssetRef.current === asset && optTickExpiryRef.current === expiry) return;
+    unsubscribeOptTickWs();
+    optTickAssetRef.current  = asset;
+    optTickExpiryRef.current = expiry;
+    optTickExchRef.current   = exchange;
+    subscribeOC(asset, expiry, exchange);
+  }
+
+  function unsubscribeOptTickWs() {
+    if (optTickAssetRef.current && optTickExpiryRef.current) {
+      unsubscribeOC(optTickAssetRef.current, optTickExpiryRef.current, optTickExchRef.current);
+    }
+    optTickAssetRef.current  = null;
+    optTickExpiryRef.current = null;
+  }
 
   const oi = useOIProfile({ containerRef, canvasRef, candleRef, currentInstRef, allBarsRef });
   const vega  = useGreekOverlay({ greek: 'vega',  chartRef, currentInstRef, allBarsRef });
@@ -358,6 +391,47 @@ export default function CandleChart({ instrument, theme }: Props) {
     return unsub;
   }, [subscribe]);
 
+  // option_chain is the only channel that carries a live per-second LTP for
+  // options (index_bucket/ohlcv never delivers ticks for individual option
+  // contracts — confirmed empirically) — build synthetic candles from it.
+  useEffect(() => {
+    const unsub = subscribe('option_chain', (msg: WsMessage) => {
+      if (msg.type !== 'option_chain') return;
+      if (!currentInstRef.current || nubraType(currentInstRef.current) !== 'OPT') return;
+      const data = msg.data as OptionChainData;
+      if ((data.asset || '').toUpperCase() !== optAssetRef.current) return;
+      if (String(data.expiry ?? '') !== optExpiryRef.current) return;
+
+      const legs   = (optTypeRef.current === 'PE' ? data.pe : data.ce) || [];
+      const refId  = optRefIdRef.current;
+      const strike = optStrikeRef.current;
+      let match: (OptionLeg & Record<string, unknown>) | undefined;
+      for (const l of legs) {
+        const leg = l as OptionLeg & Record<string, unknown>;
+        if (refId != null) {
+          if (Number(leg.refId ?? leg.ref_id) === refId) { match = leg; break; }
+          continue;
+        }
+        if (strike != null) {
+          const sp = Number(leg.sp);
+          if ((sp > 10000 ? sp / 100 : sp) === strike) { match = leg; break; }
+        }
+      }
+      if (!match) return;
+      const ltp = Number(match.ltp);
+      if (!(ltp > 0)) return;
+      applyOptionTick(ltp / 100, Number(match.volume) || undefined, match.ts as string | undefined);
+    });
+    return unsub;
+  }, [subscribe]);
+
+  // Release the option-chain subscription on unmount — otherwise a pane showing
+  // an option leaks a live feed after the host chart is gone.
+  useEffect(() => () => {
+    unsubscribeOptTickWs();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function upsertBar(arr: OhlcBar[], bar: OhlcBar): void {
     const last = arr[arr.length - 1];
     if (last && sortKey(last.time) === sortKey(bar.time)) {
@@ -368,6 +442,15 @@ export default function CandleChart({ instrument, theme }: Props) {
     } else if (!last || sortKey(bar.time) > sortKey(last.time)) {
       arr.push(bar);
     }
+  }
+
+  function commitCandle(candle: OhlcBar, vol?: number) {
+    candleRef.current?.update(candle as Parameters<typeof candleRef.current.update>[0]);
+    lastBarRef.current = candle;
+    upsertBar(allBarsRef.current, candle);
+    updatePriceDisplay(candle.close, dayOpenRef.current || candle.open);
+    setOhlc({ o: candle.open, h: candle.high, l: candle.low, c: candle.close, vol });
+    updateCountdownPosition();
   }
 
   function applyBucket(b: Record<string,string>) {
@@ -388,13 +471,26 @@ export default function CandleChart({ instrument, theme }: Props) {
         low: Math.min(lVal, oVal, hVal, cVal),
         close: cVal,
       };
-      candleRef.current?.update(candle as Parameters<typeof candleRef.current.update>[0]);
-      lastBarRef.current = candle;
-      upsertBar(allBarsRef.current, candle);
-      updatePriceDisplay(candle.close, dayOpenRef.current || candle.open);
-      setOhlc({ o: candle.open, h: candle.high, l: candle.low, c: candle.close, vol: Number(b.cumulative_volume) || undefined });
-      updateCountdownPosition();
+      commitCandle(candle, Number(b.cumulative_volume) || undefined);
     } catch (e) { console.warn('[Chart] applyBucket error:', e); }
+  }
+
+  // Builds a candle from a single LTP point (option_chain has no O/H/L, only a
+  // running last price) — first tick in a new interval bucket seeds O=H=L=C,
+  // later ticks in the same bucket only widen H/L and move C, like a live print.
+  function applyOptionTick(ltpRupees: number, vol: number | undefined, tsNs?: string) {
+    try {
+      if (!(ltpRupees > 0)) return;
+      const utcSec = tsNs && /^\d+$/.test(tsNs)
+        ? Number(BigInt(tsNs) / 1_000_000_000n)
+        : Math.floor(Date.now() / 1000);
+      const barTime = snapToCandle(utcSec, intervalRef.current);
+      const last = lastBarRef.current;
+      const candle = (last && sortKey(last.time) === sortKey(barTime))
+        ? { time: barTime, open: last.open, high: Math.max(last.high, ltpRupees), low: Math.min(last.low, ltpRupees), close: ltpRupees }
+        : { time: barTime, open: ltpRupees, high: ltpRupees, low: ltpRupees, close: ltpRupees };
+      commitCandle(candle, vol);
+    } catch (e) { console.warn('[Chart] applyOptionTick error:', e); }
   }
 
   const hasReachedEarliestRef = useRef(false);
@@ -439,12 +535,26 @@ function dedupeAndSortBars<T extends { time: any }>(bars: T[]): T[] {
       const oldSym   = getSymbol(currentInstRef.current);
       const wasIndex = nubraType(currentInstRef.current) === 'INDEX';
       unsubscribeChart(wasIndex ? { indexes: [oldSym] } : { instruments: [oldSym] }, iv, currentInstRef.current.exchange || 'NSE');
+      if (nubraType(currentInstRef.current) === 'OPT') unsubscribeOptTickWs();
     }
     oi.clearForInstrumentChange();
     vega.clearForInstrumentChange();
     theta.clearForInstrumentChange();
 
     currentInstRef.current       = inst;
+    if (nubraType(inst) === 'OPT') {
+      optAssetRef.current  = (inst.asset || '').toUpperCase();
+      optExpiryRef.current = String(inst.expiry ?? '');
+      optRefIdRef.current  = inst.ref_id ?? null;
+      optStrikeRef.current = inst.strike_price ? inst.strike_price / 100 : null;
+      optTypeRef.current   = (inst.option_type as 'CE' | 'PE' | undefined) || null;
+    } else {
+      optAssetRef.current  = null;
+      optExpiryRef.current = null;
+      optRefIdRef.current  = null;
+      optStrikeRef.current = null;
+      optTypeRef.current   = null;
+    }
     allBarsRef.current           = [];
     allVolBarsRef.current        = [];
     earliestRef.current          = null;
@@ -484,6 +594,11 @@ function dedupeAndSortBars<T extends { time: any }>(bars: T[]): T[] {
 
       candleRef.current.setData(cleanBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })) as Parameters<typeof candleRef.current.setData>[0]);
       volRef.current.setData(cleanVolBars.map(v => ({ time: v.time, value: v.value, color: v.color })) as Parameters<typeof volRef.current.setData>[0]);
+      // The price scale is the same object across symbol switches (the series is
+      // never recreated). If the user had dragged the right axis on the previous
+      // symbol, autoScale stays off and the new symbol's candles render against
+      // the old price range — force it back on for every freshly loaded symbol.
+      candleRef.current.priceScale().applyOptions({ autoScale: true });
 
       const len = cleanBars.length;
       chartRef.current.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 60), to: len + 5 });
@@ -495,6 +610,9 @@ function dedupeAndSortBars<T extends { time: any }>(bars: T[]): T[] {
       const chartSym = getSymbol(inst);
       const isIndex  = nubraType(inst) === 'INDEX';
       subscribeChart(isIndex ? { indexes: [chartSym] } : { instruments: [chartSym] }, iv, inst.exchange || 'NSE');
+      if (nubraType(inst) === 'OPT') {
+        subscribeOptTickWs(inst.asset || chartSym, String(inst.expiry ?? ''), inst.exchange || 'NSE');
+      }
     } catch (err: unknown) {
       setLoading(`Error: ${(err as Error).message}`);
     }
