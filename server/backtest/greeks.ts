@@ -29,6 +29,66 @@ export function bsDelta(
   return optionType === 'CALL' ? cdf : cdf - 1; // put delta is negative
 }
 
+/**
+ * Black-76 option premium. Same conventions as bsDelta: ivPct is the IV percentage,
+ * tYears years to expiry, zero rate and zero dividend. Used by the local margin engine
+ * to reprice a leg under each SPAN scenario shock.
+ */
+export function bsPrice(
+  optionType: OptionType, spot: number, strike: number, ivPct: number, tYears: number,
+): number {
+  const intrinsic = optionType === 'CALL' ? Math.max(0, spot - strike) : Math.max(0, strike - spot);
+  if (!(spot > 0) || !(strike > 0) || !(ivPct > 0) || !(tYears > 0)) return intrinsic;
+
+  const sigma = ivPct / 100;
+  const sqrtT = sigma * Math.sqrt(tYears);
+  const d1 = (Math.log(spot / strike) + (sigma * sigma / 2) * tYears) / sqrtT;
+  const d2 = d1 - sqrtT;
+  const price = optionType === 'CALL'
+    ? spot * normCdf(d1) - strike * normCdf(d2)
+    : strike * normCdf(-d2) - spot * normCdf(-d1);
+  // Guard against tiny negative values from the erf approximation near the boundaries.
+  return Math.max(price, intrinsic, 0);
+}
+
+/**
+ * Implied volatility (as a percentage) from an observed premium, by bisection.
+ * Returns null when the premium is outside what the model can produce — deep-OTM
+ * quotes near zero are the usual cause, and the caller should fall back to a
+ * quoted IV rather than trusting a boundary value.
+ */
+export function impliedVolPct(
+  optionType: OptionType, spot: number, strike: number, premium: number, tYears: number,
+): number | null {
+  if (!(spot > 0) || !(strike > 0) || !(premium > 0) || !(tYears > 0)) return null;
+  const intrinsic = optionType === 'CALL' ? Math.max(0, spot - strike) : Math.max(0, strike - spot);
+  if (premium <= intrinsic) return null; // no time value left to imply vol from
+
+  let lo = 0.5, hi = 300; // IV percentage bounds
+  if (bsPrice(optionType, spot, strike, hi, tYears) < premium) return null;
+  for (let i = 0; i < 60; i++) {
+    const mid = (lo + hi) / 2;
+    if (bsPrice(optionType, spot, strike, mid, tYears) < premium) lo = mid; else hi = mid;
+  }
+  const iv = (lo + hi) / 2;
+  return iv > 0.6 && iv < 299 ? iv : null;
+}
+
+/**
+ * Calendar years to expiry (expiry assumed 15:30 IST) — the convention an annualised
+ * IV is actually quoted against, so that `σ√T` reproduces the option's own time value.
+ *
+ * Deliberately separate from `yearsToExpiry` below, whose trading-time arithmetic
+ * understates a multi-day horizon by roughly 3.8x and is discontinuous at the one-day
+ * boundary. The backtest's delta thresholds are calibrated against that behaviour, so
+ * it is left alone; anything that needs a true T (option repricing, margin) uses this.
+ */
+export function calendarYearsToExpiry(date: string, hhmm: string, expiry: string): number {
+  const ms = Date.parse(`${expiry}T15:30:00+05:30`) - Date.parse(`${date}T${hhmm}:00+05:30`);
+  if (!Number.isFinite(ms)) return 1 / 365;
+  return Math.max(ms / 86400000 / 365, 1 / (365 * 24 * 60));
+}
+
 /** Trading years between an IST trade datetime and expiry (expiry assumed 15:30 IST). */
 export function yearsToExpiry(date: string, hhmm: string, expiry: string): number {
   const now = Date.parse(`${date}T${hhmm}:00+05:30`);

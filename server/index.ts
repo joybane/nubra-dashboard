@@ -1934,6 +1934,9 @@ interface BasketMarginBody {
     lot_size?: number;
     expiry?: string;
     symbol?: string;
+    /** Filled in server-side from the option chain; consumed by the local margin engine. */
+    spot?: number;
+    iv?: number;
   }>;
 }
 
@@ -2095,6 +2098,15 @@ fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, rep
           });
           if (matched) {
             o.ref_id = Number(matched.ref_id || matched.refId);
+            // Feed the freshly resolved market data back onto the order itself, not only
+            // into resolvedLegs. The local margin engine prices from these fields and
+            // would otherwise use whatever stale (or absent) values the client sent.
+            const freshLtp = matched.ltp != null ? Number(matched.ltp) / 100 : 0;
+            if (freshLtp > 0) o.ltp = freshLtp;
+            // The chain reports IV as a decimal (0.1905); the margin engine wants percent.
+            if (matched.iv != null && Number(matched.iv) > 0) o.iv = Number(matched.iv) * 100;
+            const rawSpot = Number(chain.cp ?? chain.currentprice ?? 0) / 100; // cp is paise
+            if (rawSpot > 0) o.spot = rawSpot;
             resolvedLegs.push({
               strike: o.strike,
               optionType: o.option_type,
