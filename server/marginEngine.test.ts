@@ -8,22 +8,36 @@ import { calculateLocalBasketMargin, type BasketMarginOrder } from './marginEngi
 // previous suite passed while charging 2x premium and 73x on a bull call spread.
 
 const SPOT = 24000;
-const QTY = 65;          // one NIFTY lot
+const QTY = 65; // one NIFTY lot
 const FAR_EXPIRY = '20260904';
 
 const leg = (
-  side: 'BUY' | 'SELL', ot: 'CE' | 'PE', strike: number, ltp: number,
-  { qty = QTY, expiry = FAR_EXPIRY, spot = SPOT }: { qty?: number; expiry?: string; spot?: number } = {},
+  side: 'BUY' | 'SELL',
+  ot: 'CE' | 'PE',
+  strike: number,
+  ltp: number,
+  {
+    qty = QTY,
+    expiry = FAR_EXPIRY,
+    spot = SPOT,
+  }: { qty?: number; expiry?: string; spot?: number } = {},
 ): BasketMarginOrder => ({
-  order_qty: qty, order_side: side, option_type: ot, strike, ltp,
-  symbol: 'NIFTY', expiry, spot,
+  order_qty: qty,
+  order_side: side,
+  option_type: ot,
+  strike,
+  ltp,
+  symbol: 'NIFTY',
+  expiry,
+  spot,
 });
 
 const rupees = (paise: number) => paise / 100;
 /** Fixed clock so expiry-day rules and time-to-expiry stay deterministic. */
 const ON = (iso: string) => new Date(`${iso}T10:00:00+05:30`);
 const NOW = ON('2026-08-25');
-const calc = (orders: BasketMarginOrder[], now = NOW) => calculateLocalBasketMargin(orders, 'NIFTY', now)!;
+const calc = (orders: BasketMarginOrder[], now = NOW) =>
+  calculateLocalBasketMargin(orders, 'NIFTY', now)!;
 
 test('returns null when no leg is a valid option (missing strike / type)', () => {
   expect(calculateLocalBasketMargin([])).toBeNull();
@@ -88,8 +102,10 @@ test('short strangle nets to roughly one leg of span, but ELM on both', () => {
 
 test('iron condor is defined-risk on both wings', () => {
   const r = calc([
-    leg('BUY', 'PE', 24200, 60), leg('SELL', 'PE', 24300, 90),
-    leg('SELL', 'CE', 24400, 90), leg('BUY', 'CE', 24500, 60),
+    leg('BUY', 'PE', 24200, 60),
+    leg('SELL', 'PE', 24300, 90),
+    leg('SELL', 'CE', 24400, 90),
+    leg('BUY', 'CE', 24500, 60),
   ]);
   expect(rupees(r.span)).toBeLessThan(100 * QTY * 2); // both wings capped by width
   expect(r.margin_benefit).toBeGreaterThan(0);
@@ -146,9 +162,13 @@ test('the total always equals the sum of its parts, across many baskets', () => 
       const strike = Math.round((21000 + next() * 6000) / 50) * 50;
       const ot = next() < 0.5 ? 'CE' : 'PE';
       const intrinsic = ot === 'CE' ? Math.max(0, SPOT - strike) : Math.max(0, strike - SPOT);
-      return leg(next() < 0.5 ? 'BUY' : 'SELL', ot, strike,
+      return leg(
+        next() < 0.5 ? 'BUY' : 'SELL',
+        ot,
+        strike,
         Math.round((intrinsic + 1 + next() * 400) * 100) / 100,
-        { expiry: ['20260827', '20260904', '20261030'][Math.floor(next() * 3)] });
+        { expiry: ['20260827', '20260904', '20261030'][Math.floor(next() * 3)] },
+      );
     });
     const r = calc(orders);
     expect(r.total_margin).toBe(r.span + r.exposure + r.opt_prem);
@@ -158,7 +178,8 @@ test('the total always equals the sum of its parts, across many baskets', () => 
 
 test('an all-long basket never carries span — its risk is the premium it already paid', () => {
   const r = calc([
-    leg('BUY', 'CE', 24200, 90), leg('BUY', 'PE', 23800, 85),
+    leg('BUY', 'CE', 24200, 90),
+    leg('BUY', 'PE', 23800, 85),
     leg('BUY', 'CE', 25000, 12, { expiry: '20261030' }),
   ]);
   expect(rupees(r.span)).toBe(0);
@@ -183,6 +204,9 @@ test('IV is calibrated from the traded premium, so a wider premium costs more sp
 });
 
 test('non-option legs are reported as excluded rather than dropped silently', () => {
-  const r = calc([leg('SELL', 'CE', 24000, 150), { order_qty: QTY, order_side: 'BUY', symbol: 'NIFTY' }]);
+  const r = calc([
+    leg('SELL', 'CE', 24000, 150),
+    { order_qty: QTY, order_side: 'BUY', symbol: 'NIFTY' },
+  ]);
   expect(r.message).toMatch(/excluded/i);
 });

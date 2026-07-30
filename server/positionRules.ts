@@ -23,17 +23,17 @@ export type { TrailStop };
 export interface LegRule {
   scope: 'LEG';
   ref_id: number;
-  basket_group_id: string;   // '' if ungrouped — matches SimBroker's posKey convention
-  stopLoss?: SLTarget;       // type restricted to NONE | PREMIUM_PERCENT | PREMIUM_ABSOLUTE
+  basket_group_id: string; // '' if ungrouped — matches SimBroker's posKey convention
+  stopLoss?: SLTarget; // type restricted to NONE | PREMIUM_PERCENT | PREMIUM_ABSOLUTE
   target?: SLTarget;
   trail?: TrailStop;
 }
 export interface GroupRule {
   scope: 'GROUP';
   basket_group_id: string;
-  maxProfit?: number;  // ₹, combined MTM across the group's open legs
-  maxLoss?:   number;  // ₹, positive magnitude
-  trail?:     TrailStop; // trailing lock/giveback on combined ₹ MTM (entry treated as 0)
+  maxProfit?: number; // ₹, combined MTM across the group's open legs
+  maxLoss?: number; // ₹, positive magnitude
+  trail?: TrailStop; // trailing lock/giveback on combined ₹ MTM (entry treated as 0)
   exitAllOnLegHit?: boolean; // cascade: any single leg's own SL/target hit closes the whole group
 }
 export type PositionRule = LegRule | GroupRule;
@@ -58,12 +58,12 @@ export function sanitizeSLTarget(v: SLTarget | undefined): SLTarget {
 // stop from a previous occupant of the same key.
 interface TrailState {
   entryTimeSeen: number;
-  slPriceRs:     number | null; // tightened SL premium (₹), mirrors engine.ts Slot.slPrice
-  favExtremeRs:  number;        // best premium seen since entry (₹), running high/low
+  slPriceRs: number | null; // tightened SL premium (₹), mirrors engine.ts Slot.slPrice
+  favExtremeRs: number; // best premium seen since entry (₹), running high/low
 }
 
-const legRules    = new Map<string, LegRule>();
-const groupRules   = new Map<string, GroupRule>();
+const legRules = new Map<string, LegRule>();
+const groupRules = new Map<string, GroupRule>();
 const trailStates = new Map<string, TrailState>();
 
 export function loadPositionRules(): void {
@@ -72,9 +72,13 @@ export function loadPositionRules(): void {
       const rule = JSON.parse(row.rule_json) as PositionRule;
       if (rule.scope === 'LEG') legRules.set(row.rule_key, rule);
       else if (rule.scope === 'GROUP') groupRules.set(row.rule_key, rule);
-    } catch { /* skip corrupt row */ }
+    } catch {
+      /* skip corrupt row */
+    }
   }
-  console.log(`[PositionRules] Restored ${legRules.size} leg rule(s), ${groupRules.size} group rule(s)`);
+  console.log(
+    `[PositionRules] Restored ${legRules.size} leg rule(s), ${groupRules.size} group rule(s)`,
+  );
 }
 
 export function upsertLegRule(rule: LegRule): void {
@@ -115,39 +119,49 @@ export function listPositionRules(): PositionRule[] {
 // Deliberately duck-typed rather than importing SimBroker/SimPosition from
 // index.ts, so this module has no dependency on the server entrypoint.
 export interface RulePosition {
-  ref_id:              number;
-  nubraName:           string;
-  display_name:        string;
-  qty:                 number;  // signed: + long, - short
-  avg_price:           number;  // paise
-  last_traded_price:   number;  // paise
+  ref_id: number;
+  nubraName: string;
+  display_name: string;
+  qty: number; // signed: + long, - short
+  avg_price: number; // paise
+  last_traded_price: number; // paise
   order_delivery_type: string;
-  basket_group_id?:    string;
-  entry_time?:         number;
+  basket_group_id?: string;
+  entry_time?: number;
 }
 export interface RuleBroker {
   getPositions(): RulePosition[];
   placeOrder(p: {
-    nubraName: string; liveRefId: number; display_name?: string;
-    order_type: string; order_side: string; order_qty: number;
-    order_delivery_type: string; validity_type: string;
+    nubraName: string;
+    liveRefId: number;
+    display_name?: string;
+    order_type: string;
+    order_side: string;
+    order_qty: number;
+    order_delivery_type: string;
+    validity_type: string;
     basket_group_id?: string;
   }): unknown;
 }
 
 export interface RuleFireEvent {
-  scope:            'LEG' | 'GROUP';
-  reason:           'STOPLOSS' | 'TARGET' | 'PORTFOLIO_TP' | 'PORTFOLIO_SL';
-  ref_ids:          number[];
+  scope: 'LEG' | 'GROUP';
+  reason: 'STOPLOSS' | 'TARGET' | 'PORTFOLIO_TP' | 'PORTFOLIO_SL';
+  ref_ids: number[];
   basket_group_id?: string;
 }
 
 function closePosition(broker: RuleBroker, pos: RulePosition): void {
   broker.placeOrder({
-    nubraName: pos.nubraName, liveRefId: pos.ref_id, display_name: pos.display_name,
-    order_type: 'ORDER_TYPE_MARKET', order_side: pos.qty > 0 ? 'ORDER_SIDE_SELL' : 'ORDER_SIDE_BUY',
-    order_qty: Math.abs(pos.qty), order_delivery_type: pos.order_delivery_type,
-    validity_type: 'DAY', basket_group_id: pos.basket_group_id || undefined,
+    nubraName: pos.nubraName,
+    liveRefId: pos.ref_id,
+    display_name: pos.display_name,
+    order_type: 'ORDER_TYPE_MARKET',
+    order_side: pos.qty > 0 ? 'ORDER_SIDE_SELL' : 'ORDER_SIDE_BUY',
+    order_qty: Math.abs(pos.qty),
+    order_delivery_type: pos.order_delivery_type,
+    validity_type: 'DAY',
+    basket_group_id: pos.basket_group_id || undefined,
   });
 }
 
@@ -155,8 +169,12 @@ function closePosition(broker: RuleBroker, pos: RulePosition): void {
 // backtest) and return the current SL premium level in rupees, or null if the
 // trail hasn't triggered yet.
 function applyLiveTrail(
-  key: string, side: 'BUY' | 'SELL', entryRs: number, ltpRs: number,
-  trail: TrailStop, entryTime: number | undefined,
+  key: string,
+  side: 'BUY' | 'SELL',
+  entryRs: number,
+  ltpRs: number,
+  trail: TrailStop,
+  entryTime: number | undefined,
 ): number | null {
   if (!trail || trail.type === 'NONE') return null;
   const sell = side === 'SELL';
@@ -165,8 +183,11 @@ function applyLiveTrail(
     st = { entryTimeSeen: entryTime ?? 0, slPriceRs: null, favExtremeRs: entryRs };
     trailStates.set(key, st);
   }
-  if (sell) { if (ltpRs < st.favExtremeRs) st.favExtremeRs = ltpRs; }
-  else      { if (ltpRs > st.favExtremeRs) st.favExtremeRs = ltpRs; }
+  if (sell) {
+    if (ltpRs < st.favExtremeRs) st.favExtremeRs = ltpRs;
+  } else {
+    if (ltpRs > st.favExtremeRs) st.favExtremeRs = ltpRs;
+  }
 
   const favExtreme = sell ? entryRs - st.favExtremeRs : st.favExtremeRs - entryRs;
   const trigger = trail.trigger ?? 0;
@@ -192,7 +213,12 @@ function applyLiveTrail(
     }
   }
   if (candidate == null) return st.slPriceRs;
-  st.slPriceRs = st.slPriceRs == null ? candidate : (sell ? Math.min(st.slPriceRs, candidate) : Math.max(st.slPriceRs, candidate));
+  st.slPriceRs =
+    st.slPriceRs == null
+      ? candidate
+      : sell
+        ? Math.min(st.slPriceRs, candidate)
+        : Math.max(st.slPriceRs, candidate);
   return st.slPriceRs;
 }
 
@@ -205,7 +231,7 @@ export function evaluateAndFire(broker: RuleBroker, changedRefId: number): RuleF
   if (legRules.size === 0 && groupRules.size === 0) return events;
 
   const allPositions = broker.getPositions();
-  const touched = allPositions.filter(p => p.ref_id === changedRefId);
+  const touched = allPositions.filter((p) => p.ref_id === changedRefId);
 
   for (const pos of touched) {
     const key = legRuleKey(pos.ref_id, pos.basket_group_id);
@@ -215,14 +241,15 @@ export function evaluateAndFire(broker: RuleBroker, changedRefId: number): RuleF
     const side: 'BUY' | 'SELL' = pos.qty > 0 ? 'BUY' : 'SELL';
     const sell = side === 'SELL';
     const entryRs = pos.avg_price / 100;
-    const ltpRs   = pos.last_traded_price / 100;
-    const sl  = sanitizeSLTarget(rule.stopLoss);
+    const ltpRs = pos.last_traded_price / 100;
+    const sl = sanitizeSLTarget(rule.stopLoss);
     const tgt = sanitizeSLTarget(rule.target);
     const { slPrice, tgtPrice } = liveLevels(side, entryRs, sl, tgt);
 
     let hitReason: 'STOPLOSS' | 'TARGET' | null = null;
     if (slPrice != null && (sell ? ltpRs >= slPrice : ltpRs <= slPrice)) hitReason = 'STOPLOSS';
-    else if (tgtPrice != null && (sell ? ltpRs <= tgtPrice : ltpRs >= tgtPrice)) hitReason = 'TARGET';
+    else if (tgtPrice != null && (sell ? ltpRs <= tgtPrice : ltpRs >= tgtPrice))
+      hitReason = 'TARGET';
     else if (rule.trail && rule.trail.type !== 'NONE') {
       const trailSl = applyLiveTrail(key, side, entryRs, ltpRs, rule.trail, pos.entry_time);
       if (trailSl != null && (sell ? ltpRs >= trailSl : ltpRs <= trailSl)) hitReason = 'STOPLOSS';
@@ -231,33 +258,48 @@ export function evaluateAndFire(broker: RuleBroker, changedRefId: number): RuleF
     if (hitReason) {
       closePosition(broker, pos);
       deleteLegRule(pos.ref_id, pos.basket_group_id);
-      events.push({ scope: 'LEG', reason: hitReason, ref_ids: [pos.ref_id], basket_group_id: pos.basket_group_id });
+      events.push({
+        scope: 'LEG',
+        reason: hitReason,
+        ref_ids: [pos.ref_id],
+        basket_group_id: pos.basket_group_id,
+      });
 
       // Cascade: this group wants every other leg squared off the moment any
       // one leg's own SL/target fires, not just on the combined ₹ threshold.
       const gid = pos.basket_group_id;
       const grpRule = gid ? groupRules.get(gid) : undefined;
       if (gid && grpRule?.exitAllOnLegHit) {
-        const siblings = allPositions.filter(p => p.basket_group_id === gid && p.ref_id !== pos.ref_id);
+        const siblings = allPositions.filter(
+          (p) => p.basket_group_id === gid && p.ref_id !== pos.ref_id,
+        );
         for (const sib of siblings) {
           closePosition(broker, sib);
           deleteLegRule(sib.ref_id, sib.basket_group_id);
         }
         deleteGroupRule(gid);
         if (siblings.length) {
-          events.push({ scope: 'GROUP', reason: hitReason, ref_ids: siblings.map(p => p.ref_id), basket_group_id: gid });
+          events.push({
+            scope: 'GROUP',
+            reason: hitReason,
+            ref_ids: siblings.map((p) => p.ref_id),
+            basket_group_id: gid,
+          });
         }
       }
     }
   }
 
-  const groupIds = new Set(touched.map(p => p.basket_group_id).filter((g): g is string => !!g));
+  const groupIds = new Set(touched.map((p) => p.basket_group_id).filter((g): g is string => !!g));
   for (const gid of groupIds) {
     const rule = groupRules.get(gid);
     if (!rule) continue;
-    const members = allPositions.filter(p => p.basket_group_id === gid);
+    const members = allPositions.filter((p) => p.basket_group_id === gid);
     if (!members.length) continue;
-    const mtmRs = members.reduce((s, p) => s + ((p.last_traded_price - p.avg_price) * p.qty) / 100, 0);
+    const mtmRs = members.reduce(
+      (s, p) => s + ((p.last_traded_price - p.avg_price) * p.qty) / 100,
+      0,
+    );
 
     let hit: 'PORTFOLIO_TP' | 'PORTFOLIO_SL' | null = null;
     if (rule.maxProfit && mtmRs >= rule.maxProfit) hit = 'PORTFOLIO_TP';
@@ -267,14 +309,26 @@ export function evaluateAndFire(broker: RuleBroker, changedRefId: number): RuleF
       // episode to the earliest member entry_time so a full close + later
       // re-open of the group doesn't inherit a stale, already-tightened floor.
       const anchorTime = members.reduce((min, p) => Math.min(min, p.entry_time ?? 0), Infinity);
-      const trailFloor = applyLiveTrail(groupTrailKey(gid), 'BUY', 0, mtmRs, rule.trail, anchorTime === Infinity ? 0 : anchorTime);
+      const trailFloor = applyLiveTrail(
+        groupTrailKey(gid),
+        'BUY',
+        0,
+        mtmRs,
+        rule.trail,
+        anchorTime === Infinity ? 0 : anchorTime,
+      );
       if (trailFloor != null && mtmRs <= trailFloor) hit = 'PORTFOLIO_SL';
     }
 
     if (hit) {
       for (const p of members) closePosition(broker, p);
       deleteGroupRule(gid);
-      events.push({ scope: 'GROUP', reason: hit, ref_ids: members.map(p => p.ref_id), basket_group_id: gid });
+      events.push({
+        scope: 'GROUP',
+        reason: hit,
+        ref_ids: members.map((p) => p.ref_id),
+        basket_group_id: gid,
+      });
     }
   }
 

@@ -12,30 +12,37 @@ export interface OrderTicketConfig {
 }
 
 interface PaperTradingCtx {
-  authenticated:    boolean;
+  authenticated: boolean;
   refreshAuthStatus: () => Promise<void>;
-  ticketOpen:       boolean;
-  ticketConfig:     OrderTicketConfig;
-  openTicket:       (cfg?: Partial<OrderTicketConfig>) => void;
-  closeTicket:      () => void;
+  ticketOpen: boolean;
+  ticketConfig: OrderTicketConfig;
+  openTicket: (cfg?: Partial<OrderTicketConfig>) => void;
+  closeTicket: () => void;
 }
 
 const Ctx = createContext<PaperTradingCtx | null>(null);
 
 export function PaperTradingProvider({ children }: { children: React.ReactNode }) {
   const [authenticated, setAuthenticated] = useState(false);
-  const [ticketOpen,    setTicketOpen]    = useState(false);
-  const [ticketConfig,  setTicketConfig]  = useState<OrderTicketConfig>({ instrument: null, side: 'BUY' });
+  const [ticketOpen, setTicketOpen] = useState(false);
+  const [ticketConfig, setTicketConfig] = useState<OrderTicketConfig>({
+    instrument: null,
+    side: 'BUY',
+  });
 
   const refreshAuthStatus = useCallback(async () => {
     try {
       const res = await fetch('/paper/auth/status');
-      const d   = await res.json() as { authenticated: boolean };
+      const d = (await res.json()) as { authenticated: boolean };
       setAuthenticated(d.authenticated);
-    } catch (e) { console.warn('[Auth] refreshAuthStatus failed:', e); }
+    } catch (e) {
+      console.warn('[Auth] refreshAuthStatus failed:', e);
+    }
   }, []);
 
-  useEffect(() => { refreshAuthStatus(); }, [refreshAuthStatus]);
+  useEffect(() => {
+    refreshAuthStatus();
+  }, [refreshAuthStatus]);
 
   const openTicket = useCallback((cfg?: Partial<OrderTicketConfig>) => {
     setTicketConfig((prev) => ({ ...prev, ...cfg }));
@@ -45,7 +52,16 @@ export function PaperTradingProvider({ children }: { children: React.ReactNode }
   const closeTicket = useCallback(() => setTicketOpen(false), []);
 
   return (
-    <Ctx.Provider value={{ authenticated, refreshAuthStatus, ticketOpen, ticketConfig, openTicket, closeTicket }}>
+    <Ctx.Provider
+      value={{
+        authenticated,
+        refreshAuthStatus,
+        ticketOpen,
+        ticketConfig,
+        openTicket,
+        closeTicket,
+      }}
+    >
       {children}
     </Ctx.Provider>
   );

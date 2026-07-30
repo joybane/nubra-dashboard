@@ -1,7 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
-  Instrument, PaperHolding, PaperOrder, PaperPosition, WsMessage, OptionChainData, OptionLeg,
-  PositionRule, LegPositionRule, GroupPositionRule,
+  Instrument,
+  PaperHolding,
+  PaperOrder,
+  PaperPosition,
+  WsMessage,
+  OptionChainData,
+  OptionLeg,
+  PositionRule,
+  LegPositionRule,
+  GroupPositionRule,
 } from '../types';
 import { fmtPrice } from '../lib/utils';
 import { liveLevels } from '../lib/positionRuleLevels';
@@ -20,21 +28,32 @@ function paise(v: number | undefined | null): string {
 function fmtTime(ns: number | undefined | null): string {
   if (!ns) return '—';
   const ms = ns / 1_000_000;
-  return new Date(ms).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  return new Date(ms).toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
 }
 
 function isToday(ns: number | undefined | null): boolean {
   if (!ns) return true;
   const d = new Date(ns / 1_000_000);
   const now = new Date();
-  return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  );
 }
 
 function fmtDateStr(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-function todayStr(): string { return fmtDateStr(new Date()); }
+function todayStr(): string {
+  return fmtDateStr(new Date());
+}
 
 function shiftDateStr(s: string, days: number): string {
   const d = new Date(s + 'T00:00:00');
@@ -58,24 +77,24 @@ function displayName(o: PaperOrder): string {
 }
 
 const STATUS_STYLE: Record<string, string> = {
-  ORDER_STATUS_PENDING:   'bg-yellow-500/15 text-yellow-400',
-  ORDER_STATUS_OPEN:      'bg-blue-500/15 text-blue-400',
-  ORDER_STATUS_FILLED:    'bg-green-500/15 text-[var(--green)]',
+  ORDER_STATUS_PENDING: 'bg-yellow-500/15 text-yellow-400',
+  ORDER_STATUS_OPEN: 'bg-blue-500/15 text-blue-400',
+  ORDER_STATUS_FILLED: 'bg-green-500/15 text-[var(--green)]',
   ORDER_STATUS_CANCELLED: 'bg-[var(--bg-hover)] text-[var(--text-muted)]',
-  ORDER_STATUS_REJECTED:  'bg-red-500/15 text-[var(--red)]',
+  ORDER_STATUS_REJECTED: 'bg-red-500/15 text-[var(--red)]',
 };
 
 const STATUS_LABEL: Record<string, string> = {
-  ORDER_STATUS_PENDING:   'PENDING',
-  ORDER_STATUS_OPEN:      'OPEN',
-  ORDER_STATUS_FILLED:    'COMPLETE',
+  ORDER_STATUS_PENDING: 'PENDING',
+  ORDER_STATUS_OPEN: 'OPEN',
+  ORDER_STATUS_FILLED: 'COMPLETE',
   ORDER_STATUS_CANCELLED: 'CANCELLED',
-  ORDER_STATUS_REJECTED:  'REJECTED',
+  ORDER_STATUS_REJECTED: 'REJECTED',
 };
 
-const MIN_H     = 120;
+const MIN_H = 120;
 const DEFAULT_H = 220;
-const HEADER_H  = 40;   // collapsed height = just header bar
+const HEADER_H = 40; // collapsed height = just header bar
 
 // ─── Grouping helpers ─────────────────────────────────────────────────────────
 interface OrderGroup {
@@ -98,7 +117,11 @@ function groupOrders(orders: PaperOrder[]): (PaperOrder | OrderGroup)[] {
   }
   const result: (PaperOrder | OrderGroup)[] = [];
   for (const [gid, gOrders] of groups) {
-    result.push({ basket_group_id: gid, strategy_name: gOrders[0].strategy_name || 'Basket', orders: gOrders });
+    result.push({
+      basket_group_id: gid,
+      strategy_name: gOrders[0].strategy_name || 'Basket',
+      orders: gOrders,
+    });
   }
   result.push(...ungrouped);
   return result;
@@ -109,32 +132,40 @@ function isOrderGroup(item: PaperOrder | OrderGroup): item is OrderGroup {
 }
 
 function groupStatus(orders: PaperOrder[]): string {
-  if (orders.every(o => o.order_status === 'ORDER_STATUS_FILLED')) return 'ORDER_STATUS_FILLED';
-  if (orders.some(o => o.order_status === 'ORDER_STATUS_OPEN')) return 'ORDER_STATUS_OPEN';
-  if (orders.some(o => o.order_status === 'ORDER_STATUS_PENDING')) return 'ORDER_STATUS_PENDING';
-  if (orders.every(o => o.order_status === 'ORDER_STATUS_CANCELLED')) return 'ORDER_STATUS_CANCELLED';
+  if (orders.every((o) => o.order_status === 'ORDER_STATUS_FILLED')) return 'ORDER_STATUS_FILLED';
+  if (orders.some((o) => o.order_status === 'ORDER_STATUS_OPEN')) return 'ORDER_STATUS_OPEN';
+  if (orders.some((o) => o.order_status === 'ORDER_STATUS_PENDING')) return 'ORDER_STATUS_PENDING';
+  if (orders.every((o) => o.order_status === 'ORDER_STATUS_CANCELLED'))
+    return 'ORDER_STATUS_CANCELLED';
   return orders[0].order_status;
 }
 
 // ─── Orders table ─────────────────────────────────────────────────────────────
-function OrdersTab({ uatAuth, onOpenStrategyChart }: { uatAuth: boolean; onOpenStrategyChart?: (basketGroupId: string, strategyName: string) => void }) {
-  const [openOrders,   setOpenOrders]   = useState<PaperOrder[]>([]);
+function OrdersTab({
+  uatAuth,
+  onOpenStrategyChart,
+}: {
+  uatAuth: boolean;
+  onOpenStrategyChart?: (basketGroupId: string, strategyName: string) => void;
+}) {
+  const [openOrders, setOpenOrders] = useState<PaperOrder[]>([]);
   const [closedOrders, setClosedOrders] = useState<PaperOrder[]>([]);
-  const [subTab,       setSubTab]       = useState<'open' | 'closed'>('open');
-  const [loading,      setLoading]      = useState(false);
-  const [cancelling,   setCancelling]   = useState<number | null>(null);
-  const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
+  const [subTab, setSubTab] = useState<'open' | 'closed'>('open');
+  const [loading, setLoading] = useState(false);
+  const [cancelling, setCancelling] = useState<number | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [editingGroup, setEditingGroup] = useState<string | null>(null);
-  const [editingName,  setEditingName]  = useState('');
-  const [showHistory,  setShowHistory]  = useState(false);
-  const [histFrom,     setHistFrom]     = useState('');
-  const [histTo,       setHistTo]       = useState('');
+  const [editingName, setEditingName] = useState('');
+  const [showHistory, setShowHistory] = useState(false);
+  const [histFrom, setHistFrom] = useState('');
+  const [histTo, setHistTo] = useState('');
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const toggleExpand = useCallback((gid: string) => {
-    setExpanded(prev => {
+    setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(gid)) next.delete(gid); else next.add(gid);
+      if (next.has(gid)) next.delete(gid);
+      else next.add(gid);
       return next;
     });
   }, []);
@@ -147,14 +178,16 @@ function OrdersTab({ uatAuth, onOpenStrategyChart }: { uatAuth: boolean; onOpenS
         fetch('/paper/orders?executed=1'),
       ]);
       if (liveRes.ok) {
-        const d = await liveRes.json() as PaperOrder[] | { orders?: PaperOrder[] };
+        const d = (await liveRes.json()) as PaperOrder[] | { orders?: PaperOrder[] };
         setOpenOrders(Array.isArray(d) ? d : (d.orders ?? []));
       }
       if (doneRes.ok) {
-        const d = await doneRes.json() as PaperOrder[] | { orders?: PaperOrder[] };
+        const d = (await doneRes.json()) as PaperOrder[] | { orders?: PaperOrder[] };
         setClosedOrders(Array.isArray(d) ? d : (d.orders ?? []));
       }
-    } catch (e) { console.warn('[Orders] fetchOrders failed:', e); }
+    } catch (e) {
+      console.warn('[Orders] fetchOrders failed:', e);
+    }
   }, [uatAuth]);
 
   useEffect(() => {
@@ -162,59 +195,94 @@ function OrdersTab({ uatAuth, onOpenStrategyChart }: { uatAuth: boolean; onOpenS
     setLoading(true);
     fetchOrders().finally(() => setLoading(false));
     timerRef.current = setInterval(fetchOrders, 5000);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
   }, [uatAuth, fetchOrders]);
 
-  const commitRename = useCallback(async (basketGroupId: string) => {
-    const name = editingName.trim();
-    setEditingGroup(null);
-    if (!name) return;
-    try {
-      await fetch('/paper/strategy/rename', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ basket_group_id: basketGroupId, name }) });
-      fetchOrders();
-    } catch (e) { console.warn('[Orders] commitRename failed:', e); }
-  }, [editingName, fetchOrders]);
+  const commitRename = useCallback(
+    async (basketGroupId: string) => {
+      const name = editingName.trim();
+      setEditingGroup(null);
+      if (!name) return;
+      try {
+        await fetch('/paper/strategy/rename', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ basket_group_id: basketGroupId, name }),
+        });
+        fetchOrders();
+      } catch (e) {
+        console.warn('[Orders] commitRename failed:', e);
+      }
+    },
+    [editingName, fetchOrders],
+  );
 
   async function cancelOrder(id: number) {
     setCancelling(id);
     try {
       await fetch(`/paper/orders/${id}`, { method: 'DELETE' });
       await fetchOrders();
-    } catch (e) { console.warn('[Orders] cancelOrder failed:', e); }
-    finally { setCancelling(null); }
+    } catch (e) {
+      console.warn('[Orders] cancelOrder failed:', e);
+    } finally {
+      setCancelling(null);
+    }
   }
 
-  const filteredOpen   = openOrders.filter(o => isToday(o.order_time));
-  const filteredClosed = closedOrders.filter(o => isToday(o.order_time));
-  const historyOrders  = showHistory
+  const filteredOpen = openOrders.filter((o) => isToday(o.order_time));
+  const filteredClosed = closedOrders.filter((o) => isToday(o.order_time));
+  const historyOrders = showHistory
     ? [...openOrders, ...closedOrders]
-        .filter(o => matchesDateRange(o.order_time, histFrom, histTo))
+        .filter((o) => matchesDateRange(o.order_time, histFrom, histTo))
         .sort((a, b) => b.order_time - a.order_time)
     : [];
-  const rows = showHistory ? historyOrders : (subTab === 'open' ? filteredOpen : filteredClosed);
+  const rows = showHistory ? historyOrders : subTab === 'open' ? filteredOpen : filteredClosed;
   const grouped = groupOrders(rows);
 
   function renderOrderRow(o: PaperOrder, indent = false) {
-    const isBuy    = o.order_side === 'ORDER_SIDE_BUY';
-    const canCancel = o.order_status === 'ORDER_STATUS_PENDING' || o.order_status === 'ORDER_STATUS_OPEN';
+    const isBuy = o.order_side === 'ORDER_SIDE_BUY';
+    const canCancel =
+      o.order_status === 'ORDER_STATUS_PENDING' || o.order_status === 'ORDER_STATUS_OPEN';
     return (
-      <tr key={o.order_id} className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`}>
-        <td className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] whitespace-nowrap ${indent ? 'pl-8' : ''}`}>{displayName(o)}</td>
+      <tr
+        key={o.order_id}
+        className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`}
+      >
+        <td
+          className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] whitespace-nowrap ${indent ? 'pl-8' : ''}`}
+        >
+          {displayName(o)}
+        </td>
         <td className="px-3 py-1.5">
-          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${STATUS_STYLE[o.order_status] || ''}`}>
+          <span
+            className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${STATUS_STYLE[o.order_status] || ''}`}
+          >
             {STATUS_LABEL[o.order_status] || o.order_status}
           </span>
         </td>
-        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(o.order_time)}</td>
-        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{productLabel(o.order_delivery_type)}</td>
-        <td className={`px-3 py-1.5 font-semibold ${isBuy ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
+          {fmtTime(o.order_time)}
+        </td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+          {productLabel(o.order_delivery_type)}
+        </td>
+        <td
+          className={`px-3 py-1.5 font-semibold ${isBuy ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+        >
           {isBuy ? 'BUY' : 'SELL'}
         </td>
-        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{o.filled_qty}/{o.order_qty}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+          {o.filled_qty}/{o.order_qty}
+        </td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(o.order_price)}</td>
-        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{o.trigger_price ? paise(o.trigger_price) : '—'}</td>
-        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{o.avg_filled_price ? paise(o.avg_filled_price) : '—'}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+          {o.trigger_price ? paise(o.trigger_price) : '—'}
+        </td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+          {o.avg_filled_price ? paise(o.avg_filled_price) : '—'}
+        </td>
         <td className="px-3 py-1.5">
           {canCancel && (
             <button
@@ -232,45 +300,108 @@ function OrdersTab({ uatAuth, onOpenStrategyChart }: { uatAuth: boolean; onOpenS
   }
 
   const tdy = todayStr();
-  const openHistory = () => { const y = shiftDateStr(tdy, -1); setHistFrom(y); setHistTo(y); setShowHistory(true); };
+  const openHistory = () => {
+    const y = shiftDateStr(tdy, -1);
+    setHistFrom(y);
+    setHistTo(y);
+    setShowHistory(true);
+  };
   const closeHistory = () => setShowHistory(false);
   const shiftDates = (days: number) => {
-    setHistFrom(f => { const n = shiftDateStr(f, days); return n > tdy ? f : n; });
-    setHistTo(t => { const n = shiftDateStr(t, days); return n > tdy ? tdy : n; });
+    setHistFrom((f) => {
+      const n = shiftDateStr(f, days);
+      return n > tdy ? f : n;
+    });
+    setHistTo((t) => {
+      const n = shiftDateStr(t, days);
+      return n > tdy ? tdy : n;
+    });
   };
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* sub-tab row OR history bar */}
       <div className="h-8 shrink-0 flex items-center gap-1 px-3 border-b border-[var(--border)] bg-[var(--bg-secondary)]">
-        {showHistory ? (<>
-          <button onClick={() => shiftDates(-1)} className="w-5 h-5 rounded flex items-center justify-center text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors" title="Previous day">◀</button>
-          <input type="date" value={histFrom} max={tdy} onChange={e => { const v = e.target.value; if (v) { setHistFrom(v); setHistTo(t => t < v ? v : t); } }}
-            className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]" />
-          <button onClick={() => shiftDates(1)} disabled={histTo >= tdy} className="w-5 h-5 rounded flex items-center justify-center text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors disabled:opacity-30" title="Next day">▶</button>
-          <span className="text-[10px] text-[var(--text-muted)] mx-1">to</span>
-          <input type="date" value={histTo} min={histFrom} max={tdy} onChange={e => { const v = e.target.value; if (v) setHistTo(v); }}
-            className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]" />
-          <span className="ml-auto text-[11px] text-[var(--text-muted)]">{historyOrders.length} orders</span>
-          <button onClick={closeHistory} className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/20 transition-colors" title="Back to today">Today</button>
-        </>) : (<>
-          {(['open', 'closed'] as const).map((t) => (
-            <button key={t} onClick={() => setSubTab(t)}
-              className={`px-3 py-0.5 rounded text-[11px] font-semibold transition-all ${
-                subTab === t ? 'bg-[var(--accent)]/15 text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-              }`}
+        {showHistory ? (
+          <>
+            <button
+              onClick={() => shiftDates(-1)}
+              className="w-5 h-5 rounded flex items-center justify-center text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors"
+              title="Previous day"
             >
-              {t === 'open' ? `Open ${filteredOpen.length}` : `Closed ${filteredClosed.length}`}
+              ◀
             </button>
-          ))}
-          <button onClick={openHistory}
-            className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-all"
-            title="View past orders"
-          >
-            History
-          </button>
-        </>)}
-        {loading && <span className="w-3 h-3 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin ml-2" />}
+            <input
+              type="date"
+              value={histFrom}
+              max={tdy}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v) {
+                  setHistFrom(v);
+                  setHistTo((t) => (t < v ? v : t));
+                }
+              }}
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]"
+            />
+            <button
+              onClick={() => shiftDates(1)}
+              disabled={histTo >= tdy}
+              className="w-5 h-5 rounded flex items-center justify-center text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors disabled:opacity-30"
+              title="Next day"
+            >
+              ▶
+            </button>
+            <span className="text-[10px] text-[var(--text-muted)] mx-1">to</span>
+            <input
+              type="date"
+              value={histTo}
+              min={histFrom}
+              max={tdy}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v) setHistTo(v);
+              }}
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]"
+            />
+            <span className="ml-auto text-[11px] text-[var(--text-muted)]">
+              {historyOrders.length} orders
+            </span>
+            <button
+              onClick={closeHistory}
+              className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/20 transition-colors"
+              title="Back to today"
+            >
+              Today
+            </button>
+          </>
+        ) : (
+          <>
+            {(['open', 'closed'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setSubTab(t)}
+                className={`px-3 py-0.5 rounded text-[11px] font-semibold transition-all ${
+                  subTab === t
+                    ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                {t === 'open' ? `Open ${filteredOpen.length}` : `Closed ${filteredClosed.length}`}
+              </button>
+            ))}
+            <button
+              onClick={openHistory}
+              className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-all"
+              title="View past orders"
+            >
+              History
+            </button>
+          </>
+        )}
+        {loading && (
+          <span className="w-3 h-3 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin ml-2" />
+        )}
       </div>
 
       {/* table */}
@@ -278,8 +409,24 @@ function OrdersTab({ uatAuth, onOpenStrategyChart }: { uatAuth: boolean; onOpenS
         <table className="w-full text-[11px] border-collapse tabular-nums">
           <thead className="sticky top-0 bg-[var(--bg-secondary)] z-10">
             <tr className="text-[var(--text-muted)] font-medium">
-              {['Symbol', 'Status', 'Time', 'Product', 'Side', 'Qty', 'Price', 'Trigger', 'Avg Price', ''].map((h) => (
-                <th key={h} className="px-3 py-1.5 text-left font-medium whitespace-nowrap border-b border-[var(--border)]">{h}</th>
+              {[
+                'Symbol',
+                'Status',
+                'Time',
+                'Product',
+                'Side',
+                'Qty',
+                'Price',
+                'Trigger',
+                'Avg Price',
+                '',
+              ].map((h) => (
+                <th
+                  key={h}
+                  className="px-3 py-1.5 text-left font-medium whitespace-nowrap border-b border-[var(--border)]"
+                >
+                  {h}
+                </th>
               ))}
             </tr>
           </thead>
@@ -287,7 +434,11 @@ function OrdersTab({ uatAuth, onOpenStrategyChart }: { uatAuth: boolean; onOpenS
             {grouped.length === 0 && (
               <tr>
                 <td colSpan={10} className="text-center py-8 text-[var(--text-muted)]">
-                  {showHistory ? 'No orders for this period' : subTab === 'open' ? 'No open orders' : 'No closed orders'}
+                  {showHistory
+                    ? 'No orders for this period'
+                    : subTab === 'open'
+                      ? 'No open orders'
+                      : 'No closed orders'}
                 </td>
               </tr>
             )}
@@ -306,14 +457,21 @@ function OrdersTab({ uatAuth, onOpenStrategyChart }: { uatAuth: boolean; onOpenS
                   >
                     <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
                       <span className="inline-flex items-center gap-1.5">
-                        <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">{isOpen ? '▾' : '▸'}</span>
+                        <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">
+                          {isOpen ? '▾' : '▸'}
+                        </span>
                         {editingGroup === g.basket_group_id ? (
                           <input
-                            type="text" value={editingName} autoFocus
-                            onClick={e => e.stopPropagation()}
-                            onChange={e => setEditingName(e.target.value)}
+                            type="text"
+                            value={editingName}
+                            autoFocus
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => setEditingName(e.target.value)}
                             onBlur={() => commitRename(g.basket_group_id)}
-                            onKeyDown={e => { if (e.key === 'Enter') commitRename(g.basket_group_id); if (e.key === 'Escape') setEditingGroup(null); }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') commitRename(g.basket_group_id);
+                              if (e.key === 'Escape') setEditingGroup(null);
+                            }}
                             className="bg-[var(--bg-primary)] border border-[var(--accent)] rounded px-1.5 py-0.5 text-[11px] font-semibold text-[var(--text-primary)] outline-none"
                             style={{ width: Math.max(80, editingName.length * 7 + 20) }}
                           />
@@ -321,37 +479,58 @@ function OrdersTab({ uatAuth, onOpenStrategyChart }: { uatAuth: boolean; onOpenS
                           <>
                             {g.strategy_name}
                             <button
-                              onClick={e => { e.stopPropagation(); setEditingGroup(g.basket_group_id); setEditingName(g.strategy_name); }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingGroup(g.basket_group_id);
+                                setEditingName(g.strategy_name);
+                              }}
                               className="w-3.5 h-3.5 rounded flex items-center justify-center text-[8px] font-semibold text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border border-white/30 transition-colors ml-1"
                               title="Rename strategy"
-                            >R</button>
+                            >
+                              R
+                            </button>
                             {onOpenStrategyChart && (
                               <button
-                                onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onOpenStrategyChart(g.basket_group_id, g.strategy_name);
+                                }}
                                 className="p-0.5 rounded text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
                                 title="Strategy P&L chart"
-                              >📈</button>
+                              >
+                                📈
+                              </button>
                             )}
                           </>
                         )}
-                        <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.orders.length} legs)</span>
+                        <span className="text-[10px] text-[var(--text-muted)] font-normal">
+                          ({g.orders.length} legs)
+                        </span>
                       </span>
                     </td>
                     <td className="px-3 py-1.5">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${STATUS_STYLE[status] || ''}`}>
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${STATUS_STYLE[status] || ''}`}
+                      >
                         {STATUS_LABEL[status] || status}
                       </span>
                     </td>
-                    <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(g.orders[0].order_time)}</td>
-                    <td className="px-3 py-1.5 text-[var(--text-secondary)]">{productLabel(g.orders[0].order_delivery_type)}</td>
+                    <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
+                      {fmtTime(g.orders[0].order_time)}
+                    </td>
+                    <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                      {productLabel(g.orders[0].order_delivery_type)}
+                    </td>
                     <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
-                    <td className="px-3 py-1.5 text-[var(--text-secondary)]">{filledQty}/{totalQty}</td>
+                    <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                      {filledQty}/{totalQty}
+                    </td>
                     <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
                     <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
                     <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
                     <td className="px-3 py-1.5" />
                   </tr>
-                  {isOpen && g.orders.map(o => renderOrderRow(o, true))}
+                  {isOpen && g.orders.map((o) => renderOrderRow(o, true))}
                 </React.Fragment>
               );
             })}
@@ -383,7 +562,11 @@ function groupPositions(positions: PaperPosition[]): (PaperPosition | PositionGr
   }
   const result: (PaperPosition | PositionGroup)[] = [];
   for (const [gid, gPos] of groups) {
-    result.push({ basket_group_id: gid, strategy_name: gPos[0].strategy_name || 'Basket', positions: gPos });
+    result.push({
+      basket_group_id: gid,
+      strategy_name: gPos[0].strategy_name || 'Basket',
+      positions: gPos,
+    });
   }
   result.push(...ungrouped);
   return result;
@@ -394,7 +577,9 @@ function isPositionGroup(item: PaperPosition | PositionGroup): item is PositionG
 }
 
 function groupMarginPaise(positions: PaperPosition[]): number {
-  const withMargin = positions.find(p => typeof p.margin_required === 'number' && p.margin_required > 0);
+  const withMargin = positions.find(
+    (p) => typeof p.margin_required === 'number' && p.margin_required > 0,
+  );
   return withMargin?.margin_required ?? 0;
 }
 
@@ -403,13 +588,28 @@ function groupMarginKey(strategyName: string, positions: PaperPosition[]): strin
   return `${strategyName.trim().toLowerCase()}|${positions.length}|${product}`;
 }
 
-function parsePositionOption(p: PaperPosition): { symbol?: string; strike?: number; optionType?: 'CE' | 'PE' } {
+function parsePositionOption(p: PaperPosition): {
+  symbol?: string;
+  strike?: number;
+  optionType?: 'CE' | 'PE';
+} {
   const explicitType = String(p.option_type || '').toUpperCase();
-  const optionType = explicitType === 'CE' || explicitType === 'PE'
-    ? explicitType
-    : ((`${p.display_name || ''} ${p.zanskar_name || ''}`.toUpperCase().match(/\b(CE|PE)\b|(\d+)(CE|PE)$/)?.[1]
-      || `${p.display_name || ''} ${p.zanskar_name || ''}`.toUpperCase().match(/\b(CE|PE)\b|(\d+)(CE|PE)$/)?.[3]) as 'CE' | 'PE' | undefined);
-  const strike = Number(p.strike_price || (`${p.display_name || ''} ${p.zanskar_name || ''}`.match(/(\d+(?:\.\d+)?)\s*(?:CE|PE)\b/i)?.[1] ?? 0));
+  const optionType =
+    explicitType === 'CE' || explicitType === 'PE'
+      ? explicitType
+      : ((`${p.display_name || ''} ${p.zanskar_name || ''}`
+          .toUpperCase()
+          .match(/\b(CE|PE)\b|(\d+)(CE|PE)$/)?.[1] ||
+          `${p.display_name || ''} ${p.zanskar_name || ''}`
+            .toUpperCase()
+            .match(/\b(CE|PE)\b|(\d+)(CE|PE)$/)?.[3]) as 'CE' | 'PE' | undefined);
+  const strike = Number(
+    p.strike_price ||
+      (`${p.display_name || ''} ${p.zanskar_name || ''}`.match(
+        /(\d+(?:\.\d+)?)\s*(?:CE|PE)\b/i,
+      )?.[1] ??
+        0),
+  );
   const symbol = String(p.display_name || p.zanskar_name || '')
     .trim()
     .split(/\s+/)[0]
@@ -418,10 +618,12 @@ function parsePositionOption(p: PaperPosition): { symbol?: string; strike?: numb
   return { symbol: symbol || undefined, strike: strike > 0 ? strike : undefined, optionType };
 }
 
-async function fetchPositionGroupMarginPaise(positions: PaperPosition[]): Promise<{ total: number; estimated: boolean }> {
+async function fetchPositionGroupMarginPaise(
+  positions: PaperPosition[],
+): Promise<{ total: number; estimated: boolean }> {
   const orders = positions
-    .filter(p => p.ref_id && p.qty)
-    .map(p => {
+    .filter((p) => p.ref_id && p.qty)
+    .map((p) => {
       const opt = parsePositionOption(p);
       return {
         ref_id: p.ref_id,
@@ -433,7 +635,8 @@ async function fetchPositionGroupMarginPaise(positions: PaperPosition[]): Promis
         expiry: p.expiry,
         symbol: opt.symbol,
         order_side: (p.order_side || '').includes('BUY') ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
-        order_delivery_type: p.product === 'MIS' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
+        order_delivery_type:
+          p.product === 'MIS' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
       };
     });
   if (!orders.length) return { total: 0, estimated: false };
@@ -444,7 +647,7 @@ async function fetchPositionGroupMarginPaise(positions: PaperPosition[]): Promis
     body: JSON.stringify({ exchange: 'NSE', multiplier: 1, orders }),
   });
   if (!res.ok) return { total: 0, estimated: false };
-  const data = await res.json() as Record<string, unknown>;
+  const data = (await res.json()) as Record<string, unknown>;
   return {
     total: Number(data.total_margin ?? 0),
     estimated: Boolean(data.estimated),
@@ -460,19 +663,21 @@ interface PositionsTabProps {
 }
 
 function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: PositionsTabProps) {
-  const [positions,       setPositions]       = useState<PaperPosition[]>([]);
+  const [positions, setPositions] = useState<PaperPosition[]>([]);
   const [closedPositions, setClosedPositions] = useState<PaperPosition[]>([]);
-  const [subTab,          setSubTab]          = useState<'open' | 'closed'>('open');
-  const [loading,   setLoading]   = useState(false);
-  const [exiting,   setExiting]   = useState<Set<string>>(new Set());
-  const [expanded,  setExpanded]  = useState<Set<string>>(new Set());
+  const [subTab, setSubTab] = useState<'open' | 'closed'>('open');
+  const [loading, setLoading] = useState(false);
+  const [exiting, setExiting] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [editingGroup, setEditingGroup] = useState<string | null>(null);
-  const [editingName,  setEditingName]  = useState('');
-  const [showHistory,  setShowHistory]  = useState(false);
-  const [histFrom,     setHistFrom]     = useState('');
-  const [histTo,       setHistTo]       = useState('');
-  const [detailPos,    setDetailPos]    = useState<PaperPosition | null>(null);
-  const [groupMargins, setGroupMargins] = useState<Record<string, { total: number; estimated: boolean }>>({});
+  const [editingName, setEditingName] = useState('');
+  const [showHistory, setShowHistory] = useState(false);
+  const [histFrom, setHistFrom] = useState('');
+  const [histTo, setHistTo] = useState('');
+  const [detailPos, setDetailPos] = useState<PaperPosition | null>(null);
+  const [groupMargins, setGroupMargins] = useState<
+    Record<string, { total: number; estimated: boolean }>
+  >({});
   const groupMarginsRef = useRef<Record<string, { total: number; estimated: boolean }>>({});
   const marginRequestsRef = useRef<Set<string>>(new Set());
   const [rules, setRules] = useState<PositionRule[]>([]);
@@ -484,19 +689,31 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
   const { subscribe } = useWs();
 
   const posExitKey = (p: PaperPosition) => `${p.ref_id}:${p.basket_group_id || ''}`;
-  const legRuleFor = useCallback((p: PaperPosition): LegPositionRule | null => {
-    const r = rules.find(r => r.scope === 'LEG' && r.ref_id === p.ref_id && (r.basket_group_id || '') === (p.basket_group_id || ''));
-    return (r as LegPositionRule) ?? null;
-  }, [rules]);
-  const groupRuleFor = useCallback((gid: string): GroupPositionRule | null => {
-    const r = rules.find(r => r.scope === 'GROUP' && r.basket_group_id === gid);
-    return (r as GroupPositionRule) ?? null;
-  }, [rules]);
+  const legRuleFor = useCallback(
+    (p: PaperPosition): LegPositionRule | null => {
+      const r = rules.find(
+        (r) =>
+          r.scope === 'LEG' &&
+          r.ref_id === p.ref_id &&
+          (r.basket_group_id || '') === (p.basket_group_id || ''),
+      );
+      return (r as LegPositionRule) ?? null;
+    },
+    [rules],
+  );
+  const groupRuleFor = useCallback(
+    (gid: string): GroupPositionRule | null => {
+      const r = rules.find((r) => r.scope === 'GROUP' && r.basket_group_id === gid);
+      return (r as GroupPositionRule) ?? null;
+    },
+    [rules],
+  );
 
   const toggleExpand = useCallback((gid: string) => {
-    setExpanded(prev => {
+    setExpanded((prev) => {
       const next = new Set(prev);
-      if (next.has(gid)) next.delete(gid); else next.add(gid);
+      if (next.has(gid)) next.delete(gid);
+      else next.add(gid);
       return next;
     });
   }, []);
@@ -510,42 +727,60 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
         fetch('/paper/positions/rules'),
       ]);
       if (openRes.ok) {
-        const d = await openRes.json() as { portfolio?: { stock_positions?: PaperPosition[] } } | PaperPosition[];
+        const d = (await openRes.json()) as
+          { portfolio?: { stock_positions?: PaperPosition[] } } | PaperPosition[];
         if (Array.isArray(d)) setPositions(d);
-        else setPositions((d.portfolio?.stock_positions) ?? []);
+        else setPositions(d.portfolio?.stock_positions ?? []);
       }
       if (closedRes.ok) {
-        const d = await closedRes.json() as PaperPosition[];
+        const d = (await closedRes.json()) as PaperPosition[];
         setClosedPositions(Array.isArray(d) ? d : []);
       }
       if (rulesRes.ok) {
-        const d = await rulesRes.json() as { rules?: PositionRule[] };
+        const d = (await rulesRes.json()) as { rules?: PositionRule[] };
         setRules(d.rules ?? []);
       }
-    } catch (e) { console.warn('[Positions] fetch failed:', e); }
+    } catch (e) {
+      console.warn('[Positions] fetch failed:', e);
+    }
   }, [uatAuth]);
 
-  const toggleExitAllOnLegHit = useCallback(async (gid: string, current: GroupPositionRule | null, checked: boolean) => {
-    await fetch('/paper/positions/rules/group', {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        basket_group_id: gid, maxProfit: current?.maxProfit, maxLoss: current?.maxLoss,
-        trail: current?.trail, exitAllOnLegHit: checked,
-      }),
-    });
-    fetch_();
-  }, [fetch_]);
-
-  const commitRename = useCallback(async (basketGroupId: string) => {
-    const name = editingName.trim();
-    setEditingGroup(null);
-    if (!name) return;
-    try {
-      await fetch('/paper/strategy/rename', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ basket_group_id: basketGroupId, name }) });
+  const toggleExitAllOnLegHit = useCallback(
+    async (gid: string, current: GroupPositionRule | null, checked: boolean) => {
+      await fetch('/paper/positions/rules/group', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          basket_group_id: gid,
+          maxProfit: current?.maxProfit,
+          maxLoss: current?.maxLoss,
+          trail: current?.trail,
+          exitAllOnLegHit: checked,
+        }),
+      });
       fetch_();
-    } catch (e) { console.warn('[Positions] commitRename failed:', e); }
-  }, [editingName, fetch_]);
+    },
+    [fetch_],
+  );
+
+  const commitRename = useCallback(
+    async (basketGroupId: string) => {
+      const name = editingName.trim();
+      setEditingGroup(null);
+      if (!name) return;
+      try {
+        await fetch('/paper/strategy/rename', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ basket_group_id: basketGroupId, name }),
+        });
+        fetch_();
+      } catch (e) {
+        console.warn('[Positions] commitRename failed:', e);
+      }
+    },
+    [editingName, fetch_],
+  );
 
   useEffect(() => {
     if (!uatAuth) return;
@@ -563,13 +798,13 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
       for (const item of [...(data.ce || []), ...(data.pe || [])]) {
         const leg = item as OptionLeg & Record<string, unknown>;
         const refId = Number(leg.ref_id ?? leg.refId ?? 0);
-        const ltp   = Number(leg.ltp ?? 0);
+        const ltp = Number(leg.ltp ?? 0);
         if (refId && ltp > 0) ltpMap.set(refId, ltp);
       }
       if (ltpMap.size === 0) return;
-      setPositions(prev => {
+      setPositions((prev) => {
         let changed = false;
-        const next = prev.map(p => {
+        const next = prev.map((p) => {
           const newLtp = ltpMap.get(p.ref_id);
           if (newLtp != null && newLtp !== p.last_traded_price) {
             changed = true;
@@ -587,9 +822,9 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
       if (!updates || updates.length === 0) return;
       const ltpMap = new Map<number, number>();
       for (const u of updates) ltpMap.set(u.ref_id, u.ltp);
-      setPositions(prev => {
+      setPositions((prev) => {
         let changed = false;
-        const next = prev.map(p => {
+        const next = prev.map((p) => {
           const newLtp = ltpMap.get(p.ref_id);
           if (newLtp != null && newLtp !== p.last_traded_price) {
             changed = true;
@@ -608,47 +843,68 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
       fetch_();
     });
 
-    return () => { unsub1(); unsub2(); unsub3(); };
+    return () => {
+      unsub1();
+      unsub2();
+      unsub3();
+    };
   }, [subscribe, fetch_]);
 
-  const exitDirect = useCallback(async (p: PaperPosition) => {
-    const ek = posExitKey(p);
-    if (exiting.has(ek)) return;
-    setExiting(prev => new Set(prev).add(ek));
-    const exitSide = (p.order_side || '').includes('BUY') ? 'ORDER_SIDE_SELL' : 'ORDER_SIDE_BUY';
-    try {
-      let nubraName = p.zanskar_name || '';
-      if (!nubraName && p.ref_id) {
-        const res = await fetch(`/api/instruments/lookup?ref_id=${p.ref_id}`);
-        const d = await res.json() as { instrument: Record<string, unknown> | null };
-        if (d.instrument) nubraName = (d.instrument.zanskar_name || d.instrument.nubra_name || '') as string;
+  const exitDirect = useCallback(
+    async (p: PaperPosition) => {
+      const ek = posExitKey(p);
+      if (exiting.has(ek)) return;
+      setExiting((prev) => new Set(prev).add(ek));
+      const exitSide = (p.order_side || '').includes('BUY') ? 'ORDER_SIDE_SELL' : 'ORDER_SIDE_BUY';
+      try {
+        let nubraName = p.zanskar_name || '';
+        if (!nubraName && p.ref_id) {
+          const res = await fetch(`/api/instruments/lookup?ref_id=${p.ref_id}`);
+          const d = (await res.json()) as { instrument: Record<string, unknown> | null };
+          if (d.instrument)
+            nubraName = (d.instrument.zanskar_name || d.instrument.nubra_name || '') as string;
+        }
+        if (!nubraName) {
+          setExiting((prev) => {
+            const s = new Set(prev);
+            s.delete(ek);
+            return s;
+          });
+          return;
+        }
+        await fetch('/paper/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            nubraName,
+            liveRefId: p.ref_id,
+            display_name: p.display_name || nubraName,
+            order_type: 'ORDER_TYPE_MARKET',
+            order_qty: p.qty,
+            order_side: exitSide,
+            order_delivery_type:
+              p.product === 'MIS' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
+            validity_type: 'DAY',
+            basket_group_id: p.basket_group_id || undefined,
+            strategy_name: p.strategy_name || undefined,
+          }),
+        });
+        setTimeout(fetch_, 500);
+      } catch (e) {
+        console.warn('[Positions] exitDirect failed:', e);
       }
-      if (!nubraName) { setExiting(prev => { const s = new Set(prev); s.delete(ek); return s; }); return; }
-      await fetch('/paper/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nubraName,
-          liveRefId: p.ref_id,
-          display_name: p.display_name || nubraName,
-          order_type: 'ORDER_TYPE_MARKET',
-          order_qty: p.qty,
-          order_side: exitSide,
-          order_delivery_type: p.product === 'MIS' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
-          validity_type: 'DAY',
-          basket_group_id: p.basket_group_id || undefined,
-          strategy_name: p.strategy_name || undefined,
-        }),
-      });
-      setTimeout(fetch_, 500);
-    } catch (e) { console.warn('[Positions] exitDirect failed:', e); }
-  }, [exiting, fetch_]);
+    },
+    [exiting, fetch_],
+  );
 
-  const exitAllInGroup = useCallback(async (gPositions: PaperPosition[]) => {
-    for (const p of gPositions) {
-      if (!exiting.has(posExitKey(p))) exitDirect(p);
-    }
-  }, [exiting, exitDirect]);
+  const exitAllInGroup = useCallback(
+    async (gPositions: PaperPosition[]) => {
+      for (const p of gPositions) {
+        if (!exiting.has(posExitKey(p))) exitDirect(p);
+      }
+    },
+    [exiting, exitDirect],
+  );
 
   const exitAll = useCallback(async () => {
     for (const p of positions) {
@@ -661,17 +917,19 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     return s + side * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0);
   }, 0);
   const closedPnl = closedPositions
-    .filter(p => isToday(p.exit_time) || isToday(p.entry_time))
+    .filter((p) => isToday(p.exit_time) || isToday(p.entry_time))
     .reduce((s, p) => s + (p.realised_pnl || p.pnl || 0), 0);
   const totalPnl = openPnl + closedPnl;
 
-  const filteredOpen   = positions.filter(p => isToday(p.entry_time));
-  const filteredClosed = closedPositions.filter(p => isToday(p.exit_time) || isToday(p.entry_time));
+  const filteredOpen = positions.filter((p) => isToday(p.entry_time));
+  const filteredClosed = closedPositions.filter(
+    (p) => isToday(p.exit_time) || isToday(p.entry_time),
+  );
   const historyPositions = showHistory
-    ? closedPositions.filter(p => matchesDateRange(p.exit_time || p.entry_time, histFrom, histTo))
+    ? closedPositions.filter((p) => matchesDateRange(p.exit_time || p.entry_time, histFrom, histTo))
     : [];
-  const groupedOpen    = groupPositions(filteredOpen);
-  const groupedClosed  = groupPositions(filteredClosed);
+  const groupedOpen = groupPositions(filteredOpen);
+  const groupedClosed = groupPositions(filteredClosed);
   const groupedHistory = groupPositions(historyPositions);
 
   const knownGroupMargins = useMemo(() => {
@@ -679,7 +937,11 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     for (const item of groupPositions(closedPositions)) {
       if (!isPositionGroup(item)) continue;
       const margin = groupMarginPaise(item.positions);
-      if (margin > 0) out[groupMarginKey(item.strategy_name, item.positions)] = { total: margin, estimated: true };
+      if (margin > 0)
+        out[groupMarginKey(item.strategy_name, item.positions)] = {
+          total: margin,
+          estimated: true,
+        };
     }
     return out;
   }, [closedPositions]);
@@ -692,7 +954,9 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     return { paise: groupMarginPaise(g.positions), estimated: true };
   }
 
-  useEffect(() => { groupMarginsRef.current = groupMargins; }, [groupMargins]);
+  useEffect(() => {
+    groupMarginsRef.current = groupMargins;
+  }, [groupMargins]);
 
   useEffect(() => {
     if (!uatAuth) return;
@@ -702,17 +966,17 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
       if (marginRequestsRef.current.has(g.basket_group_id)) continue;
       marginRequestsRef.current.add(g.basket_group_id);
       fetchPositionGroupMarginPaise(g.positions)
-        .then(res => {
-          if (res.total > 0) setGroupMargins(prev => ({ ...prev, [g.basket_group_id]: res }));
+        .then((res) => {
+          if (res.total > 0) setGroupMargins((prev) => ({ ...prev, [g.basket_group_id]: res }));
         })
-        .catch(e => console.warn('[Positions] group margin fallback failed:', e))
+        .catch((e) => console.warn('[Positions] group margin fallback failed:', e))
         .finally(() => marginRequestsRef.current.delete(g.basket_group_id));
     }
   }, [positions, uatAuth]);
 
   function calcPnl(p: PaperPosition): number {
     const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-    return side * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0) / 100;
+    return (side * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0)) / 100;
   }
 
   // Spell the armed levels out on the ● marker. Uses qty's sign for the side and
@@ -720,9 +984,14 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
   // trigger prices — a rule whose value means something other than the user
   // expected is then visible on hover instead of only after it fails to fire.
   function legRuleTitle(p: PaperPosition, rule: LegPositionRule): string {
-    const { slPrice, tgtPrice } = liveLevels(p.qty < 0 ? 'SELL' : 'BUY', (p.avg_price || 0) / 100, rule.stopLoss, rule.target);
+    const { slPrice, tgtPrice } = liveLevels(
+      p.qty < 0 ? 'SELL' : 'BUY',
+      (p.avg_price || 0) / 100,
+      rule.stopLoss,
+      rule.target,
+    );
     const parts: string[] = [];
-    if (slPrice  != null) parts.push(`SL ₹${slPrice.toFixed(2)}`);
+    if (slPrice != null) parts.push(`SL ₹${slPrice.toFixed(2)}`);
     if (tgtPrice != null) parts.push(`Target ₹${tgtPrice.toFixed(2)}`);
     if (rule.trail && rule.trail.type !== 'NONE') parts.push('trailing');
     return parts.length ? `Auto-exit — ${parts.join(' · ')}` : 'Auto SL/Target active';
@@ -730,37 +999,67 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
 
   function renderPositionRow(p: PaperPosition, indent = false) {
     const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
-    const pnl  = calcPnl(p);
-    const ek   = posExitKey(p);
+    const pnl = calcPnl(p);
+    const ek = posExitKey(p);
     const legRule = legRuleFor(p);
     return (
-      <tr key={ek} className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`} onClick={() => setDetailPos(p)}>
-        <td className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] ${indent ? 'pl-8' : ''}`}>
+      <tr
+        key={ek}
+        className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`}
+        onClick={() => setDetailPos(p)}
+      >
+        <td
+          className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] ${indent ? 'pl-8' : ''}`}
+        >
           {p.display_name || p.zanskar_name || p.ref_id}
-          {legRule && <span className="text-[var(--accent)] ml-1" title={legRuleTitle(p, legRule)}>●</span>}
+          {legRule && (
+            <span className="text-[var(--accent)] ml-1" title={legRuleTitle(p, legRule)}>
+              ●
+            </span>
+          )}
         </td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.product || 'NRML'}</td>
-        <td className={`px-3 py-1.5 font-semibold ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{side}</td>
+        <td
+          className={`px-3 py-1.5 font-semibold ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+        >
+          {side}
+        </td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.qty}</td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(p.avg_price)}</td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(p.last_traded_price)}</td>
-        <td className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+        <td
+          className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+        >
           {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
         </td>
         <td className={`px-3 py-1.5 ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-          {pnl >= 0 ? '+' : ''}{((p.avg_price || 0) > 0 ? (((p.last_traded_price || 0) - (p.avg_price || 0)) / (p.avg_price || 1) * 100 * (side === 'BUY' ? 1 : -1)) : 0).toFixed(2)}%
+          {pnl >= 0 ? '+' : ''}
+          {((p.avg_price || 0) > 0
+            ? (((p.last_traded_price || 0) - (p.avg_price || 0)) / (p.avg_price || 1)) *
+              100 *
+              (side === 'BUY' ? 1 : -1)
+            : 0
+          ).toFixed(2)}
+          %
         </td>
-        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(p.entry_time)}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
+          {fmtTime(p.entry_time)}
+        </td>
         <td className="px-3 py-1.5">
           <div className="flex items-center gap-1">
             {onViewChart && (
               <button
-                onClick={() => onViewChart({
-                  stock_name: p.display_name || p.zanskar_name || String(p.ref_id),
-                  ref_id: p.ref_id, exchange: 'NSE',
-                  derivative_type: p.derivative_type, option_type: p.option_type,
-                  strike_price: p.strike_price, expiry: p.expiry,
-                })}
+                onClick={() =>
+                  onViewChart({
+                    stock_name: p.display_name || p.zanskar_name || String(p.ref_id),
+                    ref_id: p.ref_id,
+                    exchange: 'NSE',
+                    derivative_type: p.derivative_type,
+                    option_type: p.option_type,
+                    strike_price: p.strike_price,
+                    expiry: p.expiry,
+                  })
+                }
                 className="px-1.5 py-0.5 rounded text-[10px] font-semibold text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border border-white/30 transition-colors"
                 title="View chart"
               >
@@ -768,7 +1067,15 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
               </button>
             )}
             <button
-              onClick={e => { e.stopPropagation(); setRuleEditor({ mode: 'LEG', refId: p.ref_id, basketGroupId: p.basket_group_id || '', displayName: p.display_name || p.zanskar_name || String(p.ref_id) }); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                setRuleEditor({
+                  mode: 'LEG',
+                  refId: p.ref_id,
+                  basketGroupId: p.basket_group_id || '',
+                  displayName: p.display_name || p.zanskar_name || String(p.ref_id),
+                });
+              }}
               className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors border ${legRule ? 'text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border-[var(--accent)]/30' : 'text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border-white/30'}`}
               title="Set SL/Target"
             >
@@ -792,74 +1099,164 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     const pnl = (p.realised_pnl || p.pnl || 0) / 100;
     const ek = posExitKey(p);
     return (
-      <tr key={ek} className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`} onClick={() => setDetailPos(p)}>
-        <td className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] ${indent ? 'pl-8' : ''}`}>{p.display_name || p.zanskar_name || p.ref_id}</td>
+      <tr
+        key={ek}
+        className={`border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`}
+        onClick={() => setDetailPos(p)}
+      >
+        <td
+          className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] ${indent ? 'pl-8' : ''}`}
+        >
+          {p.display_name || p.zanskar_name || p.ref_id}
+        </td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.product || 'NRML'}</td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(p.avg_price)}</td>
-        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.exit_price ? paise(p.exit_price) : '—'}</td>
-        <td className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+          {p.exit_price ? paise(p.exit_price) : '—'}
+        </td>
+        <td
+          className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+        >
           {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
         </td>
-        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(p.entry_time)}</td>
-        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(p.exit_time)}</td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
+          {fmtTime(p.entry_time)}
+        </td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
+          {fmtTime(p.exit_time)}
+        </td>
       </tr>
     );
   }
 
   const tdy = todayStr();
-  const openHistory = () => { const y = shiftDateStr(tdy, -1); setHistFrom(y); setHistTo(y); setShowHistory(true); };
+  const openHistory = () => {
+    const y = shiftDateStr(tdy, -1);
+    setHistFrom(y);
+    setHistTo(y);
+    setShowHistory(true);
+  };
   const closeHistory = () => setShowHistory(false);
   const shiftDates = (days: number) => {
-    setHistFrom(f => { const n = shiftDateStr(f, days); return n > tdy ? f : n; });
-    setHistTo(t => { const n = shiftDateStr(t, days); return n > tdy ? tdy : n; });
+    setHistFrom((f) => {
+      const n = shiftDateStr(f, days);
+      return n > tdy ? f : n;
+    });
+    setHistTo((t) => {
+      const n = shiftDateStr(t, days);
+      return n > tdy ? tdy : n;
+    });
   };
 
-  const histHeaders = ['Symbol', 'Product', 'Entry Price', 'Exit Price', 'P&L', 'Entry Time', 'Exit Time'];
+  const histHeaders = [
+    'Symbol',
+    'Product',
+    'Entry Price',
+    'Exit Price',
+    'P&L',
+    'Entry Time',
+    'Exit Time',
+  ];
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* sub-tab row OR history bar */}
       <div className="h-8 shrink-0 flex items-center gap-1 px-3 border-b border-[var(--border)] bg-[var(--bg-secondary)]">
-        {showHistory ? (<>
-          <button onClick={() => shiftDates(-1)} className="w-5 h-5 rounded flex items-center justify-center text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors" title="Previous day">◀</button>
-          <input type="date" value={histFrom} max={tdy} onChange={e => { const v = e.target.value; if (v) { setHistFrom(v); setHistTo(t => t < v ? v : t); } }}
-            className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]" />
-          <button onClick={() => shiftDates(1)} disabled={histTo >= tdy} className="w-5 h-5 rounded flex items-center justify-center text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors disabled:opacity-30" title="Next day">▶</button>
-          <span className="text-[10px] text-[var(--text-muted)] mx-1">to</span>
-          <input type="date" value={histTo} min={histFrom} max={tdy} onChange={e => { const v = e.target.value; if (v) setHistTo(v); }}
-            className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]" />
-          <span className="ml-auto text-[11px] text-[var(--text-muted)]">{historyPositions.length} positions</span>
-          <button onClick={closeHistory} className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/20 transition-colors" title="Back to today">Today</button>
-        </>) : (<>
-          {(['open', 'closed'] as const).map((t) => (
-            <button key={t} onClick={() => setSubTab(t)}
-              className={`px-3 py-0.5 rounded text-[11px] font-semibold transition-all ${
-                subTab === t ? 'bg-[var(--accent)]/15 text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-              }`}
-            >
-              {t === 'open' ? `Open ${filteredOpen.length}` : `Closed ${filteredClosed.length}`}
-            </button>
-          ))}
-          <button onClick={openHistory}
-            className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-all"
-            title="View past positions"
-          >
-            History
-          </button>
-          <span className="ml-auto text-[11px] text-[var(--text-muted)]">
-            Day P&L: <span className={totalPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>{totalPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(totalPnl / 100))}</span>
-          </span>
-          {subTab === 'open' && filteredOpen.length > 0 && (
+        {showHistory ? (
+          <>
             <button
-              onClick={exitAll}
-              disabled={positions.every(p => exiting.has(posExitKey(p)))}
-              className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--red)] bg-[var(--red)]/10 hover:bg-[var(--red)]/25 border border-[var(--red)]/30 transition-colors"
+              onClick={() => shiftDates(-1)}
+              className="w-5 h-5 rounded flex items-center justify-center text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors"
+              title="Previous day"
             >
-              Exit All
+              ◀
             </button>
-          )}
-        </>)}
-        {loading && <span className="w-3 h-3 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin ml-2" />}
+            <input
+              type="date"
+              value={histFrom}
+              max={tdy}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v) {
+                  setHistFrom(v);
+                  setHistTo((t) => (t < v ? v : t));
+                }
+              }}
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]"
+            />
+            <button
+              onClick={() => shiftDates(1)}
+              disabled={histTo >= tdy}
+              className="w-5 h-5 rounded flex items-center justify-center text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors disabled:opacity-30"
+              title="Next day"
+            >
+              ▶
+            </button>
+            <span className="text-[10px] text-[var(--text-muted)] mx-1">to</span>
+            <input
+              type="date"
+              value={histTo}
+              min={histFrom}
+              max={tdy}
+              onChange={(e) => {
+                const v = e.target.value;
+                if (v) setHistTo(v);
+              }}
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]"
+            />
+            <span className="ml-auto text-[11px] text-[var(--text-muted)]">
+              {historyPositions.length} positions
+            </span>
+            <button
+              onClick={closeHistory}
+              className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/20 transition-colors"
+              title="Back to today"
+            >
+              Today
+            </button>
+          </>
+        ) : (
+          <>
+            {(['open', 'closed'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setSubTab(t)}
+                className={`px-3 py-0.5 rounded text-[11px] font-semibold transition-all ${
+                  subTab === t
+                    ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                {t === 'open' ? `Open ${filteredOpen.length}` : `Closed ${filteredClosed.length}`}
+              </button>
+            ))}
+            <button
+              onClick={openHistory}
+              className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-all"
+              title="View past positions"
+            >
+              History
+            </button>
+            <span className="ml-auto text-[11px] text-[var(--text-muted)]">
+              Day P&L:{' '}
+              <span className={totalPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>
+                {totalPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(totalPnl / 100))}
+              </span>
+            </span>
+            {subTab === 'open' && filteredOpen.length > 0 && (
+              <button
+                onClick={exitAll}
+                disabled={positions.every((p) => exiting.has(posExitKey(p)))}
+                className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--red)] bg-[var(--red)]/10 hover:bg-[var(--red)]/25 border border-[var(--red)]/30 transition-colors"
+              >
+                Exit All
+              </button>
+            )}
+          </>
+        )}
+        {loading && (
+          <span className="w-3 h-3 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin ml-2" />
+        )}
       </div>
       <div className="flex-1 overflow-auto">
         <table className="w-full text-[11px] border-collapse tabular-nums">
@@ -868,320 +1265,544 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
               {(showHistory
                 ? histHeaders
                 : subTab === 'open'
-                  ? ['Symbol', 'Product', 'Side', 'Qty', 'Entry Price', 'LTP', 'P&L', 'P&L %', 'Entry Time', '']
-                  : ['Symbol', 'Product', 'Entry Price', 'Exit Price', 'P&L', 'Entry Time', 'Exit Time']
+                  ? [
+                      'Symbol',
+                      'Product',
+                      'Side',
+                      'Qty',
+                      'Entry Price',
+                      'LTP',
+                      'P&L',
+                      'P&L %',
+                      'Entry Time',
+                      '',
+                    ]
+                  : [
+                      'Symbol',
+                      'Product',
+                      'Entry Price',
+                      'Exit Price',
+                      'P&L',
+                      'Entry Time',
+                      'Exit Time',
+                    ]
               ).map((h) => (
-                <th key={h} className="px-3 py-1.5 text-left font-medium whitespace-nowrap border-b border-[var(--border)]">{h}</th>
+                <th
+                  key={h}
+                  className="px-3 py-1.5 text-left font-medium whitespace-nowrap border-b border-[var(--border)]"
+                >
+                  {h}
+                </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {showHistory && groupedHistory.length === 0 && (
-              <tr><td colSpan={7} className="text-center py-8 text-[var(--text-muted)]">No positions for this period</td></tr>
+              <tr>
+                <td colSpan={7} className="text-center py-8 text-[var(--text-muted)]">
+                  No positions for this period
+                </td>
+              </tr>
             )}
-            {showHistory && groupedHistory.map((item) => {
-              if (!isPositionGroup(item)) return renderClosedPositionRow(item);
-              const g = item;
-              const isExp = expanded.has(g.basket_group_id);
-              const groupPnl = g.positions.reduce((s, p) => s + (p.realised_pnl || p.pnl || 0) / 100, 0);
-              const gMarginInfo = resolvedGroupMarginInfo(g);
-              const gMarginRs = gMarginInfo.paise / 100;
-              const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
-              return (
-                <React.Fragment key={g.basket_group_id}>
-                  <tr className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]" onClick={() => toggleExpand(g.basket_group_id)}>
-                    <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">{isExp ? '▾' : '▸'}</span>
-                        {g.strategy_name}
-                        {onOpenStrategyChart && (
-                          <button
-                            onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
-                            className="p-0.5 rounded text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
-                            title="Strategy P&L chart"
-                          >📈</button>
-                        )}
-                        <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.positions.length} legs)</span>
-                      </span>
-                    </td>
-                    <td className="px-3 py-1.5 text-[var(--text-secondary)]">{g.positions[0].product || 'NRML'}</td>
-                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
-                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
-                    <td className="px-3 py-1.5 whitespace-nowrap" colSpan={3}>
-                      <span className={`font-semibold ${groupPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                        {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
-                      </span>
-                      {gMarginRs > 0 && (<>
-                        <span className="text-[var(--text-muted)] ml-3 text-[11px]" title={gMarginInfo.estimated ? 'Calculated locally via conservative fallback' : 'Calculated live from Nubra API'}>
-                          Margin ₹{fmtPrice(gMarginRs)} {gMarginInfo.estimated && <span className="text-amber-400 font-semibold ml-0.5">(Est.)</span>}
+            {showHistory &&
+              groupedHistory.map((item) => {
+                if (!isPositionGroup(item)) return renderClosedPositionRow(item);
+                const g = item;
+                const isExp = expanded.has(g.basket_group_id);
+                const groupPnl = g.positions.reduce(
+                  (s, p) => s + (p.realised_pnl || p.pnl || 0) / 100,
+                  0,
+                );
+                const gMarginInfo = resolvedGroupMarginInfo(g);
+                const gMarginRs = gMarginInfo.paise / 100;
+                const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
+                return (
+                  <React.Fragment key={g.basket_group_id}>
+                    <tr
+                      className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
+                      onClick={() => toggleExpand(g.basket_group_id)}
+                    >
+                      <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">
+                            {isExp ? '▾' : '▸'}
+                          </span>
+                          {g.strategy_name}
+                          {onOpenStrategyChart && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenStrategyChart(g.basket_group_id, g.strategy_name);
+                              }}
+                              className="p-0.5 rounded text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
+                              title="Strategy P&L chart"
+                            >
+                              📈
+                            </button>
+                          )}
+                          <span className="text-[10px] text-[var(--text-muted)] font-normal">
+                            ({g.positions.length} legs)
+                          </span>
                         </span>
-                        <span className={`ml-2 text-[11px] font-semibold ${gRoi >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>ROI {gRoi >= 0 ? '+' : ''}{gRoi.toFixed(1)}%</span>
-                      </>)}
-                    </td>
-                  </tr>
-                  {isExp && g.positions.map(p => renderClosedPositionRow(p, true))}
-                </React.Fragment>
-              );
-            })}
+                      </td>
+                      <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                        {g.positions[0].product || 'NRML'}
+                      </td>
+                      <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                      <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                      <td className="px-3 py-1.5 whitespace-nowrap" colSpan={3}>
+                        <span
+                          className={`font-semibold ${groupPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                        >
+                          {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
+                        </span>
+                        {gMarginRs > 0 && (
+                          <>
+                            <span
+                              className="text-[var(--text-muted)] ml-3 text-[11px]"
+                              title={
+                                gMarginInfo.estimated
+                                  ? 'Calculated locally via conservative fallback'
+                                  : 'Calculated live from Nubra API'
+                              }
+                            >
+                              Margin ₹{fmtPrice(gMarginRs)}{' '}
+                              {gMarginInfo.estimated && (
+                                <span className="text-amber-400 font-semibold ml-0.5">(Est.)</span>
+                              )}
+                            </span>
+                            <span
+                              className={`ml-2 text-[11px] font-semibold ${gRoi >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                            >
+                              ROI {gRoi >= 0 ? '+' : ''}
+                              {gRoi.toFixed(1)}%
+                            </span>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                    {isExp && g.positions.map((p) => renderClosedPositionRow(p, true))}
+                  </React.Fragment>
+                );
+              })}
             {!showHistory && subTab === 'open' && groupedOpen.length === 0 && (
-              <tr><td colSpan={10} className="text-center py-8 text-[var(--text-muted)]">No open positions</td></tr>
+              <tr>
+                <td colSpan={10} className="text-center py-8 text-[var(--text-muted)]">
+                  No open positions
+                </td>
+              </tr>
             )}
-            {!showHistory && subTab === 'open' && groupedOpen.map((item) => {
-              if (!isPositionGroup(item)) return renderPositionRow(item);
-              const g = item;
-              const isOpen = expanded.has(g.basket_group_id);
-              const groupPnl = g.positions.reduce((s, p) => s + calcPnl(p), 0);
-              const allExiting = g.positions.every(p => exiting.has(posExitKey(p)));
-              const gMarginInfo = resolvedGroupMarginInfo(g);
-              const gMarginRs = gMarginInfo.paise / 100;
-              const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
-              const groupRule = groupRuleFor(g.basket_group_id);
-              return (
-                <React.Fragment key={g.basket_group_id}>
-                  <tr
-                    className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
-                    onClick={() => toggleExpand(g.basket_group_id)}
-                  >
-                    <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">{isOpen ? '▾' : '▸'}</span>
-                        {groupRule && <span className="text-[var(--accent)]" title="Group auto SL/Target active">●</span>}
-                        {editingGroup === g.basket_group_id ? (
-                          <input
-                            type="text" value={editingName} autoFocus
-                            onClick={e => e.stopPropagation()}
-                            onChange={e => setEditingName(e.target.value)}
-                            onBlur={() => commitRename(g.basket_group_id)}
-                            onKeyDown={e => { if (e.key === 'Enter') commitRename(g.basket_group_id); if (e.key === 'Escape') setEditingGroup(null); }}
-                            className="bg-[var(--bg-primary)] border border-[var(--accent)] rounded px-1.5 py-0.5 text-[11px] font-semibold text-[var(--text-primary)] outline-none"
-                            style={{ width: Math.max(80, editingName.length * 7 + 20) }}
-                          />
-                        ) : (
-                          <>
-                            {g.strategy_name}
-                            <button
-                              onClick={e => { e.stopPropagation(); setEditingGroup(g.basket_group_id); setEditingName(g.strategy_name); }}
-                              className="w-3.5 h-3.5 rounded flex items-center justify-center text-[8px] font-semibold text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border border-white/30 transition-colors ml-1"
-                              title="Rename strategy"
-                            >R</button>
-                            {onOpenStrategyChart && (
+            {!showHistory &&
+              subTab === 'open' &&
+              groupedOpen.map((item) => {
+                if (!isPositionGroup(item)) return renderPositionRow(item);
+                const g = item;
+                const isOpen = expanded.has(g.basket_group_id);
+                const groupPnl = g.positions.reduce((s, p) => s + calcPnl(p), 0);
+                const allExiting = g.positions.every((p) => exiting.has(posExitKey(p)));
+                const gMarginInfo = resolvedGroupMarginInfo(g);
+                const gMarginRs = gMarginInfo.paise / 100;
+                const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
+                const groupRule = groupRuleFor(g.basket_group_id);
+                return (
+                  <React.Fragment key={g.basket_group_id}>
+                    <tr
+                      className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
+                      onClick={() => toggleExpand(g.basket_group_id)}
+                    >
+                      <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">
+                            {isOpen ? '▾' : '▸'}
+                          </span>
+                          {groupRule && (
+                            <span
+                              className="text-[var(--accent)]"
+                              title="Group auto SL/Target active"
+                            >
+                              ●
+                            </span>
+                          )}
+                          {editingGroup === g.basket_group_id ? (
+                            <input
+                              type="text"
+                              value={editingName}
+                              autoFocus
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => setEditingName(e.target.value)}
+                              onBlur={() => commitRename(g.basket_group_id)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') commitRename(g.basket_group_id);
+                                if (e.key === 'Escape') setEditingGroup(null);
+                              }}
+                              className="bg-[var(--bg-primary)] border border-[var(--accent)] rounded px-1.5 py-0.5 text-[11px] font-semibold text-[var(--text-primary)] outline-none"
+                              style={{ width: Math.max(80, editingName.length * 7 + 20) }}
+                            />
+                          ) : (
+                            <>
+                              {g.strategy_name}
                               <button
-                                onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
-                                className="p-0.5 rounded text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
-                                title="Strategy P&L chart"
-                              >📈</button>
-                            )}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingGroup(g.basket_group_id);
+                                  setEditingName(g.strategy_name);
+                                }}
+                                className="w-3.5 h-3.5 rounded flex items-center justify-center text-[8px] font-semibold text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border border-white/30 transition-colors ml-1"
+                                title="Rename strategy"
+                              >
+                                R
+                              </button>
+                              {onOpenStrategyChart && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onOpenStrategyChart(g.basket_group_id, g.strategy_name);
+                                  }}
+                                  className="p-0.5 rounded text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
+                                  title="Strategy P&L chart"
+                                >
+                                  📈
+                                </button>
+                              )}
+                            </>
+                          )}
+                          <span className="text-[10px] text-[var(--text-muted)] font-normal">
+                            ({g.positions.length} legs)
+                          </span>
+                        </span>
+                      </td>
+                      <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                        {g.positions[0].product || 'NRML'}
+                      </td>
+                      <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                      <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                      <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                      <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                      <td className="px-3 py-1.5 whitespace-nowrap" colSpan={3}>
+                        <span
+                          className={`font-semibold ${groupPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                        >
+                          {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
+                        </span>
+                        {gMarginRs > 0 && (
+                          <>
+                            <span
+                              className="text-[var(--text-muted)] ml-3 text-[11px]"
+                              title={
+                                gMarginInfo.estimated
+                                  ? 'Calculated locally via conservative fallback'
+                                  : 'Calculated live from Nubra API'
+                              }
+                            >
+                              Margin ₹{fmtPrice(gMarginRs)}{' '}
+                              {gMarginInfo.estimated && (
+                                <span className="text-amber-400 font-semibold ml-0.5">(Est.)</span>
+                              )}
+                            </span>
+                            <span
+                              className={`ml-2 text-[11px] font-semibold ${gRoi >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                            >
+                              ROI {gRoi >= 0 ? '+' : ''}
+                              {gRoi.toFixed(1)}%
+                            </span>
                           </>
                         )}
-                        <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.positions.length} legs)</span>
-                      </span>
-                    </td>
-                    <td className="px-3 py-1.5 text-[var(--text-secondary)]">{g.positions[0].product || 'NRML'}</td>
-                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
-                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
-                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
-                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
-                    <td className="px-3 py-1.5 whitespace-nowrap" colSpan={3}>
-                      <span className={`font-semibold ${groupPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                        {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
-                      </span>
-                      {gMarginRs > 0 && (<>
-                        <span className="text-[var(--text-muted)] ml-3 text-[11px]" title={gMarginInfo.estimated ? 'Calculated locally via conservative fallback' : 'Calculated live from Nubra API'}>
-                          Margin ₹{fmtPrice(gMarginRs)} {gMarginInfo.estimated && <span className="text-amber-400 font-semibold ml-0.5">(Est.)</span>}
-                        </span>
-                        <span className={`ml-2 text-[11px] font-semibold ${gRoi >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>ROI {gRoi >= 0 ? '+' : ''}{gRoi.toFixed(1)}%</span>
-                      </>)}
-                    </td>
-                    <td className="px-3 py-1.5" onClick={e => e.stopPropagation()}>
-                      <label className="inline-flex items-center gap-1 mr-1.5 cursor-pointer align-middle" title="Exit all legs if any single leg hits its own SL/Target">
-                        <input
-                          type="checkbox"
-                          checked={!!groupRule?.exitAllOnLegHit}
-                          onChange={e => toggleExitAllOnLegHit(g.basket_group_id, groupRule, e.target.checked)}
-                        />
-                      </label>
-                      <button
-                        onClick={() => setRuleEditor({ mode: 'GROUP', basketGroupId: g.basket_group_id, strategyName: g.strategy_name })}
-                        className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors border mr-1 ${groupRule ? 'text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border-[var(--accent)]/30' : 'text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border-white/30'}`}
-                        title="Set group SL/Target"
-                      >
-                        SL/T
-                      </button>
-                      <button
-                        onClick={() => exitAllInGroup(g.positions)}
-                        disabled={allExiting}
-                        className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${allExiting ? 'text-[var(--text-muted)] bg-[var(--bg-hover)] border border-[var(--border)] cursor-not-allowed' : 'text-[var(--red)] bg-[var(--red)]/10 hover:bg-[var(--red)]/25 border border-[var(--red)]/30'}`}
-                        title="Exit all legs"
-                      >
-                        Exit All
-                      </button>
-                    </td>
-                  </tr>
-                  {isOpen && g.positions.map(p => renderPositionRow(p, true))}
-                </React.Fragment>
-              );
-            })}
+                      </td>
+                      <td className="px-3 py-1.5" onClick={(e) => e.stopPropagation()}>
+                        <label
+                          className="inline-flex items-center gap-1 mr-1.5 cursor-pointer align-middle"
+                          title="Exit all legs if any single leg hits its own SL/Target"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={!!groupRule?.exitAllOnLegHit}
+                            onChange={(e) =>
+                              toggleExitAllOnLegHit(g.basket_group_id, groupRule, e.target.checked)
+                            }
+                          />
+                        </label>
+                        <button
+                          onClick={() =>
+                            setRuleEditor({
+                              mode: 'GROUP',
+                              basketGroupId: g.basket_group_id,
+                              strategyName: g.strategy_name,
+                            })
+                          }
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors border mr-1 ${groupRule ? 'text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border-[var(--accent)]/30' : 'text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border-white/30'}`}
+                          title="Set group SL/Target"
+                        >
+                          SL/T
+                        </button>
+                        <button
+                          onClick={() => exitAllInGroup(g.positions)}
+                          disabled={allExiting}
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${allExiting ? 'text-[var(--text-muted)] bg-[var(--bg-hover)] border border-[var(--border)] cursor-not-allowed' : 'text-[var(--red)] bg-[var(--red)]/10 hover:bg-[var(--red)]/25 border border-[var(--red)]/30'}`}
+                          title="Exit all legs"
+                        >
+                          Exit All
+                        </button>
+                      </td>
+                    </tr>
+                    {isOpen && g.positions.map((p) => renderPositionRow(p, true))}
+                  </React.Fragment>
+                );
+              })}
             {!showHistory && subTab === 'closed' && groupedClosed.length === 0 && (
-              <tr><td colSpan={7} className="text-center py-8 text-[var(--text-muted)]">No closed positions</td></tr>
+              <tr>
+                <td colSpan={7} className="text-center py-8 text-[var(--text-muted)]">
+                  No closed positions
+                </td>
+              </tr>
             )}
-            {!showHistory && subTab === 'closed' && groupedClosed.map((item) => {
-              if (!isPositionGroup(item)) return renderClosedPositionRow(item);
-              const g = item;
-              const isOpen = expanded.has(g.basket_group_id);
-              const groupPnl = g.positions.reduce((s, p) => s + (p.realised_pnl || p.pnl || 0) / 100, 0);
-              const gMarginInfo = resolvedGroupMarginInfo(g);
-              const gMarginRs = gMarginInfo.paise / 100;
-              const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
-              return (
-                <React.Fragment key={g.basket_group_id}>
-                  <tr
-                    className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
-                    onClick={() => toggleExpand(g.basket_group_id)}
-                  >
-                    <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">{isOpen ? '▾' : '▸'}</span>
-                        {editingGroup === g.basket_group_id ? (
-                          <input
-                            type="text" value={editingName} autoFocus
-                            onClick={e => e.stopPropagation()}
-                            onChange={e => setEditingName(e.target.value)}
-                            onBlur={() => commitRename(g.basket_group_id)}
-                            onKeyDown={e => { if (e.key === 'Enter') commitRename(g.basket_group_id); if (e.key === 'Escape') setEditingGroup(null); }}
-                            className="bg-[var(--bg-primary)] border border-[var(--accent)] rounded px-1.5 py-0.5 text-[11px] font-semibold text-[var(--text-primary)] outline-none"
-                            style={{ width: Math.max(80, editingName.length * 7 + 20) }}
-                          />
-                        ) : (
-                          <>
-                            {g.strategy_name}
-                            <button
-                              onClick={e => { e.stopPropagation(); setEditingGroup(g.basket_group_id); setEditingName(g.strategy_name); }}
-                              className="w-3.5 h-3.5 rounded flex items-center justify-center text-[8px] font-semibold text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border border-white/30 transition-colors ml-1"
-                              title="Rename strategy"
-                            >R</button>
-                            {onOpenStrategyChart && (
+            {!showHistory &&
+              subTab === 'closed' &&
+              groupedClosed.map((item) => {
+                if (!isPositionGroup(item)) return renderClosedPositionRow(item);
+                const g = item;
+                const isOpen = expanded.has(g.basket_group_id);
+                const groupPnl = g.positions.reduce(
+                  (s, p) => s + (p.realised_pnl || p.pnl || 0) / 100,
+                  0,
+                );
+                const gMarginInfo = resolvedGroupMarginInfo(g);
+                const gMarginRs = gMarginInfo.paise / 100;
+                const gRoi = gMarginRs > 0 ? (groupPnl / gMarginRs) * 100 : 0;
+                return (
+                  <React.Fragment key={g.basket_group_id}>
+                    <tr
+                      className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
+                      onClick={() => toggleExpand(g.basket_group_id)}
+                    >
+                      <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="text-[10px] text-[var(--text-muted)] w-3 inline-block">
+                            {isOpen ? '▾' : '▸'}
+                          </span>
+                          {editingGroup === g.basket_group_id ? (
+                            <input
+                              type="text"
+                              value={editingName}
+                              autoFocus
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => setEditingName(e.target.value)}
+                              onBlur={() => commitRename(g.basket_group_id)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') commitRename(g.basket_group_id);
+                                if (e.key === 'Escape') setEditingGroup(null);
+                              }}
+                              className="bg-[var(--bg-primary)] border border-[var(--accent)] rounded px-1.5 py-0.5 text-[11px] font-semibold text-[var(--text-primary)] outline-none"
+                              style={{ width: Math.max(80, editingName.length * 7 + 20) }}
+                            />
+                          ) : (
+                            <>
+                              {g.strategy_name}
                               <button
-                                onClick={e => { e.stopPropagation(); onOpenStrategyChart(g.basket_group_id, g.strategy_name); }}
-                                className="p-0.5 rounded text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
-                                title="Strategy P&L chart"
-                              >📈</button>
-                            )}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingGroup(g.basket_group_id);
+                                  setEditingName(g.strategy_name);
+                                }}
+                                className="w-3.5 h-3.5 rounded flex items-center justify-center text-[8px] font-semibold text-[var(--text-primary)] bg-white/10 hover:bg-white/20 border border-white/30 transition-colors ml-1"
+                                title="Rename strategy"
+                              >
+                                R
+                              </button>
+                              {onOpenStrategyChart && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onOpenStrategyChart(g.basket_group_id, g.strategy_name);
+                                  }}
+                                  className="p-0.5 rounded text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30 transition-colors ml-1"
+                                  title="Strategy P&L chart"
+                                >
+                                  📈
+                                </button>
+                              )}
+                            </>
+                          )}
+                          <span className="text-[10px] text-[var(--text-muted)] font-normal">
+                            ({g.positions.length} legs)
+                          </span>
+                        </span>
+                      </td>
+                      <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                        {g.positions[0].product || 'NRML'}
+                      </td>
+                      <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                      <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+                      <td className="px-3 py-1.5 whitespace-nowrap" colSpan={3}>
+                        <span
+                          className={`font-semibold ${groupPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                        >
+                          {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
+                        </span>
+                        {gMarginRs > 0 && (
+                          <>
+                            <span
+                              className="text-[var(--text-muted)] ml-3 text-[11px]"
+                              title={
+                                gMarginInfo.estimated
+                                  ? 'Calculated locally via conservative fallback'
+                                  : 'Calculated live from Nubra API'
+                              }
+                            >
+                              Margin ₹{fmtPrice(gMarginRs)}{' '}
+                              {gMarginInfo.estimated && (
+                                <span className="text-amber-400 font-semibold ml-0.5">(Est.)</span>
+                              )}
+                            </span>
+                            <span
+                              className={`ml-2 text-[11px] font-semibold ${gRoi >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                            >
+                              ROI {gRoi >= 0 ? '+' : ''}
+                              {gRoi.toFixed(1)}%
+                            </span>
                           </>
                         )}
-                        <span className="text-[10px] text-[var(--text-muted)] font-normal">({g.positions.length} legs)</span>
-                      </span>
-                    </td>
-                    <td className="px-3 py-1.5 text-[var(--text-secondary)]">{g.positions[0].product || 'NRML'}</td>
-                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
-                    <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
-                    <td className="px-3 py-1.5 whitespace-nowrap" colSpan={3}>
-                      <span className={`font-semibold ${groupPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                        {groupPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(groupPnl))}
-                      </span>
-                      {gMarginRs > 0 && (<>
-                        <span className="text-[var(--text-muted)] ml-3 text-[11px]" title={gMarginInfo.estimated ? 'Calculated locally via conservative fallback' : 'Calculated live from Nubra API'}>
-                          Margin ₹{fmtPrice(gMarginRs)} {gMarginInfo.estimated && <span className="text-amber-400 font-semibold ml-0.5">(Est.)</span>}
-                        </span>
-                        <span className={`ml-2 text-[11px] font-semibold ${gRoi >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>ROI {gRoi >= 0 ? '+' : ''}{gRoi.toFixed(1)}%</span>
-                      </>)}
-                    </td>
-                  </tr>
-                  {isOpen && g.positions.map(p => renderClosedPositionRow(p, true))}
-                </React.Fragment>
-              );
-            })}
+                      </td>
+                    </tr>
+                    {isOpen && g.positions.map((p) => renderClosedPositionRow(p, true))}
+                  </React.Fragment>
+                );
+              })}
           </tbody>
         </table>
       </div>
 
       {/* Detail panel modal */}
-      {detailPos && (() => {
-        const dp = detailPos;
-        const isOpen = (dp.qty || 0) > 0;
-        const side = (dp.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
-        const pnl = isOpen ? calcPnl(dp) : (dp.realised_pnl || dp.pnl || 0) / 100;
-        const marginRs = dp.margin_required ? dp.margin_required / 100 : 0;
-        const roi = marginRs > 0 ? (pnl / marginRs) * 100 : 0;
-        return (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setDetailPos(null)}>
-            <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg shadow-xl w-80 p-4" onClick={e => e.stopPropagation()}>
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-[13px] font-semibold text-[var(--text-primary)]">{dp.display_name || dp.zanskar_name || dp.ref_id}</span>
-                <button onClick={() => setDetailPos(null)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-lg leading-none">&times;</button>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-[11px]">
-                <div>
-                  <div className="text-[var(--text-muted)]">Side</div>
-                  <div className={`font-semibold ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{side}</div>
+      {detailPos &&
+        (() => {
+          const dp = detailPos;
+          const isOpen = (dp.qty || 0) > 0;
+          const side = (dp.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
+          const pnl = isOpen ? calcPnl(dp) : (dp.realised_pnl || dp.pnl || 0) / 100;
+          const marginRs = dp.margin_required ? dp.margin_required / 100 : 0;
+          const roi = marginRs > 0 ? (pnl / marginRs) * 100 : 0;
+          return (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+              onClick={() => setDetailPos(null)}
+            >
+              <div
+                className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg shadow-xl w-80 p-4"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-[13px] font-semibold text-[var(--text-primary)]">
+                    {dp.display_name || dp.zanskar_name || dp.ref_id}
+                  </span>
+                  <button
+                    onClick={() => setDetailPos(null)}
+                    className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-lg leading-none"
+                  >
+                    &times;
+                  </button>
                 </div>
-                <div>
-                  <div className="text-[var(--text-muted)]">Qty</div>
-                  <div className="text-[var(--text-primary)] font-semibold">{dp.qty || '—'}</div>
-                </div>
-                <div>
-                  <div className="text-[var(--text-muted)]">Entry Price</div>
-                  <div className="text-[var(--text-primary)]">{paise(dp.avg_price)}</div>
-                </div>
-                <div>
-                  <div className="text-[var(--text-muted)]">{isOpen ? 'LTP' : 'Exit Price'}</div>
-                  <div className="text-[var(--text-primary)]">{isOpen ? paise(dp.last_traded_price) : paise(dp.exit_price)}</div>
-                </div>
-                <div>
-                  <div className="text-[var(--text-muted)]">P&L</div>
-                  <div className={`font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                    {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[var(--text-muted)]">Product</div>
-                  <div className="text-[var(--text-primary)]">{dp.product || 'NRML'}</div>
-                </div>
-              </div>
-              {marginRs > 0 && (
-                <div className="mt-3 pt-3 border-t border-[var(--border)] flex items-center gap-4 text-[11px]">
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
                   <div>
-                    <div className="text-[var(--text-muted)]">Margin Required</div>
-                    <div className="text-[var(--text-primary)] font-semibold">₹{fmtPrice(marginRs)}</div>
-                  </div>
-                  <div>
-                    <div className="text-[var(--text-muted)]">Return on Margin</div>
-                    <div className={`font-semibold ${roi >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                      {roi >= 0 ? '+' : ''}{roi.toFixed(2)}%
+                    <div className="text-[var(--text-muted)]">Side</div>
+                    <div
+                      className={`font-semibold ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                    >
+                      {side}
                     </div>
                   </div>
+                  <div>
+                    <div className="text-[var(--text-muted)]">Qty</div>
+                    <div className="text-[var(--text-primary)] font-semibold">{dp.qty || '—'}</div>
+                  </div>
+                  <div>
+                    <div className="text-[var(--text-muted)]">Entry Price</div>
+                    <div className="text-[var(--text-primary)]">{paise(dp.avg_price)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[var(--text-muted)]">{isOpen ? 'LTP' : 'Exit Price'}</div>
+                    <div className="text-[var(--text-primary)]">
+                      {isOpen ? paise(dp.last_traded_price) : paise(dp.exit_price)}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[var(--text-muted)]">P&L</div>
+                    <div
+                      className={`font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                    >
+                      {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[var(--text-muted)]">Product</div>
+                    <div className="text-[var(--text-primary)]">{dp.product || 'NRML'}</div>
+                  </div>
                 </div>
-              )}
+                {marginRs > 0 && (
+                  <div className="mt-3 pt-3 border-t border-[var(--border)] flex items-center gap-4 text-[11px]">
+                    <div>
+                      <div className="text-[var(--text-muted)]">Margin Required</div>
+                      <div className="text-[var(--text-primary)] font-semibold">
+                        ₹{fmtPrice(marginRs)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[var(--text-muted)]">Return on Margin</div>
+                      <div
+                        className={`font-semibold ${roi >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                      >
+                        {roi >= 0 ? '+' : ''}
+                        {roi.toFixed(2)}%
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        );
-      })()}
+          );
+        })()}
 
-      {ruleEditor && ruleEditor.mode === 'LEG' && (() => {
-        // Resolve the position at render time rather than snapshotting it into
-        // ruleEditor state, so the dialog's entry/LTP readout stays live while
-        // it is open — that readout is what the trigger-price preview is built on.
-        const rp = positions.find(p => p.ref_id === ruleEditor.refId && (p.basket_group_id || '') === ruleEditor.basketGroupId);
-        return (
-          <PositionRuleEditor
-            mode="LEG"
-            refId={ruleEditor.refId}
-            basketGroupId={ruleEditor.basketGroupId}
-            displayName={ruleEditor.displayName}
-            entryPriceRs={(rp?.avg_price ?? 0) / 100}
-            side={(rp?.qty ?? 0) < 0 ? 'SELL' : 'BUY'}
-            ltpRs={rp?.last_traded_price ? rp.last_traded_price / 100 : undefined}
-            initial={(rules.find(r => r.scope === 'LEG' && r.ref_id === ruleEditor.refId && (r.basket_group_id || '') === ruleEditor.basketGroupId) as LegPositionRule | undefined) ?? null}
-            onClose={() => setRuleEditor(null)}
-            onSaved={fetch_}
-          />
-        );
-      })()}
+      {ruleEditor &&
+        ruleEditor.mode === 'LEG' &&
+        (() => {
+          // Resolve the position at render time rather than snapshotting it into
+          // ruleEditor state, so the dialog's entry/LTP readout stays live while
+          // it is open — that readout is what the trigger-price preview is built on.
+          const rp = positions.find(
+            (p) =>
+              p.ref_id === ruleEditor.refId &&
+              (p.basket_group_id || '') === ruleEditor.basketGroupId,
+          );
+          return (
+            <PositionRuleEditor
+              mode="LEG"
+              refId={ruleEditor.refId}
+              basketGroupId={ruleEditor.basketGroupId}
+              displayName={ruleEditor.displayName}
+              entryPriceRs={(rp?.avg_price ?? 0) / 100}
+              side={(rp?.qty ?? 0) < 0 ? 'SELL' : 'BUY'}
+              ltpRs={rp?.last_traded_price ? rp.last_traded_price / 100 : undefined}
+              initial={
+                (rules.find(
+                  (r) =>
+                    r.scope === 'LEG' &&
+                    r.ref_id === ruleEditor.refId &&
+                    (r.basket_group_id || '') === ruleEditor.basketGroupId,
+                ) as LegPositionRule | undefined) ?? null
+              }
+              onClose={() => setRuleEditor(null)}
+              onSaved={fetch_}
+            />
+          );
+        })()}
       {ruleEditor && ruleEditor.mode === 'GROUP' && (
         <PositionRuleEditor
           mode="GROUP"
           basketGroupId={ruleEditor.basketGroupId}
           strategyName={ruleEditor.strategyName}
-          initial={(rules.find(r => r.scope === 'GROUP' && r.basket_group_id === ruleEditor.basketGroupId) as GroupPositionRule | undefined) ?? null}
+          initial={
+            (rules.find(
+              (r) => r.scope === 'GROUP' && r.basket_group_id === ruleEditor.basketGroupId,
+            ) as GroupPositionRule | undefined) ?? null
+          }
           onClose={() => setRuleEditor(null)}
           onSaved={fetch_}
         />
@@ -1193,17 +1814,20 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
 // ─── Holdings tab ─────────────────────────────────────────────────────────────
 function HoldingsTab({ uatAuth }: { uatAuth: boolean }) {
   const [holdings, setHoldings] = useState<PaperHolding[]>([]);
-  const [loading,  setLoading]  = useState(false);
+  const [loading, setLoading] = useState(false);
 
   const fetch_ = useCallback(async () => {
     if (!uatAuth) return;
     try {
       const res = await fetch('/paper/holdings');
       if (!res.ok) return;
-      const d = await res.json() as { portfolio?: { holdings?: PaperHolding[] } } | PaperHolding[];
+      const d = (await res.json()) as
+        { portfolio?: { holdings?: PaperHolding[] } } | PaperHolding[];
       if (Array.isArray(d)) setHoldings(d);
       else setHoldings(d.portfolio?.holdings ?? []);
-    } catch (e) { console.warn('[Holdings] fetch failed:', e); }
+    } catch (e) {
+      console.warn('[Holdings] fetch failed:', e);
+    }
   }, [uatAuth]);
 
   useEffect(() => {
@@ -1218,38 +1842,66 @@ function HoldingsTab({ uatAuth }: { uatAuth: boolean }) {
     <div className="flex flex-col h-full overflow-hidden">
       <div className="h-8 shrink-0 flex items-center gap-2 px-3 border-b border-[var(--border)] bg-[var(--bg-secondary)]">
         <span className="text-[11px] text-[var(--text-muted)]">
-          Net P&L: <span className={totalPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>{totalPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(totalPnl / 100))}</span>
+          Net P&L:{' '}
+          <span className={totalPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>
+            {totalPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(totalPnl / 100))}
+          </span>
         </span>
-        {loading && <span className="w-3 h-3 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin ml-auto" />}
+        {loading && (
+          <span className="w-3 h-3 border-2 border-[var(--accent)] border-t-transparent rounded-full animate-spin ml-auto" />
+        )}
       </div>
       <div className="flex-1 overflow-auto">
         <table className="w-full text-[11px] border-collapse tabular-nums">
           <thead className="sticky top-0 bg-[var(--bg-secondary)] z-10">
             <tr className="text-[var(--text-muted)]">
               {['Symbol', 'Qty', 'Avg Price', 'LTP', 'Net P&L', 'P&L %', 'Day P&L'].map((h) => (
-                <th key={h} className="px-3 py-1.5 text-left font-medium whitespace-nowrap border-b border-[var(--border)]">{h}</th>
+                <th
+                  key={h}
+                  className="px-3 py-1.5 text-left font-medium whitespace-nowrap border-b border-[var(--border)]"
+                >
+                  {h}
+                </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {holdings.length === 0 && (
-              <tr><td colSpan={7} className="text-center py-8 text-[var(--text-muted)]">No holdings</td></tr>
+              <tr>
+                <td colSpan={7} className="text-center py-8 text-[var(--text-muted)]">
+                  No holdings
+                </td>
+              </tr>
             )}
             {holdings.map((h) => {
               const pnl = (h.net_pnl || 0) / 100;
               return (
-                <tr key={h.ref_id} className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)]">
-                  <td className="px-3 py-1.5 font-semibold text-[var(--text-primary)]">{h.display_name || h.nubra_name || h.symbol || h.ref_id}</td>
+                <tr
+                  key={h.ref_id}
+                  className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)]"
+                >
+                  <td className="px-3 py-1.5 font-semibold text-[var(--text-primary)]">
+                    {h.display_name || h.nubra_name || h.symbol || h.ref_id}
+                  </td>
                   <td className="px-3 py-1.5 text-[var(--text-secondary)]">{h.quantity}</td>
                   <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(h.avg_price)}</td>
-                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(h.last_traded_price)}</td>
-                  <td className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                  <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                    {paise(h.last_traded_price)}
+                  </td>
+                  <td
+                    className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                  >
                     {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
                   </td>
-                  <td className={`px-3 py-1.5 ${(h.net_pnl_chg || 0) >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-                    {(h.net_pnl_chg || 0) >= 0 ? '+' : ''}{(h.net_pnl_chg || 0).toFixed(2)}%
+                  <td
+                    className={`px-3 py-1.5 ${(h.net_pnl_chg || 0) >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                  >
+                    {(h.net_pnl_chg || 0) >= 0 ? '+' : ''}
+                    {(h.net_pnl_chg || 0).toFixed(2)}%
                   </td>
-                  <td className={`px-3 py-1.5 ${(h.day_pnl || 0) >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+                  <td
+                    className={`px-3 py-1.5 ${(h.day_pnl || 0) >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                  >
                     {(h.day_pnl || 0) >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs((h.day_pnl || 0) / 100))}
                   </td>
                 </tr>
@@ -1263,14 +1915,23 @@ function HoldingsTab({ uatAuth }: { uatAuth: boolean }) {
 }
 
 // ─── OrderTerminal ────────────────────────────────────────────────────────────
-export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyChart?: (basketGroupId: string, strategyName: string, snapshotId?: string) => void }) {
+export default function OrderTerminal({
+  onOpenStrategyChart,
+}: {
+  onOpenStrategyChart?: (basketGroupId: string, strategyName: string, snapshotId?: string) => void;
+}) {
   const { authenticated: uatAuth, refreshAuthStatus, openTicket } = usePaperTrading();
-  const { state: wsState, setPaneView, setActivePane, loadInstrumentInActivePane } = useWorkspaceState();
-  const [tab,        setTab]        = useState<'orders' | 'positions' | 'holdings' | 'saved'>('orders');
-  const [height,     setHeight]     = useState(DEFAULT_H);
-  const [collapsed,  setCollapsed]  = useState(false);
+  const {
+    state: wsState,
+    setPaneView,
+    setActivePane,
+    loadInstrumentInActivePane,
+  } = useWorkspaceState();
+  const [tab, setTab] = useState<'orders' | 'positions' | 'holdings' | 'saved'>('orders');
+  const [height, setHeight] = useState(DEFAULT_H);
+  const [collapsed, setCollapsed] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
-  const [preFullH,   setPreFullH]   = useState(DEFAULT_H);
+  const [preFullH, setPreFullH] = useState(DEFAULT_H);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // ── resize drag (direct DOM for smoothness, sync state on mouseup) ────
@@ -1321,35 +1982,41 @@ export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyC
     }
   }
 
-  const handleViewChart = useCallback((inst: Instrument) => {
-    const paneId = wsState.activePane || wsState.panes[0]?.id;
-    if (paneId) {
-      setActivePane(paneId);
-      setPaneView(paneId, 'chart');
-    }
-    loadInstrumentInActivePane(inst);
-  }, [wsState, setActivePane, setPaneView, loadInstrumentInActivePane]);
+  const handleViewChart = useCallback(
+    (inst: Instrument) => {
+      const paneId = wsState.activePane || wsState.panes[0]?.id;
+      if (paneId) {
+        setActivePane(paneId);
+        setPaneView(paneId, 'chart');
+      }
+      loadInstrumentInActivePane(inst);
+    },
+    [wsState, setActivePane, setPaneView, loadInstrumentInActivePane],
+  );
 
-  const handleExit = useCallback((p: PaperPosition, exitSide: 'BUY' | 'SELL') => {
-    const lotSize = p.lot_size || 1;
-    const lots    = lotSize > 1 ? Math.ceil(p.qty / lotSize) : p.qty;
-    openTicket({
-      instrument: {
-        stock_name:      p.display_name || p.zanskar_name || String(p.ref_id),
-        zanskar_name:    p.zanskar_name,
-        ref_id:          p.ref_id,
-        exchange:        'NSE',
-        derivative_type: p.derivative_type,
-        option_type:     p.option_type,
-        strike_price:    p.strike_price,
-        expiry:          p.expiry,
-        lot_size:        p.lot_size,
-      },
-      qty: lots,
-      side: exitSide,
-      ltp:  p.last_traded_price,
-    });
-  }, [openTicket]);
+  const handleExit = useCallback(
+    (p: PaperPosition, exitSide: 'BUY' | 'SELL') => {
+      const lotSize = p.lot_size || 1;
+      const lots = lotSize > 1 ? Math.ceil(p.qty / lotSize) : p.qty;
+      openTicket({
+        instrument: {
+          stock_name: p.display_name || p.zanskar_name || String(p.ref_id),
+          zanskar_name: p.zanskar_name,
+          ref_id: p.ref_id,
+          exchange: 'NSE',
+          derivative_type: p.derivative_type,
+          option_type: p.option_type,
+          strike_price: p.strike_price,
+          expiry: p.expiry,
+          lot_size: p.lot_size,
+        },
+        qty: lots,
+        side: exitSide,
+        ltp: p.last_traded_price,
+      });
+    },
+    [openTicket],
+  );
 
   const effectiveH = collapsed ? HEADER_H : height;
 
@@ -1360,7 +2027,8 @@ export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyC
         : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
     }`;
 
-  const iconBtn = 'w-6 h-6 flex items-center justify-center rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] text-[14px] transition-colors';
+  const iconBtn =
+    'w-6 h-6 flex items-center justify-center rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] text-[14px] transition-colors';
 
   return (
     <div
@@ -1378,16 +2046,30 @@ export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyC
 
       {/* header bar */}
       <div className="h-9 shrink-0 flex items-center border-b border-[var(--border)] bg-[var(--bg-secondary)] px-2 gap-1">
-        <button onClick={() => setTab('orders')}    className={TAB_STYLE('orders')}>Regular Orders</button>
-        <button onClick={() => setTab('positions')} className={TAB_STYLE('positions')}>Positions</button>
-        <button onClick={() => setTab('holdings')}  className={TAB_STYLE('holdings')}>Holdings</button>
-        <button onClick={() => setTab('saved')}     className={TAB_STYLE('saved')}>Saved</button>
+        <button onClick={() => setTab('orders')} className={TAB_STYLE('orders')}>
+          Regular Orders
+        </button>
+        <button onClick={() => setTab('positions')} className={TAB_STYLE('positions')}>
+          Positions
+        </button>
+        <button onClick={() => setTab('holdings')} className={TAB_STYLE('holdings')}>
+          Holdings
+        </button>
+        <button onClick={() => setTab('saved')} className={TAB_STYLE('saved')}>
+          Saved
+        </button>
 
         <div className="ml-auto flex items-center gap-2 pr-1">
-          <span className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-            uatAuth ? 'bg-green-500/15 text-[var(--green)]' : 'bg-[var(--bg-hover)] text-[var(--text-muted)]'
-          }`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${uatAuth ? 'bg-green-400' : 'bg-[var(--text-muted)]'}`} />
+          <span
+            className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+              uatAuth
+                ? 'bg-green-500/15 text-[var(--green)]'
+                : 'bg-[var(--bg-hover)] text-[var(--text-muted)]'
+            }`}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${uatAuth ? 'bg-green-400' : 'bg-[var(--text-muted)]'}`}
+            />
             SIM
           </span>
 
@@ -1400,14 +2082,24 @@ export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyC
             </button>
           )}
 
-          <button onClick={refreshAuthStatus} title="Refresh" className={iconBtn}>↻</button>
+          <button onClick={refreshAuthStatus} title="Refresh" className={iconBtn}>
+            ↻
+          </button>
 
           <span className="w-px h-4 bg-[var(--border)]" />
 
-          <button onClick={toggleCollapse} title={collapsed ? 'Expand' : 'Collapse'} className={iconBtn}>
+          <button
+            onClick={toggleCollapse}
+            title={collapsed ? 'Expand' : 'Collapse'}
+            className={iconBtn}
+          >
             {collapsed ? '▲' : '▼'}
           </button>
-          <button onClick={toggleFullscreen} title={fullscreen ? 'Restore' : 'Full screen'} className={iconBtn}>
+          <button
+            onClick={toggleFullscreen}
+            title={fullscreen ? 'Restore' : 'Full screen'}
+            className={iconBtn}
+          >
             {fullscreen ? '⤡' : '⤢'}
           </button>
         </div>
@@ -1422,10 +2114,21 @@ export default function OrderTerminal({ onOpenStrategyChart }: { onOpenStrategyC
           </div>
         ) : (
           <>
-            {tab === 'orders'    && <OrdersTab    uatAuth={uatAuth} onOpenStrategyChart={onOpenStrategyChart} />}
-            {tab === 'positions' && <PositionsTab uatAuth={uatAuth} onViewChart={handleViewChart} onExit={handleExit} onOpenStrategyChart={onOpenStrategyChart} />}
-            {tab === 'holdings'  && <HoldingsTab  uatAuth={uatAuth} />}
-            {tab === 'saved'     && <SavedStrategiesTab onOpen={(bg, name, id) => onOpenStrategyChart?.(bg, name, id)} />}
+            {tab === 'orders' && (
+              <OrdersTab uatAuth={uatAuth} onOpenStrategyChart={onOpenStrategyChart} />
+            )}
+            {tab === 'positions' && (
+              <PositionsTab
+                uatAuth={uatAuth}
+                onViewChart={handleViewChart}
+                onExit={handleExit}
+                onOpenStrategyChart={onOpenStrategyChart}
+              />
+            )}
+            {tab === 'holdings' && <HoldingsTab uatAuth={uatAuth} />}
+            {tab === 'saved' && (
+              <SavedStrategiesTab onOpen={(bg, name, id) => onOpenStrategyChart?.(bg, name, id)} />
+            )}
           </>
         )}
       </div>

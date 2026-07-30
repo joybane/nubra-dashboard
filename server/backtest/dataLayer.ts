@@ -13,37 +13,36 @@ import { asyncBufferFromFile, parquetReadObjects } from 'hyparquet';
 import { compressors } from 'hyparquet-compressors';
 import type { ExpiryFlag, OptionType, Underlying } from './types.ts';
 
-export const DATA_ROOT =
-  process.env.BACKTEST_DATA_ROOT || 'E:/Derivativesproject/ATM Wise data';
+export const DATA_ROOT = process.env.BACKTEST_DATA_ROOT || 'E:/Derivativesproject/ATM Wise data';
 
 const IST_OFFSET_SEC = 5.5 * 3600;
 
 export interface Bar {
-  ts:     number;  // epoch seconds (UTC)
-  date:   string;  // IST yyyy-mm-dd
-  hhmm:   string;  // IST HH:MM
-  open:   number;
-  high:   number;
-  low:    number;
-  close:  number;
-  iv:     number;
+  ts: number; // epoch seconds (UTC)
+  date: string; // IST yyyy-mm-dd
+  hhmm: string; // IST HH:MM
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  iv: number;
   volume: number;
   strike: number;
-  oi:     number;
-  spot:   number;
+  oi: number;
+  spot: number;
 }
 
 export interface StrikeFile {
-  strike:   number;
+  strike: number;
   callPath: string;
-  putPath:  string;
+  putPath: string;
 }
 
 export interface Contract {
-  strike:     number;
+  strike: number;
   optionType: OptionType;
-  bars:       Bar[];
-  byDate:     Map<string, Bar[]>;
+  bars: Bar[];
+  byDate: Map<string, Bar[]>;
 }
 
 // One trading day across an entire expiry, re-keyed by ABSOLUTE strike. The raw
@@ -52,17 +51,17 @@ export interface Contract {
 // fixed strike we stitch every bucket's bars for the date and regroup by their
 // own `strike` value — yielding a continuous intraday series per absolute strike.
 export interface ExpiryDay {
-  date:    string;
-  strikes: number[];            // sorted ascending, strikes present on this date
-  call:    Map<number, Bar[]>;  // absolute strike → intraday bars (sorted by ts)
-  put:     Map<number, Bar[]>;
+  date: string;
+  strikes: number[]; // sorted ascending, strikes present on this date
+  call: Map<number, Bar[]>; // absolute strike → intraday bars (sorted by ts)
+  put: Map<number, Bar[]>;
 }
 
 // ── caches ───────────────────────────────────────────────────────────────────
 const contractCache = new Map<string, Promise<Contract>>();
 const strikeIdxCache = new Map<string, Promise<StrikeFile[]>>();
 const expiryDayCache = new Map<string, Promise<ExpiryDay>>();
-const expiryCache    = new Map<string, Promise<string[]>>();
+const expiryCache = new Map<string, Promise<string[]>>();
 
 function num(v: unknown): number {
   return typeof v === 'bigint' ? Number(v) : (v as number);
@@ -99,7 +98,10 @@ export function listExpiries(und: Underlying, flag: ExpiryFlag): Promise<string[
   return p;
 }
 
-export interface ResolvedExpiry { expiry: string; flag: ExpiryFlag; }
+export interface ResolvedExpiry {
+  expiry: string;
+  flag: ExpiryFlag;
+}
 
 /**
  * Resolve a relative expiry offset (0 = nearest ≥ tradeDate).
@@ -111,7 +113,10 @@ export interface ResolvedExpiry { expiry: string; flag: ExpiryFlag; }
  * weeks. A MONTH request stays restricted to MONTH expiries.
  */
 export async function resolveExpiry(
-  und: Underlying, flag: ExpiryFlag, tradeDate: string, offset: number,
+  und: Underlying,
+  flag: ExpiryFlag,
+  tradeDate: string,
+  offset: number,
 ): Promise<ResolvedExpiry | null> {
   if (flag === 'MONTH') {
     const months = await listExpiries(und, 'MONTH');
@@ -135,7 +140,9 @@ export async function resolveExpiry(
 // ── strike index ─────────────────────────────────────────────────────────────
 /** All available strikes for an expiry/flag with their CALL/PUT file paths, sorted asc. */
 export function getStrikeIndex(
-  und: Underlying, expiry: string, flag: ExpiryFlag,
+  und: Underlying,
+  expiry: string,
+  flag: ExpiryFlag,
 ): Promise<StrikeFile[]> {
   const key = `${und}|${expiry}|${flag}`;
   let p = strikeIdxCache.get(key);
@@ -149,7 +156,7 @@ export function getStrikeIndex(
         if (!off.isDirectory()) continue;
         const flagDir = path.join(expDir, off.name, flag);
         const callPath = path.join(flagDir, `${und}_${expiry}_${flag}_CALL.parquet`);
-        const putPath  = path.join(flagDir, `${und}_${expiry}_${flag}_PUT.parquet`);
+        const putPath = path.join(flagDir, `${und}_${expiry}_${flag}_PUT.parquet`);
         if (!existsSync(callPath)) continue;
         const strike = await readFirstStrike(callPath);
         if (strike == null) continue;
@@ -178,7 +185,10 @@ async function readFirstStrike(file: string): Promise<number | null> {
 /** Inferred strike step (gap between adjacent strikes). Falls back to 50/100. */
 export function strikeStep(idx: StrikeFile[], und: Underlying): number {
   if (idx.length >= 2) {
-    const gaps = idx.slice(1).map((s, i) => s.strike - idx[i].strike).filter((g) => g > 0);
+    const gaps = idx
+      .slice(1)
+      .map((s, i) => s.strike - idx[i].strike)
+      .filter((g) => g > 0);
     if (gaps.length) return Math.min(...gaps);
   }
   return und === 'SENSEX' ? 100 : 50;
@@ -190,7 +200,10 @@ export function strikeStep(idx: StrikeFile[], und: Underlying): number {
 // aborting the whole trading day and flooding the UI with per-day warnings.
 export const corruptFiles = new Set<string>();
 const EMPTY_CONTRACT = (optionType: OptionType): Contract => ({
-  strike: NaN, optionType, bars: [], byDate: new Map(),
+  strike: NaN,
+  optionType,
+  bars: [],
+  byDate: new Map(),
 });
 
 export function readContract(file: string, optionType: OptionType): Promise<Contract> {
@@ -205,7 +218,9 @@ export function readContract(file: string, optionType: OptionType): Promise<Cont
         // Skip this bucket: the rest of the expiry's buckets still stitch fine.
         if (!corruptFiles.has(file)) {
           corruptFiles.add(file);
-          console.warn(`[backtest] skipping unreadable parquet: ${path.basename(file)} — ${(e as Error).message}`);
+          console.warn(
+            `[backtest] skipping unreadable parquet: ${path.basename(file)} — ${(e as Error).message}`,
+          );
         }
         return EMPTY_CONTRACT(optionType);
       }
@@ -215,17 +230,28 @@ export function readContract(file: string, optionType: OptionType): Promise<Cont
         const ts = num(r.timestamp);
         const { date, hhmm } = toIst(ts);
         bars[i] = {
-          ts, date, hhmm,
-          open: num(r.open), high: num(r.high), low: num(r.low), close: num(r.close),
-          iv: num(r.iv), volume: num(r.volume), strike: num(r.strike),
-          oi: num(r.oi), spot: num(r.spot),
+          ts,
+          date,
+          hhmm,
+          open: num(r.open),
+          high: num(r.high),
+          low: num(r.low),
+          close: num(r.close),
+          iv: num(r.iv),
+          volume: num(r.volume),
+          strike: num(r.strike),
+          oi: num(r.oi),
+          spot: num(r.spot),
         };
       }
       bars.sort((a, b) => a.ts - b.ts);
       const byDate = new Map<string, Bar[]>();
       for (const b of bars) {
         let arr = byDate.get(b.date);
-        if (!arr) { arr = []; byDate.set(b.date, arr); }
+        if (!arr) {
+          arr = [];
+          byDate.set(b.date, arr);
+        }
         arr.push(b);
       }
       const strike = bars.length ? bars[0].strike : NaN;
@@ -247,7 +273,10 @@ export function readContract(file: string, optionType: OptionType): Promise<Cont
 // so regrouping by `strike` yields a gap-free series while the strike stays inside
 // the ATM±N window (it drops out only if spot drifts beyond the captured wing).
 export function loadExpiryDay(
-  und: Underlying, expiry: string, flag: ExpiryFlag, date: string,
+  und: Underlying,
+  expiry: string,
+  flag: ExpiryFlag,
+  date: string,
 ): Promise<ExpiryDay> {
   const key = `${und}|${expiry}|${flag}|${date}`;
   let p = expiryDayCache.get(key);
@@ -262,9 +291,9 @@ export function loadExpiryDay(
         if (!off.isDirectory()) continue;
         const flagDir = path.join(expDir, off.name, flag);
         const callPath = path.join(flagDir, `${und}_${expiry}_${flag}_CALL.parquet`);
-        const putPath  = path.join(flagDir, `${und}_${expiry}_${flag}_PUT.parquet`);
+        const putPath = path.join(flagDir, `${und}_${expiry}_${flag}_PUT.parquet`);
         if (existsSync(callPath)) await stitchInto(callPath, 'CALL', date, call);
-        if (existsSync(putPath))  await stitchInto(putPath, 'PUT', date, put);
+        if (existsSync(putPath)) await stitchInto(putPath, 'PUT', date, put);
       }
       for (const m of [call, put]) {
         for (const [k, arr] of m) {
@@ -272,7 +301,10 @@ export function loadExpiryDay(
           // a strike may surface in two adjacent buckets on the same minute at a
           // boundary cross — keep one bar per ts.
           const seen = new Set<number>();
-          m.set(k, arr.filter((b) => (seen.has(b.ts) ? false : (seen.add(b.ts), true))));
+          m.set(
+            k,
+            arr.filter((b) => (seen.has(b.ts) ? false : (seen.add(b.ts), true))),
+          );
         }
       }
       const strikes = [...new Set([...call.keys(), ...put.keys()])].sort((a, b) => a - b);
@@ -288,7 +320,10 @@ export function loadExpiryDay(
 }
 
 async function stitchInto(
-  file: string, optionType: OptionType, date: string, into: Map<number, Bar[]>,
+  file: string,
+  optionType: OptionType,
+  date: string,
+  into: Map<number, Bar[]>,
 ): Promise<void> {
   const c = await readContract(file, optionType);
   const bars = c.byDate.get(date);
@@ -296,7 +331,10 @@ async function stitchInto(
   for (const b of bars) {
     if (!Number.isFinite(b.strike)) continue;
     let arr = into.get(b.strike);
-    if (!arr) { arr = []; into.set(b.strike, arr); }
+    if (!arr) {
+      arr = [];
+      into.set(b.strike, arr);
+    }
     arr.push(b);
   }
 }

@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
-  FEED_STALE_MS, feedKey, requiredFeedKeys, staleRequiredFeeds, isMarketHours,
-  isValidFeedKey, pruneOcSubKeys, istToday,
+  FEED_STALE_MS,
+  feedKey,
+  requiredFeedKeys,
+  staleRequiredFeeds,
+  isMarketHours,
+  isValidFeedKey,
+  pruneOcSubKeys,
+  istToday,
 } from './ocFeedGuard';
 
 const NIFTY_JUL28 = 'NIFTY:20260728';
@@ -16,12 +22,19 @@ describe('feedKey', () => {
 
 describe('requiredFeedKeys', () => {
   it('returns the feeds serving open positions', () => {
-    const index = new Map([[1445996, NIFTY_JUL28], [1446003, NIFTY_JUL28], [999, NIFTY_AUG04]]);
+    const index = new Map([
+      [1445996, NIFTY_JUL28],
+      [1446003, NIFTY_JUL28],
+      [999, NIFTY_AUG04],
+    ]);
     expect(requiredFeedKeys(index, [1445996, 1446003])).toEqual(new Set([NIFTY_JUL28]));
   });
 
   it('drops feeds whose only positions have closed', () => {
-    const index = new Map([[1445996, NIFTY_JUL28], [999, NIFTY_AUG04]]);
+    const index = new Map([
+      [1445996, NIFTY_JUL28],
+      [999, NIFTY_AUG04],
+    ]);
     expect(requiredFeedKeys(index, [999])).toEqual(new Set([NIFTY_AUG04]));
   });
 
@@ -44,7 +57,10 @@ describe('staleRequiredFeeds', () => {
   });
 
   it('flags the real failure: subscribed on paper, silent for 448s', () => {
-    const last = new Map([[NIFTY_JUL28, now - 448_000], [NIFTY_AUG04, now - 500]]);
+    const last = new Map([
+      [NIFTY_JUL28, now - 448_000],
+      [NIFTY_AUG04, now - 500],
+    ]);
     const required = new Set([NIFTY_JUL28, NIFTY_AUG04]);
     expect(staleRequiredFeeds(required, last, now)).toEqual([NIFTY_JUL28]);
   });
@@ -75,10 +91,10 @@ describe('isValidFeedKey', () => {
 
   it('rejects the malformed keys found in the live DB', () => {
     expect(isValidFeedKey('NIFTY28JUL2623,700CE:20260728')).toBe(false); // comma
-    expect(isValidFeedKey('NIFTY:2026072')).toBe(false);                 // 7-digit expiry
-    expect(isValidFeedKey('NIFTY')).toBe(false);                         // no expiry
-    expect(isValidFeedKey('NIFTY:20260728:NSE')).toBe(false);            // extra segment
-    expect(isValidFeedKey('nifty:20260728')).toBe(false);                // not normalised
+    expect(isValidFeedKey('NIFTY:2026072')).toBe(false); // 7-digit expiry
+    expect(isValidFeedKey('NIFTY')).toBe(false); // no expiry
+    expect(isValidFeedKey('NIFTY:20260728:NSE')).toBe(false); // extra segment
+    expect(isValidFeedKey('nifty:20260728')).toBe(false); // not normalised
   });
 });
 
@@ -134,8 +150,7 @@ describe('istToday', () => {
 
 describe('isMarketHours', () => {
   // 2026-07-27 is a Monday; 2026-07-25 a Saturday.
-  const ist = (d: string, hhmm: string) =>
-    Date.parse(`${d}T${hhmm}:00+05:30`);
+  const ist = (d: string, hhmm: string) => Date.parse(`${d}T${hhmm}:00+05:30`);
 
   it('is open through the session', () => {
     expect(isMarketHours(ist('2026-07-27', '09:15'))).toBe(true);

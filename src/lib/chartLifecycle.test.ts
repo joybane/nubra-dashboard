@@ -6,7 +6,9 @@ import { removeChart, isChartLive, chartFrame } from './chartLifecycle.ts';
 function fakeChart(): IChartApi & { removeCalls: number } {
   const chart = {
     removeCalls: 0,
-    remove() { chart.removeCalls++; },
+    remove() {
+      chart.removeCalls++;
+    },
   };
   return chart as unknown as IChartApi & { removeCalls: number };
 }
@@ -19,7 +21,9 @@ function stubRaf() {
     pending.set(next, cb);
     return next++;
   });
-  vi.stubGlobal('cancelAnimationFrame', (id: number) => { pending.delete(id); });
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+    pending.delete(id);
+  });
   return () => {
     const due = [...pending.values()];
     pending.clear();
@@ -38,7 +42,7 @@ test('a chart is live until removeChart, and removal is idempotent', () => {
   expect(isChartLive(chart)).toBe(false);
   expect(chart.removeCalls).toBe(1);
 
-  removeChart(chart);                 // e.g. an effect cleanup racing an unmount
+  removeChart(chart); // e.g. an effect cleanup racing an unmount
   expect(chart.removeCalls).toBe(1);
 });
 
@@ -49,7 +53,11 @@ test('null and undefined are never live and never throw', () => {
 });
 
 test('removeChart swallows a throwing remove but still marks the chart dead', () => {
-  const chart = { remove() { throw new Error('already disposed'); } } as unknown as IChartApi;
+  const chart = {
+    remove() {
+      throw new Error('already disposed');
+    },
+  } as unknown as IChartApi;
   expect(() => removeChart(chart)).not.toThrow();
   expect(isChartLive(chart)).toBe(false);
 });
@@ -61,7 +69,7 @@ test('chartFrame runs the callback on the next frame while the chart is alive', 
   const fn = vi.fn();
 
   chartFrame(chart, fn);
-  expect(fn).not.toHaveBeenCalled();   // deferred, not immediate
+  expect(fn).not.toHaveBeenCalled(); // deferred, not immediate
   flush();
   expect(fn).toHaveBeenCalledWith(chart);
 });

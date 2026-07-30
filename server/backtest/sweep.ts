@@ -1,4 +1,11 @@
-import type { BacktestConfig, Metrics, SweepCell, SweepParam, SweepRequest, SweepResponse } from './types.ts';
+import type {
+  BacktestConfig,
+  Metrics,
+  SweepCell,
+  SweepParam,
+  SweepRequest,
+  SweepResponse,
+} from './types.ts';
 import { enumerateTradingDays, runDays } from './engine.ts';
 import { computeMetrics } from './analysis.ts';
 
@@ -10,7 +17,9 @@ export function setByPath(obj: any, path: string, value: number): void {
   for (let i = 0; i < parts.length - 1; i++) {
     cur = cur?.[pathKey(parts[i])];
     if (cur == null || typeof cur !== 'object') {
-      throw new Error(`Invalid parameter path "${path}" — no object at "${parts.slice(0, i + 1).join('.')}".`);
+      throw new Error(
+        `Invalid parameter path "${path}" — no object at "${parts.slice(0, i + 1).join('.')}".`,
+      );
     }
   }
   cur[pathKey(parts[parts.length - 1])] = value;
@@ -44,7 +53,9 @@ export async function runSweep(req: SweepRequest): Promise<SweepResponse> {
   const vals1 = rangeValues(req.param1);
   const vals2 = req.param2 ? rangeValues(req.param2) : [undefined];
   const cells: SweepCell[] = [];
-  let bestMetric = -Infinity, bestV1 = vals1[0], bestV2: number | undefined;
+  let bestMetric = -Infinity,
+    bestV1 = vals1[0],
+    bestV2: number | undefined;
   const metricKey = req.metric;
 
   for (const v1 of vals1) {
@@ -59,7 +70,11 @@ export async function runSweep(req: SweepRequest): Promise<SweepResponse> {
       const val = m[metricKey] as number;
       cells.push({ v1, v2, metric: Math.round(val * 100) / 100, trades: trades.length });
 
-      if (val > bestMetric) { bestMetric = val; bestV1 = v1; bestV2 = v2; }
+      if (val > bestMetric) {
+        bestMetric = val;
+        bestV1 = v1;
+        bestV2 = v2;
+      }
     }
   }
 

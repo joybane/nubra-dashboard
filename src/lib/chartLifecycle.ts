@@ -25,7 +25,9 @@ export function removeChart(chart: IChartApi | null | undefined): void {
   disposedCharts.add(chart);
   try {
     chart.remove();
-  } catch { /* already torn down by lightweight-charts itself */ }
+  } catch {
+    /* already torn down by lightweight-charts itself */
+  }
 }
 
 /** True while `chart` exists and has not been through `removeChart`. */

@@ -61,18 +61,18 @@ interface MarginLeg {
 // Extreme Loss Margin on short index options: 2% of SPOT notional, rising to 3% for
 // strikes >10% out of the money and 5% beyond 9 months residual maturity, plus an
 // additional 2% on expiry day (NSE, effective 20-Nov-2024). Long options carry none.
-const ELM_INDEX_BASE       = Number(process.env.LOCAL_MARGIN_ELM_INDEX      || 0.02);
-const ELM_INDEX_DEEP_OTM   = Number(process.env.LOCAL_MARGIN_ELM_DEEP_OTM   || 0.03);
+const ELM_INDEX_BASE = Number(process.env.LOCAL_MARGIN_ELM_INDEX || 0.02);
+const ELM_INDEX_DEEP_OTM = Number(process.env.LOCAL_MARGIN_ELM_DEEP_OTM || 0.03);
 const ELM_INDEX_LONG_DATED = Number(process.env.LOCAL_MARGIN_ELM_LONG_DATED || 0.05);
 const ELM_EXPIRY_DAY_ADDON = Number(process.env.LOCAL_MARGIN_ELM_EXPIRY_ADDON || 0.02);
-const ELM_STOCK_BASE       = Number(process.env.LOCAL_MARGIN_ELM_STOCK      || 0.035);
+const ELM_STOCK_BASE = Number(process.env.LOCAL_MARGIN_ELM_STOCK || 0.035);
 
 // Price scan range: 6σ scaled by √2, floored at 9.3% of underlying for index products
 // and 14.2% for single stocks. At normal index IVs the floor is what binds.
 const PSR_FLOOR_INDEX = 0.093;
 const PSR_FLOOR_STOCK = 0.142;
-const VSR_INDEX_PCT   = 4;   // ± absolute IV percentage points
-const VSR_STOCK_PCT   = 10;
+const VSR_INDEX_PCT = 4; // ± absolute IV percentage points
+const VSR_STOCK_PCT = 10;
 
 // The scan range is a property of the UNDERLYING, but the only volatility we hold is
 // each option's implied vol — and a nearly-expired ATM option implies a far higher
@@ -84,12 +84,21 @@ const PSR_VOL_BAND_STOCK: [number, number] = [12, 60];
 
 // Short option minimum charge — zero in current NSCCL files, kept configurable.
 const SHORT_OPTION_MINIMUM = Number(process.env.LOCAL_MARGIN_SHORT_OPTION_MIN || 0);
-const DEFAULT_IV_PCT       = Number(process.env.LOCAL_MARGIN_DEFAULT_IV || 15);
+const DEFAULT_IV_PCT = Number(process.env.LOCAL_MARGIN_DEFAULT_IV || 15);
 
 const DEFAULT_SPAN_PATH = path.join(process.cwd(), 'data', 'margin', 'nse-span-risk.json');
 const SPAN_RISK_PATH = process.env.NSE_SPAN_RISK_FILE || DEFAULT_SPAN_PATH;
 
-const INDEX_SYMBOLS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT50', 'SENSEX', 'BANKEX', 'SENSEX50']);
+const INDEX_SYMBOLS = new Set([
+  'NIFTY',
+  'BANKNIFTY',
+  'FINNIFTY',
+  'MIDCPNIFTY',
+  'NIFTYNXT50',
+  'SENSEX',
+  'BANKEX',
+  'SENSEX50',
+]);
 
 /**
  * The 16 SPAN risk scenarios: price shifts of 0, ±1/3, ±2/3, ±1 scan ranges crossed
@@ -97,22 +106,22 @@ const INDEX_SYMBOLS = new Set(['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', '
  * 35% cover fraction (they exist to catch deep-OTM shorts jumping into the money).
  */
 const SCENARIOS: Array<{ price: number; vol: number; weight: number }> = [
-  { price:  0,     vol:  1, weight: 1 },
-  { price:  0,     vol: -1, weight: 1 },
-  { price:  1 / 3, vol:  1, weight: 1 },
-  { price:  1 / 3, vol: -1, weight: 1 },
-  { price: -1 / 3, vol:  1, weight: 1 },
+  { price: 0, vol: 1, weight: 1 },
+  { price: 0, vol: -1, weight: 1 },
+  { price: 1 / 3, vol: 1, weight: 1 },
+  { price: 1 / 3, vol: -1, weight: 1 },
+  { price: -1 / 3, vol: 1, weight: 1 },
   { price: -1 / 3, vol: -1, weight: 1 },
-  { price:  2 / 3, vol:  1, weight: 1 },
-  { price:  2 / 3, vol: -1, weight: 1 },
-  { price: -2 / 3, vol:  1, weight: 1 },
+  { price: 2 / 3, vol: 1, weight: 1 },
+  { price: 2 / 3, vol: -1, weight: 1 },
+  { price: -2 / 3, vol: 1, weight: 1 },
   { price: -2 / 3, vol: -1, weight: 1 },
-  { price:  1,     vol:  1, weight: 1 },
-  { price:  1,     vol: -1, weight: 1 },
-  { price: -1,     vol:  1, weight: 1 },
-  { price: -1,     vol: -1, weight: 1 },
-  { price:  2,     vol:  0, weight: 0.35 },
-  { price: -2,     vol:  0, weight: 0.35 },
+  { price: 1, vol: 1, weight: 1 },
+  { price: 1, vol: -1, weight: 1 },
+  { price: -1, vol: 1, weight: 1 },
+  { price: -1, vol: -1, weight: 1 },
+  { price: 2, vol: 0, weight: 0.35 },
+  { price: -2, vol: 0, weight: 0.35 },
 ];
 
 function paise(value: number): number {
@@ -131,11 +140,17 @@ function optionTypeOf(value: string | undefined): 'CE' | 'PE' | null {
 }
 
 function normalizeExpiry(value: string | undefined): string {
-  return (value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return (value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
 }
 
 function normalizeSymbol(value: string | undefined): string {
-  return (value || 'NIFTY').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return (value || 'NIFTY')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
 }
 
 /** Current wall-clock date/time in IST, as the `YYYY-MM-DD` / `HH:MM` pair the clock helper wants. */
@@ -150,10 +165,16 @@ function istNow(now: Date): { date: string; hhmm: string } {
 
 /** `20260804` → `2026-08-04`; anything else is returned untouched. */
 function expiryToIso(expiry: string): string | null {
-  return /^\d{8}$/.test(expiry) ? `${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}` : null;
+  return /^\d{8}$/.test(expiry)
+    ? `${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}`
+    : null;
 }
 
-function normalizeLegs(orders: BasketMarginOrder[], fallbackSymbol = 'NIFTY', now = new Date()): {
+function normalizeLegs(
+  orders: BasketMarginOrder[],
+  fallbackSymbol = 'NIFTY',
+  now = new Date(),
+): {
   legs: MarginLeg[];
   dropped: number;
 } {
@@ -164,7 +185,10 @@ function normalizeLegs(orders: BasketMarginOrder[], fallbackSymbol = 'NIFTY', no
     const optionType = optionTypeOf(o.option_type);
     const strike = Number(o.strike || 0);
     const qty = Math.abs(Number(o.order_qty || 0));
-    if (!optionType || !(strike > 0) || !(qty > 0)) { dropped++; return []; }
+    if (!optionType || !(strike > 0) || !(qty > 0)) {
+      dropped++;
+      return [];
+    }
 
     const symbol = normalizeSymbol(o.symbol || fallbackSymbol);
     const expiry = normalizeExpiry(o.expiry);
@@ -186,12 +210,22 @@ function normalizeLegs(orders: BasketMarginOrder[], fallbackSymbol = 'NIFTY', no
     const solved = impliedVolPct(bsType, spot, strike, premium, tYears);
     const ivPct = solved ?? (Number(o.iv) > 0 ? Number(o.iv) : DEFAULT_IV_PCT);
 
-    return [{
-      symbol, expiry, optionType, side: sideOf(o.order_side), strike, qty, premium,
-      spot, ivPct, tYears,
-      isIndex: INDEX_SYMBOLS.has(symbol),
-      isExpiryDay: iso === date,
-    }];
+    return [
+      {
+        symbol,
+        expiry,
+        optionType,
+        side: sideOf(o.order_side),
+        strike,
+        qty,
+        premium,
+        spot,
+        ivPct,
+        tYears,
+        isIndex: INDEX_SYMBOLS.has(symbol),
+        isExpiryDay: iso === date,
+      },
+    ];
   });
 
   return { legs, dropped };
@@ -200,7 +234,13 @@ function normalizeLegs(orders: BasketMarginOrder[], fallbackSymbol = 'NIFTY', no
 // ─── Scenario engine ─────────────────────────────────────────────────────────
 
 function modelPrice(leg: MarginLeg, spot: number, ivPct: number): number {
-  return bsPrice(leg.optionType === 'CE' ? 'CALL' : 'PUT', spot, leg.strike, Math.max(0.01, ivPct), leg.tYears);
+  return bsPrice(
+    leg.optionType === 'CE' ? 'CALL' : 'PUT',
+    spot,
+    leg.strike,
+    Math.max(0.01, ivPct),
+    leg.tYears,
+  );
 }
 
 /**
@@ -215,13 +255,15 @@ function scanRisk(legs: MarginLeg[]): number {
   const avgIv = legs.reduce((s, l) => s + l.ivPct, 0) / legs.length;
   const [ivLo, ivHi] = isIndex ? PSR_VOL_BAND_INDEX : PSR_VOL_BAND_STOCK;
   const psrIv = Math.min(ivHi, Math.max(ivLo, avgIv));
-  const psr = spot * Math.max(
-    isIndex ? PSR_FLOOR_INDEX : PSR_FLOOR_STOCK,
-    6 * (psrIv / 100 / Math.sqrt(252)) * Math.SQRT2,
-  );
+  const psr =
+    spot *
+    Math.max(
+      isIndex ? PSR_FLOOR_INDEX : PSR_FLOOR_STOCK,
+      6 * (psrIv / 100 / Math.sqrt(252)) * Math.SQRT2,
+    );
   const vsr = isIndex ? VSR_INDEX_PCT : VSR_STOCK_PCT;
 
-  const base = legs.map(l => modelPrice(l, spot, l.ivPct));
+  const base = legs.map((l) => modelPrice(l, spot, l.ivPct));
 
   let worst = 0;
   for (const sc of SCENARIOS) {
@@ -251,7 +293,7 @@ function elmRateFor(leg: MarginLeg): number {
   let rate = ELM_INDEX_BASE;
   const isOtm = leg.optionType === 'CE' ? leg.strike > leg.spot : leg.strike < leg.spot;
   // Spec measures moneyness off the previous close; spot is the closest thing we hold.
-  if (isOtm && Math.abs(leg.strike - leg.spot) / leg.spot > 0.10) rate = ELM_INDEX_DEEP_OTM;
+  if (isOtm && Math.abs(leg.strike - leg.spot) / leg.spot > 0.1) rate = ELM_INDEX_DEEP_OTM;
   if (leg.tYears > 0.75) rate = Math.max(rate, ELM_INDEX_LONG_DATED);
   if (leg.isExpiryDay) rate += ELM_EXPIRY_DAY_ADDON;
   return rate;
@@ -260,7 +302,7 @@ function elmRateFor(leg: MarginLeg): number {
 /** ELM applies to short option positions only, on spot notional rather than strike. */
 function exposureFor(legs: MarginLeg[]): number {
   return legs
-    .filter(l => l.side === 'SELL')
+    .filter((l) => l.side === 'SELL')
     .reduce((sum, l) => sum + elmRateFor(l) * l.spot * l.qty, 0);
 }
 
@@ -268,19 +310,24 @@ function groupBySymbol(legs: MarginLeg[]): MarginLeg[][] {
   const groups = new Map<string, MarginLeg[]>();
   for (const leg of legs) {
     const list = groups.get(leg.symbol);
-    if (list) list.push(leg); else groups.set(leg.symbol, [leg]);
+    if (list) list.push(leg);
+    else groups.set(leg.symbol, [leg]);
   }
   return [...groups.values()];
 }
 
 /** SPAN margin for one underlying: worst scenario loss, less what the options are worth. */
 function spanFor(legs: MarginLeg[]): number {
-  const shortUnits = legs.filter(l => l.side === 'SELL').reduce((s, l) => s + l.qty, 0);
+  const shortUnits = legs.filter((l) => l.side === 'SELL').reduce((s, l) => s + l.qty, 0);
   const som = SHORT_OPTION_MINIMUM * shortUnits;
   return Math.max(0, Math.max(scanRisk(legs), som) - netOptionValue(legs));
 }
 
-function computeScenarioMargin(legs: MarginLeg[]): { span: number; exposure: number; benefit: number } {
+function computeScenarioMargin(legs: MarginLeg[]): {
+  span: number;
+  exposure: number;
+  benefit: number;
+} {
   const groups = groupBySymbol(legs);
   const span = groups.reduce((sum, g) => sum + spanFor(g), 0);
   const exposure = exposureFor(legs);
@@ -313,15 +360,23 @@ function riskKeys(leg: MarginLeg): string[] {
   ];
 }
 
-function computeSpanFromRiskFile(legs: MarginLeg[], riskFile: SpanRiskFile): { span: number; exposure: number } | null {
+function computeSpanFromRiskFile(
+  legs: MarginLeg[],
+  riskFile: SpanRiskFile,
+): { span: number; exposure: number } | null {
   const contracts = riskFile.contracts || {};
   const resolved = legs.map((leg) => {
-    const contract = riskKeys(leg).map(k => contracts[k]).find(Boolean);
+    const contract = riskKeys(leg)
+      .map((k) => contracts[k])
+      .find(Boolean);
     return contract ? { leg, contract } : null;
   });
-  if (resolved.some(item => !item)) return null;
+  if (resolved.some((item) => !item)) return null;
 
-  const maxScenarios = Math.max(...resolved.map(item => item?.contract.riskArray?.length || 0), 0);
+  const maxScenarios = Math.max(
+    ...resolved.map((item) => item?.contract.riskArray?.length || 0),
+    0,
+  );
   let span = 0;
   if (maxScenarios > 0) {
     for (let scenario = 0; scenario < maxScenarios; scenario++) {
@@ -346,7 +401,7 @@ function computeSpanFromRiskFile(legs: MarginLeg[], riskFile: SpanRiskFile): { s
   span = Math.max(0, span - netOptionValue(legs));
 
   const exposure = resolved
-    .filter(item => item && item.leg.side === 'SELL')
+    .filter((item) => item && item.leg.side === 'SELL')
     .reduce((sum, item) => {
       if (!item) return sum;
       const rate = Number(item.contract.exposureRate ?? elmRateFor(item.leg));
@@ -359,20 +414,24 @@ function computeSpanFromRiskFile(legs: MarginLeg[], riskFile: SpanRiskFile): { s
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 export function calculateLocalBasketMargin(
-  orders: BasketMarginOrder[], fallbackSymbol = 'NIFTY', now = new Date(),
+  orders: BasketMarginOrder[],
+  fallbackSymbol = 'NIFTY',
+  now = new Date(),
 ): LocalMarginResult | null {
   const { legs, dropped } = normalizeLegs(orders, fallbackSymbol, now);
   if (!legs.length) return null;
 
-  const droppedNote = dropped > 0
-    ? ` ${dropped} non-option leg${dropped > 1 ? 's were' : ' was'} excluded — futures are not yet priced locally.`
-    : '';
+  const droppedNote =
+    dropped > 0
+      ? ` ${dropped} non-option leg${dropped > 1 ? 's were' : ' was'} excluded — futures are not yet priced locally.`
+      : '';
   // Cash actually needed to open the position: premium paid on longs less credit taken
   // in on shorts. A net-credit basket needs no premium outlay, and the risk it carries
   // is already in span/ELM — the credit must not be handed back a second time here.
-  const premiumPayable = Math.max(0, legs.reduce(
-    (sum, l) => sum + (l.side === 'BUY' ? 1 : -1) * l.premium * l.qty, 0,
-  ));
+  const premiumPayable = Math.max(
+    0,
+    legs.reduce((sum, l) => sum + (l.side === 'BUY' ? 1 : -1) * l.premium * l.qty, 0),
+  );
 
   const riskFile = loadSpanRiskFile();
   const spanResult = riskFile ? computeSpanFromRiskFile(legs, riskFile) : null;

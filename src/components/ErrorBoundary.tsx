@@ -35,8 +35,18 @@ export default class ErrorBoundary extends Component<Props, State> {
     return (
       <div className="flex h-full min-h-[240px] w-full flex-col items-center justify-center gap-4 p-8 text-center">
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[var(--red-dim)] text-[var(--red)]">
-          <svg className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+          <svg
+            className="h-6 w-6"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+            />
           </svg>
         </div>
         <div>
@@ -44,8 +54,8 @@ export default class ErrorBoundary extends Component<Props, State> {
             {this.props.label ? `${this.props.label} hit an error` : 'Something went wrong'}
           </h2>
           <p className="mt-1 max-w-md text-[13px] text-[var(--text-secondary)]">
-            This view crashed unexpectedly. Your data and open positions are safe — you can
-            retry this panel or reload the app.
+            This view crashed unexpectedly. Your data and open positions are safe — you can retry
+            this panel or reload the app.
           </p>
           {this.state.error.message && (
             <p className="mt-2 font-mono text-[11px] text-[var(--text-muted)]">

@@ -6,29 +6,29 @@ import { createOcSubRegistry, ocKey } from '../lib/ocSubRegistry';
 type Listener = (msg: WsMessage) => void;
 
 interface WsContextValue {
-  wsReady:     boolean;
-  subscribe:   (type: WsMessage['type'] | '*', cb: Listener) => () => void;
-  send:        (msg: object) => void;
+  wsReady: boolean;
+  subscribe: (type: WsMessage['type'] | '*', cb: Listener) => () => void;
+  send: (msg: object) => void;
   subscribeOC: (asset: string, expiry: string, exchange?: string) => void;
-  unsubscribeOC:(asset: string, expiry: string, exchange?: string) => void;
-  subscribeChart:(payload: object, interval: string, exchange?: string) => void;
-  unsubscribeChart:(payload: object, interval: string, exchange?: string) => void;
+  unsubscribeOC: (asset: string, expiry: string, exchange?: string) => void;
+  subscribeChart: (payload: object, interval: string, exchange?: string) => void;
+  unsubscribeChart: (payload: object, interval: string, exchange?: string) => void;
 }
 
 const WsContext = createContext<WsContextValue | null>(null);
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
 export function WsProvider({ children }: { children: React.ReactNode }) {
-  const wsRef     = useRef<WebSocket | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const listeners = useRef(new Map<string, Set<Listener>>());
   // Reconnect bookkeeping: `reconnectRef` holds the pending retry timer so we can
   // cancel it, and `stoppedRef` marks intentional teardown so a `close` event
   // triggered by *us* (unmount) does not schedule a resurrecting reconnect.
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const stoppedRef   = useRef(false);
+  const stoppedRef = useRef(false);
   // Option-chain subscriptions are shared by many consumers, so they are
   // reference counted here rather than sent per caller — see lib/ocSubRegistry.
-  const ocSubs       = useRef(createOcSubRegistry());
+  const ocSubs = useRef(createOcSubRegistry());
   const [wsReady, setWsReady] = useState(false);
 
   const dispatch = useCallback((msg: WsMessage) => {
@@ -37,8 +37,11 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
     // the rest of the session — and the caller's try/catch around JSON.parse
     // swallowed the error, so it failed silently. Live prices would just stop.
     const notify = (cb: Listener) => {
-      try { cb(msg); }
-      catch (err) { console.error(`[ws] listener for "${msg.type}" threw:`, err); }
+      try {
+        cb(msg);
+      } catch (err) {
+        console.error(`[ws] listener for "${msg.type}" threw:`, err);
+      }
     };
     const typed = listeners.current.get(msg.type);
     if (typed) for (const cb of typed) notify(cb);
@@ -69,7 +72,9 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
       try {
         const msg = JSON.parse(evt.data as string) as WsMessage;
         dispatch(msg);
-      } catch { /* ignore malformed */ }
+      } catch {
+        /* ignore malformed */
+      }
     });
 
     ws.addEventListener('close', () => {
@@ -112,31 +117,53 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
     return () => listeners.current.get(type)?.delete(cb);
   }, []);
 
-  const subscribeChart = useCallback((payload: object, interval: string, exchange = 'NSE') => {
-    send({ action: 'subscribe', bucket: 'index_bucket', payload, interval, exchange });
-  }, [send]);
+  const subscribeChart = useCallback(
+    (payload: object, interval: string, exchange = 'NSE') => {
+      send({ action: 'subscribe', bucket: 'index_bucket', payload, interval, exchange });
+    },
+    [send],
+  );
 
-  const unsubscribeChart = useCallback((payload: object, interval: string, exchange = 'NSE') => {
-    send({ action: 'unsubscribe', bucket: 'index_bucket', payload, interval, exchange });
-  }, [send]);
+  const unsubscribeChart = useCallback(
+    (payload: object, interval: string, exchange = 'NSE') => {
+      send({ action: 'unsubscribe', bucket: 'index_bucket', payload, interval, exchange });
+    },
+    [send],
+  );
 
-  const subscribeOC = useCallback((asset: string, expiry: string, exchange = 'NSE') => {
-    if (!asset || !expiry) return;
-    if (ocSubs.current.acquire(ocKey(asset, expiry, exchange))) {
-      send({ action: 'subscribe_oc', asset, expiry, exchange });
-    }
-  }, [send]);
+  const subscribeOC = useCallback(
+    (asset: string, expiry: string, exchange = 'NSE') => {
+      if (!asset || !expiry) return;
+      if (ocSubs.current.acquire(ocKey(asset, expiry, exchange))) {
+        send({ action: 'subscribe_oc', asset, expiry, exchange });
+      }
+    },
+    [send],
+  );
 
-  const unsubscribeOC = useCallback((asset: string, expiry: string, exchange = 'NSE') => {
-    if (!asset || !expiry) return;
-    // Only the last holder tears the feed down; everyone else just drops their claim.
-    if (ocSubs.current.release(ocKey(asset, expiry, exchange))) {
-      send({ action: 'unsubscribe_oc', asset, expiry, exchange });
-    }
-  }, [send]);
+  const unsubscribeOC = useCallback(
+    (asset: string, expiry: string, exchange = 'NSE') => {
+      if (!asset || !expiry) return;
+      // Only the last holder tears the feed down; everyone else just drops their claim.
+      if (ocSubs.current.release(ocKey(asset, expiry, exchange))) {
+        send({ action: 'unsubscribe_oc', asset, expiry, exchange });
+      }
+    },
+    [send],
+  );
 
   return (
-    <WsContext.Provider value={{ wsReady, subscribe, send, subscribeOC, unsubscribeOC, subscribeChart, unsubscribeChart }}>
+    <WsContext.Provider
+      value={{
+        wsReady,
+        subscribe,
+        send,
+        subscribeOC,
+        unsubscribeOC,
+        subscribeChart,
+        unsubscribeChart,
+      }}
+    >
       {children}
     </WsContext.Provider>
   );

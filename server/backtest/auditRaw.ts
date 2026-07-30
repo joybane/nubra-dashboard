@@ -3,8 +3,9 @@
 import { asyncBufferFromFile, parquetReadObjects } from 'hyparquet';
 import { compressors } from 'hyparquet-compressors';
 
-const file = process.argv[2]
-  || 'E:/Derivativesproject/ATM Wise data/NIFTY/2026-05-12/ATM+2/WEEK/NIFTY_2026-05-12_WEEK_CALL.parquet';
+const file =
+  process.argv[2] ||
+  'E:/Derivativesproject/ATM Wise data/NIFTY/2026-05-12/ATM+2/WEEK/NIFTY_2026-05-12_WEEK_CALL.parquet';
 
 const buf = await asyncBufferFromFile(file);
 const rows = await parquetReadObjects({ file: buf, compressors });

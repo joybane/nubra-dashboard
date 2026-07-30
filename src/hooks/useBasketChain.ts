@@ -40,18 +40,50 @@ interface Deps {
 }
 
 function emptyRow(strike: number, lotSize: number): ChainRow {
-  return { strike, ceLtp: 0, peLtp: 0, ceRefId: null, peRefId: null, ceNubraName: '', peNubraName: '', lotSize, ceIv: null, peIv: null, ceDelta: null, peDelta: null, ceGamma: null, peGamma: null, ceTheta: null, peTheta: null, ceVega: null, peVega: null, ceOi: null, peOi: null, ceVol: null, peVol: null };
+  return {
+    strike,
+    ceLtp: 0,
+    peLtp: 0,
+    ceRefId: null,
+    peRefId: null,
+    ceNubraName: '',
+    peNubraName: '',
+    lotSize,
+    ceIv: null,
+    peIv: null,
+    ceDelta: null,
+    peDelta: null,
+    ceGamma: null,
+    peGamma: null,
+    ceTheta: null,
+    peTheta: null,
+    ceVega: null,
+    peVega: null,
+    ceOi: null,
+    peOi: null,
+    ceVol: null,
+    peVol: null,
+  };
 }
 
-function buildChainRows(ceListIn: Array<Record<string, unknown>>, peListIn: Array<Record<string, unknown>>): ChainRow[] {
-  let ceList = ceListIn, peList = peListIn;
+function buildChainRows(
+  ceListIn: Array<Record<string, unknown>>,
+  peListIn: Array<Record<string, unknown>>,
+): ChainRow[] {
+  let ceList = ceListIn,
+    peList = peListIn;
   if (ceList.length >= 3 && peList.length >= 3) {
     const sample = ceList.slice(0, Math.min(ceList.length, 40));
     const sorted = [...sample].sort((a, b) => (Number(a.sp) || 0) - (Number(b.sp) || 0));
-    let ups = 0, downs = 0;
+    let ups = 0,
+      downs = 0;
     for (let i = 1; i < sorted.length; i++) {
-      const prev = Number(sorted[i - 1].ltp) || 0, curr = Number(sorted[i].ltp) || 0;
-      if (prev > 0 && curr > 0) { if (curr > prev) ups++; else if (curr < prev) downs++; }
+      const prev = Number(sorted[i - 1].ltp) || 0,
+        curr = Number(sorted[i].ltp) || 0;
+      if (prev > 0 && curr > 0) {
+        if (curr > prev) ups++;
+        else if (curr < prev) downs++;
+      }
     }
     if (ups > downs && ups > 3) [ceList, peList] = [peList, ceList];
   }
@@ -63,10 +95,17 @@ function buildChainRows(ceListIn: Array<Record<string, unknown>>, peListIn: Arra
     const nubraName = String(ce.zanskar_name || ce.nubra_name || ce.symbol || '');
     const lotSize = Number(ce.ls || ce.lot_size || 1);
     if (!map[sp]) map[sp] = emptyRow(sp, lotSize);
-    map[sp].ceLtp = ltp; map[sp].ceRefId = refId; map[sp].ceNubraName = nubraName; map[sp].lotSize = lotSize;
-    map[sp].ceIv = numField(ce, 'iv', 'implied_volatility'); map[sp].ceDelta = numField(ce, 'delta');
-    map[sp].ceGamma = numField(ce, 'gamma'); map[sp].ceTheta = numField(ce, 'theta'); map[sp].ceVega = numField(ce, 'vega');
-    map[sp].ceOi = numField(ce, 'oi', 'open_interest'); map[sp].ceVol = numField(ce, 'volume', 'vol');
+    map[sp].ceLtp = ltp;
+    map[sp].ceRefId = refId;
+    map[sp].ceNubraName = nubraName;
+    map[sp].lotSize = lotSize;
+    map[sp].ceIv = numField(ce, 'iv', 'implied_volatility');
+    map[sp].ceDelta = numField(ce, 'delta');
+    map[sp].ceGamma = numField(ce, 'gamma');
+    map[sp].ceTheta = numField(ce, 'theta');
+    map[sp].ceVega = numField(ce, 'vega');
+    map[sp].ceOi = numField(ce, 'oi', 'open_interest');
+    map[sp].ceVol = numField(ce, 'volume', 'vol');
   }
   for (const pe of peList) {
     const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
@@ -75,11 +114,17 @@ function buildChainRows(ceListIn: Array<Record<string, unknown>>, peListIn: Arra
     const nubraName = String(pe.zanskar_name || pe.nubra_name || pe.symbol || '');
     const lotSize = Number(pe.ls || pe.lot_size || 1);
     if (!map[sp]) map[sp] = emptyRow(sp, lotSize);
-    map[sp].peLtp = ltp; map[sp].peRefId = refId; map[sp].peNubraName = nubraName;
+    map[sp].peLtp = ltp;
+    map[sp].peRefId = refId;
+    map[sp].peNubraName = nubraName;
     if (!map[sp].lotSize || map[sp].lotSize <= 1) map[sp].lotSize = lotSize;
-    map[sp].peIv = numField(pe, 'iv', 'implied_volatility'); map[sp].peDelta = numField(pe, 'delta');
-    map[sp].peGamma = numField(pe, 'gamma'); map[sp].peTheta = numField(pe, 'theta'); map[sp].peVega = numField(pe, 'vega');
-    map[sp].peOi = numField(pe, 'oi', 'open_interest'); map[sp].peVol = numField(pe, 'volume', 'vol');
+    map[sp].peIv = numField(pe, 'iv', 'implied_volatility');
+    map[sp].peDelta = numField(pe, 'delta');
+    map[sp].peGamma = numField(pe, 'gamma');
+    map[sp].peTheta = numField(pe, 'theta');
+    map[sp].peVega = numField(pe, 'vega');
+    map[sp].peOi = numField(pe, 'oi', 'open_interest');
+    map[sp].peVol = numField(pe, 'volume', 'vol');
   }
   return Object.values(map).sort((a, b) => a.strike - b.strike);
 }
@@ -112,16 +157,26 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
     setError(null);
     try {
       const res = await fetch(`/api/optionchain/${encodeURIComponent(sym)}?exchange=${exch}`);
-      const data = await res.json() as { chain?: { all_expiries?: string[]; ce?: Array<Record<string, unknown>>; pe?: Array<Record<string, unknown>>; cp?: number } };
+      const data = (await res.json()) as {
+        chain?: {
+          all_expiries?: string[];
+          ce?: Array<Record<string, unknown>>;
+          pe?: Array<Record<string, unknown>>;
+          cp?: number;
+        };
+      };
       const chain = data.chain;
       if (!chain) return;
       const exps = chain.all_expiries || [];
       setExpiries(exps);
-      setExpiry(prev => (!prev || !exps.includes(prev)) ? (exps[0] || '') : prev);
+      setExpiry((prev) => (!prev || !exps.includes(prev) ? exps[0] || '' : prev));
       if (chain.cp) setSpot(chain.cp > 10000 ? chain.cp / 100 : chain.cp);
       setChainRows(buildChainRows(chain.ce || [], chain.pe || []));
-    } catch (e) { setError((e as Error).message); }
-    finally { setLoading(false); }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function changeExpiry(exp: string) {
@@ -129,13 +184,23 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
     setExpiry(exp);
     setLoading(true);
     try {
-      const res = await fetch(`/api/optionchain/${encodeURIComponent(sym)}?exchange=${exch}&expiry=${exp}`);
-      const data = await res.json() as { chain?: { ce?: Array<Record<string, unknown>>; pe?: Array<Record<string, unknown>>; cp?: number } };
+      const res = await fetch(
+        `/api/optionchain/${encodeURIComponent(sym)}?exchange=${exch}&expiry=${exp}`,
+      );
+      const data = (await res.json()) as {
+        chain?: {
+          ce?: Array<Record<string, unknown>>;
+          pe?: Array<Record<string, unknown>>;
+          cp?: number;
+        };
+      };
       if (data.chain) {
         if (data.chain.cp) setSpot(data.chain.cp > 10000 ? data.chain.cp / 100 : data.chain.cp);
         setChainRows(buildChainRows(data.chain.ce || [], data.chain.pe || []));
       }
-    } catch (e) { console.warn('[BasketChain] loadChain failed:', e); }
+    } catch (e) {
+      console.warn('[BasketChain] loadChain failed:', e);
+    }
     setLoading(false);
   }
 
@@ -147,7 +212,14 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
     setLoading(true);
     try {
       const res = await fetch(`/api/optionchain/${encodeURIComponent(newSym)}?exchange=${newExch}`);
-      const data = await res.json() as { chain?: { all_expiries?: string[]; ce?: Array<Record<string, unknown>>; pe?: Array<Record<string, unknown>>; cp?: number } };
+      const data = (await res.json()) as {
+        chain?: {
+          all_expiries?: string[];
+          ce?: Array<Record<string, unknown>>;
+          pe?: Array<Record<string, unknown>>;
+          cp?: number;
+        };
+      };
       if (data.chain) {
         const exps = data.chain.all_expiries || [];
         setExpiries(exps);
@@ -155,7 +227,9 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
         if (data.chain.cp) setSpot(data.chain.cp > 10000 ? data.chain.cp / 100 : data.chain.cp);
         setChainRows(buildChainRows(data.chain.ce || [], data.chain.pe || []));
       }
-    } catch (e) { console.warn('[BasketChain] loadChainForSymbol failed:', e); }
+    } catch (e) {
+      console.warn('[BasketChain] loadChainForSymbol failed:', e);
+    }
     setLoading(false);
   }
 
@@ -169,7 +243,7 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
   // Auto-load on sym change
   useEffect(() => {
     if (sym) loadChain();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sym]);
 
   // WS subscription — stabilize legExpiries dependency to avoid churn on every LTP tick
@@ -180,8 +254,10 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
     if (expiry) allExpiries.add(expiry);
     for (const e of legExpiries) allExpiries.add(e);
     for (const exp of allExpiries) subscribeOC(sym, exp, exch);
-    return () => { for (const exp of allExpiries) unsubscribeOC(sym, exp, exch); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => {
+      for (const exp of allExpiries) unsubscribeOC(sym, exp, exch);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sym, expiry, exch, legExpKey, subscribeOC, unsubscribeOC]);
 
   // WS live updates
@@ -199,26 +275,51 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
       const ltpMap = new Map<number, Record<string, number | undefined>>();
       for (const ce of ceArr) {
         const sp = Number(ce.sp) > 10000 ? Number(ce.sp) / 100 : Number(ce.sp);
-        ltpMap.set(sp, { ...ltpMap.get(sp), ce: ce.ltp != null ? Number(ce.ltp) / 100 : undefined,
-          ceIv: numField(ce, 'iv', 'implied_volatility') ?? undefined, ceDelta: numField(ce, 'delta') ?? undefined,
-          ceGamma: numField(ce, 'gamma') ?? undefined, ceTheta: numField(ce, 'theta') ?? undefined, ceVega: numField(ce, 'vega') ?? undefined });
+        ltpMap.set(sp, {
+          ...ltpMap.get(sp),
+          ce: ce.ltp != null ? Number(ce.ltp) / 100 : undefined,
+          ceIv: numField(ce, 'iv', 'implied_volatility') ?? undefined,
+          ceDelta: numField(ce, 'delta') ?? undefined,
+          ceGamma: numField(ce, 'gamma') ?? undefined,
+          ceTheta: numField(ce, 'theta') ?? undefined,
+          ceVega: numField(ce, 'vega') ?? undefined,
+        });
       }
       for (const pe of peArr) {
         const sp = Number(pe.sp) > 10000 ? Number(pe.sp) / 100 : Number(pe.sp);
-        ltpMap.set(sp, { ...ltpMap.get(sp), pe: pe.ltp != null ? Number(pe.ltp) / 100 : undefined,
-          peIv: numField(pe, 'iv', 'implied_volatility') ?? undefined, peDelta: numField(pe, 'delta') ?? undefined,
-          peGamma: numField(pe, 'gamma') ?? undefined, peTheta: numField(pe, 'theta') ?? undefined, peVega: numField(pe, 'vega') ?? undefined });
+        ltpMap.set(sp, {
+          ...ltpMap.get(sp),
+          pe: pe.ltp != null ? Number(pe.ltp) / 100 : undefined,
+          peIv: numField(pe, 'iv', 'implied_volatility') ?? undefined,
+          peDelta: numField(pe, 'delta') ?? undefined,
+          peGamma: numField(pe, 'gamma') ?? undefined,
+          peTheta: numField(pe, 'theta') ?? undefined,
+          peVega: numField(pe, 'vega') ?? undefined,
+        });
       }
 
       if (msgExpiry === expiry) {
-        setChainRows(prev => prev.map(row => {
-          const u = ltpMap.get(row.strike);
-          if (!u) return row;
-          return { ...row, ceLtp: u.ce ?? row.ceLtp, peLtp: u.pe ?? row.peLtp,
-            ceIv: u.ceIv ?? row.ceIv, peIv: u.peIv ?? row.peIv, ceDelta: u.ceDelta ?? row.ceDelta, peDelta: u.peDelta ?? row.peDelta,
-            ceGamma: u.ceGamma ?? row.ceGamma, peGamma: u.peGamma ?? row.peGamma, ceTheta: u.ceTheta ?? row.ceTheta, peTheta: u.peTheta ?? row.peTheta,
-            ceVega: u.ceVega ?? row.ceVega, peVega: u.peVega ?? row.peVega };
-        }));
+        setChainRows((prev) =>
+          prev.map((row) => {
+            const u = ltpMap.get(row.strike);
+            if (!u) return row;
+            return {
+              ...row,
+              ceLtp: u.ce ?? row.ceLtp,
+              peLtp: u.pe ?? row.peLtp,
+              ceIv: u.ceIv ?? row.ceIv,
+              peIv: u.peIv ?? row.peIv,
+              ceDelta: u.ceDelta ?? row.ceDelta,
+              peDelta: u.peDelta ?? row.peDelta,
+              ceGamma: u.ceGamma ?? row.ceGamma,
+              peGamma: u.peGamma ?? row.peGamma,
+              ceTheta: u.ceTheta ?? row.ceTheta,
+              peTheta: u.peTheta ?? row.peTheta,
+              ceVega: u.ceVega ?? row.ceVega,
+              peVega: u.peVega ?? row.peVega,
+            };
+          }),
+        );
       }
 
       return { msgExpiry, ltpMap };
@@ -226,5 +327,16 @@ export function useBasketChain({ sym, exch, legExpiries }: Deps): BasketChainApi
     return unsub;
   }, [subscribe, sym, expiry]);
 
-  return { expiries, expiry, chainRows, spot, loading, error, changeExpiry, setChainRows, resetChain, loadChainForSymbol };
+  return {
+    expiries,
+    expiry,
+    chainRows,
+    spot,
+    loading,
+    error,
+    changeExpiry,
+    setChainRows,
+    resetChain,
+    loadChainForSymbol,
+  };
 }

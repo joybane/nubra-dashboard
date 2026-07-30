@@ -5,11 +5,13 @@ interface LoginOverlayProps {
 }
 
 export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
-  const [step,    setStep]    = useState<1 | 2>(1);
-  const [phone,   setPhone]   = useState(() => localStorage.getItem('saved_phone') || '');
-  const [otp,     setOtp]     = useState('');
-  const [mpin,    setMpin]    = useState('');
-  const [status,  setStatus]  = useState<{ msg: string; type: 'info' | 'error' | 'success' } | null>(null);
+  const [step, setStep] = useState<1 | 2>(1);
+  const [phone, setPhone] = useState(() => localStorage.getItem('saved_phone') || '');
+  const [otp, setOtp] = useState('');
+  const [mpin, setMpin] = useState('');
+  const [status, setStatus] = useState<{ msg: string; type: 'info' | 'error' | 'success' } | null>(
+    null,
+  );
   const [loading, setLoading] = useState(false);
 
   function showStatus(msg: string, type: 'info' | 'error' | 'success') {
@@ -17,18 +19,21 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
   }
 
   async function sendOtp() {
-    if (!phone.trim()) { showStatus('Phone number is required.', 'error'); return; }
+    if (!phone.trim()) {
+      showStatus('Phone number is required.', 'error');
+      return;
+    }
     setLoading(true);
     setOtp('');
     showStatus('Sending OTP...', 'info');
     try {
       localStorage.setItem('saved_phone', phone.trim());
-      const res  = await fetch('/auth/send-otp', {
+      const res = await fetch('/auth/send-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: phone.trim() }),
       });
-      const data = await res.json() as { ok: boolean; message?: string; error?: string };
+      const data = (await res.json()) as { ok: boolean; message?: string; error?: string };
       if (!data.ok) throw new Error(data.error);
       showStatus(data.message!, 'success');
       setStep(2);
@@ -41,17 +46,23 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
   }
 
   async function verifyOtp() {
-    if (!otp.trim()) { showStatus('Enter the OTP first.', 'error'); return; }
-    if (!mpin.trim()) { showStatus('Enter your MPIN.', 'error'); return; }
+    if (!otp.trim()) {
+      showStatus('Enter the OTP first.', 'error');
+      return;
+    }
+    if (!mpin.trim()) {
+      showStatus('Enter your MPIN.', 'error');
+      return;
+    }
     setLoading(true);
     showStatus('Verifying OTP and MPIN...', 'info');
     try {
-      const res  = await fetch('/auth/verify-otp', {
-        method:  'POST',
+      const res = await fetch('/auth/verify-otp', {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ otp: otp.trim(), mpin: mpin.trim() }),
+        body: JSON.stringify({ otp: otp.trim(), mpin: mpin.trim() }),
       });
-      const data = await res.json() as { ok: boolean; message?: string; error?: string };
+      const data = (await res.json()) as { ok: boolean; message?: string; error?: string };
       if (!data.ok) throw new Error(data.error);
       showStatus('Authenticated!', 'success');
       setTimeout(() => onAuthenticated(), 600);
@@ -66,8 +77,8 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
     setLoading(true);
     showStatus('Resuming session...', 'info');
     try {
-      const res  = await fetch('/auth/verify-pin', { method: 'POST' });
-      const data = await res.json() as { ok: boolean; message?: string; error?: string };
+      const res = await fetch('/auth/verify-pin', { method: 'POST' });
+      const data = (await res.json()) as { ok: boolean; message?: string; error?: string };
       if (!data.ok) throw new Error(data.error);
       showStatus('Authenticated!', 'success');
       setTimeout(() => onAuthenticated(), 500);
@@ -79,9 +90,9 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
   }
 
   const statusColors = {
-    info:    'bg-[rgba(59,130,246,0.1)] text-blue-400 border border-blue-500/20',
+    info: 'bg-[rgba(59,130,246,0.1)] text-blue-400 border border-blue-500/20',
     success: 'bg-[rgba(34,197,94,0.1)] text-green-400 border border-green-500/20',
-    error:   'bg-[rgba(239,68,68,0.1)] text-red-400 border border-red-500/20',
+    error: 'bg-[rgba(239,68,68,0.1)] text-red-400 border border-red-500/20',
   };
 
   return (

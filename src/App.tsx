@@ -32,21 +32,38 @@ function AppInner() {
   const [auth, setAuth] = useState<AuthStatus>('unknown');
   const [strategyChart, setStrategyChart] = useState<StrategyChartTarget | null>(null);
 
-  const { state: workspaceState, setActivePane, setPaneView, loadInstrumentInActivePane } = useWorkspaceState();
+  const {
+    state: workspaceState,
+    setActivePane,
+    setPaneView,
+    loadInstrumentInActivePane,
+  } = useWorkspaceState();
   const { subscribe } = useWs();
 
-  const openStrategyChart = useCallback((basketGroupId: string, strategyName: string, snapshotId?: string) => {
-    setStrategyChart({ basketGroupId, strategyName, snapshotId });
-  }, []);
+  const openStrategyChart = useCallback(
+    (basketGroupId: string, strategyName: string, snapshotId?: string) => {
+      setStrategyChart({ basketGroupId, strategyName, snapshotId });
+    },
+    [],
+  );
 
-  const openInstrumentChart = useCallback((instrument: Instrument) => {
-    const paneId = workspaceState.activePane || workspaceState.panes[0]?.id;
-    if (paneId) {
-      setActivePane(paneId);
-      setPaneView(paneId, 'chart');
-    }
-    loadInstrumentInActivePane(instrument);
-  }, [workspaceState.activePane, workspaceState.panes, setActivePane, setPaneView, loadInstrumentInActivePane]);
+  const openInstrumentChart = useCallback(
+    (instrument: Instrument) => {
+      const paneId = workspaceState.activePane || workspaceState.panes[0]?.id;
+      if (paneId) {
+        setActivePane(paneId);
+        setPaneView(paneId, 'chart');
+      }
+      loadInstrumentInActivePane(instrument);
+    },
+    [
+      workspaceState.activePane,
+      workspaceState.panes,
+      setActivePane,
+      setPaneView,
+      loadInstrumentInActivePane,
+    ],
+  );
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);

@@ -27,16 +27,27 @@ function loadState(): WorkspaceState {
         return parsed;
       }
     }
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
   return defaultState();
 }
 
 function saveState(s: WorkspaceState): void {
-  try { localStorage.setItem('nubra-workspace', JSON.stringify(s)); } catch { /* ignore */ }
+  try {
+    localStorage.setItem('nubra-workspace', JSON.stringify(s));
+  } catch {
+    /* ignore */
+  }
 }
 
 export const LAYOUT_PANE_COUNT: Record<LayoutType, number> = {
-  single: 1, hsplit: 2, vsplit: 2, grid: 4, tleft: 3, tright: 3,
+  single: 1,
+  hsplit: 2,
+  vsplit: 2,
+  grid: 4,
+  tleft: 3,
+  tright: 3,
 };
 
 export function useWorkspaceStateCore() {
@@ -57,48 +68,71 @@ export function useWorkspaceStateCore() {
     });
   }, []);
 
-  const setLayout = useCallback((layout: LayoutType) => {
-    update((prev) => {
-      const needed = LAYOUT_PANE_COUNT[layout];
-      const panes  = [...prev.panes];
-      while (panes.length < needed) panes.push(defaultPane());
-      const trimmed = panes.slice(0, needed);
-      const active  = trimmed.some((p) => p.id === prev.activePane)
-        ? prev.activePane : (trimmed[0]?.id || '');
-      return { layout, panes: trimmed, activePane: active };
-    });
-  }, [update]);
+  const setLayout = useCallback(
+    (layout: LayoutType) => {
+      update((prev) => {
+        const needed = LAYOUT_PANE_COUNT[layout];
+        const panes = [...prev.panes];
+        while (panes.length < needed) panes.push(defaultPane());
+        const trimmed = panes.slice(0, needed);
+        const active = trimmed.some((p) => p.id === prev.activePane)
+          ? prev.activePane
+          : trimmed[0]?.id || '';
+        return { layout, panes: trimmed, activePane: active };
+      });
+    },
+    [update],
+  );
 
-  const setPaneView = useCallback((paneId: string, view: ViewType) => {
-    update((prev) => ({
-      ...prev,
-      panes: prev.panes.map((p) => p.id === paneId ? { ...p, view } : p),
-    }));
-  }, [update]);
+  const setPaneView = useCallback(
+    (paneId: string, view: ViewType) => {
+      update((prev) => ({
+        ...prev,
+        panes: prev.panes.map((p) => (p.id === paneId ? { ...p, view } : p)),
+      }));
+    },
+    [update],
+  );
 
-  const setPaneInstrument = useCallback((paneId: string, instrument: Instrument) => {
-    update((prev) => ({
-      ...prev,
-      panes: prev.panes.map((p) => p.id === paneId ? { ...p, instrument } : p),
-    }));
-  }, [update]);
+  const setPaneInstrument = useCallback(
+    (paneId: string, instrument: Instrument) => {
+      update((prev) => ({
+        ...prev,
+        panes: prev.panes.map((p) => (p.id === paneId ? { ...p, instrument } : p)),
+      }));
+    },
+    [update],
+  );
 
-  const setActivePane = useCallback((paneId: string) => {
-    // Skip redundant updates: clicking inside the already-active pane must not
-    // churn state (and re-render/persist) on every mousedown.
-    update((prev) => (prev.activePane === paneId ? prev : { ...prev, activePane: paneId }));
-  }, [update]);
+  const setActivePane = useCallback(
+    (paneId: string) => {
+      // Skip redundant updates: clicking inside the already-active pane must not
+      // churn state (and re-render/persist) on every mousedown.
+      update((prev) => (prev.activePane === paneId ? prev : { ...prev, activePane: paneId }));
+    },
+    [update],
+  );
 
-  const loadInstrumentInActivePane = useCallback((instrument: Instrument) => {
-    update((prev) => ({
-      ...prev,
-      panes: prev.panes.map((p) =>
-        p.id === (prev.activePane || prev.panes[0]?.id) ? { ...p, instrument } : p,
-      ),
-    }));
-  }, [update]);
+  const loadInstrumentInActivePane = useCallback(
+    (instrument: Instrument) => {
+      update((prev) => ({
+        ...prev,
+        panes: prev.panes.map((p) =>
+          p.id === (prev.activePane || prev.panes[0]?.id) ? { ...p, instrument } : p,
+        ),
+      }));
+    },
+    [update],
+  );
 
-  return { state, setLayout, setPaneView, setPaneInstrument, setActivePane, loadInstrumentInActivePane };
+  return {
+    state,
+    setLayout,
+    setPaneView,
+    setPaneInstrument,
+    setActivePane,
+    loadInstrumentInActivePane,
+  };
 }
 
 export type WorkspaceAPI = ReturnType<typeof useWorkspaceStateCore>;

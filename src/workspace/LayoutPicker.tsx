@@ -1,16 +1,16 @@
 import type { LayoutType } from '../types';
 
 interface LayoutPickerProps {
-  current:  LayoutType;
+  current: LayoutType;
   onChange: (layout: LayoutType) => void;
 }
 
 const LAYOUTS: { id: LayoutType; icon: string; label: string }[] = [
-  { id: 'single', icon: '▣',  label: 'Single' },
+  { id: 'single', icon: '▣', label: 'Single' },
   { id: 'hsplit', icon: '⬛⬛', label: 'H-Split' },
   { id: 'vsplit', icon: '🔲', label: 'V-Split' },
-  { id: 'grid',   icon: '⊞',  label: '2×2 Grid' },
-  { id: 'tleft',  icon: '⬛|□', label: 'T-Left' },
+  { id: 'grid', icon: '⊞', label: '2×2 Grid' },
+  { id: 'tleft', icon: '⬛|□', label: 'T-Left' },
   { id: 'tright', icon: '□|⬛', label: 'T-Right' },
 ];
 

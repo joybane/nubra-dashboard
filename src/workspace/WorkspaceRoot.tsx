@@ -9,27 +9,28 @@ interface WorkspaceRootProps {
 }
 
 export default function WorkspaceRoot({ theme }: WorkspaceRootProps) {
-  const {
-    state, setPaneView, setActivePane, loadInstrumentInActivePane,
-  } = useWorkspaceState();
+  const { state, setPaneView, setActivePane, loadInstrumentInActivePane } = useWorkspaceState();
 
   const [sizes, setSizes] = useState<number[]>([50, 50]);
 
   const handleResize = useCallback((idx: number, delta: number, containerSize: number) => {
     setSizes((prev) => {
       const next = [...prev];
-      const pct  = (delta / containerSize) * 100;
-      next[idx]     = Math.max(15, next[idx] + pct);
+      const pct = (delta / containerSize) * 100;
+      next[idx] = Math.max(15, next[idx] + pct);
       next[idx + 1] = Math.max(15, next[idx + 1] - pct);
       return next;
     });
   }, []);
 
-  const navigateToChart = useCallback((paneId: string) => (inst: Instrument) => {
-    setActivePane(paneId);
-    setPaneView(paneId, 'chart');         // switch the pane to chart view
-    loadInstrumentInActivePane(inst);
-  }, [setActivePane, setPaneView, loadInstrumentInActivePane]);
+  const navigateToChart = useCallback(
+    (paneId: string) => (inst: Instrument) => {
+      setActivePane(paneId);
+      setPaneView(paneId, 'chart'); // switch the pane to chart view
+      loadInstrumentInActivePane(inst);
+    },
+    [setActivePane, setPaneView, loadInstrumentInActivePane],
+  );
 
   const { layout, panes, activePane } = state;
 
@@ -51,16 +52,22 @@ export default function WorkspaceRoot({ theme }: WorkspaceRootProps) {
   }
 
   const divH = () => (
-    <SplitDivider direction="horizontal" onResize={(d) => {
-      const cont = document.getElementById('workspace-root');
-      handleResize(0, d, cont?.clientWidth || 800);
-    }} />
+    <SplitDivider
+      direction="horizontal"
+      onResize={(d) => {
+        const cont = document.getElementById('workspace-root');
+        handleResize(0, d, cont?.clientWidth || 800);
+      }}
+    />
   );
   const divV = () => (
-    <SplitDivider direction="vertical" onResize={(d) => {
-      const cont = document.getElementById('workspace-root');
-      handleResize(0, d, cont?.clientHeight || 600);
-    }} />
+    <SplitDivider
+      direction="vertical"
+      onResize={(d) => {
+        const cont = document.getElementById('workspace-root');
+        handleResize(0, d, cont?.clientHeight || 600);
+      }}
+    />
   );
 
   const renderLayout = () => {
@@ -70,19 +77,32 @@ export default function WorkspaceRoot({ theme }: WorkspaceRootProps) {
 
       case 'hsplit':
         return (
-          <div className="flex h-full" style={{ '--s0': `${sizes[0] || 50}`, '--s1': `${sizes[1] || 50}` } as React.CSSProperties}>
-            <div style={{ flex: `${sizes[0] || 50} 1 0` }} className="overflow-hidden min-w-0">{renderPane(0)}</div>
+          <div
+            className="flex h-full"
+            style={
+              { '--s0': `${sizes[0] || 50}`, '--s1': `${sizes[1] || 50}` } as React.CSSProperties
+            }
+          >
+            <div style={{ flex: `${sizes[0] || 50} 1 0` }} className="overflow-hidden min-w-0">
+              {renderPane(0)}
+            </div>
             {divH()}
-            <div style={{ flex: `${sizes[1] || 50} 1 0` }} className="overflow-hidden min-w-0">{renderPane(1)}</div>
+            <div style={{ flex: `${sizes[1] || 50} 1 0` }} className="overflow-hidden min-w-0">
+              {renderPane(1)}
+            </div>
           </div>
         );
 
       case 'vsplit':
         return (
           <div className="flex flex-col h-full">
-            <div style={{ flex: `${sizes[0] || 50} 1 0` }} className="overflow-hidden min-h-0">{renderPane(0)}</div>
+            <div style={{ flex: `${sizes[0] || 50} 1 0` }} className="overflow-hidden min-h-0">
+              {renderPane(0)}
+            </div>
             {divV()}
-            <div style={{ flex: `${sizes[1] || 50} 1 0` }} className="overflow-hidden min-h-0">{renderPane(1)}</div>
+            <div style={{ flex: `${sizes[1] || 50} 1 0` }} className="overflow-hidden min-h-0">
+              {renderPane(1)}
+            </div>
           </div>
         );
 
@@ -139,7 +159,7 @@ export default function WorkspaceRoot({ theme }: WorkspaceRootProps) {
             Click a pane to activate it, then search to load a symbol
           </span>
           <span className="text-[10px] text-[var(--accent)] font-medium">
-            Active: Pane {panes.findIndex(p => p.id === activePane) + 1}
+            Active: Pane {panes.findIndex((p) => p.id === activePane) + 1}
           </span>
         </div>
       )}

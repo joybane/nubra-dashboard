@@ -8,14 +8,22 @@ import type { OptionType } from './types.ts';
 // standard normal CDF via erf approximation (Abramowitz & Stegun 7.1.26)
 function normCdf(x: number): number {
   const t = 1 / (1 + 0.2316419 * Math.abs(x));
-  const d = 0.3989422804014327 * Math.exp(-x * x / 2);
-  const p = d * t * (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  const d = 0.3989422804014327 * Math.exp((-x * x) / 2);
+  const p =
+    d *
+    t *
+    (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
   return x >= 0 ? 1 - p : p;
 }
 
 /** Black-Scholes / Black-76 option delta. ivPct is the IV percentage; tYears years to expiry. */
 export function bsDelta(
-  optionType: OptionType, spot: number, strike: number, ivPct: number, tYears: number, isFutures = true,
+  optionType: OptionType,
+  spot: number,
+  strike: number,
+  ivPct: number,
+  tYears: number,
+  isFutures = true,
 ): number {
   if (!(spot > 0) || !(strike > 0) || !(ivPct > 0) || !(tYears > 0)) {
     // degenerate: fall back to moneyness sign
@@ -24,7 +32,8 @@ export function bsDelta(
   }
   const sigma = ivPct / 100;
   // Black-76 drift for Futures/Forward pricing (standard for NSE index options)
-  const d1 = (Math.log(spot / strike) + (sigma * sigma / 2) * tYears) / (sigma * Math.sqrt(tYears));
+  const d1 =
+    (Math.log(spot / strike) + ((sigma * sigma) / 2) * tYears) / (sigma * Math.sqrt(tYears));
   const cdf = normCdf(d1);
   return optionType === 'CALL' ? cdf : cdf - 1; // put delta is negative
 }
@@ -35,18 +44,23 @@ export function bsDelta(
  * to reprice a leg under each SPAN scenario shock.
  */
 export function bsPrice(
-  optionType: OptionType, spot: number, strike: number, ivPct: number, tYears: number,
+  optionType: OptionType,
+  spot: number,
+  strike: number,
+  ivPct: number,
+  tYears: number,
 ): number {
   const intrinsic = optionType === 'CALL' ? Math.max(0, spot - strike) : Math.max(0, strike - spot);
   if (!(spot > 0) || !(strike > 0) || !(ivPct > 0) || !(tYears > 0)) return intrinsic;
 
   const sigma = ivPct / 100;
   const sqrtT = sigma * Math.sqrt(tYears);
-  const d1 = (Math.log(spot / strike) + (sigma * sigma / 2) * tYears) / sqrtT;
+  const d1 = (Math.log(spot / strike) + ((sigma * sigma) / 2) * tYears) / sqrtT;
   const d2 = d1 - sqrtT;
-  const price = optionType === 'CALL'
-    ? spot * normCdf(d1) - strike * normCdf(d2)
-    : strike * normCdf(-d2) - spot * normCdf(-d1);
+  const price =
+    optionType === 'CALL'
+      ? spot * normCdf(d1) - strike * normCdf(d2)
+      : strike * normCdf(-d2) - spot * normCdf(-d1);
   // Guard against tiny negative values from the erf approximation near the boundaries.
   return Math.max(price, intrinsic, 0);
 }
@@ -58,17 +72,23 @@ export function bsPrice(
  * quoted IV rather than trusting a boundary value.
  */
 export function impliedVolPct(
-  optionType: OptionType, spot: number, strike: number, premium: number, tYears: number,
+  optionType: OptionType,
+  spot: number,
+  strike: number,
+  premium: number,
+  tYears: number,
 ): number | null {
   if (!(spot > 0) || !(strike > 0) || !(premium > 0) || !(tYears > 0)) return null;
   const intrinsic = optionType === 'CALL' ? Math.max(0, spot - strike) : Math.max(0, strike - spot);
   if (premium <= intrinsic) return null; // no time value left to imply vol from
 
-  let lo = 0.5, hi = 300; // IV percentage bounds
+  let lo = 0.5,
+    hi = 300; // IV percentage bounds
   if (bsPrice(optionType, spot, strike, hi, tYears) < premium) return null;
   for (let i = 0; i < 60; i++) {
     const mid = (lo + hi) / 2;
-    if (bsPrice(optionType, spot, strike, mid, tYears) < premium) lo = mid; else hi = mid;
+    if (bsPrice(optionType, spot, strike, mid, tYears) < premium) lo = mid;
+    else hi = mid;
   }
   const iv = (lo + hi) / 2;
   return iv > 0.6 && iv < 299 ? iv : null;
@@ -100,7 +120,7 @@ export function yearsToExpiry(date: string, hhmm: string, expiry: string): numbe
   if (days === 0) {
     // Intraday: map remaining minutes to trading day ratio
     const minsLeft = Math.max(1, totalMs / 60000);
-    return (minsLeft / 375) / 252; // 375 trading mins/day, 252 trading days/yr
+    return minsLeft / 375 / 252; // 375 trading mins/day, 252 trading days/yr
   }
 
   // Multi-day: trading day weighting

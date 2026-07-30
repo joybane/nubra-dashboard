@@ -1,4 +1,13 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState, memo, forwardRef, useImperativeHandle } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  memo,
+  forwardRef,
+  useImperativeHandle,
+} from 'react';
 import {
   createChart,
   createSeriesMarkers,
@@ -13,7 +22,7 @@ import type { PaperPosition, PaperOrder, WsMessage, OptionChainData, OptionLeg }
 import { fmtPrice, IST_OFFSET, toChartTime } from '../lib/utils';
 import { useWs } from '../hooks/useWsContext';
 import { chartFrame, isChartLive, removeChart } from '../lib/chartLifecycle';
-import { blackScholes, impliedVolatility } from '../lib/GexService';
+import { blackScholes, impliedVolatility, RISK_FREE } from '../lib/GexService';
 
 interface StrategyAnalysisViewProps {
   basketGroupId: string;
@@ -42,7 +51,12 @@ function paise(v: number | undefined | null): string {
 function fmtTime(ns: number | undefined | null): string {
   if (!ns) return '—';
   const ms = ns / 1_000_000;
-  return new Date(ms).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  return new Date(ms).toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
 }
 
 function fmtChartTime(chartTime: number): string {
@@ -75,8 +89,12 @@ function upsertGreekPoint(
 }
 function upsertBar(arr: HistBar[], bar: HistBar): void {
   const last = arr[arr.length - 1];
-  if (last && last.time === bar.time) { last.open = bar.open; last.high = bar.high; last.low = bar.low; last.close = bar.close; }
-  else if (!last || bar.time > last.time) arr.push(bar);
+  if (last && last.time === bar.time) {
+    last.open = bar.open;
+    last.high = bar.high;
+    last.low = bar.low;
+    last.close = bar.close;
+  } else if (!last || bar.time > last.time) arr.push(bar);
 }
 
 // Fill a P&L data series over the full underlying time grid (09:15 to session close).
@@ -87,7 +105,7 @@ function fillPnlToGrid(
   data: Array<{ time: any; value: number }>,
 ): Array<{ time: any; value: number }> {
   if (grid.length === 0) return data;
-  if (data.length === 0) return grid.map(t => ({ time: t as any, value: 0 }));
+  if (data.length === 0) return grid.map((t) => ({ time: t as any, value: 0 }));
 
   const valMap = new Map<number, number>();
   for (const d of data) {
@@ -122,7 +140,7 @@ function fillGreeksToGrid(
 ): Array<{ time: any; value: number }> {
   if (grid.length === 0) return [];
   const times = [...byTime.keys()].sort((a, b) => a - b);
-  if (times.length === 0) return grid.map(t => ({ time: t as any, value: 0 }));
+  if (times.length === 0) return grid.map((t) => ({ time: t as any, value: 0 }));
 
   const firstTime = times[0];
   const firstVal = (byTime.get(firstTime)![greekKey] - factor.mid) / factor.half;
@@ -155,7 +173,16 @@ function safeSetVisibleLogicalRange(chart: IChartApi | null | undefined, range: 
   }
 }
 
-const LEG_COLORS = ['#22c55e', '#ef4444', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+const LEG_COLORS = [
+  '#22c55e',
+  '#ef4444',
+  '#3b82f6',
+  '#f59e0b',
+  '#8b5cf6',
+  '#ec4899',
+  '#14b8a6',
+  '#f97316',
+];
 const CALL_LEG_COLOR = '#22c55e';
 const PUT_LEG_COLOR = '#ef4444';
 
@@ -179,13 +206,18 @@ function positionGreekSource(p: PaperPosition): 'CE' | 'PE' | null {
   return optType === 'CE' || optType === 'PE' ? optType : null;
 }
 
-function parsePositionOption(p: PaperPosition): { symbol?: string; strike?: number; optionType?: 'CE' | 'PE' } {
+function parsePositionOption(p: PaperPosition): {
+  symbol?: string;
+  strike?: number;
+  optionType?: 'CE' | 'PE';
+} {
   const explicitType = String(p.option_type || '').toUpperCase();
   const text = `${p.display_name || ''} ${p.zanskar_name || ''}`.toUpperCase();
   const optMatch = text.match(/\b(CE|PE)\b|(\d+)(CE|PE)$/);
-  const optionType = explicitType === 'CE' || explicitType === 'PE'
-    ? explicitType
-    : ((optMatch?.[1] || optMatch?.[3]) as 'CE' | 'PE' | undefined);
+  const optionType =
+    explicitType === 'CE' || explicitType === 'PE'
+      ? explicitType
+      : ((optMatch?.[1] || optMatch?.[3]) as 'CE' | 'PE' | undefined);
   const strike = Number(p.strike_price || (text.match(/(\d+(?:\.\d+)?)\s*(?:CE|PE)\b/)?.[1] ?? 0));
   const symbol = String(p.display_name || p.zanskar_name || '')
     .trim()
@@ -197,8 +229,8 @@ function parsePositionOption(p: PaperPosition): { symbol?: string; strike?: numb
 
 async function fetchStrategyMarginPaise(positions: PaperPosition[]): Promise<number> {
   const orders = positions
-    .filter(p => p.ref_id && p.qty)
-    .map(p => {
+    .filter((p) => p.ref_id && p.qty)
+    .map((p) => {
       const opt = parsePositionOption(p);
       return {
         ref_id: p.ref_id,
@@ -210,7 +242,8 @@ async function fetchStrategyMarginPaise(positions: PaperPosition[]): Promise<num
         expiry: p.expiry,
         symbol: opt.symbol,
         order_side: (p.order_side || '').includes('BUY') ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
-        order_delivery_type: p.product === 'MIS' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
+        order_delivery_type:
+          p.product === 'MIS' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
       };
     });
   if (!orders.length) return 0;
@@ -220,14 +253,33 @@ async function fetchStrategyMarginPaise(positions: PaperPosition[]): Promise<num
     body: JSON.stringify({ exchange: 'NSE', multiplier: 1, orders }),
   });
   if (!res.ok) return 0;
-  const data = await res.json() as Record<string, unknown>;
+  const data = (await res.json()) as Record<string, unknown>;
   return Number(data.total_margin ?? 0);
 }
 
-const DEFAULT_LOT_SIZES: Record<string, number> = { NIFTY: 65, BANKNIFTY: 30, FINNIFTY: 60, MIDCPNIFTY: 120, SENSEX: 20 };
-const MONTH_CODES: Record<string, string> = { '1':'01','2':'02','3':'03','4':'04','5':'05','6':'06','7':'07','8':'08','9':'09','O':'10','N':'11','D':'12' };
+const DEFAULT_LOT_SIZES: Record<string, number> = {
+  NIFTY: 65,
+  BANKNIFTY: 30,
+  FINNIFTY: 60,
+  MIDCPNIFTY: 120,
+  SENSEX: 20,
+};
+const MONTH_CODES: Record<string, string> = {
+  '1': '01',
+  '2': '02',
+  '3': '03',
+  '4': '04',
+  '5': '05',
+  '6': '06',
+  '7': '07',
+  '8': '08',
+  '9': '09',
+  O: '10',
+  N: '11',
+  D: '12',
+};
 const GREEK_SOURCES = ['net', 'CE', 'PE'] as const;
-type GreekSource = typeof GREEK_SOURCES[number];
+type GreekSource = (typeof GREEK_SOURCES)[number];
 type GreekKey = 'delta' | 'gamma' | 'theta' | 'vega';
 const GREEK_LINE_STYLES: Record<string, number> = { net: 0, CE: 2, PE: 1 };
 const GREEK_LINE_WIDTHS: Record<string, 1 | 2> = { net: 2, CE: 1, PE: 1 };
@@ -236,7 +288,6 @@ function activeGreekSource(filter: Set<string>): GreekSource {
   for (const src of GREEK_SOURCES) if (filter.has(src)) return src;
   return 'net';
 }
-
 
 function deriveUnderlying(positions: PaperPosition[]): string | null {
   for (const p of positions) {
@@ -247,37 +298,87 @@ function deriveUnderlying(positions: PaperPosition[]): string | null {
   return null;
 }
 
-interface HistBar { time: number; open: number; high: number; low: number; close: number }
+interface HistBar {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
 
-async function fetchHistorical(symbol: string, type: string, interval: string, startDate: Date, endDate: Date): Promise<HistBar[]> {
+async function fetchHistorical(
+  symbol: string,
+  type: string,
+  interval: string,
+  startDate: Date,
+  endDate: Date,
+): Promise<HistBar[]> {
   const body = {
-    query: [{
-      exchange: 'NSE', type,
-      values: [symbol],
-      fields: ['open', 'high', 'low', 'close'],
-      startDate: startDate.toISOString(),
-      endDate: endDate.toISOString(),
-      interval, intraDay: false, realTime: false,
-    }],
+    query: [
+      {
+        exchange: 'NSE',
+        type,
+        values: [symbol],
+        fields: ['open', 'high', 'low', 'close'],
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString(),
+        interval,
+        intraDay: false,
+        realTime: false,
+      },
+    ],
   };
   try {
-    const res = await fetch('/api/historical', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const data = await res.json() as { result?: Array<{ values: Array<Record<string, { open?: Array<{ts?: string; v: number}>; high?: Array<{v: number}>; low?: Array<{v: number}>; close?: Array<{v: number}> }>> }> };
+    const res = await fetch('/api/historical', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = (await res.json()) as {
+      result?: Array<{
+        values: Array<
+          Record<
+            string,
+            {
+              open?: Array<{ ts?: string; v: number }>;
+              high?: Array<{ v: number }>;
+              low?: Array<{ v: number }>;
+              close?: Array<{ v: number }>;
+            }
+          >
+        >;
+      }>;
+    };
     const bars: HistBar[] = [];
     for (const group of data.result || []) {
       for (const symbolMap of group.values || []) {
         for (const chart of Object.values(symbolMap)) {
-          const opens = chart.open || [], highs = chart.high || [], lows = chart.low || [], closes = chart.close || [];
+          const opens = chart.open || [],
+            highs = chart.high || [],
+            lows = chart.low || [],
+            closes = chart.close || [];
           const len = Math.min(opens.length, highs.length, lows.length, closes.length);
           for (let i = 0; i < len; i++) {
             const tsNs = opens[i]?.ts;
             if (tsNs == null) continue;
-            const oVal = opens[i]?.v, hVal = highs[i]?.v, lVal = lows[i]?.v, cVal = closes[i]?.v;
+            const oVal = opens[i]?.v,
+              hVal = highs[i]?.v,
+              lVal = lows[i]?.v,
+              cVal = closes[i]?.v;
             if (oVal == null || hVal == null || lVal == null || cVal == null) continue;
-            const o = Number(oVal) / 100, h = Number(hVal) / 100, l = Number(lVal) / 100, c = Number(cVal) / 100;
+            const o = Number(oVal) / 100,
+              h = Number(hVal) / 100,
+              l = Number(lVal) / 100,
+              c = Number(cVal) / 100;
             if (isNaN(o) || isNaN(h) || isNaN(l) || isNaN(c) || o <= 0 || c <= 0) continue;
             const t = toChartTime(BigInt(tsNs), interval) as number;
-            bars.push({ time: t, open: o, high: Math.max(h, o, l, c), low: Math.min(l, o, h, c), close: c });
+            bars.push({
+              time: t,
+              open: o,
+              high: Math.max(h, o, l, c),
+              low: Math.min(l, o, h, c),
+              close: c,
+            });
           }
         }
       }
@@ -289,7 +390,11 @@ async function fetchHistorical(symbol: string, type: string, interval: string, s
   }
 }
 
-function chartOpts(isDark: boolean, hideTimeScale: boolean = false, showLeftScale: boolean = false) {
+function chartOpts(
+  isDark: boolean,
+  hideTimeScale: boolean = false,
+  showLeftScale: boolean = false,
+) {
   return {
     autoSize: true,
     devicePixelRatio: Math.max(window.devicePixelRatio, 2),
@@ -300,13 +405,29 @@ function chartOpts(isDark: boolean, hideTimeScale: boolean = false, showLeftScal
       fontFamily: "'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif",
     },
     grid: {
-      vertLines: { color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)', style: 1 as const },
-      horzLines: { color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)', style: 1 as const },
+      vertLines: {
+        color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)',
+        style: 1 as const,
+      },
+      horzLines: {
+        color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)',
+        style: 1 as const,
+      },
     },
     crosshair: {
       mode: CrosshairMode.Normal,
-      vertLine: { color: isDark ? '#4b5563' : '#9ca3af', width: 1 as const, style: 2 as const, labelBackgroundColor: isDark ? '#22262b' : '#e8ecf5' },
-      horzLine: { color: isDark ? '#3b82f6' : '#2563eb', width: 1 as const, style: 2 as const, labelBackgroundColor: '#2563eb' },
+      vertLine: {
+        color: isDark ? '#4b5563' : '#9ca3af',
+        width: 1 as const,
+        style: 2 as const,
+        labelBackgroundColor: isDark ? '#22262b' : '#e8ecf5',
+      },
+      horzLine: {
+        color: isDark ? '#3b82f6' : '#2563eb',
+        width: 1 as const,
+        style: 2 as const,
+        labelBackgroundColor: '#2563eb',
+      },
     },
     leftPriceScale: {
       visible: showLeftScale,
@@ -335,7 +456,10 @@ interface ChartDataCache {
   legPriceData: Map<number, Array<{ time: any; value: number }>>;
   legPnlData: Map<number, Array<{ time: any; value: number }>>;
   basketPnlData: Array<{ time: any; value: number }>;
-  legGreeksHist: Map<number, Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }>>;
+  legGreeksHist: Map<
+    number,
+    Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }>
+  >;
   pnlFrom: number;
   pnlTo: number;
   sessionOpen: number;
@@ -353,8 +477,13 @@ interface SnapshotData {
     legPriceData: Array<[number, Array<{ time: number; value: number }>]>;
     legPnlData: Array<[number, Array<{ time: number; value: number }>]>;
     basketPnlData: Array<{ time: number; value: number }>;
-    legGreeksHist: Array<[number, Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }>]>;
-    pnlFrom: number; pnlTo: number; sessionOpen: number; sessionClose: number;
+    legGreeksHist: Array<
+      [number, Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }>]
+    >;
+    pnlFrom: number;
+    pnlTo: number;
+    sessionOpen: number;
+    sessionClose: number;
   };
 }
 
@@ -364,19 +493,42 @@ function istDateFromNs(ns: number): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
 
-const GREEK_COLORS: Record<string, string> = { delta: '#3b82f6', gamma: '#a78bfa', theta: '#22c55e', vega: '#f59e0b' };
+const GREEK_COLORS: Record<string, string> = {
+  delta: '#3b82f6',
+  gamma: '#a78bfa',
+  theta: '#22c55e',
+  vega: '#f59e0b',
+};
 
 // Min-max normalization factor: maps a series' [min,max] to [-1,1]. True value = plotted × half + mid.
 function minMaxFactor(values: number[]): { mid: number; half: number } {
-  let min = Infinity, max = -Infinity;
-  for (const v of values) { if (v < min) min = v; if (v > max) max = v; }
+  let min = Infinity,
+    max = -Infinity;
+  for (const v of values) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
   if (min === Infinity) return { mid: 0, half: 1 };
-  const mid = (max + min) / 2, half = (max - min) / 2;
+  const mid = (max + min) / 2,
+    half = (max - min) / 2;
   return { mid, half: half > 0 ? half : 1 };
 }
-import { PriceTooltip, PnlTooltip, GreeksTooltip, PriceTooltipRef, PnlTooltipRef, GreeksTooltipRef } from './ChartTooltips';
+import {
+  PriceTooltip,
+  PnlTooltip,
+  GreeksTooltip,
+  PriceTooltipRef,
+  PnlTooltipRef,
+  GreeksTooltipRef,
+} from './ChartTooltips';
 
-export default function StrategyAnalysisView({ basketGroupId, strategyName, theme, onBack, snapshotId }: StrategyAnalysisViewProps) {
+export default function StrategyAnalysisView({
+  basketGroupId,
+  strategyName,
+  theme,
+  onBack,
+  snapshotId,
+}: StrategyAnalysisViewProps) {
   const { subscribe, subscribeChart, unsubscribeChart, subscribeOC, unsubscribeOC } = useWs();
   const isSnapshot = !!snapshotId;
 
@@ -407,8 +559,12 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   // Price-panel min-max normalization (same idea as Greeks): NIFTY and each option leg are mapped to
   // [-1,1] over their own range so they share one draggable axis and zoom together. Badges/tooltip
   // de-normalize via {mid,half}: true value = plotted × half + mid.
-  const priceFactorsRef = useRef<{ underlying: { mid: number; half: number }; legs: Map<number, { mid: number; half: number }> }>({
-    underlying: { mid: 0, half: 1 }, legs: new Map(),
+  const priceFactorsRef = useRef<{
+    underlying: { mid: number; half: number };
+    legs: Map<number, { mid: number; half: number }>;
+  }>({
+    underlying: { mid: 0, half: 1 },
+    legs: new Map(),
   });
   const [chartData, setChartData] = useState<ChartDataCache | null>(null);
   const chartDataRef = useRef<ChartDataCache | null>(null);
@@ -438,8 +594,12 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const [greeksMode, setGreeksMode] = useState<'unit' | 'lot'>('unit');
   const [greeksExpanded, setGreeksExpanded] = useState(false);
   const [greeksPopupOpen, setGreeksPopupOpen] = useState(false);
-  const [legGreeks, setLegGreeks] = useState<Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>>(new Map());
-  const [selectedGreeks, setSelectedGreeks] = useState<Set<string>>(new Set(['delta', 'gamma', 'theta', 'vega']));
+  const [legGreeks, setLegGreeks] = useState<
+    Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>
+  >(new Map());
+  const [selectedGreeks, setSelectedGreeks] = useState<Set<string>>(
+    new Set(['delta', 'gamma', 'theta', 'vega']),
+  );
   const [greeksLegFilter, setGreeksLegFilter] = useState<Set<string>>(new Set(['net']));
   const [lotSizeOverride, setLotSizeOverride] = useState<number | null>(null);
   const [editingLotSize, setEditingLotSize] = useState(false);
@@ -452,16 +612,20 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   // [-1,1] over its own data range so every greek spans the full height regardless of magnitude;
   // all 4 share one draggable axis (zoom scales them together) while badges/tooltip show true values.
   const greekFactorsRef = useRef<Record<string, { mid: number; half: number }>>({
-    delta: { mid: 0, half: 1 }, gamma: { mid: 0, half: 1 }, theta: { mid: 0, half: 1 }, vega: { mid: 0, half: 1 },
+    delta: { mid: 0, half: 1 },
+    gamma: { mid: 0, half: 1 },
+    theta: { mid: 0, half: 1 },
+    vega: { mid: 0, half: 1 },
   });
   const [greeksChartHeight, setGreeksChartHeight] = useState(150);
   const greeksTooltipRef = useRef<GreeksTooltipRef>(null);
-  const [currentGreeksBySource, setCurrentGreeksBySource] = useState<Record<GreekSource, Record<GreekKey, number>>>({
+  const [currentGreeksBySource, setCurrentGreeksBySource] = useState<
+    Record<GreekSource, Record<GreekKey, number>>
+  >({
     net: { delta: 0, gamma: 0, theta: 0, vega: 0 },
     CE: { delta: 0, gamma: 0, theta: 0, vega: 0 },
     PE: { delta: 0, gamma: 0, theta: 0, vega: 0 },
   });
-
 
   // ── Chart display state ──
   const [pnlHeight, setPnlHeight] = useState(200);
@@ -488,7 +652,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const [legPriceVisibility, setLegPriceVisibility] = useState<Record<number, boolean>>({});
   const [legPnlVisibility, setLegPnlVisibility] = useState<Record<number, boolean>>({});
   // ── Derived data ──
-  const allPositions = useMemo(() => [...positions, ...closedPositions], [positions, closedPositions]);
+  const allPositions = useMemo(
+    () => [...positions, ...closedPositions],
+    [positions, closedPositions],
+  );
   allPositionsRef.current = allPositions;
   const underlying = useMemo(() => deriveUnderlying(allPositions), [allPositions]);
 
@@ -536,39 +703,50 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       let openPos: PaperPosition[] = [];
       let closedPos: PaperPosition[] = [];
       if (openRes.ok) {
-        const d = await openRes.json() as { portfolio?: { stock_positions?: PaperPosition[] } } | PaperPosition[];
+        const d = (await openRes.json()) as
+          { portfolio?: { stock_positions?: PaperPosition[] } } | PaperPosition[];
         const all = Array.isArray(d) ? d : (d.portfolio?.stock_positions ?? []);
-        openPos = all.filter(p => p.basket_group_id === basketGroupId);
-        
+        openPos = all.filter((p) => p.basket_group_id === basketGroupId);
+
         // Dynamically resolve missing expiries from the backend so Option Chain live WS works
-        const missing = openPos.filter(p => !p.expiry && p.zanskar_name && /CE|PE$/.test(p.zanskar_name) && !expiryCacheRef.current.has(p.zanskar_name));
+        const missing = openPos.filter(
+          (p) =>
+            !p.expiry &&
+            p.zanskar_name &&
+            /CE|PE$/.test(p.zanskar_name) &&
+            !expiryCacheRef.current.has(p.zanskar_name),
+        );
         if (missing.length > 0) {
-          await Promise.all(missing.map(async p => {
-            try {
-              const res = await fetch(`/api/instruments/search?q=${encodeURIComponent(p.zanskar_name!)}&limit=1`);
-              const searchData = await res.json() as { results: any[] };
-              const match = searchData.results?.[0];
-              if (match?.expiry) expiryCacheRef.current.set(p.zanskar_name!, match.expiry);
-            } catch (e) {}
-          }));
+          await Promise.all(
+            missing.map(async (p) => {
+              try {
+                const res = await fetch(
+                  `/api/instruments/search?q=${encodeURIComponent(p.zanskar_name!)}&limit=1`,
+                );
+                const searchData = (await res.json()) as { results: any[] };
+                const match = searchData.results?.[0];
+                if (match?.expiry) expiryCacheRef.current.set(p.zanskar_name!, match.expiry);
+              } catch (e) {}
+            }),
+          );
         }
         for (const p of openPos) {
           if (!p.expiry && p.zanskar_name && expiryCacheRef.current.has(p.zanskar_name)) {
             p.expiry = expiryCacheRef.current.get(p.zanskar_name);
           }
         }
-        
+
         setPositions(openPos);
       }
       if (closedRes.ok) {
-        const d = await closedRes.json() as PaperPosition[];
-        closedPos = (Array.isArray(d) ? d : []).filter(p => p.basket_group_id === basketGroupId);
+        const d = (await closedRes.json()) as PaperPosition[];
+        closedPos = (Array.isArray(d) ? d : []).filter((p) => p.basket_group_id === basketGroupId);
         setClosedPositions(closedPos);
       }
       if (ordersRes.ok) {
-        const d = await ordersRes.json() as PaperOrder[] | { orders?: PaperOrder[] };
+        const d = (await ordersRes.json()) as PaperOrder[] | { orders?: PaperOrder[] };
         const all = Array.isArray(d) ? d : (d.orders ?? []);
-        setOrders(all.filter(o => o.basket_group_id === basketGroupId));
+        setOrders(all.filter((o) => o.basket_group_id === basketGroupId));
       }
       setDataLoaded(true);
 
@@ -583,7 +761,10 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         const parsedInfo = new Map<number, { expiry: string; strike: number; optType: string }>();
         const expiries = new Set<string>();
         for (const p of allPos) {
-          if (p.expiry) { expiries.add(String(p.expiry)); continue; }
+          if (p.expiry) {
+            expiries.add(String(p.expiry));
+            continue;
+          }
           const m = (p.zanskar_name || '').match(/^[A-Z]+(\d{2})([0-9OND])(\d{2})(\d+)(CE|PE)$/i);
           if (m) {
             const mm = MONTH_CODES[m[2].toUpperCase()] || '01';
@@ -592,12 +773,17 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
             parsedInfo.set(p.ref_id, { expiry, strike: Number(m[4]), optType: m[5].toUpperCase() });
           }
         }
-        const refIds = new Set(allPos.map(p => p.ref_id));
-        const greekUpdates = new Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>();
+        const refIds = new Set(allPos.map((p) => p.ref_id));
+        const greekUpdates = new Map<
+          number,
+          { delta: number; gamma: number; theta: number; vega: number; iv: number }
+        >();
 
         let chainSpotPrice = 0;
-        const ocFetches = [...expiries].map(expiry =>
-          fetch(`/api/optionchain/${ul}?expiry=${expiry}`).then(r => r.ok ? r.json() : null).catch(() => null)
+        const ocFetches = [...expiries].map((expiry) =>
+          fetch(`/api/optionchain/${ul}?expiry=${expiry}`)
+            .then((r) => (r.ok ? r.json() : null))
+            .catch(() => null),
         );
         const ocResults = await Promise.all(ocFetches);
         for (const data of ocResults) {
@@ -609,8 +795,11 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
             const refId = Number(item.ref_id ?? 0);
             if (!refId || !refIds.has(refId)) continue;
             greekUpdates.set(refId, {
-              delta: Number(item.delta ?? 0), gamma: Number(item.gamma ?? 0),
-              theta: Number(item.theta ?? 0), vega: Number(item.vega ?? 0), iv: Number(item.iv ?? 0),
+              delta: Number(item.delta ?? 0),
+              gamma: Number(item.gamma ?? 0),
+              theta: Number(item.theta ?? 0),
+              vega: Number(item.vega ?? 0),
+              iv: Number(item.iv ?? 0),
             });
           }
         }
@@ -622,8 +811,15 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
             try {
               const priceRes = await fetch(`/api/optionchain/${ul}/price`);
               if (priceRes.ok) {
-                const priceData = await priceRes.json() as Record<string, unknown>;
-                spotPrice = Number(priceData.ltp ?? priceData.last_traded_price ?? priceData.currentprice ?? priceData.cp ?? 0) / 100;
+                const priceData = (await priceRes.json()) as Record<string, unknown>;
+                spotPrice =
+                  Number(
+                    priceData.ltp ??
+                      priceData.last_traded_price ??
+                      priceData.currentprice ??
+                      priceData.cp ??
+                      0,
+                  ) / 100;
               }
             } catch {}
           }
@@ -635,36 +831,60 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
               let optType = parsed?.optType || '';
               if (!strike || (optType !== 'CE' && optType !== 'PE')) {
                 const dm = (p.display_name || '').match(/(\d+)\s*(CE|PE)/i);
-                if (dm) { strike = strike || Number(dm[1]); optType = optType || dm[2].toUpperCase(); }
+                if (dm) {
+                  strike = strike || Number(dm[1]);
+                  optType = optType || dm[2].toUpperCase();
+                }
               }
               if (!strike || (optType !== 'CE' && optType !== 'PE')) continue;
               const expiryStr = parsed?.expiry;
               const daysToExpiry = expiryStr
-                ? Math.max(0, (new Date(expiryStr.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')).getTime() - Date.now()) / (1000 * 86400))
+                ? Math.max(
+                    0,
+                    (new Date(expiryStr.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')).getTime() -
+                      Date.now()) /
+                      (1000 * 86400),
+                  )
                 : 1;
               const T = Math.max(daysToExpiry / 365, 1 / (365 * 24));
               const ltp = (p.last_traded_price || p.avg_price || 0) / 100;
-              let iv = ltp > 0 ? impliedVolatility(ltp, spotPrice, strike, T, 0.07, optType as 'CE' | 'PE') : 0;
+              // blackScholes runs Black-76, which prices off the FORWARD. Spot is used as the
+              // forward proxy deliberately: there is no CE/PE pair here to imply a forward
+              // from, and measured against a live NIFTY chain spot lands ~0.79 vol points from
+              // the broker's own IV while spot·e^{rT} lands ~1.33 — NIFTY's basis is negative,
+              // so compounding at +r moves the forward the wrong way. See forwardFromParity.
+              let iv =
+                ltp > 0
+                  ? impliedVolatility(ltp, spotPrice, strike, T, RISK_FREE, optType as 'CE' | 'PE')
+                  : 0;
               if (iv <= 0 || !isFinite(iv)) iv = 0.2;
-              const g = blackScholes(spotPrice, strike, T, 0.07, iv, optType as 'CE' | 'PE');
-              greekUpdates.set(p.ref_id, { delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega, iv });
+              const g = blackScholes(spotPrice, strike, T, RISK_FREE, iv, optType as 'CE' | 'PE');
+              greekUpdates.set(p.ref_id, {
+                delta: g.delta,
+                gamma: g.gamma,
+                theta: g.theta,
+                vega: g.vega,
+                iv,
+              });
             }
           }
         }
 
         if (greekUpdates.size > 0) {
-          setLegGreeks(prev => {
+          setLegGreeks((prev) => {
             const next = new Map(prev);
             for (const [k, v] of greekUpdates) next.set(k, v);
             return next;
           });
         }
       }
-    } catch (e) { console.warn('[StrategyAnalysis] fetch failed:', e); }
+    } catch (e) {
+      console.warn('[StrategyAnalysis] fetch failed:', e);
+    }
   }, [basketGroupId]);
 
   useEffect(() => {
-    if (isSnapshot) return;            // frozen snapshot → no live polling
+    if (isSnapshot) return; // frozen snapshot → no live polling
     fetchData();
     const t = setInterval(fetchData, 3000);
     return () => clearInterval(t);
@@ -674,7 +894,9 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   useEffect(() => {
     if (isSnapshot || !underlying) return;
     subscribeChart({ indexes: [underlying] }, '1m', 'NSE');
-    return () => { unsubscribeChart({ indexes: [underlying] }, '1m', 'NSE'); };
+    return () => {
+      unsubscribeChart({ indexes: [underlying] }, '1m', 'NSE');
+    };
   }, [underlying, subscribeChart, unsubscribeChart, isSnapshot]);
 
   // ── Subscribe option chain for strategy legs (ensures live ticks flow) ──
@@ -708,14 +930,18 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     const isDark = theme === 'dark';
     const chart = createChart(priceChartContainerRef.current, chartOpts(isDark, false, true));
     priceChartRef.current = chart;
-    setChartEpoch(e => e + 1);
+    setChartEpoch((e) => e + 1);
 
     // NIFTY candles on primary right axis; option leg lines share left axis in ₹ (rupees).
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#22c55e', downColor: '#ef4444',
-      borderUpColor: '#22c55e', borderDownColor: '#ef4444',
-      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
-      priceLineVisible: true, lastValueVisible: true,
+      upColor: '#22c55e',
+      downColor: '#ef4444',
+      borderUpColor: '#22c55e',
+      borderDownColor: '#ef4444',
+      wickUpColor: '#22c55e',
+      wickDownColor: '#ef4444',
+      priceLineVisible: true,
+      lastValueVisible: true,
       title: underlying || 'Underlying',
       priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
     } as Partial<CandlestickSeriesOptions>);
@@ -727,20 +953,36 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     let cancelFit = () => {};
     const cached = chartDataRef.current;
     if (cached) {
-      candleSeries.setData(cached.underlyingBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })) as any);
+      candleSeries.setData(
+        cached.underlyingBars.map((b) => ({
+          time: b.time,
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+        })) as any,
+      );
       for (const leg of legMetasRef.current) {
         const s = chart.addSeries(LineSeries, {
-          color: leg.color, lineWidth: 2, priceScaleId: 'left',
-          title: leg.displayName, lastValueVisible: true, priceLineVisible: true,
+          color: leg.color,
+          lineWidth: 2,
+          priceScaleId: 'left',
+          title: leg.displayName,
+          lastValueVisible: true,
+          priceLineVisible: true,
           priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
         });
         seriesRef.current.legPrice.set(leg.refId, s);
         const data = cached.legPriceData.get(leg.refId);
-        if (data) s.setData(data.map(d => ({ time: d.time, value: d.value })));
+        if (data) s.setData(data.map((d) => ({ time: d.time, value: d.value })));
       }
-      try { chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } }); } catch {}
-      try { chart.priceScale('left').applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } }); } catch {}
-      cancelFit = chartFrame(chart, c => c.timeScale().fitContent());
+      try {
+        chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } });
+      } catch {}
+      try {
+        chart.priceScale('left').applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } });
+      } catch {}
+      cancelFit = chartFrame(chart, (c) => c.timeScale().fitContent());
     }
 
     return () => {
@@ -749,7 +991,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       seriesRef.current.legPrice.clear();
       priceChartRef.current = null;
       removeChart(chart);
-      setChartEpoch(e => e + 1);
+      setChartEpoch((e) => e + 1);
     };
   }, [theme, underlying, priceVisible]);
 
@@ -759,11 +1001,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     const isDark = theme === 'dark';
     const chart = createChart(pnlChartContainerRef.current, chartOpts(isDark, false, true));
     pnlChartRef.current = chart;
-    setChartEpoch(e => e + 1);
+    setChartEpoch((e) => e + 1);
 
     const basketSeries = chart.addSeries(LineSeries, {
-      color: '#ffffff', lineWidth: 3,
-      title: 'Total P&L', lastValueVisible: true, priceLineVisible: true,
+      color: '#ffffff',
+      lineWidth: 3,
+      title: 'Total P&L',
+      lastValueVisible: true,
+      priceLineVisible: true,
       priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
     });
     seriesRef.current.basketPnl = basketSeries;
@@ -771,8 +1016,11 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     // Create all leg P&L series
     for (const leg of legMetasRef.current) {
       const s = chart.addSeries(LineSeries, {
-        color: leg.color, lineWidth: 2,
-        title: leg.displayName, lastValueVisible: true, priceLineVisible: true,
+        color: leg.color,
+        lineWidth: 2,
+        title: leg.displayName,
+        lastValueVisible: true,
+        priceLineVisible: true,
         priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
       });
       seriesRef.current.legPnl.set(leg.refId, s);
@@ -787,7 +1035,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(data);
       }
       if (cached.basketPnlData.length > 0) basketSeries.setData(cached.basketPnlData);
-      cancelFit = chartFrame(chart, c => c.timeScale().fitContent());
+      cancelFit = chartFrame(chart, (c) => c.timeScale().fitContent());
     }
 
     // Crosshair '+' tooltip is driven centrally by the crosshair-sync effect (section 4).
@@ -798,72 +1046,98 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       seriesRef.current.basketPnl = null;
       pnlChartRef.current = null;
       removeChart(chart);
-      setChartEpoch(e => e + 1);
+      setChartEpoch((e) => e + 1);
     };
   }, [theme, pnlVisible]);
 
   // ── 3a. Fetch historical data (stores in state — decoupled from chart refs) ──
   useEffect(() => {
-
     if (isSnapshot || !dataLoaded || !underlying) return;
     const positions = allPositionsRef.current;
     const metas = legMetasRef.current;
 
     if (positions.length === 0 || metas.length === 0) return;
 
-    const entryTimes = positions.map(p => p.entry_time || 0).filter(t => t > 0);
-    const exitTimes = positions.map(p => p.exit_time || 0).filter(t => t > 0);
+    const entryTimes = positions.map((p) => p.entry_time || 0).filter((t) => t > 0);
+    const exitTimes = positions.map((p) => p.exit_time || 0).filter((t) => t > 0);
 
     if (entryTimes.length === 0) return;
 
     const earliestNs = Math.min(...entryTimes);
     const latestNs = exitTimes.length > 0 ? Math.max(...exitTimes) : 0;
     const entryDate = new Date(earliestNs / 1_000_000);
-    const sessionOpen = Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 3, 45, 0) / 1000 + IST_OFFSET;
-    const sessionClose = Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 10, 0, 0) / 1000 + IST_OFFSET;
+    const sessionOpen =
+      Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 3, 45, 0) /
+        1000 +
+      IST_OFFSET;
+    const sessionClose =
+      Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 10, 0, 0) /
+        1000 +
+      IST_OFFSET;
     const pnlFrom = Math.floor(earliestNs / 1_000_000_000 / 60) * 60 + IST_OFFSET;
-    const pnlTo = latestNs > 0
-      ? Math.min(Math.ceil(latestNs / 1_000_000_000 / 60) * 60 + IST_OFFSET, sessionClose)
-      : sessionClose;
-    const startDate = new Date(Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 3, 45, 0));
-    const endDate = new Date(Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 10, 0, 0));
+    const pnlTo =
+      latestNs > 0
+        ? Math.min(Math.ceil(latestNs / 1_000_000_000 / 60) * 60 + IST_OFFSET, sessionClose)
+        : sessionClose;
+    const startDate = new Date(
+      Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 3, 45, 0),
+    );
+    const endDate = new Date(
+      Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 10, 0, 0),
+    );
     const ul = underlying;
 
     let cancelled = false;
     (async () => {
-      const legFetches = metas.filter(l => l.zanskarName).map(leg => {
-        const type = leg.derivativeType === 'OPT' ? 'OPT' : leg.derivativeType === 'FUT' ? 'FUT' : 'STOCK';
-        return fetchHistorical(leg.zanskarName, type, '1m', startDate, endDate).then(bars => ({ leg, bars }));
-      });
+      const legFetches = metas
+        .filter((l) => l.zanskarName)
+        .map((leg) => {
+          const type =
+            leg.derivativeType === 'OPT' ? 'OPT' : leg.derivativeType === 'FUT' ? 'FUT' : 'STOCK';
+          return fetchHistorical(leg.zanskarName, type, '1m', startDate, endDate).then((bars) => ({
+            leg,
+            bars,
+          }));
+        });
       const [underlyingRaw, ...legResults] = await Promise.all([
         fetchHistorical(ul, 'INDEX', '1m', startDate, endDate),
         ...legFetches,
       ]);
       if (cancelled) return;
 
-
-      const underlyingBars = underlyingRaw.filter(b => b.time >= sessionOpen && b.time <= sessionClose);
+      const underlyingBars = underlyingRaw.filter(
+        (b) => b.time >= sessionOpen && b.time <= sessionClose,
+      );
       const legPriceData = new Map<number, Array<{ time: any; value: number }>>();
       const legPnlData = new Map<number, Array<{ time: any; value: number }>>();
       const pnlByTime = new Map<number, Map<number, number>>();
 
       for (const { leg, bars } of legResults) {
-        const sessionBars = bars.filter(b => b.time >= sessionOpen && b.time <= sessionClose);
+        const sessionBars = bars.filter((b) => b.time >= sessionOpen && b.time <= sessionClose);
         if (sessionBars.length === 0) continue;
-        legPriceData.set(leg.refId, sessionBars.map(b => ({ time: b.time as any, value: b.close })));
-        const pos = positions.find(p => p.ref_id === leg.refId);
+        legPriceData.set(
+          leg.refId,
+          sessionBars.map((b) => ({ time: b.time as any, value: b.close })),
+        );
+        const pos = positions.find((p) => p.ref_id === leg.refId);
         if (pos) {
           const side = (pos.order_side || '').includes('BUY') ? 1 : -1;
           const avgPrice = (pos.avg_price || 0) / 100;
           const qty = pos.qty || 0;
           // For a leg closed during the session, freeze P&L at its realized value after exit instead of
           // continuing to mark it to market (keeps the curve + basket total consistent with the live tip).
-          const exitChartTime = pos.exit_time ? Math.floor(pos.exit_time / 1_000_000_000 / 60) * 60 + IST_OFFSET : 0;
-          const realizedPnl = pos.exit_price != null ? side * (pos.exit_price / 100 - avgPrice) * qty : 0;
-          const pnlBars = sessionBars.filter(b => b.time >= pnlFrom && b.time <= pnlTo);
-          const legPnlPoints = pnlBars.map(b => ({
+          const exitChartTime = pos.exit_time
+            ? Math.floor(pos.exit_time / 1_000_000_000 / 60) * 60 + IST_OFFSET
+            : 0;
+          const realizedPnl =
+            pos.exit_price != null ? side * (pos.exit_price / 100 - avgPrice) * qty : 0;
+          const pnlBars = sessionBars.filter((b) => b.time >= pnlFrom && b.time <= pnlTo);
+          const legPnlPoints = pnlBars.map((b) => ({
             time: b.time as any,
-            value: exitChartTime > 0 && b.time > exitChartTime ? realizedPnl : side * (b.close - avgPrice) * qty,
+            value:
+              exitChartTime > 0 && b.time > exitChartTime
+                ? realizedPnl
+                : side * (b.close - avgPrice) * qty,
           }));
           legPnlData.set(leg.refId, legPnlPoints);
           for (const pt of legPnlPoints) {
@@ -884,23 +1158,58 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
 
       // Fetch historical Greeks for each leg
-      const legGreeksHist = new Map<number, Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }>>();
-      const greekSymbols = metas.filter(l => l.zanskarName && l.derivativeType === 'OPT').map(l => l.zanskarName);
+      const legGreeksHist = new Map<
+        number,
+        Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }>
+      >();
+      const greekSymbols = metas
+        .filter((l) => l.zanskarName && l.derivativeType === 'OPT')
+        .map((l) => l.zanskarName);
       if (greekSymbols.length > 0) {
         try {
           const gRes = await fetch('/api/historical', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: [{ exchange: 'NSE', type: 'OPT', values: greekSymbols, fields: ['delta', 'gamma', 'theta', 'vega'], startDate: startDate.toISOString(), endDate: endDate.toISOString(), interval: '1m', intraDay: false, realTime: false }] }),
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: [
+                {
+                  exchange: 'NSE',
+                  type: 'OPT',
+                  values: greekSymbols,
+                  fields: ['delta', 'gamma', 'theta', 'vega'],
+                  startDate: startDate.toISOString(),
+                  endDate: endDate.toISOString(),
+                  interval: '1m',
+                  intraDay: false,
+                  realTime: false,
+                },
+              ],
+            }),
           });
           if (gRes.ok) {
-            const gData = await gRes.json() as { result?: Array<{ values: Array<Record<string, Record<string, Array<{ ts: number | string; v: number }>>>> }> };
+            const gData = (await gRes.json()) as {
+              result?: Array<{
+                values: Array<
+                  Record<string, Record<string, Array<{ ts: number | string; v: number }>>>
+                >;
+              }>;
+            };
             for (const group of gData.result || []) {
               for (const symbolMap of group.values || []) {
                 for (const [symName, fields] of Object.entries(symbolMap)) {
-                  const meta = metas.find(l => l.zanskarName === symName);
+                  const meta = metas.find((l) => l.zanskarName === symName);
                   if (!meta || !fields.delta?.length) continue;
-                  const points: Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }> = [];
-                  const dArr = fields.delta || [], gArr = fields.gamma || [], tArr = fields.theta || [], vArr = fields.vega || [];
+                  const points: Array<{
+                    time: number;
+                    delta: number;
+                    gamma: number;
+                    theta: number;
+                    vega: number;
+                  }> = [];
+                  const dArr = fields.delta || [],
+                    gArr = fields.gamma || [],
+                    tArr = fields.theta || [],
+                    vArr = fields.vega || [];
                   for (let i = 0; i < dArr.length; i++) {
                     const rawTs = dArr[i].ts;
                     let t = 0;
@@ -910,21 +1219,41 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
                       t = toChartTime(BigInt(String(rawTs)), '1m') as number;
                     }
                     if (t < sessionOpen || t > sessionClose) continue;
-                    points.push({ time: t, delta: dArr[i].v, gamma: gArr[i]?.v || 0, theta: tArr[i]?.v || 0, vega: vArr[i]?.v || 0 });
+                    points.push({
+                      time: t,
+                      delta: dArr[i].v,
+                      gamma: gArr[i]?.v || 0,
+                      theta: tArr[i]?.v || 0,
+                      vega: vArr[i]?.v || 0,
+                    });
                   }
                   if (points.length > 0) legGreeksHist.set(meta.refId, points);
                 }
               }
             }
           }
-        } catch (e) { console.warn('[StrategyAnalysis] Greeks historical fetch failed:', e); }
+        } catch (e) {
+          console.warn('[StrategyAnalysis] Greeks historical fetch failed:', e);
+        }
       }
 
       if (!cancelled) {
-        setChartData({ underlyingBars, legPriceData, legPnlData, basketPnlData, legGreeksHist, pnlFrom, pnlTo, sessionOpen, sessionClose });
+        setChartData({
+          underlyingBars,
+          legPriceData,
+          legPnlData,
+          basketPnlData,
+          legGreeksHist,
+          pnlFrom,
+          pnlTo,
+          sessionOpen,
+          sessionClose,
+        });
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [dataLoaded, underlying, isSnapshot]);
 
   // ── 3a-snapshot. Load a frozen saved snapshot ──
@@ -935,7 +1264,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       try {
         const res = await fetch(`/paper/strategy/snapshot/${snapshotId}`);
         if (!res.ok) return;
-        const snap = await res.json() as { data?: SnapshotData };
+        const snap = (await res.json()) as { data?: SnapshotData };
         const d = snap?.data;
         if (cancelled || !d?.chart) return;
         setPositions(d.positions || []);
@@ -947,20 +1276,37 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           legPnlData: new Map(c.legPnlData || []),
           basketPnlData: c.basketPnlData || [],
           legGreeksHist: new Map(c.legGreeksHist || []),
-          pnlFrom: c.pnlFrom, pnlTo: c.pnlTo, sessionOpen: c.sessionOpen, sessionClose: c.sessionClose,
+          pnlFrom: c.pnlFrom,
+          pnlTo: c.pnlTo,
+          sessionOpen: c.sessionOpen,
+          sessionClose: c.sessionClose,
         };
-        const g = new Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>();
+        const g = new Map<
+          number,
+          { delta: number; gamma: number; theta: number; vega: number; iv: number }
+        >();
         for (const [refId, pts] of cache.legGreeksHist) {
           const last = pts[pts.length - 1];
-          if (last) g.set(refId, { delta: last.delta, gamma: last.gamma, theta: last.theta, vega: last.vega, iv: 0 });
+          if (last)
+            g.set(refId, {
+              delta: last.delta,
+              gamma: last.gamma,
+              theta: last.theta,
+              vega: last.vega,
+              iv: 0,
+            });
         }
         if (g.size > 0) setLegGreeks(g);
         greeksFetchedRef.current = true;
         setDataLoaded(true);
         setChartData(cache);
-      } catch (e) { console.warn('[StrategyAnalysis] snapshot load failed:', e); }
+      } catch (e) {
+        console.warn('[StrategyAnalysis] snapshot load failed:', e);
+      }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, [snapshotId]);
 
   // ── 3b. Apply fetched data to existing charts ──
@@ -970,50 +1316,77 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     const priceChart = priceChartRef.current;
     if (priceChart && seriesRef.current.underlying) {
       let savedRange: any = null;
-      try { savedRange = priceChart.timeScale().getVisibleLogicalRange(); } catch {}
+      try {
+        savedRange = priceChart.timeScale().getVisibleLogicalRange();
+      } catch {}
 
-      seriesRef.current.underlying.setData(chartData.underlyingBars.map(b => ({ time: b.time, open: b.open, high: b.high, low: b.low, close: b.close })) as any);
+      seriesRef.current.underlying.setData(
+        chartData.underlyingBars.map((b) => ({
+          time: b.time,
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+        })) as any,
+      );
       for (const leg of legMetasRef.current) {
         if (!seriesRef.current.legPrice.has(leg.refId)) {
           const s = priceChart.addSeries(LineSeries, {
-            color: leg.color, lineWidth: 2, priceScaleId: 'left',
-            title: leg.displayName, lastValueVisible: true, priceLineVisible: true,
+            color: leg.color,
+            lineWidth: 2,
+            priceScaleId: 'left',
+            title: leg.displayName,
+            lastValueVisible: true,
+            priceLineVisible: true,
             priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
           seriesRef.current.legPrice.set(leg.refId, s);
         }
         const data = chartData.legPriceData.get(leg.refId);
-        if (data) seriesRef.current.legPrice.get(leg.refId)?.setData(data.map(d => ({ time: d.time, value: d.value })));
+        if (data)
+          seriesRef.current.legPrice
+            .get(leg.refId)
+            ?.setData(data.map((d) => ({ time: d.time, value: d.value })));
       }
-      try { priceChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } }); } catch {}
-      try { priceChart.priceScale('left').applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } }); } catch {}
+      try {
+        priceChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } });
+      } catch {}
+      try {
+        priceChart.priceScale('left').applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } });
+      } catch {}
 
       if (savedRange) {
-        try { priceChart.timeScale().setVisibleLogicalRange(savedRange); } catch {}
+        try {
+          priceChart.timeScale().setVisibleLogicalRange(savedRange);
+        } catch {}
       } else if (!hasInitialFittedRef.current) {
         // The chart belongs to the create-effect above, so there is no canceller to
         // hold here — chartFrame's liveness check is what covers it being torn down
         // (theme flip, pane toggle) before this frame lands.
-        chartFrame(priceChart, c => c.timeScale().fitContent());
+        chartFrame(priceChart, (c) => c.timeScale().fitContent());
       }
     }
 
     // Shared full-session grid
-    const grid = chartData.underlyingBars.map(b => b.time as number);
+    const grid = chartData.underlyingBars.map((b) => b.time as number);
 
     const pnlChart = pnlChartRef.current;
     if (pnlChart) {
       for (const leg of legMetasRef.current) {
         if (!seriesRef.current.legPnl.has(leg.refId)) {
           const s = pnlChart.addSeries(LineSeries, {
-            color: leg.color, lineWidth: 2,
-            title: leg.displayName, lastValueVisible: true, priceLineVisible: true,
+            color: leg.color,
+            lineWidth: 2,
+            title: leg.displayName,
+            lastValueVisible: true,
+            priceLineVisible: true,
             priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
           seriesRef.current.legPnl.set(leg.refId, s);
         }
         const data = chartData.legPnlData.get(leg.refId);
-        if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(fillPnlToGrid(grid, data) as any);
+        if (data)
+          seriesRef.current.legPnl.get(leg.refId)?.setData(fillPnlToGrid(grid, data) as any);
       }
       if (chartData.basketPnlData.length > 0) {
         seriesRef.current.basketPnl?.setData(fillPnlToGrid(grid, chartData.basketPnlData) as any);
@@ -1046,8 +1419,12 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     const hoverCleanups: Array<() => void> = [];
     for (const [el, chart] of hoverTargets) {
       if (!el || !chart) continue;
-      const onEnter = () => { hoveredChartRef.current = chart; };
-      const onLeave = () => { if (hoveredChartRef.current === chart) hoveredChartRef.current = null; };
+      const onEnter = () => {
+        hoveredChartRef.current = chart;
+      };
+      const onLeave = () => {
+        if (hoveredChartRef.current === chart) hoveredChartRef.current = null;
+      };
       el.addEventListener('mouseenter', onEnter);
       el.addEventListener('mouseleave', onLeave);
       hoverCleanups.push(() => {
@@ -1079,13 +1456,18 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           for (const target of charts) {
             if (target !== c) safeSetVisibleLogicalRange(target, range);
           }
-        } catch (e) {} finally {
+        } catch (e) {
+        } finally {
           isSyncingRange = false;
         }
       };
       try {
         c.timeScale().subscribeVisibleLogicalRangeChange(onRangeChange);
-        unsubs.push(() => { try { c.timeScale().unsubscribeVisibleLogicalRangeChange(onRangeChange); } catch (e) {} });
+        unsubs.push(() => {
+          try {
+            c.timeScale().unsubscribeVisibleLogicalRangeChange(onRangeChange);
+          } catch (e) {}
+        });
       } catch (e) {}
     }
 
@@ -1093,14 +1475,23 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     // three tooltips (data + position + visibility) and pushes the crosshair onto the
     // other panes with real in-range values. No shared re-entrancy flag — programmatic
     // crosshair echoes are recognised by the (point === undefined, time !== undefined) branch.
-    const findLatest = <T extends { time: any }>(arr: T[] | undefined, targetTime: number): T | undefined => {
+    const findLatest = <T extends { time: any }>(
+      arr: T[] | undefined,
+      targetTime: number,
+    ): T | undefined => {
       if (!arr || arr.length === 0) return undefined;
-      let l = 0, r = arr.length - 1;
+      let l = 0,
+        r = arr.length - 1;
       let res: T | undefined = undefined;
       while (l <= r) {
         const m = (l + r) >> 1;
         const time = arr[m].time as number;
-        if (time <= targetTime) { res = arr[m]; l = m + 1; } else { r = m - 1; }
+        if (time <= targetTime) {
+          res = arr[m];
+          l = m + 1;
+        } else {
+          r = m - 1;
+        }
       }
       return res;
     };
@@ -1108,7 +1499,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     const activeGreekSeries = (): ISeriesApi<any> | null => {
       const g = greeksSeriesRef.current;
       if (g['net_delta']) return g['net_delta'];
-      const k = Object.keys(g).find(kk => g[kk]);
+      const k = Object.keys(g).find((kk) => g[kk]);
       return k ? g[k] : null;
     };
 
@@ -1121,18 +1512,30 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     const GAP = 24;
     const place = (
       tip: PriceTooltipRef | PnlTooltipRef | GreeksTooltipRef | null,
-      chart: IChartApi | null, containerW: number, containerH: number, x: number, activeY: number | null, isActive: boolean,
+      chart: IChartApi | null,
+      containerW: number,
+      containerH: number,
+      x: number,
+      activeY: number | null,
+      isActive: boolean,
     ) => {
       if (!tip) return;
       let xAdj = x;
-      try { xAdj = x + (chart?.priceScale('left').width() ?? 0); } catch {}
+      try {
+        xAdj = x + (chart?.priceScale('left').width() ?? 0);
+      } catch {}
       const alignLeft = xAdj > containerW * 0.5;
       const y = isActive ? Math.max(8, Math.min((activeY ?? 40) - 80, containerH - 100)) : 8;
       tip.setPosition(alignLeft ? xAdj - GAP : xAdj + GAP, y, alignLeft);
       tip.setVisibility(true);
     };
 
-    const updateAllTooltips = (t: number | null, x: number | null, activeY: number | null, activeChart: IChartApi | null) => {
+    const updateAllTooltips = (
+      t: number | null,
+      x: number | null,
+      activeY: number | null,
+      activeChart: IChartApi | null,
+    ) => {
       if (t == null || x == null) {
         priceTooltipRef.current?.setVisibility(false);
         pnlTooltipRef.current?.setVisibility(false);
@@ -1141,21 +1544,34 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       }
       const cd = chartDataRef.current;
       const tStr = fmtChartTime(t);
-      let spot = 0, totalPnl = 0, greekNorm = 0;
+      let spot = 0,
+        totalPnl = 0,
+        greekNorm = 0;
 
       if (pc) {
         let newOhlc = null;
         const legs: Array<{ name: string; color: string; value: number }> = [];
         if (cd) {
           const b = findLatest(cd.underlyingBars, t);
-          if (b) { spot = b.close; newOhlc = { o: b.open, h: b.high, l: b.low, c: b.close }; }
+          if (b) {
+            spot = b.close;
+            newOhlc = { o: b.open, h: b.high, l: b.low, c: b.close };
+          }
           for (const leg of legMetasRef.current) {
             const d = findLatest(cd.legPriceData.get(leg.refId), t);
             if (d) legs.push({ name: leg.displayName, color: leg.color, value: d.value });
           }
         }
         priceTooltipRef.current?.setData(tStr, newOhlc, legs, underlying || '');
-        place(priceTooltipRef.current, pc, priceChartContainerRef.current?.clientWidth ?? 800, priceChartContainerRef.current?.clientHeight ?? 400, x, activeY, activeChart === pc);
+        place(
+          priceTooltipRef.current,
+          pc,
+          priceChartContainerRef.current?.clientWidth ?? 800,
+          priceChartContainerRef.current?.clientHeight ?? 400,
+          x,
+          activeY,
+          activeChart === pc,
+        );
       }
 
       if (nc) {
@@ -1169,34 +1585,55 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
           }
         }
         pnlTooltipRef.current?.setData(tStr, { legs, total: totalPnl });
-        place(pnlTooltipRef.current, nc, pnlChartContainerRef.current?.clientWidth ?? 800, pnlChartContainerRef.current?.clientHeight ?? 400, x, activeY, activeChart === nc);
+        place(
+          pnlTooltipRef.current,
+          nc,
+          pnlChartContainerRef.current?.clientWidth ?? 800,
+          pnlChartContainerRef.current?.clientHeight ?? 400,
+          x,
+          activeY,
+          activeChart === nc,
+        );
       }
 
       if (gc) {
         const tv: Record<string, Record<string, number>> = {};
-        for (const src of ['net', 'CE', 'PE'] as const) tv[src] = { delta: 0, gamma: 0, theta: 0, vega: 0 };
+        for (const src of ['net', 'CE', 'PE'] as const)
+          tv[src] = { delta: 0, gamma: 0, theta: 0, vega: 0 };
         if (cd) {
           for (const leg of legMetasRef.current) {
             const pt = findLatest(cd.legGreeksHist.get(leg.refId), t);
             if (!pt) continue;
             const mult = lotSizeOverride || 1;
-            const pos = allPositionsRef.current.find(p => p.ref_id === leg.refId);
+            const pos = allPositionsRef.current.find((p) => p.ref_id === leg.refId);
             const side = pos ? (pos.order_side?.includes('BUY') ? 1 : -1) : 0;
-            const qty = pos ? (pos.qty || 0) : 0;
+            const qty = pos ? pos.qty || 0 : 0;
             const weight = greeksMode === 'lot' ? qty : side * mult;
-            const src = positionGreekSource(pos || {} as any);
-            tv.net.delta += pt.delta * weight; tv.net.gamma += pt.gamma * weight;
-            tv.net.theta += pt.theta * weight; tv.net.vega += pt.vega * weight;
+            const src = positionGreekSource(pos || ({} as any));
+            tv.net.delta += pt.delta * weight;
+            tv.net.gamma += pt.gamma * weight;
+            tv.net.theta += pt.theta * weight;
+            tv.net.vega += pt.vega * weight;
             if (src) {
-              tv[src].delta += pt.delta * weight; tv[src].gamma += pt.gamma * weight;
-              tv[src].theta += pt.theta * weight; tv[src].vega += pt.vega * weight;
+              tv[src].delta += pt.delta * weight;
+              tv[src].gamma += pt.gamma * weight;
+              tv[src].theta += pt.theta * weight;
+              tv[src].vega += pt.vega * weight;
             }
           }
         }
         greeksTooltipRef.current?.setData(tStr, tv);
         const f = greekFactorsRef.current['delta'] || { mid: 0, half: 1 };
         greekNorm = f.half ? (tv.net.delta - f.mid) / f.half : 0;
-        place(greeksTooltipRef.current, gc, greeksChartContainerRef.current?.clientWidth ?? 800, greeksChartContainerRef.current?.clientHeight ?? 400, x, activeY, activeChart === gc);
+        place(
+          greeksTooltipRef.current,
+          gc,
+          greeksChartContainerRef.current?.clientWidth ?? 800,
+          greeksChartContainerRef.current?.clientHeight ?? 400,
+          x,
+          activeY,
+          activeChart === gc,
+        );
       }
 
       return { spot, totalPnl, greekNorm };
@@ -1220,9 +1657,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
               // crosshair onto it queues a paint that throws a frame later.
               if (c === sourceChart || !isChartLive(c)) continue;
               try {
-                if (c === pc && seriesRef.current.underlying) c.setCrosshairPosition(res.spot, t as any, seriesRef.current.underlying);
-                else if (c === nc && seriesRef.current.basketPnl) c.setCrosshairPosition(res.totalPnl, t as any, seriesRef.current.basketPnl);
-                else if (c === gc) { const gs = activeGreekSeries(); if (gs) c.setCrosshairPosition(res.greekNorm, t as any, gs); }
+                if (c === pc && seriesRef.current.underlying)
+                  c.setCrosshairPosition(res.spot, t as any, seriesRef.current.underlying);
+                else if (c === nc && seriesRef.current.basketPnl)
+                  c.setCrosshairPosition(res.totalPnl, t as any, seriesRef.current.basketPnl);
+                else if (c === gc) {
+                  const gs = activeGreekSeries();
+                  if (gs) c.setCrosshairPosition(res.greekNorm, t as any, gs);
+                }
               } catch {}
             }
           }
@@ -1231,18 +1673,30 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         } else {
           updateAllTooltips(null, null, null, null);
           for (const c of charts) {
-            if (c !== sourceChart && isChartLive(c)) { try { c.clearCrosshairPosition(); } catch {} }
+            if (c !== sourceChart && isChartLive(c)) {
+              try {
+                c.clearCrosshairPosition();
+              } catch {}
+            }
           }
         }
       };
 
       try {
         sourceChart.subscribeCrosshairMove(onCrosshairMove);
-        unsubs.push(() => { try { sourceChart.unsubscribeCrosshairMove(onCrosshairMove); } catch {} });
+        unsubs.push(() => {
+          try {
+            sourceChart.unsubscribeCrosshairMove(onCrosshairMove);
+          } catch {}
+        });
       } catch (e) {}
     }
 
-    return () => { unsubs.forEach(u => u()); hoverCleanups.forEach(u => u()); hoveredChartRef.current = null; };
+    return () => {
+      unsubs.forEach((u) => u());
+      hoverCleanups.forEach((u) => u());
+      hoveredChartRef.current = null;
+    };
   }, [priceVisible, pnlVisible, greeksVisible, chartEpoch]);
 
   // ── 5. Resize observer & persistent layout range sync ──
@@ -1286,14 +1740,27 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     if (isSnapshot) return;
     const unsub1 = subscribe('ohlcv', (msg: WsMessage) => {
       if (msg.type !== 'ohlcv' || !underlying || !seriesRef.current.underlying) return;
-      const data = msg.data as { indexes?: Array<{ indexname?: string; timestamp?: string; open?: string; high?: string; low?: string; close?: string }> };
-      const idx = data.indexes?.find(i => (i.indexname || '').toUpperCase() === underlying.toUpperCase());
+      const data = msg.data as {
+        indexes?: Array<{
+          indexname?: string;
+          timestamp?: string;
+          open?: string;
+          high?: string;
+          low?: string;
+          close?: string;
+        }>;
+      };
+      const idx = data.indexes?.find(
+        (i) => (i.indexname || '').toUpperCase() === underlying.toUpperCase(),
+      );
       if (!idx?.timestamp) return;
       const t = Math.floor((Number(BigInt(idx.timestamp)) / 1e9 + IST_OFFSET) / 60) * 60;
       const cached = chartDataRef.current;
       if (cached && (t < cached.sessionOpen || t > cached.sessionClose)) return;
-      const o = parseFloat(idx.open || '0') / 100, h = parseFloat(idx.high || '0') / 100;
-      const l = parseFloat(idx.low || '0') / 100, c = parseFloat(idx.close || '0') / 100;
+      const o = parseFloat(idx.open || '0') / 100,
+        h = parseFloat(idx.high || '0') / 100;
+      const l = parseFloat(idx.low || '0') / 100,
+        c = parseFloat(idx.close || '0') / 100;
       seriesRef.current.underlying.update({ time: t as any, open: o, high: h, low: l, close: c });
       if (cached) upsertBar(cached.underlyingBars, { time: t, open: o, high: h, low: l, close: c });
     });
@@ -1304,7 +1771,8 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (cached) {
         if (t < cached.sessionOpen || t > cached.sessionClose) return;
         if (cached.underlyingBars.length > 0) {
-          const lastBarTime = cached.underlyingBars[cached.underlyingBars.length - 1].time as number;
+          const lastBarTime = cached.underlyingBars[cached.underlyingBars.length - 1]
+            .time as number;
           if (t < lastBarTime) t = lastBarTime;
         }
       }
@@ -1316,12 +1784,20 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (ltp == null || ltp <= 0) continue;
         seriesRef.current.legPrice.get(p.ref_id)?.update({ time: t as any, value: ltp / 100 });
         const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-        const pnl = side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
+        const pnl = (side * (ltp - (p.avg_price || 0)) * (p.qty || 0)) / 100;
         seriesRef.current.legPnl.get(p.ref_id)?.update({ time: t as any, value: pnl });
         if (cached) {
-          let pa = cached.legPriceData.get(p.ref_id); if (!pa) { pa = []; cached.legPriceData.set(p.ref_id, pa); }
+          let pa = cached.legPriceData.get(p.ref_id);
+          if (!pa) {
+            pa = [];
+            cached.legPriceData.set(p.ref_id, pa);
+          }
           upsertPoint(pa, t, ltp / 100);
-          let na = cached.legPnlData.get(p.ref_id); if (!na) { na = []; cached.legPnlData.set(p.ref_id, na); }
+          let na = cached.legPnlData.get(p.ref_id);
+          if (!na) {
+            na = [];
+            cached.legPnlData.set(p.ref_id, na);
+          }
           upsertPoint(na, t, pnl);
         }
       }
@@ -1329,13 +1805,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       let totalPnl = 0;
       for (const p of closedPositionsRef.current) {
         const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-        if (p.exit_price != null) totalPnl += side * (p.exit_price - (p.avg_price || 0)) * (p.qty || 0) / 100;
+        if (p.exit_price != null)
+          totalPnl += (side * (p.exit_price - (p.avg_price || 0)) * (p.qty || 0)) / 100;
       }
       for (const p of positionsRef.current) {
         const ltp = lastLtpRef.current.get(p.ref_id) ?? p.last_traded_price;
         if (ltp == null || ltp <= 0) continue;
         const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-        totalPnl += side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
+        totalPnl += (side * (ltp - (p.avg_price || 0)) * (p.qty || 0)) / 100;
       }
       if (positionsRef.current.length > 0 && seriesRef.current.basketPnl) {
         seriesRef.current.basketPnl.update({ time: t as any, value: totalPnl });
@@ -1347,16 +1824,21 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (msg.type !== 'position_ltp') return;
       const updates = msg.data as { ref_id: number; ltp: number }[];
       if (!updates?.length) return;
-      const ids = new Set(positionsRef.current.map(p => p.ref_id));
+      const ids = new Set(positionsRef.current.map((p) => p.ref_id));
       const ltpMap = new Map<number, number>();
-      for (const u of updates) { if (ids.has(u.ref_id) && u.ltp > 0) ltpMap.set(u.ref_id, u.ltp); }
+      for (const u of updates) {
+        if (ids.has(u.ref_id) && u.ltp > 0) ltpMap.set(u.ref_id, u.ltp);
+      }
       if (ltpMap.size > 0) processLtp(ltpMap);
     });
 
     const unsub3 = subscribe('option_chain', (msg: WsMessage) => {
       if (msg.type !== 'option_chain') return;
-      const data = (msg as any).data as { ce?: Array<Record<string, unknown>>; pe?: Array<Record<string, unknown>> };
-      const ids = new Set(positionsRef.current.map(p => p.ref_id));
+      const data = (msg as any).data as {
+        ce?: Array<Record<string, unknown>>;
+        pe?: Array<Record<string, unknown>>;
+      };
+      const ids = new Set(positionsRef.current.map((p) => p.ref_id));
       const ltpMap = new Map<number, number>();
       for (const item of [...(data.ce || []), ...(data.pe || [])]) {
         const refId = Number(item.ref_id ?? item.refId ?? 0);
@@ -1366,7 +1848,11 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (ltpMap.size > 0) processLtp(ltpMap);
     });
 
-    return () => { unsub1(); unsub2(); unsub3(); };
+    return () => {
+      unsub1();
+      unsub2();
+      unsub3();
+    };
   }, [subscribe, underlying, isSnapshot]);
 
   // ── 6b. Polling fallback ──
@@ -1390,13 +1876,21 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       seriesRef.current.legPrice.get(p.ref_id)?.update({ time: t as any, value: ltp / 100 });
 
       const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-      const pnl = side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
+      const pnl = (side * (ltp - (p.avg_price || 0)) * (p.qty || 0)) / 100;
       seriesRef.current.legPnl.get(p.ref_id)?.update({ time: t as any, value: pnl });
 
       if (cached) {
-        let pa = cached.legPriceData.get(p.ref_id); if (!pa) { pa = []; cached.legPriceData.set(p.ref_id, pa); }
+        let pa = cached.legPriceData.get(p.ref_id);
+        if (!pa) {
+          pa = [];
+          cached.legPriceData.set(p.ref_id, pa);
+        }
         upsertPoint(pa, t, ltp / 100);
-        let na = cached.legPnlData.get(p.ref_id); if (!na) { na = []; cached.legPnlData.set(p.ref_id, na); }
+        let na = cached.legPnlData.get(p.ref_id);
+        if (!na) {
+          na = [];
+          cached.legPnlData.set(p.ref_id, na);
+        }
         upsertPoint(na, t, pnl);
       }
     }
@@ -1404,13 +1898,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     let totalPnl = 0;
     for (const p of closedPositions) {
       const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-      if (p.exit_price != null) totalPnl += side * (p.exit_price - (p.avg_price || 0)) * (p.qty || 0) / 100;
+      if (p.exit_price != null)
+        totalPnl += (side * (p.exit_price - (p.avg_price || 0)) * (p.qty || 0)) / 100;
     }
     for (const p of positions) {
       const ltp = lastLtpRef.current.get(p.ref_id) ?? p.last_traded_price;
       if (!ltp || ltp <= 0) continue;
       const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-      totalPnl += side * (ltp - (p.avg_price || 0)) * (p.qty || 0) / 100;
+      totalPnl += (side * (ltp - (p.avg_price || 0)) * (p.qty || 0)) / 100;
     }
     if (seriesRef.current.basketPnl) {
       seriesRef.current.basketPnl.update({ time: t as any, value: totalPnl });
@@ -1427,11 +1922,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       if (!updates?.length) return;
       const ltpMap = new Map<number, number>();
       for (const u of updates) ltpMap.set(u.ref_id, u.ltp);
-      setPositions(prev => {
+      setPositions((prev) => {
         let changed = false;
-        const next = prev.map(p => {
+        const next = prev.map((p) => {
           const v = ltpMap.get(p.ref_id);
-          if (v != null && v !== p.last_traded_price) { changed = true; return { ...p, last_traded_price: v }; }
+          if (v != null && v !== p.last_traded_price) {
+            changed = true;
+            return { ...p, last_traded_price: v };
+          }
           return p;
         });
         return changed ? next : prev;
@@ -1448,39 +1946,76 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (refId && ltp > 0) ltpMap.set(refId, ltp);
       }
       if (ltpMap.size === 0) return;
-      setPositions(prev => {
+      setPositions((prev) => {
         let changed = false;
-        const next = prev.map(p => {
+        const next = prev.map((p) => {
           const v = ltpMap.get(p.ref_id);
-          if (v != null && v !== p.last_traded_price) { changed = true; return { ...p, last_traded_price: v }; }
+          if (v != null && v !== p.last_traded_price) {
+            changed = true;
+            return { ...p, last_traded_price: v };
+          }
           return p;
         });
         return changed ? next : prev;
       });
     });
-    return () => { unsub1(); unsub2(); };
+    return () => {
+      unsub1();
+      unsub2();
+    };
   }, [subscribe, isSnapshot]);
 
   // ── 8. Visibility toggles ──
-  useEffect(() => { seriesRef.current.underlying?.applyOptions({ visible: visibility.underlying }); }, [visibility.underlying, priceVisible]);
-  useEffect(() => { seriesRef.current.basketPnl?.applyOptions({ visible: visibility.basketPnl }); }, [visibility.basketPnl, pnlVisible]);
   useEffect(() => {
-    markersRef.current.forEach(m => { try { m.detach(); } catch {} });
+    seriesRef.current.underlying?.applyOptions({ visible: visibility.underlying });
+  }, [visibility.underlying, priceVisible]);
+  useEffect(() => {
+    seriesRef.current.basketPnl?.applyOptions({ visible: visibility.basketPnl });
+  }, [visibility.basketPnl, pnlVisible]);
+  useEffect(() => {
+    markersRef.current.forEach((m) => {
+      try {
+        m.detach();
+      } catch {}
+    });
     markersRef.current = [];
     if (!chartData || !visibility.entryMarkers) return;
     for (const p of allPositionsRef.current) {
       const series = seriesRef.current.legPrice.get(p.ref_id);
       if (!series) continue;
-      const markers: Array<{ time: any; position: 'aboveBar' | 'belowBar'; color: string; shape: 'circle'; text: string; size: number }> = [];
+      const markers: Array<{
+        time: any;
+        position: 'aboveBar' | 'belowBar';
+        color: string;
+        shape: 'circle';
+        text: string;
+        size: number;
+      }> = [];
       const entryPrice = (p.avg_price || 0) / 100;
-      const entryTime = p.entry_time ? Math.floor(p.entry_time / 1_000_000_000 / 60) * 60 + IST_OFFSET : 0;
+      const entryTime = p.entry_time
+        ? Math.floor(p.entry_time / 1_000_000_000 / 60) * 60 + IST_OFFSET
+        : 0;
       const isBuy = (p.order_side || '').includes('BUY');
       if (entryPrice > 0 && entryTime > 0) {
-        markers.push({ time: entryTime, position: 'aboveBar', color: isBuy ? '#22c55e' : '#ef4444', shape: 'circle', text: 'e', size: 1 });
+        markers.push({
+          time: entryTime,
+          position: 'aboveBar',
+          color: isBuy ? '#22c55e' : '#ef4444',
+          shape: 'circle',
+          text: 'e',
+          size: 1,
+        });
       }
       if (p.exit_price && p.exit_time) {
         const exitTime = Math.floor(p.exit_time / 1_000_000_000 / 60) * 60 + IST_OFFSET;
-        markers.push({ time: exitTime, position: 'belowBar', color: '#9ca3af', shape: 'circle', text: 'x', size: 1 });
+        markers.push({
+          time: exitTime,
+          position: 'belowBar',
+          color: '#9ca3af',
+          shape: 'circle',
+          text: 'x',
+          size: 1,
+        });
       }
       if (markers.length > 0) {
         markers.sort((a, b) => (a.time as number) - (b.time as number));
@@ -1490,12 +2025,16 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   }, [chartData, theme, visibility.entryMarkers, priceVisible]);
   useEffect(() => {
     for (const leg of legMetas) {
-      seriesRef.current.legPrice.get(leg.refId)?.applyOptions({ visible: legPriceVisibility[leg.refId] !== false });
+      seriesRef.current.legPrice
+        .get(leg.refId)
+        ?.applyOptions({ visible: legPriceVisibility[leg.refId] !== false });
     }
   }, [legPriceVisibility, legMetas, priceVisible]);
   useEffect(() => {
     for (const leg of legMetas) {
-      seriesRef.current.legPnl.get(leg.refId)?.applyOptions({ visible: legPnlVisibility[leg.refId] !== false });
+      seriesRef.current.legPnl
+        .get(leg.refId)
+        ?.applyOptions({ visible: legPnlVisibility[leg.refId] !== false });
     }
   }, [legPnlVisibility, legMetas, pnlVisible]);
 
@@ -1504,9 +2043,15 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     if (isSnapshot) return;
     const unsub = subscribe('option_chain', (msg: WsMessage) => {
       if (msg.type !== 'option_chain') return;
-      const data = (msg as any).data as { ce?: Array<Record<string, unknown>>; pe?: Array<Record<string, unknown>> };
-      const ids = new Set(allPositionsRef.current.map(p => p.ref_id));
-      const updates = new Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>();
+      const data = (msg as any).data as {
+        ce?: Array<Record<string, unknown>>;
+        pe?: Array<Record<string, unknown>>;
+      };
+      const ids = new Set(allPositionsRef.current.map((p) => p.ref_id));
+      const updates = new Map<
+        number,
+        { delta: number; gamma: number; theta: number; vega: number; iv: number }
+      >();
       for (const item of [...(data.ce || []), ...(data.pe || [])]) {
         const refId = Number(item.ref_id ?? item.refId ?? 0);
         if (!refId || !ids.has(refId)) continue;
@@ -1525,12 +2070,21 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         if (cached && t >= cached.sessionOpen && t <= cached.sessionClose) {
           for (const [refId, g] of updates) {
             let hist = cached.legGreeksHist.get(refId);
-            if (!hist) { hist = []; cached.legGreeksHist.set(refId, hist); }
-            upsertGreekPoint(hist, { time: t, delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega });
+            if (!hist) {
+              hist = [];
+              cached.legGreeksHist.set(refId, hist);
+            }
+            upsertGreekPoint(hist, {
+              time: t,
+              delta: g.delta,
+              gamma: g.gamma,
+              theta: g.theta,
+              vega: g.vega,
+            });
           }
           setChartData({ ...cached, legGreeksHist: new Map(cached.legGreeksHist) });
         }
-        setLegGreeks(prev => {
+        setLegGreeks((prev) => {
           const next = new Map(prev);
           for (const [k, v] of updates) next.set(k, v);
           return next;
@@ -1546,7 +2100,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     const isDark = theme === 'dark';
     const chart = createChart(greeksChartContainerRef.current, chartOpts(isDark, false, true));
     greeksChartRef.current = chart;
-    setChartEpoch(e => e + 1);
+    setChartEpoch((e) => e + 1);
     const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
     greeksSeriesRef.current = {};
     // All 4 greeks are min-max normalized to a shared [-1,1] range before setData (see the
@@ -1555,22 +2109,39 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     // this invisible, dataless anchor series claims that slot with plain numbers, so the axis
     // reads as a generic reference scale instead of being denormalized into one greek's units.
     // The colored last-value badges are unaffected — those use each series' own priceFormat.
-    chart.addSeries(LineSeries, {
-      priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false, visible: false,
-      priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
-    }).setData([]);
+    chart
+      .addSeries(LineSeries, {
+        priceScaleId: 'right',
+        lastValueVisible: false,
+        priceLineVisible: false,
+        visible: false,
+        priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+      })
+      .setData([]);
     for (const src of GREEK_SOURCES) {
       for (const k of greekKeys) {
         const key = `${src}_${k}`;
         const s = chart.addSeries(LineSeries, {
-          color: GREEK_COLORS[k], lineWidth: Math.max(2, GREEK_LINE_WIDTHS[src]) as any, lineStyle: GREEK_LINE_STYLES[src],
-          priceScaleId: 'right', title: src === 'net' ? k.charAt(0).toUpperCase() + k.slice(1) : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
-          lastValueVisible: true, priceLineVisible: false, visible: false,
-          priceFormat: { type: 'custom', minMove: 0.00001, formatter: (price: number) => {
-            const f = greekFactorsRef.current[k] || { mid: 0, half: 1 };
-            const v = price * f.half + f.mid;
-            return k === 'gamma' ? v.toFixed(4) : v.toFixed(2);
-          } },
+          color: GREEK_COLORS[k],
+          lineWidth: Math.max(2, GREEK_LINE_WIDTHS[src]) as any,
+          lineStyle: GREEK_LINE_STYLES[src],
+          priceScaleId: 'right',
+          title:
+            src === 'net'
+              ? k.charAt(0).toUpperCase() + k.slice(1)
+              : `${src} ${k.charAt(0).toUpperCase() + k.slice(1)}`,
+          lastValueVisible: true,
+          priceLineVisible: false,
+          visible: false,
+          priceFormat: {
+            type: 'custom',
+            minMove: 0.00001,
+            formatter: (price: number) => {
+              const f = greekFactorsRef.current[k] || { mid: 0, half: 1 };
+              const v = price * f.half + f.mid;
+              return k === 'gamma' ? v.toFixed(4) : v.toFixed(2);
+            },
+          },
         });
         greeksSeriesRef.current[key] = s;
       }
@@ -1579,14 +2150,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     // Crosshair '+' tooltip is driven centrally by the crosshair-sync effect (section 4).
     let cancelFit = () => {};
     if (!hasInitialFittedRef.current) {
-      cancelFit = chartFrame(chart, c => c.timeScale().fitContent());
+      cancelFit = chartFrame(chart, (c) => c.timeScale().fitContent());
     }
     return () => {
       cancelFit();
       greeksSeriesRef.current = {};
       greeksChartRef.current = null;
       removeChart(chart);
-      setChartEpoch(e => e + 1);
+      setChartEpoch((e) => e + 1);
     };
   }, [theme, greeksVisible, greeksLegFilter]);
 
@@ -1594,19 +2165,25 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   useEffect(() => {
     if (!chartData || !greeksChartRef.current || !greeksVisible) return;
     const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
-    const activeLotSize = lotSizeOverride ?? (underlying ? DEFAULT_LOT_SIZES[underlying] ?? 65 : 65);
+    const activeLotSize =
+      lotSizeOverride ?? (underlying ? (DEFAULT_LOT_SIZES[underlying] ?? 65) : 65);
     const multiplier = greeksMode === 'lot' ? activeLotSize : 1;
 
     const computeByTime = (positions: PaperPosition[]) => {
-      const byTime = new Map<number, { delta: number; gamma: number; theta: number; vega: number }>();
+      const byTime = new Map<
+        number,
+        { delta: number; gamma: number; theta: number; vega: number }
+      >();
       for (const p of positions) {
         const data = chartData.legGreeksHist.get(p.ref_id);
         if (!data) continue;
         const sign = (p.order_side || '').includes('BUY') ? 1 : -1;
         for (const pt of data) {
           const ex = byTime.get(pt.time) || { delta: 0, gamma: 0, theta: 0, vega: 0 };
-          ex.delta += pt.delta * sign * multiplier; ex.gamma += pt.gamma * sign * multiplier;
-          ex.theta += pt.theta * sign * multiplier; ex.vega += pt.vega * sign * multiplier;
+          ex.delta += pt.delta * sign * multiplier;
+          ex.gamma += pt.gamma * sign * multiplier;
+          ex.theta += pt.theta * sign * multiplier;
+          ex.vega += pt.vega * sign * multiplier;
           byTime.set(pt.time, ex);
         }
       }
@@ -1614,15 +2191,18 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     };
 
     const allPos = allPositionsRef.current;
-    const cePositions = allPos.filter(p => positionGreekSource(p) === 'CE');
-    const pePositions = allPos.filter(p => positionGreekSource(p) === 'PE');
-    const sourceData: Record<string, Map<number, { delta: number; gamma: number; theta: number; vega: number }>> = {
+    const cePositions = allPos.filter((p) => positionGreekSource(p) === 'CE');
+    const pePositions = allPos.filter((p) => positionGreekSource(p) === 'PE');
+    const sourceData: Record<
+      string,
+      Map<number, { delta: number; gamma: number; theta: number; vega: number }>
+    > = {
       net: computeByTime(allPos),
       CE: computeByTime(cePositions),
       PE: computeByTime(pePositions),
     };
 
-    setLegGreeks(prev => {
+    setLegGreeks((prev) => {
       const next = new Map(prev);
       for (const p of allPos) {
         const hist = chartData.legGreeksHist.get(p.ref_id);
@@ -1656,10 +2236,14 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     // so every greek spans the full height regardless of magnitude. Only selected greeks count toward
     // the range (so hiding one rescales the rest). Stored as {mid,half} for the de-normalizing formatter.
     const factors: Record<string, { mid: number; half: number }> = {
-      delta: { mid: 0, half: 1 }, gamma: { mid: 0, half: 1 }, theta: { mid: 0, half: 1 }, vega: { mid: 0, half: 1 },
+      delta: { mid: 0, half: 1 },
+      gamma: { mid: 0, half: 1 },
+      theta: { mid: 0, half: 1 },
+      vega: { mid: 0, half: 1 },
     };
     for (const k of greekKeys) {
-      let min = Infinity, max = -Infinity;
+      let min = Infinity,
+        max = -Infinity;
       for (const src of GREEK_SOURCES) {
         if (!greeksLegFilter.has(src)) continue;
         for (const v of sourceData[src].values()) {
@@ -1675,7 +2259,7 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     greekFactorsRef.current = factors;
 
     // Same full-session grid as the P&L pane so greeks time-align with the other charts (whitespace pad).
-    const grid = chartData.underlyingBars.map(b => b.time as number);
+    const grid = chartData.underlyingBars.map((b) => b.time as number);
 
     for (const src of GREEK_SOURCES) {
       const byTime = sourceData[src];
@@ -1700,60 +2284,109 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
     if (pc) {
       const r = pc.timeScale().getVisibleLogicalRange();
       if (r) {
-        try { greeksChartRef.current?.timeScale().setVisibleLogicalRange(r); } catch {}
+        try {
+          greeksChartRef.current?.timeScale().setVisibleLogicalRange(r);
+        } catch {}
       } else {
         requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
       }
     } else {
       requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
     }
-  }, [chartData, greeksMode, lotSizeOverride, selectedGreeks, greeksVisible, underlying, greeksLegFilter]);
+  }, [
+    chartData,
+    greeksMode,
+    lotSizeOverride,
+    selectedGreeks,
+    greeksVisible,
+    underlying,
+    greeksLegFilter,
+  ]);
 
-  const toggleVis = useCallback((key: string) => { setVisibility(prev => ({ ...prev, [key]: !prev[key] })); }, []);
-  const toggleLegPrice = useCallback((refId: number) => { setLegPriceVisibility(prev => ({ ...prev, [refId]: !(prev[refId] !== false) })); }, []);
-  const toggleLegPnl = useCallback((refId: number) => { setLegPnlVisibility(prev => ({ ...prev, [refId]: !(prev[refId] !== false) })); }, []);
+  const toggleVis = useCallback((key: string) => {
+    setVisibility((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+  const toggleLegPrice = useCallback((refId: number) => {
+    setLegPriceVisibility((prev) => ({ ...prev, [refId]: !(prev[refId] !== false) }));
+  }, []);
+  const toggleLegPnl = useCallback((refId: number) => {
+    setLegPnlVisibility((prev) => ({ ...prev, [refId]: !(prev[refId] !== false) }));
+  }, []);
 
   // ── Snapshot save (freeze this day's chart so it survives the historical API rolling off) ──
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const buildSnapshotPayload = useCallback((source: 'manual' | 'auto') => {
-    const cd = chartDataRef.current;
-    if (!cd) return null;
-    // Nothing reconstructable (e.g. API already rolled the contracts off) → don't overwrite a good snapshot.
-    if (cd.underlyingBars.length === 0 && cd.legPriceData.size === 0) return null;
-    const open = positionsRef.current, closed = closedPositionsRef.current;
-    const entryTimes = [...open, ...closed].map(p => p.entry_time || 0).filter(t => t > 0);
-    if (entryTimes.length === 0) return null;
-    const tradeDate = istDateFromNs(Math.min(...entryTimes));
-    const lastBasket = cd.basketPnlData.length > 0 ? cd.basketPnlData[cd.basketPnlData.length - 1].value : 0;
-    return {
-      basket_group_id: basketGroupId, trade_date: tradeDate, strategy_name: strategyName,
-      underlying, total_pnl: Math.round(lastBasket * 100), leg_count: legMetasRef.current.length, source,
-      data: {
-        version: 1, underlying, positions: open, closedPositions: closed,
-        chart: {
-          underlyingBars: cd.underlyingBars,
-          legPriceData: [...cd.legPriceData.entries()],
-          legPnlData: [...cd.legPnlData.entries()],
-          basketPnlData: cd.basketPnlData,
-          legGreeksHist: [...cd.legGreeksHist.entries()],
-          pnlFrom: cd.pnlFrom, pnlTo: cd.pnlTo, sessionOpen: cd.sessionOpen, sessionClose: cd.sessionClose,
+  const buildSnapshotPayload = useCallback(
+    (source: 'manual' | 'auto') => {
+      const cd = chartDataRef.current;
+      if (!cd) return null;
+      // Nothing reconstructable (e.g. API already rolled the contracts off) → don't overwrite a good snapshot.
+      if (cd.underlyingBars.length === 0 && cd.legPriceData.size === 0) return null;
+      const open = positionsRef.current,
+        closed = closedPositionsRef.current;
+      const entryTimes = [...open, ...closed].map((p) => p.entry_time || 0).filter((t) => t > 0);
+      if (entryTimes.length === 0) return null;
+      const tradeDate = istDateFromNs(Math.min(...entryTimes));
+      const lastBasket =
+        cd.basketPnlData.length > 0 ? cd.basketPnlData[cd.basketPnlData.length - 1].value : 0;
+      return {
+        basket_group_id: basketGroupId,
+        trade_date: tradeDate,
+        strategy_name: strategyName,
+        underlying,
+        total_pnl: Math.round(lastBasket * 100),
+        leg_count: legMetasRef.current.length,
+        source,
+        data: {
+          version: 1,
+          underlying,
+          positions: open,
+          closedPositions: closed,
+          chart: {
+            underlyingBars: cd.underlyingBars,
+            legPriceData: [...cd.legPriceData.entries()],
+            legPnlData: [...cd.legPnlData.entries()],
+            basketPnlData: cd.basketPnlData,
+            legGreeksHist: [...cd.legGreeksHist.entries()],
+            pnlFrom: cd.pnlFrom,
+            pnlTo: cd.pnlTo,
+            sessionOpen: cd.sessionOpen,
+            sessionClose: cd.sessionClose,
+          },
         },
-      },
-    };
-  }, [basketGroupId, strategyName, underlying]);
+      };
+    },
+    [basketGroupId, strategyName, underlying],
+  );
 
-  const saveSnapshot = useCallback(async (source: 'manual' | 'auto') => {
-    const payload = buildSnapshotPayload(source);
-    if (!payload) { if (source === 'manual') setSaveState('error'); return false; }
-    if (source === 'manual') setSaveState('saving');
-    try {
-      const res = await fetch('/paper/strategy/snapshot', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
-      });
-      if (source === 'manual') { setSaveState(res.ok ? 'saved' : 'error'); setTimeout(() => setSaveState('idle'), 2500); }
-      return res.ok;
-    } catch { if (source === 'manual') { setSaveState('error'); setTimeout(() => setSaveState('idle'), 2500); } return false; }
-  }, [buildSnapshotPayload]);
+  const saveSnapshot = useCallback(
+    async (source: 'manual' | 'auto') => {
+      const payload = buildSnapshotPayload(source);
+      if (!payload) {
+        if (source === 'manual') setSaveState('error');
+        return false;
+      }
+      if (source === 'manual') setSaveState('saving');
+      try {
+        const res = await fetch('/paper/strategy/snapshot', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (source === 'manual') {
+          setSaveState(res.ok ? 'saved' : 'error');
+          setTimeout(() => setSaveState('idle'), 2500);
+        }
+        return res.ok;
+      } catch {
+        if (source === 'manual') {
+          setSaveState('error');
+          setTimeout(() => setSaveState('idle'), 2500);
+        }
+        return false;
+      }
+    },
+    [buildSnapshotPayload],
+  );
 
   // Auto-upsert once when a live (non-snapshot) chart finishes building, so viewing a strategy persists it.
   const autoSavedRef = useRef(false);
@@ -1780,64 +2413,81 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   }, [chartsPopupOpen, pnlPopupOpen, greeksPopupOpen]);
 
   // ── Divider drag handlers ──
-  const onPnlDividerDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startH = pnlHeight;
-    const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
-    const dividersH = greeksVisible ? 12 : 6;
-    const maxCombined = totalH - 8 - dividersH - 80;
-    const maxPnl = greeksVisible ? Math.max(40, maxCombined - greeksChartHeight) : maxCombined;
+  const onPnlDividerDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = pnlHeight;
+      const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
+      const dividersH = greeksVisible ? 12 : 6;
+      const maxCombined = totalH - 8 - dividersH - 80;
+      const maxPnl = greeksVisible ? Math.max(40, maxCombined - greeksChartHeight) : maxCombined;
 
-    let newH = startH;
-    const onMove = (ev: MouseEvent) => {
-      newH = Math.max(40, Math.min(maxPnl, startH - (ev.clientY - startY)));
-      if (pnlChartContainerRef.current) pnlChartContainerRef.current.style.height = `${newH}px`;
-    };
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      setPnlHeight(newH);
-    };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  }, [pnlHeight, greeksChartHeight, greeksVisible]);
+      let newH = startH;
+      const onMove = (ev: MouseEvent) => {
+        newH = Math.max(40, Math.min(maxPnl, startH - (ev.clientY - startY)));
+        if (pnlChartContainerRef.current) pnlChartContainerRef.current.style.height = `${newH}px`;
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        setPnlHeight(newH);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [pnlHeight, greeksChartHeight, greeksVisible],
+  );
 
-  const onGreeksDividerDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startH = greeksChartHeight;
-    const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
-    const dividersH = greeksVisible ? 12 : 6;
-    const maxCombined = totalH - 8 - dividersH - 80;
-    const maxGreeks = Math.max(40, maxCombined - pnlHeight);
+  const onGreeksDividerDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = greeksChartHeight;
+      const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
+      const dividersH = greeksVisible ? 12 : 6;
+      const maxCombined = totalH - 8 - dividersH - 80;
+      const maxGreeks = Math.max(40, maxCombined - pnlHeight);
 
-    let newH = startH;
-    const onMove = (ev: MouseEvent) => {
-      newH = Math.max(40, Math.min(maxGreeks, startH - (ev.clientY - startY)));
-      if (greeksChartContainerRef.current) greeksChartContainerRef.current.style.height = `${newH}px`;
-    };
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      setGreeksChartHeight(newH);
-    };
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  }, [greeksChartHeight, pnlHeight, greeksVisible]);
+      let newH = startH;
+      const onMove = (ev: MouseEvent) => {
+        newH = Math.max(40, Math.min(maxGreeks, startH - (ev.clientY - startY)));
+        if (greeksChartContainerRef.current)
+          greeksChartContainerRef.current.style.height = `${newH}px`;
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        setGreeksChartHeight(newH);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [greeksChartHeight, pnlHeight, greeksVisible],
+  );
 
-  const onObDividerDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY; const startH = orderBookHeight;
-    const onMove = (ev: MouseEvent) => { setOrderBookHeight(Math.max(40, startH - (ev.clientY - startY))); };
-    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
-    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
-  }, [orderBookHeight]);
+  const onObDividerDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = orderBookHeight;
+      const onMove = (ev: MouseEvent) => {
+        setOrderBookHeight(Math.max(40, startH - (ev.clientY - startY)));
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [orderBookHeight],
+  );
 
   // ── P&L calculations ──
   function calcPnl(p: PaperPosition): number {
     const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-    return side * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0) / 100;
+    return (side * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0)) / 100;
   }
 
   const openPnl = positions.reduce((s, p) => s + calcPnl(p), 0);
@@ -1845,77 +2495,139 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
   const strategyPnl = openPnl + closedPnl;
   const strategyMargin = useMemo(() => {
     if (strategyMarginPaise > 0) return strategyMarginPaise / 100;
-    const first = allPositions.find(p => p.margin_required && p.margin_required > 0);
+    const first = allPositions.find((p) => p.margin_required && p.margin_required > 0);
     return first ? first.margin_required! / 100 : 0;
   }, [allPositions, strategyMarginPaise]);
 
   useEffect(() => {
     if (isSnapshot) return;
     const marginPositions = positions.length ? positions : allPositions;
-    if (!marginPositions.length) { setStrategyMarginPaise(0); return; }
+    if (!marginPositions.length) {
+      setStrategyMarginPaise(0);
+      return;
+    }
     let cancelled = false;
     fetchStrategyMarginPaise(marginPositions)
-      .then(total => { if (!cancelled && total > 0) setStrategyMarginPaise(total); })
-      .catch(e => console.warn('[StrategyAnalysis] margin recalculation failed:', e));
-    return () => { cancelled = true; };
+      .then((total) => {
+        if (!cancelled && total > 0) setStrategyMarginPaise(total);
+      })
+      .catch((e) => console.warn('[StrategyAnalysis] margin recalculation failed:', e));
+    return () => {
+      cancelled = true;
+    };
   }, [positions, allPositions, isSnapshot]);
   const displayPositions = posSubTab === 'open' ? positions : closedPositions;
   const effectiveObHeight = orderBookCollapsed ? 32 : orderBookHeight;
   // The first visible chart panel flexes to fill remaining space; the rest keep their fixed heights.
-  const primaryPanel = (priceVisible && 'price') || (pnlVisible && 'pnl') || (greeksVisible && 'greeks') || null;
+  const primaryPanel =
+    (priceVisible && 'price') || (pnlVisible && 'pnl') || (greeksVisible && 'greeks') || null;
 
   return (
     <div className="flex flex-col h-full bg-[var(--bg-primary)] text-[var(--text-primary)] overflow-hidden">
       {/* Consolidated ribbon: strategy info + 3 panel-toggle rectangles + total P&L */}
       <div className="h-10 shrink-0 flex items-center px-4 border-b border-[var(--border)] bg-[var(--bg-secondary)] gap-3">
-        <button onClick={onBack} className="flex items-center gap-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors">
+        <button
+          onClick={onBack}
+          className="flex items-center gap-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+        >
           <span className="text-[16px]">←</span> Back
         </button>
         <div className="w-px h-5 bg-[var(--border)]" />
         <span className="text-[13px] font-semibold text-[var(--accent)]">{strategyName}</span>
         <span className="text-[11px] text-[var(--text-muted)]">({legMetas.length} legs)</span>
-        {underlying && <span className="text-[11px] text-[var(--text-muted)] bg-[var(--bg-hover)] px-2 py-0.5 rounded">{underlying}</span>}
+        {underlying && (
+          <span className="text-[11px] text-[var(--text-muted)] bg-[var(--bg-hover)] px-2 py-0.5 rounded">
+            {underlying}
+          </span>
+        )}
         <div className="w-px h-5 bg-[var(--border)]" />
 
         {/* ── Rectangle 1: Charts (underlying + legs) ── */}
         <div ref={chartsPopupRef} className="relative flex items-stretch">
-          <button onClick={() => setPriceVisible(v => !v)}
+          <button
+            onClick={() => setPriceVisible((v) => !v)}
             className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-l text-[11px] font-semibold border border-r-0 transition-colors ${
-              priceVisible ? 'bg-[#fbbf24]/15 border-[#fbbf24]/40 text-[#fbbf24]' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)]'
-            }`}>Charts</button>
-          <button onClick={() => setChartsPopupOpen(v => !v)}
+              priceVisible
+                ? 'bg-[#fbbf24]/15 border-[#fbbf24]/40 text-[#fbbf24]'
+                : 'border-[var(--border)] bg-transparent text-[var(--text-muted)]'
+            }`}
+          >
+            Charts
+          </button>
+          <button
+            onClick={() => setChartsPopupOpen((v) => !v)}
             className={`px-1 py-0.5 rounded-r text-[11px] font-semibold border border-l-0 transition-colors ${
-              priceVisible ? 'bg-[#fbbf24]/15 border-[#fbbf24]/40 text-[#fbbf24] hover:bg-[#fbbf24]/25' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-            }`}>▾</button>
+              priceVisible
+                ? 'bg-[#fbbf24]/15 border-[#fbbf24]/40 text-[#fbbf24] hover:bg-[#fbbf24]/25'
+                : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+            }`}
+          >
+            ▾
+          </button>
           {chartsPopupOpen && (
             <div className="absolute top-full left-0 mt-1 z-50 w-[220px] bg-[var(--bg-card,var(--bg-secondary))] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden">
               <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
-                <span className="text-[11px] font-semibold text-[var(--text-primary)]">Chart Layers</span>
-                <button onClick={() => setChartsPopupOpen(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm leading-none">×</button>
+                <span className="text-[11px] font-semibold text-[var(--text-primary)]">
+                  Chart Layers
+                </span>
+                <button
+                  onClick={() => setChartsPopupOpen(false)}
+                  className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm leading-none"
+                >
+                  ×
+                </button>
               </div>
               <div className="px-3 py-2 flex flex-wrap gap-1.5">
                 {underlying && (
-                  <button onClick={() => toggleVis('underlying')}
+                  <button
+                    onClick={() => toggleVis('underlying')}
                     className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
-                      visibility.underlying ? 'border-[#fbbf24]/40 bg-[#fbbf24]/10 text-[#fbbf24]' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
-                    }`}>
-                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: visibility.underlying ? '#fbbf24' : 'transparent', border: '1px solid #fbbf24' }} />
+                      visibility.underlying
+                        ? 'border-[#fbbf24]/40 bg-[#fbbf24]/10 text-[#fbbf24]'
+                        : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
+                    }`}
+                  >
+                    <span
+                      className="w-2 h-2 rounded-full"
+                      style={{
+                        backgroundColor: visibility.underlying ? '#fbbf24' : 'transparent',
+                        border: '1px solid #fbbf24',
+                      }}
+                    />
                     {underlying}
                   </button>
                 )}
-                {legMetas.map(leg => (
-                  <button key={leg.refId} onClick={() => toggleLegPrice(leg.refId)}
+                {legMetas.map((leg) => (
+                  <button
+                    key={leg.refId}
+                    onClick={() => toggleLegPrice(leg.refId)}
                     className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
-                      legPriceVisibility[leg.refId] !== false ? 'border-white/20 bg-white/5 text-[var(--text-primary)]' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
-                    }`}>
-                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: legPriceVisibility[leg.refId] !== false ? leg.color : 'transparent', border: `1px solid ${leg.color}` }} />
+                      legPriceVisibility[leg.refId] !== false
+                        ? 'border-white/20 bg-white/5 text-[var(--text-primary)]'
+                        : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
+                    }`}
+                  >
+                    <span
+                      className="w-2 h-2 rounded-full"
+                      style={{
+                        backgroundColor:
+                          legPriceVisibility[leg.refId] !== false ? leg.color : 'transparent',
+                        border: `1px solid ${leg.color}`,
+                      }}
+                    />
                     {leg.displayName}
                   </button>
                 ))}
-                <button onClick={() => toggleVis('entryMarkers')}
+                <button
+                  onClick={() => toggleVis('entryMarkers')}
                   className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
-                    visibility.entryMarkers ? 'border-[var(--accent)]/40 bg-[var(--accent)]/10 text-[var(--accent)]' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)]'
-                  }`}>Markers (e/x)</button>
+                    visibility.entryMarkers
+                      ? 'border-[var(--accent)]/40 bg-[var(--accent)]/10 text-[var(--accent)]'
+                      : 'border-[var(--border)] bg-transparent text-[var(--text-muted)]'
+                  }`}
+                >
+                  Markers (e/x)
+                </button>
               </div>
             </div>
           )}
@@ -1923,34 +2635,75 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
         {/* ── Rectangle 2: P&L ── */}
         <div ref={pnlPopupRef} className="relative flex items-stretch">
-          <button onClick={() => setPnlVisible(v => !v)}
+          <button
+            onClick={() => setPnlVisible((v) => !v)}
             className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-l text-[11px] font-semibold border border-r-0 transition-colors ${
-              pnlVisible ? 'bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)]' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)]'
-            }`}>P&amp;L</button>
-          <button onClick={() => setPnlPopupOpen(v => !v)}
+              pnlVisible
+                ? 'bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)]'
+                : 'border-[var(--border)] bg-transparent text-[var(--text-muted)]'
+            }`}
+          >
+            P&amp;L
+          </button>
+          <button
+            onClick={() => setPnlPopupOpen((v) => !v)}
             className={`px-1 py-0.5 rounded-r text-[11px] font-semibold border border-l-0 transition-colors ${
-              pnlVisible ? 'bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)] hover:bg-[var(--accent)]/25' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-            }`}>▾</button>
+              pnlVisible
+                ? 'bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)] hover:bg-[var(--accent)]/25'
+                : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+            }`}
+          >
+            ▾
+          </button>
           {pnlPopupOpen && (
             <div className="absolute top-full left-0 mt-1 z-50 w-[220px] bg-[var(--bg-card,var(--bg-secondary))] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden">
               <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
-                <span className="text-[11px] font-semibold text-[var(--text-primary)]">P&amp;L Layers</span>
-                <button onClick={() => setPnlPopupOpen(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm leading-none">×</button>
+                <span className="text-[11px] font-semibold text-[var(--text-primary)]">
+                  P&amp;L Layers
+                </span>
+                <button
+                  onClick={() => setPnlPopupOpen(false)}
+                  className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm leading-none"
+                >
+                  ×
+                </button>
               </div>
               <div className="px-3 py-2 flex flex-wrap gap-1.5">
-                <button onClick={() => toggleVis('basketPnl')}
+                <button
+                  onClick={() => toggleVis('basketPnl')}
                   className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
-                    visibility.basketPnl ? 'border-white/40 bg-white/10 text-white' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
-                  }`}>
-                  <span className="w-2 h-2 rounded-full" style={{ backgroundColor: visibility.basketPnl ? '#ffffff' : 'transparent', border: '1px solid #ffffff' }} />
+                    visibility.basketPnl
+                      ? 'border-white/40 bg-white/10 text-white'
+                      : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
+                  }`}
+                >
+                  <span
+                    className="w-2 h-2 rounded-full"
+                    style={{
+                      backgroundColor: visibility.basketPnl ? '#ffffff' : 'transparent',
+                      border: '1px solid #ffffff',
+                    }}
+                  />
                   Total P&amp;L
                 </button>
-                {legMetas.map(leg => (
-                  <button key={leg.refId} onClick={() => toggleLegPnl(leg.refId)}
+                {legMetas.map((leg) => (
+                  <button
+                    key={leg.refId}
+                    onClick={() => toggleLegPnl(leg.refId)}
                     className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
-                      legPnlVisibility[leg.refId] !== false ? 'border-white/20 bg-white/5 text-[var(--text-primary)]' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
-                    }`}>
-                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: legPnlVisibility[leg.refId] !== false ? leg.color : 'transparent', border: `1px solid ${leg.color}` }} />
+                      legPnlVisibility[leg.refId] !== false
+                        ? 'border-white/20 bg-white/5 text-[var(--text-primary)]'
+                        : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] line-through'
+                    }`}
+                  >
+                    <span
+                      className="w-2 h-2 rounded-full"
+                      style={{
+                        backgroundColor:
+                          legPnlVisibility[leg.refId] !== false ? leg.color : 'transparent',
+                        border: `1px solid ${leg.color}`,
+                      }}
+                    />
                     {leg.displayName}
                   </button>
                 ))}
@@ -1961,133 +2714,283 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
 
         {/* ── Rectangle 3: Greeks ── */}
         <div ref={greeksPopupRef} className="relative flex items-stretch">
-          <button onClick={() => setGreeksVisible(v => !v)}
+          <button
+            onClick={() => setGreeksVisible((v) => !v)}
             className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-l text-[11px] font-semibold border border-r-0 transition-colors ${
-              greeksVisible ? 'bg-[#a78bfa]/15 border-[#a78bfa]/40 text-[#a78bfa]' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)]'
-            }`}>Greeks</button>
-          <button onClick={() => setGreeksPopupOpen(v => !v)}
+              greeksVisible
+                ? 'bg-[#a78bfa]/15 border-[#a78bfa]/40 text-[#a78bfa]'
+                : 'border-[var(--border)] bg-transparent text-[var(--text-muted)]'
+            }`}
+          >
+            Greeks
+          </button>
+          <button
+            onClick={() => setGreeksPopupOpen((v) => !v)}
             className={`px-1 py-0.5 rounded-r text-[11px] font-semibold border border-l-0 transition-colors ${
-              greeksVisible ? 'bg-[#a78bfa]/15 border-[#a78bfa]/40 text-[#a78bfa] hover:bg-[#a78bfa]/25' : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-            }`}>▾</button>
-          {greeksPopupOpen && (() => {
-            const activeLotSize = lotSizeOverride ?? (underlying ? DEFAULT_LOT_SIZES[underlying] ?? 65 : 65);
-            const multiplier = greeksMode === 'lot' ? activeLotSize : 1;
-            const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
-            const activeGreeks = greekKeys.filter(k => selectedGreeks.has(k));
-            const netGreeks = currentGreeksBySource.net;
-            const fmtG = (v: number, key: string) => key === 'gamma' ? v.toFixed(4) : v.toFixed(2);
-            const cePositions = allPositions.filter(p => positionGreekSource(p) === 'CE');
-            const pePositions = allPositions.filter(p => positionGreekSource(p) === 'PE');
-            return (
-              <div className="absolute top-full right-0 mt-1 z-50 w-[280px] bg-[var(--bg-card,var(--bg-secondary))] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden">
-                <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
-                  <span className="text-[11px] font-semibold text-[var(--text-primary)]">Greeks Settings</span>
-                  <button onClick={() => setGreeksPopupOpen(false)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm leading-none">×</button>
-                </div>
-                {/* Unit / Lot toggle */}
-                <div className="px-3 py-2 flex items-center gap-2 border-b border-[var(--border)]">
-                  <div className="flex items-center bg-[var(--bg-primary)] rounded overflow-hidden border border-[var(--border)]">
-                    <button onClick={() => setGreeksMode('unit')}
-                      className={`px-2 py-0.5 text-[10px] font-semibold transition-colors ${greeksMode === 'unit' ? 'bg-[#a78bfa]/20 text-[#a78bfa]' : 'text-[var(--text-muted)]'}`}>1 Unit</button>
-                    <button onClick={() => setGreeksMode('lot')}
-                      className={`px-2 py-0.5 text-[10px] font-semibold transition-colors ${greeksMode === 'lot' ? 'bg-[#a78bfa]/20 text-[#a78bfa]' : 'text-[var(--text-muted)]'}`}>1 Lot</button>
+              greeksVisible
+                ? 'bg-[#a78bfa]/15 border-[#a78bfa]/40 text-[#a78bfa] hover:bg-[#a78bfa]/25'
+                : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+            }`}
+          >
+            ▾
+          </button>
+          {greeksPopupOpen &&
+            (() => {
+              const activeLotSize =
+                lotSizeOverride ?? (underlying ? (DEFAULT_LOT_SIZES[underlying] ?? 65) : 65);
+              const multiplier = greeksMode === 'lot' ? activeLotSize : 1;
+              const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
+              const activeGreeks = greekKeys.filter((k) => selectedGreeks.has(k));
+              const netGreeks = currentGreeksBySource.net;
+              const fmtG = (v: number, key: string) =>
+                key === 'gamma' ? v.toFixed(4) : v.toFixed(2);
+              const cePositions = allPositions.filter((p) => positionGreekSource(p) === 'CE');
+              const pePositions = allPositions.filter((p) => positionGreekSource(p) === 'PE');
+              return (
+                <div className="absolute top-full right-0 mt-1 z-50 w-[280px] bg-[var(--bg-card,var(--bg-secondary))] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden">
+                  <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
+                    <span className="text-[11px] font-semibold text-[var(--text-primary)]">
+                      Greeks Settings
+                    </span>
+                    <button
+                      onClick={() => setGreeksPopupOpen(false)}
+                      className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm leading-none"
+                    >
+                      ×
+                    </button>
                   </div>
-                  {greeksMode === 'lot' && (
-                    <div className="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
-                      <span>Lot:</span>
-                      {editingLotSize ? (
-                        <input type="number" autoFocus defaultValue={activeLotSize}
-                          className="w-12 bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1 py-0 text-[10px] text-[var(--text-primary)] outline-none focus:border-[#a78bfa]"
-                          onBlur={(e) => { const v = parseInt(e.target.value); if (v > 0) setLotSizeOverride(v); setEditingLotSize(false); }}
-                          onKeyDown={(e) => { if (e.key === 'Enter') { const v = parseInt((e.target as HTMLInputElement).value); if (v > 0) setLotSizeOverride(v); setEditingLotSize(false); } if (e.key === 'Escape') setEditingLotSize(false); }}
-                        />
-                      ) : (
-                        <button onClick={() => setEditingLotSize(true)} className="text-[var(--text-primary)] hover:text-[#a78bfa] transition-colors underline decoration-dotted">{activeLotSize}</button>
+                  {/* Unit / Lot toggle */}
+                  <div className="px-3 py-2 flex items-center gap-2 border-b border-[var(--border)]">
+                    <div className="flex items-center bg-[var(--bg-primary)] rounded overflow-hidden border border-[var(--border)]">
+                      <button
+                        onClick={() => setGreeksMode('unit')}
+                        className={`px-2 py-0.5 text-[10px] font-semibold transition-colors ${greeksMode === 'unit' ? 'bg-[#a78bfa]/20 text-[#a78bfa]' : 'text-[var(--text-muted)]'}`}
+                      >
+                        1 Unit
+                      </button>
+                      <button
+                        onClick={() => setGreeksMode('lot')}
+                        className={`px-2 py-0.5 text-[10px] font-semibold transition-colors ${greeksMode === 'lot' ? 'bg-[#a78bfa]/20 text-[#a78bfa]' : 'text-[var(--text-muted)]'}`}
+                      >
+                        1 Lot
+                      </button>
+                    </div>
+                    {greeksMode === 'lot' && (
+                      <div className="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
+                        <span>Lot:</span>
+                        {editingLotSize ? (
+                          <input
+                            type="number"
+                            autoFocus
+                            defaultValue={activeLotSize}
+                            className="w-12 bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1 py-0 text-[10px] text-[var(--text-primary)] outline-none focus:border-[#a78bfa]"
+                            onBlur={(e) => {
+                              const v = parseInt(e.target.value);
+                              if (v > 0) setLotSizeOverride(v);
+                              setEditingLotSize(false);
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                const v = parseInt((e.target as HTMLInputElement).value);
+                                if (v > 0) setLotSizeOverride(v);
+                                setEditingLotSize(false);
+                              }
+                              if (e.key === 'Escape') setEditingLotSize(false);
+                            }}
+                          />
+                        ) : (
+                          <button
+                            onClick={() => setEditingLotSize(true)}
+                            className="text-[var(--text-primary)] hover:text-[#a78bfa] transition-colors underline decoration-dotted"
+                          >
+                            {activeLotSize}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  {/* Greek selectors */}
+                  <div className="px-3 py-2 border-b border-[var(--border)]">
+                    <div className="text-[9px] text-[var(--text-muted)] font-semibold mb-1.5">
+                      GREEKS
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {greekKeys.map((k) => (
+                        <button
+                          key={k}
+                          onClick={() =>
+                            setSelectedGreeks((prev) => {
+                              const n = new Set(prev);
+                              if (n.has(k)) n.delete(k);
+                              else n.add(k);
+                              return n;
+                            })
+                          }
+                          className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
+                            selectedGreeks.has(k)
+                              ? `border-transparent text-white`
+                              : 'border-[var(--border)] text-[var(--text-muted)]'
+                          }`}
+                          style={
+                            selectedGreeks.has(k)
+                              ? {
+                                  backgroundColor: GREEK_COLORS[k] + '33',
+                                  color: GREEK_COLORS[k],
+                                  borderColor: GREEK_COLORS[k] + '55',
+                                }
+                              : undefined
+                          }
+                        >
+                          {k.charAt(0).toUpperCase() + k.slice(1)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {/* Source filter: Net / CE / PE */}
+                  <div className="px-3 py-2 border-b border-[var(--border)]">
+                    <div className="text-[9px] text-[var(--text-muted)] font-semibold mb-1.5">
+                      SHOW IN CHART
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {(
+                        [
+                          'net',
+                          ...(cePositions.length > 0 ? ['CE'] : []),
+                          ...(pePositions.length > 0 ? ['PE'] : []),
+                        ] as string[]
+                      ).map((src) => (
+                        <button
+                          key={src}
+                          onClick={() =>
+                            setGreeksLegFilter((prev) => {
+                              const n = new Set(prev);
+                              if (n.has(src)) n.delete(src);
+                              else n.add(src);
+                              return n;
+                            })
+                          }
+                          className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
+                            greeksLegFilter.has(src)
+                              ? 'border-[#a78bfa]/40 bg-[#a78bfa]/15 text-[#a78bfa]'
+                              : 'border-[var(--border)] text-[var(--text-muted)]'
+                          }`}
+                        >
+                          {src === 'net' ? 'Net' : `${src} Leg`}
+                          {src !== 'net' && (
+                            <span className="ml-1 text-[8px] text-[var(--text-muted)]">
+                              {src === 'CE' ? '━━' : '╌╌'}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  {/* Net Greeks values */}
+                  <div className="px-3 py-2 border-b border-[var(--border)]">
+                    <div className="text-[9px] text-[var(--text-muted)] font-semibold mb-1">
+                      NET GREEKS
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px]">
+                      {activeGreeks.map((k) => (
+                        <div key={k} className="flex items-center gap-1">
+                          <span
+                            className="w-1.5 h-1.5 rounded-full"
+                            style={{ backgroundColor: GREEK_COLORS[k] }}
+                          />
+                          <span className="text-[var(--text-muted)] text-[10px]">
+                            {k.charAt(0).toUpperCase() + k.slice(1)}
+                          </span>
+                          <span
+                            className={`font-semibold tabular-nums ${netGreeks[k] >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                          >
+                            {netGreeks[k] >= 0 ? '+' : ''}
+                            {fmtG(netGreeks[k], k)}
+                          </span>
+                        </div>
+                      ))}
+                      {legGreeks.size === 0 && (
+                        <span className="text-[var(--text-muted)] text-[10px] italic">
+                          Waiting for data...
+                        </span>
                       )}
                     </div>
-                  )}
-                </div>
-                {/* Greek selectors */}
-                <div className="px-3 py-2 border-b border-[var(--border)]">
-                  <div className="text-[9px] text-[var(--text-muted)] font-semibold mb-1.5">GREEKS</div>
-                  <div className="flex items-center gap-1">
-                    {greekKeys.map(k => (
-                      <button key={k} onClick={() => setSelectedGreeks(prev => { const n = new Set(prev); if (n.has(k)) n.delete(k); else n.add(k); return n; })}
-                        className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
-                          selectedGreeks.has(k) ? `border-transparent text-white` : 'border-[var(--border)] text-[var(--text-muted)]'
-                        }`}
-                        style={selectedGreeks.has(k) ? { backgroundColor: GREEK_COLORS[k] + '33', color: GREEK_COLORS[k], borderColor: GREEK_COLORS[k] + '55' } : undefined}
-                      >{k.charAt(0).toUpperCase() + k.slice(1)}</button>
-                    ))}
                   </div>
-                </div>
-                {/* Source filter: Net / CE / PE */}
-                <div className="px-3 py-2 border-b border-[var(--border)]">
-                  <div className="text-[9px] text-[var(--text-muted)] font-semibold mb-1.5">SHOW IN CHART</div>
-                  <div className="flex items-center gap-1">
-                    {(['net', ...((cePositions.length > 0) ? ['CE'] : []), ...((pePositions.length > 0) ? ['PE'] : [])] as string[]).map(src => (
-                      <button key={src} onClick={() => setGreeksLegFilter(prev => { const n = new Set(prev); if (n.has(src)) n.delete(src); else n.add(src); return n; })}
-                        className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors border ${
-                          greeksLegFilter.has(src) ? 'border-[#a78bfa]/40 bg-[#a78bfa]/15 text-[#a78bfa]' : 'border-[var(--border)] text-[var(--text-muted)]'
-                        }`}>
-                        {src === 'net' ? 'Net' : `${src} Leg`}
-                        {src !== 'net' && <span className="ml-1 text-[8px] text-[var(--text-muted)]">{src === 'CE' ? '━━' : '╌╌'}</span>}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                {/* Net Greeks values */}
-                <div className="px-3 py-2 border-b border-[var(--border)]">
-                  <div className="text-[9px] text-[var(--text-muted)] font-semibold mb-1">NET GREEKS</div>
-                  <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px]">
-                    {activeGreeks.map(k => (
-                      <div key={k} className="flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: GREEK_COLORS[k] }} />
-                        <span className="text-[var(--text-muted)] text-[10px]">{k.charAt(0).toUpperCase() + k.slice(1)}</span>
-                        <span className={`font-semibold tabular-nums ${netGreeks[k] >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{netGreeks[k] >= 0 ? '+' : ''}{fmtG(netGreeks[k], k)}</span>
+                  {/* Leg breakdown */}
+                  <div className="px-3 py-1.5">
+                    <button
+                      onClick={() => setGreeksExpanded((v) => !v)}
+                      className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors flex items-center gap-1"
+                    >
+                      <span className="text-[8px]">{greeksExpanded ? '▾' : '▸'}</span> Leg breakdown
+                    </button>
+                    {greeksExpanded && (
+                      <div
+                        className="mt-1.5 grid gap-0 text-[10px]"
+                        style={{
+                          gridTemplateColumns: `20px 1fr ${activeGreeks.map(() => '58px').join(' ')} 40px`,
+                        }}
+                      >
+                        <span className="text-[var(--text-muted)] font-semibold py-0.5">B/S</span>
+                        <span className="text-[var(--text-muted)] font-semibold py-0.5">
+                          Instrument
+                        </span>
+                        {activeGreeks.map((k) => (
+                          <span
+                            key={k}
+                            className="text-[var(--text-muted)] font-semibold py-0.5 text-right"
+                          >
+                            {k.charAt(0).toUpperCase() + k.slice(1)}
+                          </span>
+                        ))}
+                        <span className="text-[var(--text-muted)] font-semibold py-0.5 text-right">
+                          IV%
+                        </span>
+                        {allPositions.map((p) => {
+                          const g = legGreeks.get(p.ref_id);
+                          const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
+                          const sign = side === 'BUY' ? 1 : -1;
+                          const meta = legMetas.find((l) => l.refId === p.ref_id);
+                          return (
+                            <React.Fragment key={p.ref_id}>
+                              <span
+                                className={`py-0.5 font-bold text-[9px] ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                              >
+                                {side === 'BUY' ? 'B' : 'S'}
+                              </span>
+                              <span className="py-0.5 text-[var(--text-primary)] flex items-center gap-1 truncate">
+                                {meta && (
+                                  <span
+                                    className="w-1.5 h-1.5 rounded-full shrink-0"
+                                    style={{ backgroundColor: meta.color }}
+                                  />
+                                )}
+                                {p.display_name || p.zanskar_name || p.ref_id}
+                              </span>
+                              {activeGreeks.map((k) => {
+                                const raw = g ? g[k] : 0;
+                                const val = raw * sign * multiplier;
+                                return (
+                                  <span
+                                    key={k}
+                                    className={`py-0.5 text-right tabular-nums font-medium ${val >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                                  >
+                                    {val >= 0 ? '+' : ''}
+                                    {fmtG(val, k)}
+                                  </span>
+                                );
+                              })}
+                              <span className="py-0.5 text-right tabular-nums text-[var(--text-secondary)]">
+                                {g?.iv ? (g.iv * 100).toFixed(1) : '—'}
+                              </span>
+                            </React.Fragment>
+                          );
+                        })}
                       </div>
-                    ))}
-                    {legGreeks.size === 0 && <span className="text-[var(--text-muted)] text-[10px] italic">Waiting for data...</span>}
+                    )}
                   </div>
                 </div>
-                {/* Leg breakdown */}
-                <div className="px-3 py-1.5">
-                  <button onClick={() => setGreeksExpanded(v => !v)} className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors flex items-center gap-1">
-                    <span className="text-[8px]">{greeksExpanded ? '▾' : '▸'}</span> Leg breakdown
-                  </button>
-                  {greeksExpanded && (
-                    <div className="mt-1.5 grid gap-0 text-[10px]" style={{ gridTemplateColumns: `20px 1fr ${activeGreeks.map(() => '58px').join(' ')} 40px` }}>
-                      <span className="text-[var(--text-muted)] font-semibold py-0.5">B/S</span>
-                      <span className="text-[var(--text-muted)] font-semibold py-0.5">Instrument</span>
-                      {activeGreeks.map(k => <span key={k} className="text-[var(--text-muted)] font-semibold py-0.5 text-right">{k.charAt(0).toUpperCase() + k.slice(1)}</span>)}
-                      <span className="text-[var(--text-muted)] font-semibold py-0.5 text-right">IV%</span>
-                      {allPositions.map(p => {
-                        const g = legGreeks.get(p.ref_id);
-                        const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
-                        const sign = side === 'BUY' ? 1 : -1;
-                        const meta = legMetas.find(l => l.refId === p.ref_id);
-                        return (
-                          <React.Fragment key={p.ref_id}>
-                            <span className={`py-0.5 font-bold text-[9px] ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{side === 'BUY' ? 'B' : 'S'}</span>
-                            <span className="py-0.5 text-[var(--text-primary)] flex items-center gap-1 truncate">
-                              {meta && <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: meta.color }} />}
-                              {p.display_name || p.zanskar_name || p.ref_id}
-                            </span>
-                            {activeGreeks.map(k => {
-                              const raw = g ? g[k] : 0;
-                              const val = raw * sign * multiplier;
-                              return <span key={k} className={`py-0.5 text-right tabular-nums font-medium ${val >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{val >= 0 ? '+' : ''}{fmtG(val, k)}</span>;
-                            })}
-                            <span className="py-0.5 text-right tabular-nums text-[var(--text-secondary)]">{g?.iv ? (g.iv * 100).toFixed(1) : '—'}</span>
-                          </React.Fragment>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })()}
+              );
+            })()}
         </div>
 
         <div className="ml-auto flex items-center gap-3">
@@ -2101,14 +3004,25 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
               disabled={saveState === 'saving'}
               title="Freeze this day's chart so it stays viewable after the historical data rolls off"
               className={`flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-semibold border transition-colors ${
-                saveState === 'saved' ? 'border-[var(--green)]/50 bg-[var(--green)]/15 text-[var(--green)]'
-                  : saveState === 'error' ? 'border-[var(--red)]/50 bg-[var(--red)]/15 text-[var(--red)]'
-                  : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-              }`}>
-              {saveState === 'saving' ? 'Saving…' : saveState === 'saved' ? 'Saved ✓' : saveState === 'error' ? 'Save failed' : '⭳ Save'}
+                saveState === 'saved'
+                  ? 'border-[var(--green)]/50 bg-[var(--green)]/15 text-[var(--green)]'
+                  : saveState === 'error'
+                    ? 'border-[var(--red)]/50 bg-[var(--red)]/15 text-[var(--red)]'
+                    : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+              }`}
+            >
+              {saveState === 'saving'
+                ? 'Saving…'
+                : saveState === 'saved'
+                  ? 'Saved ✓'
+                  : saveState === 'error'
+                    ? 'Save failed'
+                    : '⭳ Save'}
             </button>
           )}
-          <span className={`text-[12px] font-semibold ${strategyPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
+          <span
+            className={`text-[12px] font-semibold ${strategyPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+          >
             P&L: {strategyPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(strategyPnl))}
           </span>
         </div>
@@ -2118,25 +3032,43 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
       <div ref={chartsWrapperRef} className="flex-1 flex flex-col overflow-hidden min-h-0">
         {/* Price chart */}
         {priceVisible && (
-        <div ref={priceChartContainerRef} className="relative flex-1 min-h-[120px] bg-[var(--bg-primary)]">
-          <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
-            {/* fallback removed */}
+          <div
+            ref={priceChartContainerRef}
+            className="relative flex-1 min-h-[120px] bg-[var(--bg-primary)]"
+          >
+            <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
+              {/* fallback removed */}
+            </div>
+            <PriceTooltip ref={priceTooltipRef} />
           </div>
-          <PriceTooltip ref={priceTooltipRef} />
-        </div>
         )}
 
         {pnlVisible && (
           <>
             {priceVisible && (
-            <div onMouseDown={onPnlDividerDown} className="group h-2 shrink-0 flex items-center justify-center bg-[var(--bg-secondary)] hover:bg-[var(--accent)]/20 cursor-row-resize transition-colors z-20 relative">
-              <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[var(--accent)]" />
-            </div>
-            )}
-            <div ref={pnlChartContainerRef} style={{ height: pnlHeight, minHeight: 40, position: 'relative', borderBottom: greeksVisible ? '1px solid var(--border)' : 'none', flexShrink: 0, display: pnlVisible ? 'block' : 'none' }}>
-              <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
+              <div
+                onMouseDown={onPnlDividerDown}
+                className="group h-2 shrink-0 flex items-center justify-center bg-[var(--bg-secondary)] hover:bg-[var(--accent)]/20 cursor-row-resize transition-colors z-20 relative"
+              >
+                <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[var(--accent)]" />
               </div>
-              <PnlTooltip ref={pnlTooltipRef} strategyMargin={strategyMargin > 0 ? strategyMargin : 0} />
+            )}
+            <div
+              ref={pnlChartContainerRef}
+              style={{
+                height: pnlHeight,
+                minHeight: 40,
+                position: 'relative',
+                borderBottom: greeksVisible ? '1px solid var(--border)' : 'none',
+                flexShrink: 0,
+                display: pnlVisible ? 'block' : 'none',
+              }}
+            >
+              <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]"></div>
+              <PnlTooltip
+                ref={pnlTooltipRef}
+                strategyMargin={strategyMargin > 0 ? strategyMargin : 0}
+              />
             </div>
           </>
         )}
@@ -2144,39 +3076,72 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
         {greeksVisible && (
           <>
             {(priceVisible || pnlVisible) && (
-            <div onMouseDown={onGreeksDividerDown} className="group h-2 shrink-0 flex items-center justify-center bg-[var(--bg-secondary)] hover:bg-[#a78bfa]/20 cursor-row-resize transition-colors z-20 relative">
-              <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[#a78bfa]" />
-            </div>
-            )}
-            <div ref={greeksChartContainerRef} style={{ height: greeksChartHeight, minHeight: 40, position: 'relative', display: greeksVisible ? 'block' : 'none', flexShrink: 0 }}>
-              <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]">
+              <div
+                onMouseDown={onGreeksDividerDown}
+                className="group h-2 shrink-0 flex items-center justify-center bg-[var(--bg-secondary)] hover:bg-[#a78bfa]/20 cursor-row-resize transition-colors z-20 relative"
+              >
+                <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[#a78bfa]" />
               </div>
-              <GreeksTooltip ref={greeksTooltipRef} selectedGreeks={selectedGreeks} greeksLegFilter={greeksLegFilter} colors={GREEK_COLORS} />
+            )}
+            <div
+              ref={greeksChartContainerRef}
+              style={{
+                height: greeksChartHeight,
+                minHeight: 40,
+                position: 'relative',
+                display: greeksVisible ? 'block' : 'none',
+                flexShrink: 0,
+              }}
+            >
+              <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]"></div>
+              <GreeksTooltip
+                ref={greeksTooltipRef}
+                selectedGreeks={selectedGreeks}
+                greeksLegFilter={greeksLegFilter}
+                colors={GREEK_COLORS}
+              />
             </div>
           </>
         )}
 
-        <div onMouseDown={orderBookCollapsed ? undefined : onObDividerDown}
-          className={`group h-2 shrink-0 flex items-center justify-center bg-[var(--bg-secondary)] transition-colors z-20 relative ${orderBookCollapsed ? '' : 'hover:bg-[var(--accent)]/20 cursor-row-resize'}`}>
-          {!orderBookCollapsed && <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[var(--accent)]" />}
+        <div
+          onMouseDown={orderBookCollapsed ? undefined : onObDividerDown}
+          className={`group h-2 shrink-0 flex items-center justify-center bg-[var(--bg-secondary)] transition-colors z-20 relative ${orderBookCollapsed ? '' : 'hover:bg-[var(--accent)]/20 cursor-row-resize'}`}
+        >
+          {!orderBookCollapsed && (
+            <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[var(--accent)]" />
+          )}
         </div>
 
-        <div style={{ height: effectiveObHeight }} className="shrink-0 flex flex-col overflow-hidden bg-[var(--bg-primary)] border-t border-[var(--border)]">
+        <div
+          style={{ height: effectiveObHeight }}
+          className="shrink-0 flex flex-col overflow-hidden bg-[var(--bg-primary)] border-t border-[var(--border)]"
+        >
           <div className="h-8 shrink-0 flex items-center px-3 gap-2 border-b border-[var(--border)] bg-[var(--bg-secondary)]">
-            {(['open', 'closed'] as const).map(t => (
-              <button key={t} onClick={() => setPosSubTab(t)}
+            {(['open', 'closed'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setPosSubTab(t)}
                 className={`px-3 py-0.5 rounded text-[11px] font-semibold transition-all ${
-                  posSubTab === t ? 'bg-[var(--accent)]/15 text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-                }`}>
+                  posSubTab === t
+                    ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                }`}
+              >
                 {t === 'open' ? `Open ${positions.length}` : `Closed ${closedPositions.length}`}
               </button>
             ))}
             <span className="ml-auto text-[11px] text-[var(--text-muted)]">
-              Strategy P&L: <span className={strategyPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>{strategyPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(strategyPnl))}</span>
+              Strategy P&L:{' '}
+              <span className={strategyPnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>
+                {strategyPnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(strategyPnl))}
+              </span>
             </span>
-            <button onClick={() => setOrderBookCollapsed(v => !v)}
+            <button
+              onClick={() => setOrderBookCollapsed((v) => !v)}
               className="w-5 h-5 flex items-center justify-center rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] text-[12px] transition-colors"
-              title={orderBookCollapsed ? 'Expand' : 'Collapse'}>
+              title={orderBookCollapsed ? 'Expand' : 'Collapse'}
+            >
               {orderBookCollapsed ? '▲' : '▼'}
             </button>
           </div>
@@ -2187,62 +3152,151 @@ export default function StrategyAnalysisView({ basketGroupId, strategyName, them
                 <thead className="sticky top-0 bg-[var(--bg-secondary)] z-10">
                   <tr className="text-[var(--text-muted)]">
                     {(posSubTab === 'open'
-                      ? ['Symbol', 'Product', 'Side', 'Qty', 'Entry Price', 'LTP', 'P&L', 'P&L %', 'Entry Time', 'Margin']
-                      : ['Symbol', 'Product', 'Entry Price', 'Exit Price', 'P&L', 'Entry Time', 'Exit Time']
-                    ).map(h => (
-                      <th key={h} className="px-3 py-1.5 text-left font-medium whitespace-nowrap border-b border-[var(--border)]">{h}</th>
+                      ? [
+                          'Symbol',
+                          'Product',
+                          'Side',
+                          'Qty',
+                          'Entry Price',
+                          'LTP',
+                          'P&L',
+                          'P&L %',
+                          'Entry Time',
+                          'Margin',
+                        ]
+                      : [
+                          'Symbol',
+                          'Product',
+                          'Entry Price',
+                          'Exit Price',
+                          'P&L',
+                          'Entry Time',
+                          'Exit Time',
+                        ]
+                    ).map((h) => (
+                      <th
+                        key={h}
+                        className="px-3 py-1.5 text-left font-medium whitespace-nowrap border-b border-[var(--border)]"
+                      >
+                        {h}
+                      </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   {displayPositions.length === 0 && (
-                    <tr><td colSpan={10} className="text-center py-6 text-[var(--text-muted)]">No {posSubTab} positions for this strategy</td></tr>
+                    <tr>
+                      <td colSpan={10} className="text-center py-6 text-[var(--text-muted)]">
+                        No {posSubTab} positions for this strategy
+                      </td>
+                    </tr>
                   )}
-                  {posSubTab === 'open' && positions.map(p => {
-                    const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
-                    const pnl = calcPnl(p);
-                    const pnlPct = (p.avg_price || 0) > 0 ? ((p.last_traded_price || 0) - (p.avg_price || 0)) / (p.avg_price || 1) * 100 * (side === 'BUY' ? 1 : -1) : 0;
-                    const legMeta = legMetas.find(l => l.refId === p.ref_id);
-                    return (
-                      <tr key={p.ref_id} className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)]">
-                        <td className="px-3 py-1.5 font-semibold text-[var(--text-primary)] whitespace-nowrap">
-                          <span className="inline-flex items-center gap-1.5">
-                            {legMeta && <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: legMeta.color }} />}
-                            {p.display_name || p.zanskar_name || p.ref_id}
-                          </span>
-                        </td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.product || 'NRML'}</td>
-                        <td className={`px-3 py-1.5 font-semibold ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{side}</td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.qty}</td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(p.avg_price)}</td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(p.last_traded_price)}</td>
-                        <td className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}</td>
-                        <td className={`px-3 py-1.5 ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%</td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(p.entry_time)}</td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{strategyMargin > 0 ? `₹${fmtPrice(strategyMargin)}` : '—'}</td>
-                      </tr>
-                    );
-                  })}
-                  {posSubTab === 'closed' && closedPositions.map(p => {
-                    const pnl = (p.realised_pnl || p.pnl || 0) / 100;
-                    const legMeta = legMetas.find(l => l.refId === p.ref_id);
-                    return (
-                      <tr key={`${p.ref_id}-closed`} className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)]">
-                        <td className="px-3 py-1.5 font-semibold text-[var(--text-primary)] whitespace-nowrap">
-                          <span className="inline-flex items-center gap-1.5">
-                            {legMeta && <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: legMeta.color }} />}
-                            {p.display_name || p.zanskar_name || p.ref_id}
-                          </span>
-                        </td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.product || 'NRML'}</td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{paise(p.avg_price)}</td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.exit_price ? paise(p.exit_price) : '—'}</td>
-                        <td className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>{pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}</td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(p.entry_time)}</td>
-                        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">{fmtTime(p.exit_time)}</td>
-                      </tr>
-                    );
-                  })}
+                  {posSubTab === 'open' &&
+                    positions.map((p) => {
+                      const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
+                      const pnl = calcPnl(p);
+                      const pnlPct =
+                        (p.avg_price || 0) > 0
+                          ? (((p.last_traded_price || 0) - (p.avg_price || 0)) /
+                              (p.avg_price || 1)) *
+                            100 *
+                            (side === 'BUY' ? 1 : -1)
+                          : 0;
+                      const legMeta = legMetas.find((l) => l.refId === p.ref_id);
+                      return (
+                        <tr
+                          key={p.ref_id}
+                          className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)]"
+                        >
+                          <td className="px-3 py-1.5 font-semibold text-[var(--text-primary)] whitespace-nowrap">
+                            <span className="inline-flex items-center gap-1.5">
+                              {legMeta && (
+                                <span
+                                  className="w-2 h-2 rounded-full shrink-0"
+                                  style={{ backgroundColor: legMeta.color }}
+                                />
+                              )}
+                              {p.display_name || p.zanskar_name || p.ref_id}
+                            </span>
+                          </td>
+                          <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                            {p.product || 'NRML'}
+                          </td>
+                          <td
+                            className={`px-3 py-1.5 font-semibold ${side === 'BUY' ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                          >
+                            {side}
+                          </td>
+                          <td className="px-3 py-1.5 text-[var(--text-secondary)]">{p.qty}</td>
+                          <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                            {paise(p.avg_price)}
+                          </td>
+                          <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                            {paise(p.last_traded_price)}
+                          </td>
+                          <td
+                            className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                          >
+                            {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
+                          </td>
+                          <td
+                            className={`px-3 py-1.5 ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                          >
+                            {pnlPct >= 0 ? '+' : ''}
+                            {pnlPct.toFixed(2)}%
+                          </td>
+                          <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
+                            {fmtTime(p.entry_time)}
+                          </td>
+                          <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                            {strategyMargin > 0 ? `₹${fmtPrice(strategyMargin)}` : '—'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  {posSubTab === 'closed' &&
+                    closedPositions.map((p) => {
+                      const pnl = (p.realised_pnl || p.pnl || 0) / 100;
+                      const legMeta = legMetas.find((l) => l.refId === p.ref_id);
+                      return (
+                        <tr
+                          key={`${p.ref_id}-closed`}
+                          className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)]"
+                        >
+                          <td className="px-3 py-1.5 font-semibold text-[var(--text-primary)] whitespace-nowrap">
+                            <span className="inline-flex items-center gap-1.5">
+                              {legMeta && (
+                                <span
+                                  className="w-2 h-2 rounded-full shrink-0"
+                                  style={{ backgroundColor: legMeta.color }}
+                                />
+                              )}
+                              {p.display_name || p.zanskar_name || p.ref_id}
+                            </span>
+                          </td>
+                          <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                            {p.product || 'NRML'}
+                          </td>
+                          <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                            {paise(p.avg_price)}
+                          </td>
+                          <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+                            {p.exit_price ? paise(p.exit_price) : '—'}
+                          </td>
+                          <td
+                            className={`px-3 py-1.5 font-semibold ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+                          >
+                            {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
+                          </td>
+                          <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
+                            {fmtTime(p.entry_time)}
+                          </td>
+                          <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
+                            {fmtTime(p.exit_time)}
+                          </td>
+                        </tr>
+                      );
+                    })}
                 </tbody>
               </table>
             </div>

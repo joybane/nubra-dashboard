@@ -36,19 +36,22 @@ export interface NetGreeks {
   delta: number;
   gamma: number;
   theta: number;
-  vega:  number;
+  vega: number;
 }
 
 /** Position greeks — per-share greeks scaled by signed quantity. */
 export function netGreeks(legs: GreekLeg[]): NetGreeks {
-  return legs.reduce<NetGreeks>((acc, l) => {
-    const sign = l.side === 'BUY' ? 1 : -1;
-    const qty  = legQty(l) * sign;
-    return {
-      delta: acc.delta + (l.delta ?? 0) * qty,
-      gamma: acc.gamma + (l.gamma ?? 0) * qty,
-      theta: acc.theta + (l.theta ?? 0) * qty,
-      vega:  acc.vega  + (l.vega  ?? 0) * qty,
-    };
-  }, { delta: 0, gamma: 0, theta: 0, vega: 0 });
+  return legs.reduce<NetGreeks>(
+    (acc, l) => {
+      const sign = l.side === 'BUY' ? 1 : -1;
+      const qty = legQty(l) * sign;
+      return {
+        delta: acc.delta + (l.delta ?? 0) * qty,
+        gamma: acc.gamma + (l.gamma ?? 0) * qty,
+        theta: acc.theta + (l.theta ?? 0) * qty,
+        vega: acc.vega + (l.vega ?? 0) * qty,
+      };
+    },
+    { delta: 0, gamma: 0, theta: 0, vega: 0 },
+  );
 }

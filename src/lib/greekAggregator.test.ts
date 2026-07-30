@@ -5,6 +5,16 @@ import {
   lockBasket,
   aggregateSnapshot,
   buildSeries,
+  buildIvSeries,
+  ivAtDelta,
+  snapshotDayKey,
+  withinPruneBand,
+  CE_DELTA_MIN,
+  CE_DELTA_MAX,
+  PE_DELTA_MIN,
+  PE_DELTA_MAX,
+  PRUNE_DELTA_MIN,
+  PRUNE_DELTA_MAX,
   type ChainSnapshot,
 } from './greekAggregator.ts';
 
@@ -25,6 +35,84 @@ test('qualifies: CE band is [0.05, 0.609], PE band is [-0.609, -0.05]', () => {
   // missing / NaN never qualifies
   expect(qualifies('CE', undefined)).toBe(false);
   expect(qualifies('PE', NaN)).toBe(false);
+});
+
+// ─── Ingest prune band must strictly contain everything downstream reads ─────────
+test('prune band contains the qualifying band and both IV interpolation targets', () => {
+  // If this ever fails, legs the `fixed` basket or ivAtDelta depend on are being thrown away
+  // at ingest and the overlay silently loses data with no error anywhere.
+  expect(PRUNE_DELTA_MIN).toBeLessThan(CE_DELTA_MIN);
+  expect(PRUNE_DELTA_MAX).toBeGreaterThan(CE_DELTA_MAX);
+  expect(-PRUNE_DELTA_MIN).toBeGreaterThan(PE_DELTA_MAX);
+  expect(-PRUNE_DELTA_MAX).toBeLessThan(PE_DELTA_MIN);
+
+  // ivAtDelta interpolates at 0.5 and 0.25 and refuses to extrapolate, so the band must
+  // bracket both targets with room on either side.
+  for (const target of [0.5, 0.25]) {
+    expect(PRUNE_DELTA_MIN).toBeLessThan(target);
+    expect(PRUNE_DELTA_MAX).toBeGreaterThan(target);
+  }
+
+  // Anything the delta filter admits must survive the prune.
+  for (const d of [CE_DELTA_MIN, 0.3, CE_DELTA_MAX, PE_DELTA_MIN, -0.3, PE_DELTA_MAX]) {
+    expect(withinPruneBand(d), `qualifying delta ${d} must survive`).toBe(true);
+  }
+  // Far OTM / deep ITM go.
+  expect(withinPruneBand(0.001)).toBe(false);
+  expect(withinPruneBand(0.99)).toBe(false);
+  expect(withinPruneBand(-0.001)).toBe(false);
+  // Unknown delta is kept — aggregation decides, not the prune.
+  expect(withinPruneBand(undefined)).toBe(true);
+  expect(withinPruneBand(NaN)).toBe(true);
+});
+
+test('pruning is behaviour-preserving for totals and IV measures', () => {
+  const legs = (side: 1 | -1) =>
+    Array.from({ length: 40 }, (_, i) => {
+      const d = side * (0.005 + i * 0.025); // 0.005 … ~0.98, spans well past the band
+      return {
+        sp: 23000 + i * 50,
+        delta: d,
+        vega: 10 + i,
+        theta: -1 - i * 0.1,
+        oi: 1000 + i,
+        iv: 0.12 + i * 0.001,
+      };
+    });
+  const snap: ChainSnapshot = { ts: D1_OPEN, ce: legs(1), pe: legs(-1) };
+  const pruned: ChainSnapshot = {
+    ts: D1_OPEN,
+    ce: snap.ce.filter((l) => withinPruneBand(l.delta)),
+    pe: snap.pe.filter((l) => withinPruneBand(l.delta)),
+  };
+  expect(pruned.ce.length).toBeLessThan(snap.ce.length); // something was actually dropped
+
+  for (const method of ['mine', 'industry'] as const) {
+    for (const basket of ['fixed', 'floating'] as const) {
+      const a = aggregateSnapshot(snap, {
+        greek: 'vega',
+        method,
+        basket,
+        lotSize: 65,
+        fixedKeys: lockBasket(snap),
+      });
+      const b = aggregateSnapshot(pruned, {
+        greek: 'vega',
+        method,
+        basket,
+        lotSize: 65,
+        fixedKeys: lockBasket(pruned),
+      });
+      expect(b.ce, `${method}/${basket} ce`).toBeCloseTo(a.ce, 9);
+      expect(b.pe, `${method}/${basket} pe`).toBeCloseTo(a.pe, 9);
+    }
+  }
+  for (const measure of ['atm', 'rr25', 'fly25'] as const) {
+    expect(buildIvSeries([pruned], { measure })[0].value, measure).toBeCloseTo(
+      buildIvSeries([snap], { measure })[0].value,
+      9,
+    );
+  }
 });
 
 // ─── §2  Lock the basket at t_min ────────────────────────────────────────────────
@@ -130,4 +218,245 @@ test('buildSeries: baseline is earliest ts even if snapshots passed out of order
 
 test('buildSeries: empty input yields empty series', () => {
   expect(buildSeries([], { greek: 'vega', method: 'mine', basket: 'fixed' })).toEqual([]);
+});
+
+// ─── Baseline: session vs window ─────────────────────────────────────────────────
+// Two IST trading days. 09:20 IST = 03:50 UTC, 15:00 IST = 09:30 UTC.
+const D1_OPEN = Date.UTC(2026, 6, 27, 3, 50);
+const D1_LATE = Date.UTC(2026, 6, 27, 9, 30);
+const D2_OPEN = Date.UTC(2026, 6, 28, 3, 50);
+const D2_LATE = Date.UTC(2026, 6, 28, 9, 30);
+
+const ce = (vega: number, delta = 0.5, sp = 100) => ({ sp, delta, vega, theta: -2, oi: 1 });
+
+const twoDays: ChainSnapshot[] = [
+  { ts: D1_OPEN, ce: [ce(10)], pe: [] },
+  { ts: D1_LATE, ce: [ce(14)], pe: [] },
+  { ts: D2_OPEN, ce: [ce(30)], pe: [] }, // day 2 opens at a different level
+  { ts: D2_LATE, ce: [ce(36)], pe: [] },
+];
+
+test('snapshotDayKey: buckets epoch-ms into IST calendar days', () => {
+  expect(snapshotDayKey(D1_OPEN)).toBe('2026-07-27');
+  expect(snapshotDayKey(D1_LATE)).toBe('2026-07-27');
+  expect(snapshotDayKey(D2_OPEN)).toBe('2026-07-28');
+});
+
+test('baseline session: diff re-anchors at each session open', () => {
+  const s = buildSeries(twoDays, {
+    greek: 'vega',
+    method: 'mine',
+    basket: 'floating',
+    baseline: 'session',
+  });
+  expect(s[0].ceDiff).toBe(0); // day 1 open
+  expect(s[1].ceDiff).toBe(14 - 10); // +4 within day 1
+  expect(s[2].ceDiff).toBe(0); // day 2 re-anchors, NOT 30 - 10
+  expect(s[3].ceDiff).toBe(36 - 30); // +6 within day 2
+});
+
+test('baseline window: diff runs cumulatively from the first snapshot', () => {
+  const s = buildSeries(twoDays, {
+    greek: 'vega',
+    method: 'mine',
+    basket: 'floating',
+    baseline: 'window',
+  });
+  expect(s[0].ceDiff).toBe(0);
+  expect(s[1].ceDiff).toBe(14 - 10);
+  expect(s[2].ceDiff).toBe(30 - 10); // +20 — carries across the day boundary
+  expect(s[3].ceDiff).toBe(36 - 10); // +26
+});
+
+test('baseline defaults to session', () => {
+  const dflt = buildSeries(twoDays, { greek: 'vega', method: 'mine', basket: 'floating' });
+  const explicit = buildSeries(twoDays, {
+    greek: 'vega',
+    method: 'mine',
+    basket: 'floating',
+    baseline: 'session',
+  });
+  expect(dflt).toEqual(explicit);
+});
+
+// Strike 100 qualifies on day 1 then drifts deep ITM; strike 110 is out of band on day 1
+// but in band on day 2. Under 'session' the basket re-locks each morning, so day 2 tracks
+// 110; under 'window' it stays welded to day 1's pick.
+const driftAcrossDays: ChainSnapshot[] = [
+  { ts: D1_OPEN, ce: [ce(10, 0.55, 100), ce(5, 0.04, 110)], pe: [] },
+  { ts: D2_OPEN, ce: [ce(6, 0.8, 100), ce(7, 0.2, 110)], pe: [] },
+];
+
+test('baseline session: fixed basket re-locks membership each day', () => {
+  const s = buildSeries(driftAcrossDays, {
+    greek: 'vega',
+    method: 'mine',
+    basket: 'fixed',
+    baseline: 'session',
+  });
+  expect(s[0].ceTotal).toBe(10); // day 1 locks strike 100
+  expect(s[1].ceTotal).toBe(7); // day 2 re-locks onto strike 110 (the one in band)
+});
+
+test('baseline window: fixed basket stays locked to the first day', () => {
+  const s = buildSeries(driftAcrossDays, {
+    greek: 'vega',
+    method: 'mine',
+    basket: 'fixed',
+    baseline: 'window',
+  });
+  expect(s[0].ceTotal).toBe(10);
+  expect(s[1].ceTotal).toBe(6); // still strike 100, now deep ITM
+});
+
+test('baseline does not affect floating totals — mine is unchanged', () => {
+  const session = buildSeries(twoDays, {
+    greek: 'vega',
+    method: 'mine',
+    basket: 'floating',
+    baseline: 'session',
+  });
+  const window = buildSeries(twoDays, {
+    greek: 'vega',
+    method: 'mine',
+    basket: 'floating',
+    baseline: 'window',
+  });
+  expect(session.map((p) => p.ceTotal)).toEqual(window.map((p) => p.ceTotal));
+  expect(session.map((p) => p.ceTotal)).toEqual([10, 14, 30, 36]);
+  // industry likewise: the method weighting is untouched by the baseline
+  const ind = buildSeries(twoDays, {
+    greek: 'vega',
+    method: 'industry',
+    basket: 'floating',
+    lotSize: 50,
+    baseline: 'session',
+  });
+  expect(ind.map((p) => p.ceTotal)).toEqual([10 * 50, 14 * 50, 30 * 50, 36 * 50]);
+});
+
+// ─── Constant-delta IV ───────────────────────────────────────────────────────────
+test('ivAtDelta: interpolates linearly and refuses to extrapolate', () => {
+  const legs = [
+    { sp: 105, delta: 0.2, iv: 0.18 },
+    { sp: 100, delta: 0.5, iv: 0.14 },
+    { sp: 95, delta: 0.8, iv: 0.16 },
+  ];
+  expect(ivAtDelta(legs, 0.5)).toBeCloseTo(0.14, 8);
+  expect(ivAtDelta(legs, 0.35)).toBeCloseTo(0.16, 8); // midway between 0.20 and 0.50
+  expect(ivAtDelta(legs, 0.05)).toBeNaN(); // outside the strikes present
+  expect(ivAtDelta(legs, 0.95)).toBeNaN();
+  expect(ivAtDelta([{ sp: 100, delta: 0.5, iv: 0.14 }], 0.5)).toBeNaN(); // needs two points
+  expect(
+    ivAtDelta(
+      [
+        { sp: 100, delta: 0.5 },
+        { sp: 105, delta: 0.2 },
+      ],
+      0.3,
+    ),
+  ).toBeNaN(); // no iv
+});
+
+/** Flat smile at `iv` across both sides, wide enough in delta to cover 25Δ and 50Δ. */
+function flatSmile(ts: number, iv: number): ChainSnapshot {
+  return {
+    ts,
+    ce: [
+      { sp: 105, delta: 0.15, iv },
+      { sp: 100, delta: 0.5, iv },
+      { sp: 95, delta: 0.85, iv },
+    ],
+    pe: [
+      { sp: 95, delta: -0.15, iv },
+      { sp: 100, delta: -0.5, iv },
+      { sp: 105, delta: -0.85, iv },
+    ],
+  };
+}
+
+test('buildIvSeries: ATM recovers the level of a flat smile, in vol points', () => {
+  const s = buildIvSeries([flatSmile(D1_OPEN, 0.1905)], { measure: 'atm' });
+  expect(s).toHaveLength(1);
+  expect(s[0].value).toBeCloseTo(19.05, 6); // decimal in, percent out
+});
+
+test('buildIvSeries: flat smile has zero skew and zero smile', () => {
+  const snap = [flatSmile(D1_OPEN, 0.2)];
+  expect(buildIvSeries(snap, { measure: 'rr25' })[0].value).toBeCloseTo(0, 6);
+  expect(buildIvSeries(snap, { measure: 'fly25' })[0].value).toBeCloseTo(0, 6);
+});
+
+test('buildIvSeries: 25Δ risk reversal signs with the skew direction', () => {
+  // Puts bid over calls (the usual index shape) → negative risk reversal.
+  const putSkew: ChainSnapshot = {
+    ts: D1_OPEN,
+    ce: [
+      { sp: 105, delta: 0.15, iv: 0.16 },
+      { sp: 100, delta: 0.5, iv: 0.18 },
+      { sp: 95, delta: 0.85, iv: 0.2 },
+    ],
+    pe: [
+      { sp: 95, delta: -0.15, iv: 0.26 },
+      { sp: 100, delta: -0.5, iv: 0.18 },
+      { sp: 105, delta: -0.85, iv: 0.14 },
+    ],
+  };
+  expect(buildIvSeries([putSkew], { measure: 'rr25' })[0].value).toBeLessThan(0);
+
+  // Mirror it → calls bid over puts → positive.
+  const callSkew: ChainSnapshot = {
+    ts: D1_OPEN,
+    ce: putSkew.pe.map((l) => ({ ...l, delta: -l.delta! })),
+    pe: putSkew.ce.map((l) => ({ ...l, delta: -l.delta! })),
+  };
+  expect(buildIvSeries([callSkew], { measure: 'rr25' })[0].value).toBeGreaterThan(0);
+});
+
+test('buildIvSeries: butterfly is positive when wings sit above ATM', () => {
+  const smile: ChainSnapshot = {
+    ts: D1_OPEN,
+    ce: [
+      { sp: 105, delta: 0.15, iv: 0.26 },
+      { sp: 100, delta: 0.5, iv: 0.18 },
+      { sp: 95, delta: 0.85, iv: 0.26 },
+    ],
+    pe: [
+      { sp: 95, delta: -0.15, iv: 0.26 },
+      { sp: 100, delta: -0.5, iv: 0.18 },
+      { sp: 105, delta: -0.85, iv: 0.26 },
+    ],
+  };
+  expect(buildIvSeries([smile], { measure: 'fly25' })[0].value).toBeGreaterThan(0);
+});
+
+test('buildIvSeries: omits snapshots whose measure cannot be computed', () => {
+  const thin: ChainSnapshot = { ts: D1_LATE, ce: [{ sp: 100, delta: 0.5, iv: 0.2 }], pe: [] };
+  const series = buildIvSeries([flatSmile(D1_OPEN, 0.2), thin], { measure: 'atm' });
+  expect(series.map((p) => p.ts)).toEqual([D1_OPEN]); // the thin snapshot is dropped, not faked
+});
+
+test('buildIvSeries: averages each expiry separately rather than pooling strikes', () => {
+  // Same deltas on two expiries carrying different IVs — pooling would smear them together.
+  const multi: ChainSnapshot = {
+    ts: D1_OPEN,
+    ce: [
+      { sp: 105, delta: 0.15, iv: 0.1, exp: 'A' },
+      { sp: 100, delta: 0.5, iv: 0.1, exp: 'A' },
+      { sp: 95, delta: 0.85, iv: 0.1, exp: 'A' },
+      { sp: 105, delta: 0.15, iv: 0.3, exp: 'B' },
+      { sp: 100, delta: 0.5, iv: 0.3, exp: 'B' },
+      { sp: 95, delta: 0.85, iv: 0.3, exp: 'B' },
+    ],
+    pe: [
+      { sp: 95, delta: -0.15, iv: 0.1, exp: 'A' },
+      { sp: 100, delta: -0.5, iv: 0.1, exp: 'A' },
+      { sp: 105, delta: -0.85, iv: 0.1, exp: 'A' },
+      { sp: 95, delta: -0.15, iv: 0.3, exp: 'B' },
+      { sp: 100, delta: -0.5, iv: 0.3, exp: 'B' },
+      { sp: 105, delta: -0.85, iv: 0.3, exp: 'B' },
+    ],
+  };
+  // Mean of the two flat surfaces: (10 + 30) / 2 = 20 vol points.
+  expect(buildIvSeries([multi], { measure: 'atm' })[0].value).toBeCloseTo(20, 6);
 });

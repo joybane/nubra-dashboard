@@ -58,7 +58,10 @@ function getHistOI(
   if (!s?.length) return 0;
   if (targetMs === null) return s[s.length - 1].v;
   let best = s[0];
-  for (const pt of s) { if (pt.ts / 1_000_000 <= targetMs) best = pt; else break; }
+  for (const pt of s) {
+    if (pt.ts / 1_000_000 <= targetMs) best = pt;
+    else break;
+  }
   return best?.v ?? 0;
 }
 
@@ -83,10 +86,16 @@ export function drawOI(p: DrawOIParams): void {
   if (p.mode === 'oi_change' && p.histFetched) {
     const ceOiBysp = new Map<number, number>();
     const cePrevOiBysp = new Map<number, number>();
-    for (const c of p.oiChain.ce) { ceOiBysp.set(Number(c.sp), Number(c.oi) || 0); cePrevOiBysp.set(Number(c.sp), Number(c.prevOi) || 0); }
+    for (const c of p.oiChain.ce) {
+      ceOiBysp.set(Number(c.sp), Number(c.oi) || 0);
+      cePrevOiBysp.set(Number(c.sp), Number(c.prevOi) || 0);
+    }
     const peOiBysp = new Map<number, number>();
     const pePrevOiBysp = new Map<number, number>();
-    for (const pe of p.oiChain.pe) { peOiBysp.set(Number(pe.sp), Number(pe.oi) || 0); pePrevOiBysp.set(Number(pe.sp), Number(pe.prevOi) || 0); }
+    for (const pe of p.oiChain.pe) {
+      peOiBysp.set(Number(pe.sp), Number(pe.oi) || 0);
+      pePrevOiBysp.set(Number(pe.sp), Number(pe.prevOi) || 0);
+    }
 
     const deltas: Record<number, { ceDelta: number; peDelta: number }> = {};
     const seen = new Set<number>();
@@ -99,25 +108,34 @@ export function drawOI(p: DrawOIParams): void {
       if (!ceName && !peName) continue;
       // No custom "from" time picked: baseline is the broker's own previous-close OI
       // (prev_oi), not an approximated first-intraday-bar snapshot.
-      const ceBase = p.fromMs !== null ? getHistOI(p.historicalMap, ceName, p.fromMs) : (cePrevOiBysp.get(sp) || 0);
-      const peBase = p.fromMs !== null ? getHistOI(p.historicalMap, peName, p.fromMs) : (pePrevOiBysp.get(sp) || 0);
-      const ceEnd = p.toMs !== null
-        ? getHistOI(p.historicalMap, ceName, p.toMs)
-        : p.isToday
-          ? (ceOiBysp.get(sp) || getHistOI(p.historicalMap, ceName, null))
-          : getHistOI(p.historicalMap, ceName, null);
-      const peEnd = p.toMs !== null
-        ? getHistOI(p.historicalMap, peName, p.toMs)
-        : p.isToday
-          ? (peOiBysp.get(sp) || getHistOI(p.historicalMap, peName, null))
-          : getHistOI(p.historicalMap, peName, null);
+      const ceBase =
+        p.fromMs !== null
+          ? getHistOI(p.historicalMap, ceName, p.fromMs)
+          : cePrevOiBysp.get(sp) || 0;
+      const peBase =
+        p.fromMs !== null
+          ? getHistOI(p.historicalMap, peName, p.fromMs)
+          : pePrevOiBysp.get(sp) || 0;
+      const ceEnd =
+        p.toMs !== null
+          ? getHistOI(p.historicalMap, ceName, p.toMs)
+          : p.isToday
+            ? ceOiBysp.get(sp) || getHistOI(p.historicalMap, ceName, null)
+            : getHistOI(p.historicalMap, ceName, null);
+      const peEnd =
+        p.toMs !== null
+          ? getHistOI(p.historicalMap, peName, p.toMs)
+          : p.isToday
+            ? peOiBysp.get(sp) || getHistOI(p.historicalMap, peName, null)
+            : getHistOI(p.historicalMap, peName, null);
       deltas[sp] = { ceDelta: ceEnd - ceBase, peDelta: peEnd - peBase };
     }
     Object.assign(p.deltasOut, deltas);
 
     let maxAbs = 1;
     for (const d of Object.values(deltas)) {
-      const ca = Math.abs(d.ceDelta), pa = Math.abs(d.peDelta);
+      const ca = Math.abs(d.ceDelta),
+        pa = Math.abs(d.peDelta);
       if (ca > maxAbs) maxAbs = ca;
       if (pa > maxAbs) maxAbs = pa;
     }
@@ -153,8 +171,14 @@ export function drawOI(p: DrawOIParams): void {
     const peBase: Record<number, number> = {};
     for (const c of p.baseline.ce) ceBase[Number(c.sp)] = Number(c.oi) || 0;
     for (const p_ of p.baseline.pe) peBase[Number(p_.sp)] = Number(p_.oi) || 0;
-    ceList = ceList.map(c => ({ ...c, oi: Math.max(0, (Number(c.oi) || 0) - (ceBase[Number(c.sp)] || 0)) }));
-    peList = peList.map(pe => ({ ...pe, oi: Math.max(0, (Number(pe.oi) || 0) - (peBase[Number(pe.sp)] || 0)) }));
+    ceList = ceList.map((c) => ({
+      ...c,
+      oi: Math.max(0, (Number(c.oi) || 0) - (ceBase[Number(c.sp)] || 0)),
+    }));
+    peList = peList.map((pe) => ({
+      ...pe,
+      oi: Math.max(0, (Number(pe.oi) || 0) - (peBase[Number(pe.sp)] || 0)),
+    }));
   }
 
   const map = buildStrikeMap(ceList, peList);
@@ -199,7 +223,9 @@ export interface HoverHitParams {
   deltas: Record<number, { ceDelta: number; peDelta: number }>;
 }
 
-export function hitTestOIBar(p: HoverHitParams): { strike: number; ceOi: number; peOi: number } | null {
+export function hitTestOIBar(
+  p: HoverHitParams,
+): { strike: number; ceOi: number; peOi: number } | null {
   const maxBarW = (p.containerW - PRICE_SCALE_W) * 0.35 * p.widthScale;
   const handleX = p.containerW - PRICE_SCALE_W - maxBarW;
   if (p.x < handleX - 5) return null;
@@ -218,11 +244,15 @@ export function hitTestOIBar(p: HoverHitParams): { strike: number; ceOi: number;
     Object.assign(strikeMap, buildStrikeMap(p.oiChain.ce, p.oiChain.pe));
   }
 
-  const strikes = Object.keys(strikeMap).map(Number).sort((a, b) => a - b);
+  const strikes = Object.keys(strikeMap)
+    .map(Number)
+    .sort((a, b) => a - b);
   if (strikes.length < 2) return null;
 
-  const nearest = strikes.reduce((prev, curr) =>
-    Math.abs(curr - price) < Math.abs(prev - price) ? curr : prev, strikes[0]);
+  const nearest = strikes.reduce(
+    (prev, curr) => (Math.abs(curr - price) < Math.abs(prev - price) ? curr : prev),
+    strikes[0],
+  );
   const interval = strikes[1] - strikes[0];
   if (Math.abs(nearest - price) > interval * 0.65) return null;
 
@@ -234,8 +264,10 @@ export function hitTestOIBar(p: HoverHitParams): { strike: number; ceOi: number;
   const maxVal = _lastDrawMaxVal;
   const bwCe = Math.max(3, Math.min((Math.abs(d.ceOi) / maxVal) * maxBarW, maxBarW));
   const bwPe = Math.max(3, Math.min((Math.abs(d.peOi) / maxVal) * maxBarW, maxBarW));
-  const overCe = d.ceOi !== 0 && p.y >= yStrike - BAR_H / 2 && p.y <= yStrike && p.x >= right - bwCe;
-  const overPe = d.peOi !== 0 && p.y >= yStrike && p.y <= yStrike + BAR_H / 2 && p.x >= right - bwPe;
+  const overCe =
+    d.ceOi !== 0 && p.y >= yStrike - BAR_H / 2 && p.y <= yStrike && p.x >= right - bwCe;
+  const overPe =
+    d.peOi !== 0 && p.y >= yStrike && p.y <= yStrike + BAR_H / 2 && p.x >= right - bwPe;
 
   if (overCe || overPe) return { strike: nearest, ceOi: d.ceOi, peOi: d.peOi };
   return null;

@@ -2,7 +2,7 @@ import { test, expect } from 'vitest';
 import { createOcSubRegistry, ocKey } from './ocSubRegistry.ts';
 
 const NIFTY = ocKey('NIFTY', '20260728', 'NSE');
-const BANK  = ocKey('BANKNIFTY', '20260728', 'NSE');
+const BANK = ocKey('BANKNIFTY', '20260728', 'NSE');
 
 // ─── §1  Key normalisation ───────────────────────────────────────────────────────
 test('ocKey is case-insensitive on asset and exchange but not on expiry', () => {
@@ -15,14 +15,14 @@ test('ocKey is case-insensitive on asset and exchange but not on expiry', () => 
 test('acquire signals upstream only on 0 -> 1, release only on 1 -> 0', () => {
   const r = createOcSubRegistry();
 
-  expect(r.acquire(NIFTY)).toBe(true);   // first consumer — subscribe
-  expect(r.acquire(NIFTY)).toBe(false);  // second consumer — already streaming
+  expect(r.acquire(NIFTY)).toBe(true); // first consumer — subscribe
+  expect(r.acquire(NIFTY)).toBe(false); // second consumer — already streaming
   expect(r.acquire(NIFTY)).toBe(false);
   expect(r.count(NIFTY)).toBe(3);
 
-  expect(r.release(NIFTY)).toBe(false);  // two consumers left — keep the feed
-  expect(r.release(NIFTY)).toBe(false);  // one left — keep the feed
-  expect(r.release(NIFTY)).toBe(true);   // last one out — unsubscribe
+  expect(r.release(NIFTY)).toBe(false); // two consumers left — keep the feed
+  expect(r.release(NIFTY)).toBe(false); // one left — keep the feed
+  expect(r.release(NIFTY)).toBe(true); // last one out — unsubscribe
   expect(r.count(NIFTY)).toBe(0);
 });
 
@@ -30,11 +30,11 @@ test('acquire signals upstream only on 0 -> 1, release only on 1 -> 0', () => {
 // not tear the feed out from under an Option Chain tab that is still on screen.
 test('one consumer releasing does not stop a feed another still holds', () => {
   const r = createOcSubRegistry();
-  r.acquire(NIFTY);        // Option Chain tab
-  r.acquire(NIFTY);        // basket leg on the same expiry
+  r.acquire(NIFTY); // Option Chain tab
+  r.acquire(NIFTY); // basket leg on the same expiry
 
   expect(r.release(NIFTY)).toBe(false); // leg removed
-  expect(r.active()).toContain(NIFTY);  // tab still fed
+  expect(r.active()).toContain(NIFTY); // tab still fed
 });
 
 // ─── §3  Unbalanced cleanups are inert ───────────────────────────────────────────

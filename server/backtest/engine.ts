@@ -13,13 +13,23 @@
 // leg results, tagged with `seq` (0 = original).
 // ─────────────────────────────────────────────────────────────────────────────
 import type {
-  Adjustment, BacktestConfig, ChargeBreakdown, DayTrade, EntryFilters, ExitReason, IntradayLegPoint,
-  IntradayPoint, Leg, OptionType, Side, StrikeSelection, TradeLegResult, TrailStop, WeekdayCode,
+  Adjustment,
+  BacktestConfig,
+  ChargeBreakdown,
+  DayTrade,
+  EntryFilters,
+  ExitReason,
+  IntradayLegPoint,
+  IntradayPoint,
+  Leg,
+  OptionType,
+  Side,
+  StrikeSelection,
+  TradeLegResult,
+  TrailStop,
+  WeekdayCode,
 } from './types.ts';
-import {
-  loadExpiryDay, resolveExpiry,
-  type Bar, type ExpiryDay,
-} from './dataLayer.ts';
+import { loadExpiryDay, resolveExpiry, type Bar, type ExpiryDay } from './dataLayer.ts';
 import { bsDelta, yearsToExpiry } from './greeks.ts';
 
 const WD: WeekdayCode[] = ['MON', 'TUE', 'WED', 'THU', 'FRI'];
@@ -28,7 +38,7 @@ export function enumerateTradingDays(from: string, to: string, days?: WeekdayCod
   const out: string[] = [];
   const allow = days && days.length ? new Set(days) : null;
   const start = new Date(`${from}T12:00:00Z`);
-  const end   = new Date(`${to}T12:00:00Z`);
+  const end = new Date(`${to}T12:00:00Z`);
   for (let d = start; d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
     const dow = d.getUTCDay(); // 0=Sun
     if (dow === 0 || dow === 6) continue;
@@ -64,13 +74,21 @@ function barFrom(series: Bar[] | undefined, hhmm: string): Bar | null {
 // strikes — unlike the old path that labelled every floating ATM±N bucket with
 // its first row's strike (correct only on an expiry's first captured day).
 function chooseStrike(
-  sel: StrikeSelection, day: ExpiryDay, optionType: OptionType,
-  entrySpot: number, entryHHMM: string, date: string, expiry: string,
+  sel: StrikeSelection,
+  day: ExpiryDay,
+  optionType: OptionType,
+  entrySpot: number,
+  entryHHMM: string,
+  date: string,
+  expiry: string,
 ): number | null {
   const strikes = day.strikes;
   if (!strikes.length) return null;
   const nearestTo = (target: number): number =>
-    strikes.reduce((best, s) => Math.abs(s - target) < Math.abs(best - target) ? s : best, strikes[0]);
+    strikes.reduce(
+      (best, s) => (Math.abs(s - target) < Math.abs(best - target) ? s : best),
+      strikes[0],
+    );
   const map = optionType === 'CALL' ? day.call : day.put;
 
   // Premium of a strike at entry (this option type), or null if no/NaN bar.
@@ -87,8 +105,15 @@ function chooseStrike(
   // ATM straddle premium at entry (ATM CE close + ATM PE close) — used by
   // STRADDLE_WIDTH and ATM_STRADDLE_PREMIUM_PCT.
   const atmStraddlePremium = (): number | null => {
-    let ai = 0, bestD = Infinity;
-    strikes.forEach((s, i) => { const d = Math.abs(s - entrySpot); if (d < bestD) { bestD = d; ai = i; } });
+    let ai = 0,
+      bestD = Infinity;
+    strikes.forEach((s, i) => {
+      const d = Math.abs(s - entrySpot);
+      if (d < bestD) {
+        bestD = d;
+        ai = i;
+      }
+    });
     const atm = strikes[ai];
     const ce = barFrom(day.call.get(atm), entryHHMM);
     const pe = barFrom(day.put.get(atm), entryHHMM);
@@ -97,19 +122,31 @@ function chooseStrike(
   };
   // Pick the strike whose premium is nearest a target (used by several criteria).
   const closestPremium = (tgt: number): number | null => {
-    let best: number | null = null, bestDiff = Infinity;
+    let best: number | null = null,
+      bestDiff = Infinity;
     for (const s of strikes) {
-      const p = premAt(s); if (p == null) continue;
+      const p = premAt(s);
+      if (p == null) continue;
       const diff = Math.abs(p - tgt);
-      if (diff < bestDiff) { bestDiff = diff; best = s; }
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = s;
+      }
     }
     return best;
   };
 
   switch (sel.method) {
     case 'ATM': {
-      let ai = 0, bestD = Infinity;
-      strikes.forEach((s, i) => { const d = Math.abs(s - entrySpot); if (d < bestD) { bestD = d; ai = i; } });
+      let ai = 0,
+        bestD = Infinity;
+      strikes.forEach((s, i) => {
+        const d = Math.abs(s - entrySpot);
+        if (d < bestD) {
+          bestD = d;
+          ai = i;
+        }
+      });
       const shifted = ai + Math.round(num(sel.atmOffset, 0));
       if (shifted < 0 || shifted >= strikes.length) return null;
       return strikes[shifted];
@@ -125,43 +162,65 @@ function chooseStrike(
     case 'PREMIUM_GTE': {
       // smallest premium still ≥ threshold (most-OTM strike meeting the floor)
       const tgt = num(sel.premiumTarget, 0);
-      let best: number | null = null, bestPrem = Infinity;
+      let best: number | null = null,
+        bestPrem = Infinity;
       for (const s of strikes) {
-        const p = premAt(s); if (p == null) continue;
-        if (p >= tgt && p < bestPrem) { bestPrem = p; best = s; }
+        const p = premAt(s);
+        if (p == null) continue;
+        if (p >= tgt && p < bestPrem) {
+          bestPrem = p;
+          best = s;
+        }
       }
       return best;
     }
     case 'PREMIUM_LTE': {
       // largest premium still ≤ threshold (least-OTM strike under the cap)
       const tgt = num(sel.premiumTarget, 0);
-      let best: number | null = null, bestPrem = -Infinity;
+      let best: number | null = null,
+        bestPrem = -Infinity;
       for (const s of strikes) {
-        const p = premAt(s); if (p == null) continue;
-        if (p <= tgt && p > bestPrem) { bestPrem = p; best = s; }
+        const p = premAt(s);
+        if (p == null) continue;
+        if (p <= tgt && p > bestPrem) {
+          bestPrem = p;
+          best = s;
+        }
       }
       return best;
     }
     case 'PREMIUM_RANGE': {
       // strike whose premium falls within [min,max], nearest the band midpoint
-      const lo = num(sel.premiumMin, 0), hi = num(sel.premiumMax, 0);
+      const lo = num(sel.premiumMin, 0),
+        hi = num(sel.premiumMax, 0);
       const mid = (lo + hi) / 2;
-      let best: number | null = null, bestDiff = Infinity;
+      let best: number | null = null,
+        bestDiff = Infinity;
       for (const s of strikes) {
-        const p = premAt(s); if (p == null || p < lo || p > hi) continue;
+        const p = premAt(s);
+        if (p == null || p < lo || p > hi) continue;
         const diff = Math.abs(p - mid);
-        if (diff < bestDiff) { bestDiff = diff; best = s; }
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          best = s;
+        }
       }
       return best;
     }
     case 'DELTA_RANGE': {
-      const lo = Math.abs(num(sel.deltaMin, 0)), hi = Math.abs(num(sel.deltaMax, 1));
+      const lo = Math.abs(num(sel.deltaMin, 0)),
+        hi = Math.abs(num(sel.deltaMax, 1));
       const mid = (lo + hi) / 2;
-      let best: number | null = null, bestDiff = Infinity;
+      let best: number | null = null,
+        bestDiff = Infinity;
       for (const s of strikes) {
-        const d = deltaAt(s); if (d == null || d < lo || d > hi) continue;
+        const d = deltaAt(s);
+        if (d == null || d < lo || d > hi) continue;
         const diff = Math.abs(d - mid);
-        if (diff < bestDiff) { bestDiff = diff; best = s; }
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          best = s;
+        }
       }
       return best;
     }
@@ -181,13 +240,17 @@ function chooseStrike(
     case 'DELTA': {
       const tgt = Math.abs(num(sel.targetDelta, 0.5));
       const tYears = yearsToExpiry(date, entryHHMM, expiry);
-      let best: number | null = null, bestDiff = Infinity;
+      let best: number | null = null,
+        bestDiff = Infinity;
       for (const s of strikes) {
         const b = barFrom(map.get(s), entryHHMM);
         if (!b) continue;
         const d = Math.abs(bsDelta(optionType, b.spot, s, b.iv, tYears));
         const diff = Math.abs(d - tgt);
-        if (diff < bestDiff) { bestDiff = diff; best = s; }
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          best = s;
+        }
       }
       return best;
     }
@@ -198,13 +261,19 @@ function chooseStrike(
 
 // ── premium-based SL / target levels ─────────────────────────────────────────
 export function premiumLevels(side: Side, entry: number, sl: Leg['stopLoss'], tgt: Leg['target']) {
-  let slPrice: number | null = null, tgtPrice: number | null = null;
-  const pct = (v: number, up: boolean) => up ? entry * (1 + v / 100) : entry * (1 - v / 100);
-  const slV = num(sl.value), tgtV = num(tgt.value);
-  if (sl.type === 'PREMIUM_PERCENT' && sl.value != null) slPrice = side === 'SELL' ? pct(slV, true) : pct(slV, false);
-  if (sl.type === 'PREMIUM_ABSOLUTE' && sl.value != null) slPrice = side === 'SELL' ? entry + slV : entry - slV;
-  if (tgt.type === 'PREMIUM_PERCENT' && tgt.value != null) tgtPrice = side === 'SELL' ? pct(tgtV, false) : pct(tgtV, true);
-  if (tgt.type === 'PREMIUM_ABSOLUTE' && tgt.value != null) tgtPrice = side === 'SELL' ? entry - tgtV : entry + tgtV;
+  let slPrice: number | null = null,
+    tgtPrice: number | null = null;
+  const pct = (v: number, up: boolean) => (up ? entry * (1 + v / 100) : entry * (1 - v / 100));
+  const slV = num(sl.value),
+    tgtV = num(tgt.value);
+  if (sl.type === 'PREMIUM_PERCENT' && sl.value != null)
+    slPrice = side === 'SELL' ? pct(slV, true) : pct(slV, false);
+  if (sl.type === 'PREMIUM_ABSOLUTE' && sl.value != null)
+    slPrice = side === 'SELL' ? entry + slV : entry - slV;
+  if (tgt.type === 'PREMIUM_PERCENT' && tgt.value != null)
+    tgtPrice = side === 'SELL' ? pct(tgtV, false) : pct(tgtV, true);
+  if (tgt.type === 'PREMIUM_ABSOLUTE' && tgt.value != null)
+    tgtPrice = side === 'SELL' ? entry - tgtV : entry + tgtV;
   return { slPrice, tgtPrice };
 }
 
@@ -215,14 +284,28 @@ function isBullish(side: Side, optionType: OptionType): boolean {
   return (side === 'BUY' && optionType === 'CALL') || (side === 'SELL' && optionType === 'PUT');
 }
 function underlyingLevels(
-  side: Side, optionType: OptionType, entrySpot: number,
-  sl: Leg['stopLoss'], tgt: Leg['target'],
+  side: Side,
+  optionType: OptionType,
+  entrySpot: number,
+  sl: Leg['stopLoss'],
+  tgt: Leg['target'],
 ) {
   const bull = isBullish(side, optionType);
-  const pts = (v: number, pct: boolean) => pct ? entrySpot * (v / 100) : v;
-  let slSpot: number | null = null, tgtSpot: number | null = null;
-  const slPts = sl.type === 'UNDERLYING_POINTS' || sl.type === 'UNDERLYING_PERCENT' ? (sl.value != null ? num(sl.value) : null) : null;
-  const tgPts = tgt.type === 'UNDERLYING_POINTS' || tgt.type === 'UNDERLYING_PERCENT' ? (tgt.value != null ? num(tgt.value) : null) : null;
+  const pts = (v: number, pct: boolean) => (pct ? entrySpot * (v / 100) : v);
+  let slSpot: number | null = null,
+    tgtSpot: number | null = null;
+  const slPts =
+    sl.type === 'UNDERLYING_POINTS' || sl.type === 'UNDERLYING_PERCENT'
+      ? sl.value != null
+        ? num(sl.value)
+        : null
+      : null;
+  const tgPts =
+    tgt.type === 'UNDERLYING_POINTS' || tgt.type === 'UNDERLYING_PERCENT'
+      ? tgt.value != null
+        ? num(tgt.value)
+        : null
+      : null;
   if (slPts != null) {
     const d = pts(slPts, sl.type === 'UNDERLYING_PERCENT');
     slSpot = bull ? entrySpot - d : entrySpot + d; // adverse
@@ -236,53 +319,53 @@ function underlyingLevels(
 
 // ── per-leg slot / episode model ─────────────────────────────────────────────
 interface Episode {
-  side:       Side;
-  strike:     number;
-  expiry:     string;
+  side: Side;
+  strike: number;
+  expiry: string;
   optionType: OptionType;
-  entryRaw:   number;
-  entryFill:  number;
-  entryTime:  string;
-  entrySpot:  number;
-  exitRaw:    number;
-  exitFill:   number;
-  exitTime:   string;
+  entryRaw: number;
+  entryFill: number;
+  entryTime: string;
+  entrySpot: number;
+  exitRaw: number;
+  exitFill: number;
+  exitTime: string;
   exitReason: ExitReason;
-  qty:        number;
-  seq:        number;
+  qty: number;
+  seq: number;
   highAfterEntry: number;
-  lowAfterEntry:  number;
+  lowAfterEntry: number;
 }
 
 interface Slot {
-  leg:       Leg;
-  strike:    number;
-  expiry:    string;
-  lots:      number;   // actual lots used this day (after position sizing)
-  qty:       number;   // lots × lotSize
-  byTs:      Map<number, Bar>;
-  episodes:  Episode[];
+  leg: Leg;
+  strike: number;
+  expiry: string;
+  lots: number; // actual lots used this day (after position sizing)
+  qty: number; // lots × lotSize
+  byTs: Map<number, Bar>;
+  episodes: Episode[];
   // current open position
-  open:      boolean;
-  side:      Side;
-  entryRaw:  number;
+  open: boolean;
+  side: Side;
+  entryRaw: number;
   entryFill: number;
   entryTime: string;
-  entryTs:   number;   // epoch-sec of the entry bar — exits are skipped on this bar (no look-ahead)
+  entryTs: number; // epoch-sec of the entry bar — exits are skipped on this bar (no look-ahead)
   entrySpot: number;
-  slPrice:   number | null;   // premium-based stop (mutated by trailing)
-  tgtPrice:  number | null;   // premium-based target
-  slSpot:    number | null;   // underlying-based stop
-  tgtSpot:   number | null;   // underlying-based target
-  bull:      boolean;
-  lastRaw:   number;
-  seq:       number;
+  slPrice: number | null; // premium-based stop (mutated by trailing)
+  tgtPrice: number | null; // premium-based target
+  slSpot: number | null; // underlying-based stop
+  tgtSpot: number | null; // underlying-based target
+  bull: boolean;
+  lastRaw: number;
+  seq: number;
   reentriesUsed: number;
   // pending re-entry waiting for a trigger bar
-  pending?:  { mode: 'ASAP' | 'COST' | 'REVERSE_ASAP'; side: Side; refPrice: number };
+  pending?: { mode: 'ASAP' | 'COST' | 'REVERSE_ASAP'; side: Side; refPrice: number };
   // per-episode high/low tracking
   highAfterEntry: number;
-  lowAfterEntry:  number;
+  lowAfterEntry: number;
 }
 
 function openPosition(slot: Slot, side: Side, bar: Bar, slip: number, cfg: BacktestConfig): void {
@@ -323,13 +406,31 @@ function slotFillAt(slot: Slot, ts: number): number {
   return b && Number.isFinite(b.open) ? b.open : slot.lastRaw;
 }
 
-function closePosition(slot: Slot, exitRaw: number, reason: ExitReason, hhmm: string, slip: number): void {
+function closePosition(
+  slot: Slot,
+  exitRaw: number,
+  reason: ExitReason,
+  hhmm: string,
+  slip: number,
+): void {
   const fill = slot.side === 'SELL' ? exitRaw * (1 + slip) : exitRaw * (1 - slip);
   slot.episodes.push({
-    side: slot.side, strike: slot.strike, expiry: slot.expiry, optionType: slot.leg.optionType,
-    entryRaw: slot.entryRaw, entryFill: slot.entryFill, entryTime: slot.entryTime, entrySpot: slot.entrySpot,
-    exitRaw, exitFill: fill, exitTime: hhmm, exitReason: reason, qty: slot.qty, seq: slot.seq,
-    highAfterEntry: slot.highAfterEntry, lowAfterEntry: slot.lowAfterEntry,
+    side: slot.side,
+    strike: slot.strike,
+    expiry: slot.expiry,
+    optionType: slot.leg.optionType,
+    entryRaw: slot.entryRaw,
+    entryFill: slot.entryFill,
+    entryTime: slot.entryTime,
+    entrySpot: slot.entrySpot,
+    exitRaw,
+    exitFill: fill,
+    exitTime: hhmm,
+    exitReason: reason,
+    qty: slot.qty,
+    seq: slot.seq,
+    highAfterEntry: slot.highAfterEntry,
+    lowAfterEntry: slot.lowAfterEntry,
   });
   slot.open = false;
 }
@@ -375,7 +476,9 @@ function episodeGross(e: Episode): number {
   return e.side === 'SELL' ? (e.entryRaw - e.exitRaw) * e.qty : (e.exitRaw - e.entryRaw) * e.qty;
 }
 function episodeNet(e: Episode): number {
-  return e.side === 'SELL' ? (e.entryFill - e.exitFill) * e.qty : (e.exitFill - e.entryFill) * e.qty;
+  return e.side === 'SELL'
+    ? (e.entryFill - e.exitFill) * e.qty
+    : (e.exitFill - e.entryFill) * e.qty;
 }
 // mark-to-market of a slot's currently open position at a raw premium
 function openGross(slot: Slot, raw: number): number {
@@ -389,7 +492,11 @@ function openGross(slot: Slot, raw: number): number {
 // PnL/episode machinery. Stop-loss is evaluated before target so that a bar whose
 // range spans both fills at the stop (conservative worst-case).
 type ExitKind = 'SL' | 'TGT';
-interface ExitDecision { price: number; reason: ExitReason; kind: ExitKind; }
+interface ExitDecision {
+  price: number;
+  reason: ExitReason;
+  kind: ExitKind;
+}
 
 function evaluateExit(slot: Slot, bar: Bar, date: string): ExitDecision | null {
   const sell = slot.side === 'SELL';
@@ -440,13 +547,15 @@ function dte(date: string, expiry: string): number {
 
 // ── margin estimate ──────────────────────────────────────────────────────────
 // SPAN+exposure proxy for a *naked* short index option ≈ 10% of contract notional.
-const SHORT_NOTIONAL_PCT = 0.10;
+const SHORT_NOTIONAL_PCT = 0.1;
 
 interface MarginLeg {
-  optionType: OptionType; side: Side; strike: number;
-  qty: number;     // total units (lots × lotSize)
+  optionType: OptionType;
+  side: Side;
+  strike: number;
+  qty: number; // total units (lots × lotSize)
   premium: number; // per-unit entry premium (raw)
-  spot: number;    // underlying spot at entry
+  spot: number; // underlying spot at entry
 }
 
 // Approximate the broker margin required to *put on* the position, recognising
@@ -458,8 +567,12 @@ interface MarginLeg {
 function estimateMargin(legs: MarginLeg[]): number {
   let margin = 0;
   for (const ot of ['CALL', 'PUT'] as OptionType[]) {
-    const shorts = legs.filter((l) => l.optionType === ot && l.side === 'SELL').map((l) => ({ ...l }));
-    const longs  = legs.filter((l) => l.optionType === ot && l.side === 'BUY').map((l) => ({ ...l }));
+    const shorts = legs
+      .filter((l) => l.optionType === ot && l.side === 'SELL')
+      .map((l) => ({ ...l }));
+    const longs = legs
+      .filter((l) => l.optionType === ot && l.side === 'BUY')
+      .map((l) => ({ ...l }));
     for (const s of shorts) {
       let remaining = s.qty;
       const hedges = longs
@@ -469,7 +582,8 @@ function estimateMargin(legs: MarginLeg[]): number {
         if (remaining <= 0) break;
         const m = Math.min(remaining, l.qty);
         margin += Math.abs(l.strike - s.strike) * m; // defined risk of the vertical
-        remaining -= m; l.qty -= m;
+        remaining -= m;
+        l.qty -= m;
       }
       if (remaining > 0) margin += s.spot * SHORT_NOTIONAL_PCT * remaining; // naked portion
     }
@@ -481,42 +595,60 @@ function estimateMargin(legs: MarginLeg[]): number {
 // ── charges model (Indian index-option F&O cost stack) ───────────────────────
 // Itemised statutory + broker costs. Turnover for an option order = premium × qty.
 // Rates reflect the post-Oct-2024 schedule used by discount brokers (Zerodha-style).
-const BROKERAGE_PER_ORDER = 20;        // flat ₹20 per executed order …
-const BROKERAGE_PCT       = 0.0003;    // … or 0.03% of turnover, whichever is lower
-const STT_SELL_PCT        = 0.001;     // 0.10% on the SELL-side premium (options)
-const SEBI_PCT            = 0.000001;  // ₹10 per crore = 0.0001%, both sides
-const STAMP_BUY_PCT       = 0.00003;   // 0.003% on the BUY-side premium
-const GST_PCT             = 0.18;      // 18% on (brokerage + exchange + sebi)
+const BROKERAGE_PER_ORDER = 20; // flat ₹20 per executed order …
+const BROKERAGE_PCT = 0.0003; // … or 0.03% of turnover, whichever is lower
+const STT_SELL_PCT = 0.001; // 0.10% on the SELL-side premium (options)
+const SEBI_PCT = 0.000001; // ₹10 per crore = 0.0001%, both sides
+const STAMP_BUY_PCT = 0.00003; // 0.003% on the BUY-side premium
+const GST_PCT = 0.18; // 18% on (brokerage + exchange + sebi)
 const TXN_PCT: Record<string, number> = {
-  NIFTY:  0.0003503,  // NSE index options exchange transaction charge (0.03503%)
-  SENSEX: 0.000325,   // BSE Sensex options exchange transaction charge (≈0.0325%)
+  NIFTY: 0.0003503, // NSE index options exchange transaction charge (0.03503%)
+  SENSEX: 0.000325, // BSE Sensex options exchange transaction charge (≈0.0325%)
 };
 
-interface ChargeLeg { entryRaw: number; exitRaw: number; side: Side; qty: number; }
+interface ChargeLeg {
+  entryRaw: number;
+  exitRaw: number;
+  side: Side;
+  qty: number;
+}
 
 // Each episode is one entry order + one exit order. STT is levied on the sell leg
 // (entry for a SELL, exit for a BUY); stamp duty on the buy leg.
-function computeCharges(legs: ChargeLeg[], underlying: string, slippageCost: number): ChargeBreakdown {
+function computeCharges(
+  legs: ChargeLeg[],
+  underlying: string,
+  slippageCost: number,
+): ChargeBreakdown {
   const txnPct = TXN_PCT[underlying] ?? TXN_PCT.NIFTY;
-  let brokerage = 0, stt = 0, exchange = 0, sebi = 0, stampDuty = 0;
+  let brokerage = 0,
+    stt = 0,
+    exchange = 0,
+    sebi = 0,
+    stampDuty = 0;
   for (const l of legs) {
     const entryVal = l.entryRaw * l.qty;
-    const exitVal  = l.exitRaw  * l.qty;
-    const sellVal  = l.side === 'SELL' ? entryVal : exitVal;
-    const buyVal   = l.side === 'SELL' ? exitVal  : entryVal;
+    const exitVal = l.exitRaw * l.qty;
+    const sellVal = l.side === 'SELL' ? entryVal : exitVal;
+    const buyVal = l.side === 'SELL' ? exitVal : entryVal;
     brokerage += Math.min(BROKERAGE_PER_ORDER, BROKERAGE_PCT * entryVal);
     brokerage += Math.min(BROKERAGE_PER_ORDER, BROKERAGE_PCT * exitVal);
-    exchange  += txnPct * (entryVal + exitVal);
-    sebi      += SEBI_PCT * (entryVal + exitVal);
-    stt       += STT_SELL_PCT * sellVal;
+    exchange += txnPct * (entryVal + exitVal);
+    sebi += SEBI_PCT * (entryVal + exitVal);
+    stt += STT_SELL_PCT * sellVal;
     stampDuty += STAMP_BUY_PCT * buyVal;
   }
   const gst = GST_PCT * (brokerage + exchange + sebi);
   const total = brokerage + stt + exchange + sebi + stampDuty + gst + slippageCost;
   return {
-    brokerage: round2(brokerage), stt: round2(stt), exchange: round2(exchange),
-    sebi: round2(sebi), stampDuty: round2(stampDuty), gst: round2(gst),
-    slippage: round2(slippageCost), total: round2(total),
+    brokerage: round2(brokerage),
+    stt: round2(stt),
+    exchange: round2(exchange),
+    sebi: round2(sebi),
+    stampDuty: round2(stampDuty),
+    gst: round2(gst),
+    slippage: round2(slippageCost),
+    total: round2(total),
   };
 }
 
@@ -530,10 +662,16 @@ function peakConcurrentMargin(episodes: Episode[]): number {
   for (const t of events) {
     const live = episodes.filter((e) => e.entryTime <= t && t < e.exitTime);
     if (!live.length) continue;
-    const m = estimateMargin(live.map((e) => ({
-      optionType: e.optionType, side: e.side, strike: e.strike,
-      qty: e.qty, premium: e.entryRaw, spot: e.entrySpot,
-    })));
+    const m = estimateMargin(
+      live.map((e) => ({
+        optionType: e.optionType,
+        side: e.side,
+        strike: e.strike,
+        qty: e.qty,
+        premium: e.entryRaw,
+        spot: e.entrySpot,
+      })),
+    );
     if (m > peak) peak = m;
   }
   return peak;
@@ -547,7 +685,12 @@ function peakConcurrentMargin(episodes: Episode[]): number {
 // 26000 after spot fell ~100 pts). Returns the new strike's intraday series keyed
 // from `atTs`, plus the entry bar at `atTs`. Caches make the loads cheap.
 async function resolveSlotStrike(
-  leg: Leg, cfg: BacktestConfig, date: string, atTs: number, atHHMM: string, atSpot: number,
+  leg: Leg,
+  cfg: BacktestConfig,
+  date: string,
+  atTs: number,
+  atHHMM: string,
+  atSpot: number,
 ): Promise<{ strike: number; expiry: string; byTs: Map<number, Bar>; bar: Bar } | null> {
   const res = await resolveExpiry(cfg.underlying, leg.expiry.flag, date, leg.expiry.offset);
   if (!res) return null;
@@ -565,7 +708,11 @@ async function resolveSlotStrike(
 }
 
 async function simulateDay(
-  cfg: BacktestConfig, legs: Leg[], date: string, extMult = 1, collectSeries = false,
+  cfg: BacktestConfig,
+  legs: Leg[],
+  date: string,
+  extMult = 1,
+  collectSeries = false,
 ): Promise<{ trade: DayTrade; series?: IntradayPoint[] } | null> {
   const slip = cfg.slippagePct / 100;
   const filters: EntryFilters = cfg.entryFilters ?? {};
@@ -595,7 +742,10 @@ async function simulateDay(
     if (!db || !db.length) continue;
     const eb = firstBarFrom(db, cfg.entryTime);
     if (!eb || !Number.isFinite(eb.close)) continue;
-    if (!refDayBars || db.length > refDayBars.length) { refDayBars = db; entryBar = eb; }
+    if (!refDayBars || db.length > refDayBars.length) {
+      refDayBars = db;
+      entryBar = eb;
+    }
   }
   if (!refDayBars || !entryBar) return null; // holiday / no data
 
@@ -610,13 +760,16 @@ async function simulateDay(
     for (const b of refDayBars) {
       if (b.ts < entryBar.ts) continue;
       if (b.hhmm > cfg.exitTime) break;
-      if (base > 0 && Math.abs(b.close - base) / base * 100 >= filters.waitTradePct) { hit = b; break; }
+      if (base > 0 && (Math.abs(b.close - base) / base) * 100 >= filters.waitTradePct) {
+        hit = b;
+        break;
+      }
     }
     if (!hit) return null; // condition never met today
     entryBar = hit;
   }
 
-  const entryTs   = entryBar.ts;
+  const entryTs = entryBar.ts;
   const entrySpot = entryBar.spot;
   const entryHHMM = entryBar.hhmm;
 
@@ -628,7 +781,15 @@ async function simulateDay(
     if (!res) return null;
     const legDay = await loadExpiryDay(cfg.underlying, res.expiry, res.flag, date);
     if (!legDay.strikes.length) return null;
-    const strike = chooseStrike(leg.strike, legDay, leg.optionType, entrySpot, entryHHMM, date, res.expiry);
+    const strike = chooseStrike(
+      leg.strike,
+      legDay,
+      leg.optionType,
+      entrySpot,
+      entryHHMM,
+      date,
+      res.expiry,
+    );
     if (strike == null) return null;
     const dayBars = (leg.optionType === 'CALL' ? legDay.call : legDay.put).get(strike);
     if (!dayBars || !dayBars.length) return null;
@@ -639,11 +800,30 @@ async function simulateDay(
     for (const b of dayBars) if (b.ts >= entryTs) byTs.set(b.ts, b);
 
     const slot: Slot = {
-      leg, strike, expiry: res.expiry, lots: leg.lots, qty: leg.lots * cfg.lotSize, byTs,
-      episodes: [], open: false, side: leg.side, entryRaw: 0, entryFill: 0,
-      entryTime: entryHHMM, entryTs: 0, entrySpot: eBar.spot, slPrice: null, tgtPrice: null,
-      slSpot: null, tgtSpot: null, bull: false, lastRaw: eBar.close, seq: 0, reentriesUsed: 0,
-      highAfterEntry: 0, lowAfterEntry: 999999,
+      leg,
+      strike,
+      expiry: res.expiry,
+      lots: leg.lots,
+      qty: leg.lots * cfg.lotSize,
+      byTs,
+      episodes: [],
+      open: false,
+      side: leg.side,
+      entryRaw: 0,
+      entryFill: 0,
+      entryTime: entryHHMM,
+      entryTs: 0,
+      entrySpot: eBar.spot,
+      slPrice: null,
+      tgtPrice: null,
+      slSpot: null,
+      tgtSpot: null,
+      bull: false,
+      lastRaw: eBar.close,
+      seq: 0,
+      reentriesUsed: 0,
+      highAfterEntry: 0,
+      lowAfterEntry: 999999,
     };
     openPosition(slot, leg.side, eBar, slip, cfg);
     combinedEntryPremium += eBar.close;
@@ -681,35 +861,50 @@ async function simulateDay(
 
   // margin required to enter — captured now, from the initial legs only, before
   // any adjustment appends replacement slots (which would otherwise double-count).
-  const marginRequired = estimateMargin(slots.map((s) => ({
-    optionType: s.leg.optionType, side: s.side, strike: s.strike,
-    qty: s.qty, premium: s.entryRaw, spot: s.entrySpot,
-  })));
+  const marginRequired = estimateMargin(
+    slots.map((s) => ({
+      optionType: s.leg.optionType,
+      side: s.side,
+      strike: s.strike,
+      qty: s.qty,
+      premium: s.entryRaw,
+      spot: s.entrySpot,
+    })),
+  );
 
   // 3) timeline: reference bars from entry to exitTime
   const timeline = refDayBars.filter((b) => b.ts >= entryTs && b.hhmm <= cfg.exitTime);
   let portfolioReason: ExitReason | null = null;
-  const adjs: Adjustment[] = (cfg.adjustments ?? []).filter(a => a.enabled);
+  const adjs: Adjustment[] = (cfg.adjustments ?? []).filter((a) => a.enabled);
   let adjUsed = 0;
   // pending adjustment: waiting N bars before entering replacement legs
   let adjPending: { adj: Adjustment; barsLeft: number; spot: number; hhmm: string } | null = null;
 
   for (const tb of timeline) {
     const ts = tb.ts;
-    let legSlHit = false, legTgtHit = false;
+    let legSlHit = false,
+      legTgtHit = false;
 
     for (const slot of slots) {
       // Pending RE ASAP / REVERSE re-entry: re-select the strike at the CURRENT spot
       // and enter on this bar. Handled BEFORE the old strike's bar-existence guard
       // because the replacement may sit on a different strike than the one that
       // stopped out (and the old strike could even have a data gap this minute).
-      if (!slot.open && slot.pending && !adjPending &&
-          (slot.pending.mode === 'ASAP' || slot.pending.mode === 'REVERSE_ASAP')) {
+      if (
+        !slot.open &&
+        slot.pending &&
+        !adjPending &&
+        (slot.pending.mode === 'ASAP' || slot.pending.mode === 'REVERSE_ASAP')
+      ) {
         const p = slot.pending;
         const re = await resolveSlotStrike(slot.leg, cfg, date, ts, tb.hhmm, tb.spot);
         if (re) {
-          slot.strike = re.strike; slot.expiry = re.expiry; slot.byTs = re.byTs;
-          slot.seq += 1; slot.reentriesUsed += 1; slot.pending = undefined;
+          slot.strike = re.strike;
+          slot.expiry = re.expiry;
+          slot.byTs = re.byTs;
+          slot.seq += 1;
+          slot.reentriesUsed += 1;
+          slot.pending = undefined;
           openPosition(slot, p.side, re.bar, slip, cfg);
         }
         continue; // entered (or retry next bar); nothing else to do for this slot
@@ -720,7 +915,10 @@ async function simulateDay(
 
       if (slot.open) {
         // No look-ahead: we entered at this bar's close, so its high/low predate the fill.
-        if (ts === slot.entryTs) { slot.lastRaw = bar.close; continue; }
+        if (ts === slot.entryTs) {
+          slot.lastRaw = bar.close;
+          continue;
+        }
         slot.lastRaw = bar.close;
         if (bar.high > slot.highAfterEntry) slot.highAfterEntry = bar.high;
         if (bar.low < slot.lowAfterEntry) slot.lowAfterEntry = bar.low;
@@ -728,7 +926,8 @@ async function simulateDay(
         const decision = evaluateExit(slot, bar, date);
         if (decision) {
           closePosition(slot, decision.price, decision.reason, bar.hhmm, slip);
-          if (decision.kind === 'SL') legSlHit = true; else legTgtHit = true;
+          if (decision.kind === 'SL') legSlHit = true;
+          else legTgtHit = true;
           if (!adjPending) scheduleReentry(slot);
         } else {
           // Tighten the trailing stop only AFTER the exit check, so a tightened
@@ -782,16 +981,29 @@ async function simulateDay(
     if (adjPending) {
       if (adjPending.barsLeft <= 0) {
         // Enter replacement legs using current spot for strike selection
-        const replLegs = adjPending.adj.replacementLegs.filter(l => l.enabled);
+        const replLegs = adjPending.adj.replacementLegs.filter((l) => l.enabled);
         for (const rLeg of replLegs) {
           // find if we can reuse an existing slot or need to add one
           // for simplicity, add as new slots
-          const res = await resolveExpiry(cfg.underlying, rLeg.expiry.flag, date, rLeg.expiry.offset);
+          const res = await resolveExpiry(
+            cfg.underlying,
+            rLeg.expiry.flag,
+            date,
+            rLeg.expiry.offset,
+          );
           if (!res) continue;
           const adjDay = await loadExpiryDay(cfg.underlying, res.expiry, res.flag, date);
           if (!adjDay.strikes.length) continue;
           const adjSpot = tb.spot;
-          const strike = chooseStrike(rLeg.strike, adjDay, rLeg.optionType, adjSpot, tb.hhmm, date, res.expiry);
+          const strike = chooseStrike(
+            rLeg.strike,
+            adjDay,
+            rLeg.optionType,
+            adjSpot,
+            tb.hhmm,
+            date,
+            res.expiry,
+          );
           if (strike == null) continue;
           const dayBars = (rLeg.optionType === 'CALL' ? adjDay.call : adjDay.put).get(strike);
           if (!dayBars || !dayBars.length) continue;
@@ -800,13 +1012,30 @@ async function simulateDay(
           const adjBar = byTs2.get(ts);
           if (!adjBar) continue;
           const newSlot: Slot = {
-            leg: rLeg, strike, expiry: res.expiry,
-            lots: rLeg.lots, qty: rLeg.lots * cfg.lotSize, byTs: byTs2,
-            episodes: [], open: false, side: rLeg.side,
-            entryRaw: 0, entryFill: 0, entryTime: tb.hhmm, entryTs: 0, entrySpot: adjBar.spot,
-            slPrice: null, tgtPrice: null, slSpot: null, tgtSpot: null,
-            bull: false, lastRaw: adjBar.close, seq: 0, reentriesUsed: 0,
-            highAfterEntry: 0, lowAfterEntry: 999999,
+            leg: rLeg,
+            strike,
+            expiry: res.expiry,
+            lots: rLeg.lots,
+            qty: rLeg.lots * cfg.lotSize,
+            byTs: byTs2,
+            episodes: [],
+            open: false,
+            side: rLeg.side,
+            entryRaw: 0,
+            entryFill: 0,
+            entryTime: tb.hhmm,
+            entryTs: 0,
+            entrySpot: adjBar.spot,
+            slPrice: null,
+            tgtPrice: null,
+            slSpot: null,
+            tgtSpot: null,
+            bull: false,
+            lastRaw: adjBar.close,
+            seq: 0,
+            reentriesUsed: 0,
+            highAfterEntry: 0,
+            lowAfterEntry: 999999,
           };
           openPosition(newSlot, rLeg.side, adjBar, slip, cfg);
           slots.push(newSlot);
@@ -849,9 +1078,13 @@ async function simulateDay(
         if (!adjPending && adjs.length > 0) {
           for (const adj of adjs) {
             if (adjUsed >= (adj.maxAdjustments ?? 1)) continue;
-            if ((adj.trigger === 'ON_PORTFOLIO_SL' && portfolioReason === 'PORTFOLIO_SL') ||
-                (adj.trigger === 'ON_PORTFOLIO_TP' && portfolioReason === 'PORTFOLIO_TP')) {
-              for (const slot of slots) if (slot.open) closePosition(slot, slotFillAt(slot, ts), portfolioReason, tb.hhmm, slip);
+            if (
+              (adj.trigger === 'ON_PORTFOLIO_SL' && portfolioReason === 'PORTFOLIO_SL') ||
+              (adj.trigger === 'ON_PORTFOLIO_TP' && portfolioReason === 'PORTFOLIO_TP')
+            ) {
+              for (const slot of slots)
+                if (slot.open)
+                  closePosition(slot, slotFillAt(slot, ts), portfolioReason, tb.hhmm, slip);
               adjUsed++;
               adjPending = { adj, barsLeft: adj.delayBars ?? 0, spot: tb.spot, hhmm: tb.hhmm };
               adjFired = true;
@@ -861,7 +1094,9 @@ async function simulateDay(
           }
         }
         if (!adjFired) {
-          for (const slot of slots) if (slot.open) closePosition(slot, slotFillAt(slot, ts), portfolioReason!, tb.hhmm, slip);
+          for (const slot of slots)
+            if (slot.open)
+              closePosition(slot, slotFillAt(slot, ts), portfolioReason!, tb.hhmm, slip);
           break;
         }
       }
@@ -878,22 +1113,35 @@ async function simulateDay(
   // 5) tally — one result row per episode
   const legResults: TradeLegResult[] = [];
   const allEpisodes: Episode[] = [];
-  let grossPnl = 0, netPnl = 0;
+  let grossPnl = 0,
+    netPnl = 0;
   for (const slot of slots) {
     for (const e of slot.episodes) {
       allEpisodes.push(e);
       const gross = episodeGross(e);
       const net = episodeNet(e);
-      grossPnl += gross; netPnl += net;
+      grossPnl += gross;
+      netPnl += net;
       // guard against the sentinel seeds ever leaking if a slot skipped openPosition
       const hi = e.highAfterEntry > 0 ? e.highAfterEntry : e.entryRaw;
       const lo = e.lowAfterEntry < 999999 ? e.lowAfterEntry : e.entryRaw;
       legResults.push({
-        legId: slot.leg.id, optionType: e.optionType, side: e.side, strike: e.strike,
-        expiry: e.expiry, lots: slot.lots, entryTime: e.entryTime, exitTime: e.exitTime,
-        entryPrice: round2(e.entryFill), exitPrice: round2(e.exitFill), entrySpot: round2(e.entrySpot),
-        pnl: round2(net), exitReason: e.exitReason, seq: e.seq,
-        highAfterEntry: round2(hi), lowAfterEntry: round2(lo),
+        legId: slot.leg.id,
+        optionType: e.optionType,
+        side: e.side,
+        strike: e.strike,
+        expiry: e.expiry,
+        lots: slot.lots,
+        entryTime: e.entryTime,
+        exitTime: e.exitTime,
+        entryPrice: round2(e.entryFill),
+        exitPrice: round2(e.exitFill),
+        entrySpot: round2(e.entrySpot),
+        pnl: round2(net),
+        exitReason: e.exitReason,
+        seq: e.seq,
+        highAfterEntry: round2(hi),
+        lowAfterEntry: round2(lo),
       });
     }
   }
@@ -906,15 +1154,31 @@ async function simulateDay(
       let legPnl = 0;
       for (const e of slot.episodes) legPnl += episodeGross(e);
       total += legPnl;
-      legPts.push({ legId: slot.leg.id, seq: slot.seq, pnl: round2(legPnl), price: round2(slot.lastRaw) });
+      legPts.push({
+        legId: slot.leg.id,
+        seq: slot.seq,
+        pnl: round2(legPnl),
+        price: round2(slot.lastRaw),
+      });
     }
-    series.push({ hhmm: lastBar.hhmm, spot: round2(lastBar.spot), total: round2(total), legs: legPts });
+    series.push({
+      hhmm: lastBar.hhmm,
+      spot: round2(lastBar.spot),
+      total: round2(total),
+      legs: legPts,
+    });
   }
 
   const slippageCost = grossPnl - netPnl;
   const charges = computeCharges(
-    allEpisodes.map((e) => ({ entryRaw: e.entryRaw, exitRaw: e.exitRaw, side: e.side, qty: e.qty })),
-    cfg.underlying, slippageCost,
+    allEpisodes.map((e) => ({
+      entryRaw: e.entryRaw,
+      exitRaw: e.exitRaw,
+      side: e.side,
+      qty: e.qty,
+    })),
+    cfg.underlying,
+    slippageCost,
   );
   const costs = charges.total;
   const pnl = grossPnl - costs;
@@ -923,14 +1187,27 @@ async function simulateDay(
   // ROI on the margin that was blocked to enter the trade.
   const roiPct = marginRequired > 0 ? round2((pnl / marginRequired) * 100) : 0;
 
-  const exitReason: ExitReason = portfolioReason
-    ?? dominantReason(legResults.map((r) => r.exitReason), pnl);
+  const exitReason: ExitReason =
+    portfolioReason ??
+    dominantReason(
+      legResults.map((r) => r.exitReason),
+      pnl,
+    );
 
   const trade: DayTrade = {
-    date, entrySpot: round2(entrySpot), exitSpot: round2(lastBar.spot),
-    legs: legResults, grossPnl: round2(grossPnl), costs: round2(costs),
-    pnl: round2(pnl), cumPnl: 0, exitReason,
-    margin: round2(marginRequired), maxMargin: round2(maxMargin), roiPct, charges,
+    date,
+    entrySpot: round2(entrySpot),
+    exitSpot: round2(lastBar.spot),
+    legs: legResults,
+    grossPnl: round2(grossPnl),
+    costs: round2(costs),
+    pnl: round2(pnl),
+    cumPnl: 0,
+    exitReason,
+    margin: round2(marginRequired),
+    maxMargin: round2(maxMargin),
+    roiPct,
+    charges,
   };
   return collectSeries ? { trade, series } : { trade };
 }
@@ -952,7 +1229,11 @@ function scheduleReentry(slot: Slot): void {
   if (!wasSL && !wasTgt) return; // don't re-enter EOD / portfolio exits
 
   if (re.mode === 'REVERSE_ASAP') {
-    slot.pending = { mode: 'REVERSE_ASAP', side: last.side === 'SELL' ? 'BUY' : 'SELL', refPrice: last.entryRaw };
+    slot.pending = {
+      mode: 'REVERSE_ASAP',
+      side: last.side === 'SELL' ? 'BUY' : 'SELL',
+      refPrice: last.entryRaw,
+    };
   } else if (re.mode === 'COST') {
     slot.pending = { mode: 'COST', side: last.side, refPrice: last.entryRaw };
   } else {
@@ -969,21 +1250,25 @@ function dominantReason(reasons: ExitReason[], pnl: number): ExitReason {
   const sl = has('STOPLOSS') || has('TRAIL_SL');
   const tgt = has('TARGET');
   // Both a target and a stop fired on different legs → break by the day's sign.
-  if (sl && tgt) return pnl >= 0 ? 'TARGET' : (has('TRAIL_SL') ? 'TRAIL_SL' : 'STOPLOSS');
+  if (sl && tgt) return pnl >= 0 ? 'TARGET' : has('TRAIL_SL') ? 'TRAIL_SL' : 'STOPLOSS';
   if (tgt) return 'TARGET';
   if (sl) return has('TRAIL_SL') ? 'TRAIL_SL' : 'STOPLOSS';
   return 'EOD';
 }
 
-function round2(n: number): number { return Math.round(n * 100) / 100; }
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
 
 export async function runDays(
-  cfg: BacktestConfig, dates: string[],
+  cfg: BacktestConfig,
+  dates: string[],
 ): Promise<{ trades: DayTrade[]; warnings: string[]; scanned: number }> {
   const legs = cfg.legs.filter((l) => l.enabled);
   const trades: DayTrade[] = [];
   const warnings: string[] = [];
-  let cum = 0, skipped = 0;
+  let cum = 0,
+    skipped = 0;
   const martingale = cfg.sizing?.mode === 'MARTINGALE';
   const mFactor = cfg.sizing?.factor && cfg.sizing.factor > 0 ? cfg.sizing.factor : 2;
   let consecLosses = 0;
@@ -997,18 +1282,22 @@ export async function runDays(
       if (warnings.length < 20) warnings.push(`${date}: ${(e as Error).message}`);
     }
     if (day) {
-      cum += day.pnl; day.cumPnl = round2(cum); trades.push(day);
+      cum += day.pnl;
+      day.cumPnl = round2(cum);
+      trades.push(day);
       if (martingale) consecLosses = day.pnl < 0 ? consecLosses + 1 : 0;
     } else skipped++;
   }
-  if (skipped) warnings.push(`${skipped} day(s) skipped (holiday / no data / entry filter not met).`);
+  if (skipped)
+    warnings.push(`${skipped} day(s) skipped (holiday / no data / entry filter not met).`);
   return { trades, warnings, scanned: dates.length };
 }
 
 // Single-day detailed run: returns the day's trade plus its minute-by-minute P&L
 // curve (for the trade-detail view). cumPnl is left at 0 (single-day scope).
 export async function runSingleDay(
-  cfg: BacktestConfig, date: string,
+  cfg: BacktestConfig,
+  date: string,
 ): Promise<{ trade: DayTrade; series: IntradayPoint[] } | null> {
   const legs = cfg.legs.filter((l) => l.enabled);
   const res = await simulateDay(cfg, legs, date, 1, true);

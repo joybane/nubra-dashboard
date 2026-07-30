@@ -25,24 +25,34 @@ function PaneLoading() {
 }
 
 interface PaneShellProps {
-  pane:               PaneState;
-  theme:              'dark' | 'light';
-  isActive:           boolean;
-  onActivate:         () => void;
-  onViewChange:       (view: ViewType) => void;
+  pane: PaneState;
+  theme: 'dark' | 'light';
+  isActive: boolean;
+  onActivate: () => void;
+  onViewChange: (view: ViewType) => void;
   onNavigateToChart?: (inst: Instrument) => void;
 }
 
 export default function PaneShell({
-  pane, theme, isActive, onActivate, onViewChange, onNavigateToChart,
+  pane,
+  theme,
+  isActive,
+  onActivate,
+  onViewChange,
+  onNavigateToChart,
 }: PaneShellProps) {
-
   const viewEl = (() => {
     switch (pane.view) {
       case 'chart':
         return <CandleChart instrument={pane.instrument} theme={theme} />;
       case 'optionchain':
-        return <OptionChain instrument={pane.instrument} onNavigateToChart={onNavigateToChart} onChangeView={onViewChange} />;
+        return (
+          <OptionChain
+            instrument={pane.instrument}
+            onNavigateToChart={onNavigateToChart}
+            onChangeView={onViewChange}
+          />
+        );
       case 'straddle':
         return <StraddleChart instrument={pane.instrument} />;
       case 'strategy':
@@ -67,14 +77,10 @@ export default function PaneShell({
         isActive ? 'outline outline-1 outline-[var(--accent)] outline-offset-[-1px]' : ''
       }`}
     >
-
-
       {/* Content area */}
       <div className="flex-1 overflow-hidden min-h-0">
         <ErrorBoundary label={VIEW_LABELS[pane.view]}>
-          <Suspense fallback={<PaneLoading />}>
-            {viewEl}
-          </Suspense>
+          <Suspense fallback={<PaneLoading />}>{viewEl}</Suspense>
         </ErrorBoundary>
       </div>
     </div>

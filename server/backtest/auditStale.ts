@@ -14,7 +14,10 @@ function firstBarFrom(bars: Bar[], t: string): Bar | null {
 }
 
 const r = await getStrikeIndex(und, expiry, 'WEEK');
-const sf = r.reduce((best, s) => Math.abs(s.strike - strike) < Math.abs(best.strike - strike) ? s : best, r[0]);
+const sf = r.reduce(
+  (best, s) => (Math.abs(s.strike - strike) < Math.abs(best.strike - strike) ? s : best),
+  r[0],
+);
 const call = await readContract(sf.callPath, 'CALL');
 const put = await readContract(sf.putPath, 'PUT');
 

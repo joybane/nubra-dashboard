@@ -6,31 +6,31 @@ import { payoffAtExpiry } from './lib/GexService';
 import { fmtPrice, generateId } from './lib/utils';
 
 interface Leg {
-  id:      string;
-  type:    'CE' | 'PE';
-  side:    'BUY' | 'SELL';
-  strike:  number;
+  id: string;
+  type: 'CE' | 'PE';
+  side: 'BUY' | 'SELL';
+  strike: number;
   premium: number;
-  qty:     number;
+  qty: number;
 }
 
 interface Props {
   instrument: Instrument | null;
 }
 
-const TEMPLATES: { label: string; legs: Omit<Leg,'id'>[] }[] = [
+const TEMPLATES: { label: string; legs: Omit<Leg, 'id'>[] }[] = [
   {
     label: 'Bull Call Spread',
     legs: [
-      { type: 'CE', side: 'BUY',  strike: 22000, premium: 200, qty: 1 },
-      { type: 'CE', side: 'SELL', strike: 22500, premium: 80,  qty: 1 },
+      { type: 'CE', side: 'BUY', strike: 22000, premium: 200, qty: 1 },
+      { type: 'CE', side: 'SELL', strike: 22500, premium: 80, qty: 1 },
     ],
   },
   {
     label: 'Bear Put Spread',
     legs: [
-      { type: 'PE', side: 'BUY',  strike: 22000, premium: 150, qty: 1 },
-      { type: 'PE', side: 'SELL', strike: 21500, premium: 60,  qty: 1 },
+      { type: 'PE', side: 'BUY', strike: 22000, premium: 150, qty: 1 },
+      { type: 'PE', side: 'SELL', strike: 21500, premium: 60, qty: 1 },
     ],
   },
   {
@@ -50,10 +50,10 @@ const TEMPLATES: { label: string; legs: Omit<Leg,'id'>[] }[] = [
   {
     label: 'Iron Condor',
     legs: [
-      { type: 'PE', side: 'BUY',  strike: 21000, premium: 30,  qty: 1 },
-      { type: 'PE', side: 'SELL', strike: 21500, premium: 80,  qty: 1 },
-      { type: 'CE', side: 'SELL', strike: 22500, premium: 80,  qty: 1 },
-      { type: 'CE', side: 'BUY',  strike: 23000, premium: 30,  qty: 1 },
+      { type: 'PE', side: 'BUY', strike: 21000, premium: 30, qty: 1 },
+      { type: 'PE', side: 'SELL', strike: 21500, premium: 80, qty: 1 },
+      { type: 'CE', side: 'SELL', strike: 22500, premium: 80, qty: 1 },
+      { type: 'CE', side: 'BUY', strike: 23000, premium: 30, qty: 1 },
     ],
   },
 ];
@@ -76,10 +76,10 @@ export default function StrategyChart({ instrument }: Props) {
   }
 
   function updateLeg(id: string, updates: Partial<Leg>) {
-    setLegs((prev) => prev.map((l) => l.id === id ? { ...l, ...updates } : l));
+    setLegs((prev) => prev.map((l) => (l.id === id ? { ...l, ...updates } : l)));
   }
 
-  function loadTemplate(tmpl: typeof TEMPLATES[0]) {
+  function loadTemplate(tmpl: (typeof TEMPLATES)[0]) {
     setLegs(tmpl.legs.map((l) => ({ ...l, id: generateId() })));
   }
 
@@ -91,19 +91,22 @@ export default function StrategyChart({ instrument }: Props) {
     const maxS = Math.max(...strikes) * 1.15;
     const step = (maxS - minS) / 100;
     return Array.from({ length: 101 }, (_, i) => {
-      const s   = minS + i * step;
+      const s = minS + i * step;
       const pnl = payoffAtExpiry(s, legs);
       return { spot: Math.round(s), pnl: Math.round(pnl * 100) / 100 };
     });
   }, [legs]);
 
   const maxProfit = chartData.length ? Math.max(...chartData.map((d) => d.pnl)) : 0;
-  const maxLoss   = chartData.length ? Math.min(...chartData.map((d) => d.pnl)) : 0;
+  const maxLoss = chartData.length ? Math.min(...chartData.map((d) => d.pnl)) : 0;
   const breakevenPoints = useMemo(() => {
     const bps: number[] = [];
     for (let i = 1; i < chartData.length; i++) {
-      if ((chartData[i-1].pnl < 0 && chartData[i].pnl >= 0) || (chartData[i-1].pnl >= 0 && chartData[i].pnl < 0)) {
-        bps.push(Math.round((chartData[i-1].spot + chartData[i].spot) / 2));
+      if (
+        (chartData[i - 1].pnl < 0 && chartData[i].pnl >= 0) ||
+        (chartData[i - 1].pnl >= 0 && chartData[i].pnl < 0)
+      ) {
+        bps.push(Math.round((chartData[i - 1].spot + chartData[i].spot) / 2));
       }
     }
     return bps;
@@ -142,7 +145,10 @@ export default function StrategyChart({ instrument }: Props) {
             </button>
           ))}
         </div>
-        <button onClick={addLeg} className="ml-auto px-3 py-1 rounded bg-[var(--accent)] text-white text-[12px] font-semibold hover:bg-[var(--accent-dim)]">
+        <button
+          onClick={addLeg}
+          className="ml-auto px-3 py-1 rounded bg-[var(--accent)] text-white text-[12px] font-semibold hover:bg-[var(--accent-dim)]"
+        >
           + Add Leg
         </button>
       </div>
@@ -150,52 +156,103 @@ export default function StrategyChart({ instrument }: Props) {
       <div className="flex flex-1 overflow-hidden">
         {/* Legs panel */}
         <div className="w-[340px] shrink-0 border-r border-[var(--border)] overflow-y-auto p-3 flex flex-col gap-2">
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)] mb-1">Strategy Legs</div>
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-[var(--text-muted)] mb-1">
+            Strategy Legs
+          </div>
           {legs.length === 0 && (
-            <div className="text-[var(--text-muted)] text-[13px] text-center py-8">No legs yet. Add a leg or load a template.</div>
+            <div className="text-[var(--text-muted)] text-[13px] text-center py-8">
+              No legs yet. Add a leg or load a template.
+            </div>
           )}
           {legs.map((leg) => (
-            <div key={leg.id} className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-2.5 flex flex-col gap-2">
+            <div
+              key={leg.id}
+              className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg p-2.5 flex flex-col gap-2"
+            >
               <div className="flex items-center gap-2">
-                <select value={leg.side} onChange={(e) => updateLeg(leg.id, { side: e.target.value as 'BUY'|'SELL' })}
-                  className="flex-1 px-1.5 py-0.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[12px] text-[var(--text-primary)] focus:outline-none">
-                  <option value="BUY">BUY</option><option value="SELL">SELL</option>
+                <select
+                  value={leg.side}
+                  onChange={(e) => updateLeg(leg.id, { side: e.target.value as 'BUY' | 'SELL' })}
+                  className="flex-1 px-1.5 py-0.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[12px] text-[var(--text-primary)] focus:outline-none"
+                >
+                  <option value="BUY">BUY</option>
+                  <option value="SELL">SELL</option>
                 </select>
-                <select value={leg.type} onChange={(e) => updateLeg(leg.id, { type: e.target.value as 'CE'|'PE' })}
-                  className="flex-1 px-1.5 py-0.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[12px] text-[var(--text-primary)] focus:outline-none">
-                  <option value="CE">CE</option><option value="PE">PE</option>
+                <select
+                  value={leg.type}
+                  onChange={(e) => updateLeg(leg.id, { type: e.target.value as 'CE' | 'PE' })}
+                  className="flex-1 px-1.5 py-0.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[12px] text-[var(--text-primary)] focus:outline-none"
+                >
+                  <option value="CE">CE</option>
+                  <option value="PE">PE</option>
                 </select>
-                <button onClick={() => removeLeg(leg.id)} className="text-[var(--red)] hover:text-red-400 text-[14px] font-bold">✕</button>
+                <button
+                  onClick={() => removeLeg(leg.id)}
+                  className="text-[var(--red)] hover:text-red-400 text-[14px] font-bold"
+                >
+                  ✕
+                </button>
               </div>
               <div className="flex gap-2">
                 <label className="flex-1">
                   <span className="text-[10px] text-[var(--text-muted)]">Strike</span>
-                  <input type="number" value={leg.strike} onChange={(e) => updateLeg(leg.id, { strike: Number(e.target.value) })}
-                    className="w-full px-2 py-0.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[12px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]" />
+                  <input
+                    type="number"
+                    value={leg.strike}
+                    onChange={(e) => updateLeg(leg.id, { strike: Number(e.target.value) })}
+                    className="w-full px-2 py-0.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[12px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                  />
                 </label>
                 <label className="flex-1">
                   <span className="text-[10px] text-[var(--text-muted)]">Premium</span>
-                  <input type="number" value={leg.premium} onChange={(e) => updateLeg(leg.id, { premium: Number(e.target.value) })}
-                    className="w-full px-2 py-0.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[12px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]" />
+                  <input
+                    type="number"
+                    value={leg.premium}
+                    onChange={(e) => updateLeg(leg.id, { premium: Number(e.target.value) })}
+                    className="w-full px-2 py-0.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[12px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                  />
                 </label>
                 <label className="w-14">
                   <span className="text-[10px] text-[var(--text-muted)]">Qty</span>
-                  <input type="number" min={1} value={leg.qty} onChange={(e) => updateLeg(leg.id, { qty: Number(e.target.value) })}
-                    className="w-full px-2 py-0.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[12px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]" />
+                  <input
+                    type="number"
+                    min={1}
+                    value={leg.qty}
+                    onChange={(e) => updateLeg(leg.id, { qty: Number(e.target.value) })}
+                    className="w-full px-2 py-0.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded text-[12px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                  />
                 </label>
               </div>
-              <div className={`text-[11px] font-semibold ${leg.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
-                {leg.side} {leg.qty}× {leg.strike}{leg.type} @ ₹{leg.premium}
+              <div
+                className={`text-[11px] font-semibold ${leg.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}
+              >
+                {leg.side} {leg.qty}× {leg.strike}
+                {leg.type} @ ₹{leg.premium}
               </div>
             </div>
           ))}
 
           {legs.length > 0 && (
             <div className="mt-2 p-3 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg text-[12px] space-y-1">
-              <div className="flex justify-between"><span className="text-[var(--text-muted)]">Max Profit</span><span className="text-green-400 font-semibold">{maxProfit === Infinity ? '∞' : `₹${fmtPrice(maxProfit)}`}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--text-muted)]">Max Loss</span><span className="text-red-400 font-semibold">{maxLoss === -Infinity ? '-∞' : `₹${fmtPrice(maxLoss)}`}</span></div>
+              <div className="flex justify-between">
+                <span className="text-[var(--text-muted)]">Max Profit</span>
+                <span className="text-green-400 font-semibold">
+                  {maxProfit === Infinity ? '∞' : `₹${fmtPrice(maxProfit)}`}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[var(--text-muted)]">Max Loss</span>
+                <span className="text-red-400 font-semibold">
+                  {maxLoss === -Infinity ? '-∞' : `₹${fmtPrice(maxLoss)}`}
+                </span>
+              </div>
               {breakevenPoints.map((bp) => (
-                <div key={bp} className="flex justify-between"><span className="text-[var(--text-muted)]">Breakeven</span><span className="text-yellow-400 font-semibold">₹{bp.toLocaleString('en-IN')}</span></div>
+                <div key={bp} className="flex justify-between">
+                  <span className="text-[var(--text-muted)]">Breakeven</span>
+                  <span className="text-yellow-400 font-semibold">
+                    ₹{bp.toLocaleString('en-IN')}
+                  </span>
+                </div>
               ))}
             </div>
           )}
@@ -204,7 +261,9 @@ export default function StrategyChart({ instrument }: Props) {
         {/* Payoff chart */}
         <div className="flex-1 p-4">
           {chartData.length === 0 ? (
-            <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-[13px]">Add strategy legs to see payoff diagram</div>
+            <div className="flex items-center justify-center h-full text-[var(--text-muted)] text-[13px]">
+              Add strategy legs to see payoff diagram
+            </div>
           ) : (
             <SvgChart
               data={chartData}
@@ -212,16 +271,32 @@ export default function StrategyChart({ instrument }: Props) {
               series={[{ dataKey: 'pnl', color: '#2962ff' }]}
               refLines={[
                 { axis: 'y', value: 0, color: '#2a2d42' },
-                { axis: 'x', value: spot, color: '#5865f2', dashed: true, label: 'Current Spot', labelColor: '#5865f2' },
-                ...breakevenPoints.map(bp => ({ axis: 'x' as const, value: bp, color: '#facc15', dashed: true, label: 'BE', labelColor: '#facc15' })),
+                {
+                  axis: 'x',
+                  value: spot,
+                  color: '#5865f2',
+                  dashed: true,
+                  label: 'Current Spot',
+                  labelColor: '#5865f2',
+                },
+                ...breakevenPoints.map((bp) => ({
+                  axis: 'x' as const,
+                  value: bp,
+                  color: '#facc15',
+                  dashed: true,
+                  label: 'BE',
+                  labelColor: '#facc15',
+                })),
               ]}
-              xFormatter={v => v.toLocaleString('en-IN')}
-              yFormatter={v => `₹${fmtPrice(v)}`}
+              xFormatter={(v) => v.toLocaleString('en-IN')}
+              yFormatter={(v) => `₹${fmtPrice(v)}`}
               xLabel="Underlying at Expiry"
               yLabel="P&L (₹)"
               showLegend
               legendLabels={{ pnl: 'Strategy P&L' }}
-              tooltipFormatter={d => `Spot: ₹${d.spot.toLocaleString('en-IN')}\nP&L: ₹${fmtPrice(d.pnl)}`}
+              tooltipFormatter={(d) =>
+                `Spot: ₹${d.spot.toLocaleString('en-IN')}\nP&L: ₹${fmtPrice(d.pnl)}`
+              }
             />
           )}
         </div>

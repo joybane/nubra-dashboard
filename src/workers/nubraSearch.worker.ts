@@ -7,10 +7,10 @@ let cachedItems: Instrument[] = [];
 
 function getType(item: Instrument): InstrumentType {
   const dt = (item.derivative_type || '').toUpperCase();
-  const at = (item.asset_type      || '').toUpperCase();
+  const at = (item.asset_type || '').toUpperCase();
   if (dt === 'INDEX' || at === 'INDEX') return 'INDEX';
-  if (dt === 'FUT'   || at === 'FUT')   return 'FUT';
-  if (dt === 'OPT'   || at === 'OPT')   return 'OPT';
+  if (dt === 'FUT' || at === 'FUT') return 'FUT';
+  if (dt === 'OPT' || at === 'OPT') return 'OPT';
   if (at === 'ETF') return 'ETF';
   return 'STOCK';
 }
@@ -24,7 +24,13 @@ function typePriority(item: Instrument): number {
 
 function matchScore(item: Instrument, q: string): number {
   const name = (item.stock_name || item.asset || item.display_name || '').toLowerCase();
-  const sym  = (item.nubra_name || item.zanskar_name || item.symbol || item.trading_symbol || '').toLowerCase();
+  const sym = (
+    item.nubra_name ||
+    item.zanskar_name ||
+    item.symbol ||
+    item.trading_symbol ||
+    ''
+  ).toLowerCase();
   if (name === q || sym === q) return 0;
   if (name.startsWith(q) || sym.startsWith(q)) return 1;
   return 2;
@@ -36,9 +42,21 @@ function search(q: string, typeFilter: string, limit: number): Instrument[] {
 
   return cachedItems
     .filter((item) => {
-      const name = (item.stock_name || item.asset || item.symbol || item.display_name || '').toLowerCase();
-      const sym  = (item.nubra_name || item.zanskar_name || item.symbol || item.trading_symbol || '').toLowerCase();
-      const tm   = !typeFilter || getType(item).toUpperCase() === typeFilter.toUpperCase();
+      const name = (
+        item.stock_name ||
+        item.asset ||
+        item.symbol ||
+        item.display_name ||
+        ''
+      ).toLowerCase();
+      const sym = (
+        item.nubra_name ||
+        item.zanskar_name ||
+        item.symbol ||
+        item.trading_symbol ||
+        ''
+      ).toLowerCase();
+      const tm = !typeFilter || getType(item).toUpperCase() === typeFilter.toUpperCase();
       return tm && (name.includes(qLow) || sym.includes(qLow));
     })
     .sort((a, b) => {
@@ -49,7 +67,15 @@ function search(q: string, typeFilter: string, limit: number): Instrument[] {
     .slice(0, limit);
 }
 
-self.onmessage = (e: MessageEvent<{ type: string; q?: string; typeFilter?: string; limit?: number; items?: Instrument[] }>) => {
+self.onmessage = (
+  e: MessageEvent<{
+    type: string;
+    q?: string;
+    typeFilter?: string;
+    limit?: number;
+    items?: Instrument[];
+  }>,
+) => {
   const msg = e.data;
 
   if (msg.type === 'load') {

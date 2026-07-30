@@ -14,7 +14,9 @@ interface NavbarProps {
 }
 
 function renderLayoutIcon(type: LayoutType, active = false) {
-  const bgClass = active ? 'bg-[var(--accent)]' : 'bg-current opacity-40 group-hover:opacity-80 transition-opacity';
+  const bgClass = active
+    ? 'bg-[var(--accent)]'
+    : 'bg-current opacity-40 group-hover:opacity-80 transition-opacity';
   switch (type) {
     case 'single':
       return (
@@ -158,7 +160,7 @@ export default function Navbar({ onInstrumentSelect, theme, onThemeToggle }: Nav
           >
             {renderLayoutIcon(layout as LayoutType, true)}
           </button>
-          
+
           {layoutOpen && (
             <div className="absolute right-0 mt-2 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-xl p-3 z-[9999] min-w-[210px] flex flex-col gap-2">
               <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-bold px-1 border-b border-[var(--border)] pb-1.5 mb-1">
@@ -198,13 +200,32 @@ export default function Navbar({ onInstrumentSelect, theme, onThemeToggle }: Nav
           className="w-8 h-8 rounded-full bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-secondary)] flex items-center justify-center hover:border-[var(--accent)] hover:text-[var(--text-primary)] transition-all cursor-pointer"
         >
           {theme === 'dark' ? (
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              viewBox="0 0 24 24"
+            >
               <circle cx="12" cy="12" r="4" />
-              <path strokeLinecap="round" d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41" />
+              <path
+                strokeLinecap="round"
+                d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41m11.32-11.32l1.41-1.41"
+              />
             </svg>
           ) : (
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />
+            <svg
+              className="w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"
+              />
             </svg>
           )}
         </button>
@@ -216,8 +237,18 @@ export default function Navbar({ onInstrumentSelect, theme, onThemeToggle }: Nav
           aria-label="Log out"
           className="w-8 h-8 rounded-full bg-[var(--bg-card)] border border-[var(--border)] text-red-400 hover:text-red-500 hover:border-red-500/50 flex items-center justify-center transition-all cursor-pointer"
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
+          <svg
+            className="w-4 h-4"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75"
+            />
           </svg>
         </button>
       </div>

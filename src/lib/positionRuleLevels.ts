@@ -15,12 +15,12 @@
 
 export type LiveSLTargetType =
   | 'NONE'
-  | 'PREMIUM_PRICE'      // absolute premium level in ₹ — "exit when LTP reaches X"
-  | 'PREMIUM_PERCENT'    // % of entry premium, moved in the adverse/favourable direction
-  | 'PREMIUM_ABSOLUTE';  // ₹ offset from entry, adverse for SL / favourable for target
+  | 'PREMIUM_PRICE' // absolute premium level in ₹ — "exit when LTP reaches X"
+  | 'PREMIUM_PERCENT' // % of entry premium, moved in the adverse/favourable direction
+  | 'PREMIUM_ABSOLUTE'; // ₹ offset from entry, adverse for SL / favourable for target
 
 export interface LiveSLTarget {
-  type:   LiveSLTargetType;
+  type: LiveSLTargetType;
   value?: number;
 }
 
@@ -58,14 +58,14 @@ export function liveLevels(
 
   if (sl && sl.value != null) {
     const v = num(sl.value);
-    if (sl.type === 'PREMIUM_PRICE')          slPrice = v;
-    else if (sl.type === 'PREMIUM_PERCENT')   slPrice = sell ? pct(v, true) : pct(v, false);
-    else if (sl.type === 'PREMIUM_ABSOLUTE')  slPrice = sell ? entry + v : entry - v;
+    if (sl.type === 'PREMIUM_PRICE') slPrice = v;
+    else if (sl.type === 'PREMIUM_PERCENT') slPrice = sell ? pct(v, true) : pct(v, false);
+    else if (sl.type === 'PREMIUM_ABSOLUTE') slPrice = sell ? entry + v : entry - v;
   }
   if (tgt && tgt.value != null) {
     const v = num(tgt.value);
-    if (tgt.type === 'PREMIUM_PRICE')         tgtPrice = v;
-    else if (tgt.type === 'PREMIUM_PERCENT')  tgtPrice = sell ? pct(v, false) : pct(v, true);
+    if (tgt.type === 'PREMIUM_PRICE') tgtPrice = v;
+    else if (tgt.type === 'PREMIUM_PERCENT') tgtPrice = sell ? pct(v, false) : pct(v, true);
     else if (tgt.type === 'PREMIUM_ABSOLUTE') tgtPrice = sell ? entry - v : entry + v;
   }
   return { slPrice, tgtPrice };
@@ -77,12 +77,19 @@ export function liveLevels(
  * immediately" instead of letting the user discover it by losing the position.
  */
 export function levelHit(
-  kind: 'SL' | 'TARGET', side: LiveSide, level: number | null, ltpRs: number,
+  kind: 'SL' | 'TARGET',
+  side: LiveSide,
+  level: number | null,
+  ltpRs: number,
 ): boolean {
   if (level == null) return false;
   const sell = side === 'SELL';
   // A short's premium rising is a loss; a long's premium falling is a loss.
   return kind === 'SL'
-    ? (sell ? ltpRs >= level : ltpRs <= level)
-    : (sell ? ltpRs <= level : ltpRs >= level);
+    ? sell
+      ? ltpRs >= level
+      : ltpRs <= level
+    : sell
+      ? ltpRs <= level
+      : ltpRs >= level;
 }

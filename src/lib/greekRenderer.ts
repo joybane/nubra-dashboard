@@ -10,9 +10,15 @@
 // Totals and differences live on different magnitudes, so co-plotting them on one
 // axis would flatten the diff; the overlay scale keeps both readable.
 
-import { LineSeries, LineStyle, type IChartApi, type ISeriesApi, type UTCTimestamp } from 'lightweight-charts';
+import {
+  LineSeries,
+  LineStyle,
+  type IChartApi,
+  type ISeriesApi,
+  type UTCTimestamp,
+} from 'lightweight-charts';
 import { IST_OFFSET, chartTimeDayKey, isNseMarketSessionChartTime } from './utils.ts';
-import type { SeriesPoint } from './greekAggregator.ts';
+import type { IvPoint, SeriesPoint } from './greekAggregator.ts';
 
 export type SeriesMode = 'totals' | 'diff' | 'both';
 
@@ -42,12 +48,29 @@ export function msToChartTime(ms: number): UTCTimestamp {
  */
 export type TimeMapper = (ms: number) => number | null;
 
+/**
+ * Overlay price-scale id suffix. Inline overlays each need their OWN scale — if two collide
+ * they share an axis and one silently rescales the other flat, with no error anywhere.
+ *
+ * Callers should pass an explicit `scaleKey` built from stable identifiers (greek + method, or
+ * 'iv' + measure) rather than relying on the display label: this sanitiser strips non-word
+ * characters, so two labels differing only by a `Δ` or `·` would collapse to the same id.
+ * Deriving ids from labels couples scale identity to display text, which is the actual hazard.
+ */
+export function scaleSuffix(label: string): string {
+  return label.replace(/[^\w]/g, '');
+}
+
 const defaultMapper: TimeMapper = (ms) => msToChartTime(ms) as number;
 
 type LinePoint = { time: UTCTimestamp; value: number } | { time: UTCTimestamp };
 
 /** De-duplicate by mapped time (keep last), filter closed-market points, and break overnight lines. */
-function toLine(points: ReadonlyArray<SeriesPoint>, pick: (p: SeriesPoint) => number, mapTime: TimeMapper): LinePoint[] {
+function toLine<T extends { ts: number }>(
+  points: ReadonlyArray<T>,
+  pick: (p: T) => number,
+  mapTime: TimeMapper,
+): LinePoint[] {
   const byTime = new Map<number, number>();
   for (const p of points) {
     const t = mapTime(p.ts);
@@ -60,7 +83,8 @@ function toLine(points: ReadonlyArray<SeriesPoint>, pick: (p: SeriesPoint) => nu
   let lastTime: number | null = null;
   for (const [time, value] of [...byTime.entries()].sort((a, b) => a[0] - b[0])) {
     const day = chartTimeDayKey(time);
-    if (lastDay && day && day !== lastDay && lastTime != null) out.push({ time: (lastTime + 1) as UTCTimestamp });
+    if (lastDay && day && day !== lastDay && lastTime != null)
+      out.push({ time: (lastTime + 1) as UTCTimestamp });
     out.push({ time: time as UTCTimestamp, value });
     lastDay = day;
     lastTime = time;
@@ -70,21 +94,33 @@ function toLine(points: ReadonlyArray<SeriesPoint>, pick: (p: SeriesPoint) => nu
 
 export interface GreekPane {
   /** Push the latest computed series + visibility settings into the pane. */
-  setData(points: ReadonlyArray<SeriesPoint>, mode: SeriesMode, showCalls: boolean, showPuts: boolean, mapTime?: TimeMapper): void;
+  setData(
+    points: ReadonlyArray<SeriesPoint>,
+    mode: SeriesMode,
+    showCalls: boolean,
+    showPuts: boolean,
+    mapTime?: TimeMapper,
+  ): void;
   setHeight(px: number): void;
   destroy(): void;
 }
 
 export interface GreekPaneOpts {
   /** Render into an existing pane on overlay scales (Tracker) instead of a new sub-pane (Chart). */
-  inline?:    boolean;
+  inline?: boolean;
   /** Target pane index when inline (default 0 — the price pane). */
   paneIndex?: number;
   /** Sub-pane height when not inline. */
-  height?:    number;
+  height?: number;
   /** CE / PE line colors — distinct per greek so Vega vs Theta are tellable apart. */
-  ceColor?:   string;
-  peColor?:   string;
+  ceColor?: string;
+  peColor?: string;
+  /**
+   * Stable identity for this pane's overlay price scales, independent of the display label
+   * (e.g. 'vega-mine', 'iv-atm'). Falls back to sanitising `label`, which is unsafe if two
+   * labels differ only by characters the sanitiser strips.
+   */
+  scaleKey?: string;
 }
 
 /**
@@ -96,45 +132,60 @@ export interface GreekPaneOpts {
  * price scales, so the greeks share the same vertical space as the candles/line
  * rather than living in a separate pane below.
  */
-export function createGreekPane(chart: IChartApi, label: string, opts: GreekPaneOpts = {}): GreekPane {
+export function createGreekPane(
+  chart: IChartApi,
+  label: string,
+  opts: GreekPaneOpts = {},
+): GreekPane {
   const inline = !!opts.inline;
   const pane = inline ? null : chart.addPane();
   if (pane) pane.setHeight(opts.height ?? 120);
   const paneIndex = inline ? (opts.paneIndex ?? 0) : pane!.paneIndex();
 
-  // Unique overlay-scale ids per label so multiple inline overlays (e.g. Vega + Theta,
-  // mine + industry) never share a scale or collide with the price scale.
-  const safe = label.replace(/[^\w]/g, '');
-  const totScale  = inline ? `gt-${safe}` : undefined;       // undefined → pane's own right scale
+  // Unique overlay-scale ids so multiple inline overlays (e.g. Vega + Theta, mine + industry)
+  // never share a scale or collide with the price scale.
+  const safe = opts.scaleKey ?? scaleSuffix(label);
+  const totScale = inline ? `gt-${safe}` : undefined; // undefined → pane's own right scale
   const diffScale = inline ? `gd-${safe}` : DIFF_SCALE;
 
-  const mk = (color: string, dashed: boolean, scaleId: string | undefined, title: string): ISeriesApi<'Line'> =>
-    chart.addSeries(LineSeries, {
-      color,
-      lineWidth: dashed ? 1 : 2,
-      lineStyle: dashed ? LineStyle.Dashed : LineStyle.Solid,
-      priceLineVisible: false,
-      lastValueVisible: scaleId !== diffScale,   // axis tag only for the totals scale
-      crosshairMarkerVisible: true,
-      title: `${label} ${title}`,
-      // Inline greeks share the price pane, so format their (often huge) values
-      // compactly instead of dumping raw 10-digit numbers onto the axis tag.
-      ...(inline ? { priceFormat: { type: 'custom' as const, minMove: 0.01, formatter: compactAxis } } : {}),
-      ...(scaleId ? { priceScaleId: scaleId } : {}),
-    }, paneIndex);
+  const mk = (
+    color: string,
+    dashed: boolean,
+    scaleId: string | undefined,
+    title: string,
+  ): ISeriesApi<'Line'> =>
+    chart.addSeries(
+      LineSeries,
+      {
+        color,
+        lineWidth: dashed ? 1 : 2,
+        lineStyle: dashed ? LineStyle.Dashed : LineStyle.Solid,
+        priceLineVisible: false,
+        lastValueVisible: scaleId !== diffScale, // axis tag only for the totals scale
+        crosshairMarkerVisible: true,
+        title: `${label} ${title}`,
+        // Inline greeks share the price pane, so format their (often huge) values
+        // compactly instead of dumping raw 10-digit numbers onto the axis tag.
+        ...(inline
+          ? { priceFormat: { type: 'custom' as const, minMove: 0.01, formatter: compactAxis } }
+          : {}),
+        ...(scaleId ? { priceScaleId: scaleId } : {}),
+      },
+      paneIndex,
+    );
 
   const CE = opts.ceColor ?? CE_COLOR;
   const PE = opts.peColor ?? PE_COLOR;
   const ceTotal = mk(CE, false, totScale, 'CE');
   const peTotal = mk(PE, false, totScale, 'PE');
-  const ceDiff  = mk(CE, true,  diffScale, 'CE Δ');
-  const peDiff  = mk(PE, true,  diffScale, 'PE Δ');
+  const ceDiff = mk(CE, true, diffScale, 'CE Δ');
+  const peDiff = mk(PE, true, diffScale, 'PE Δ');
 
   if (inline) {
     // Greeks share the price pane and span most of its height (overlapping the NIFTY
     // line is fine — distinct colors + the crosshair tooltip keep them readable).
     ceTotal.priceScale().applyOptions({ scaleMargins: { top: 0.1, bottom: 0.08 } });
-    ceDiff.priceScale().applyOptions({ scaleMargins:  { top: 0.1, bottom: 0.08 } });
+    ceDiff.priceScale().applyOptions({ scaleMargins: { top: 0.1, bottom: 0.08 } });
   } else {
     // Separate sub-pane: give the overlay diff scale its own margins vs the totals.
     ceDiff.priceScale().applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } });
@@ -145,22 +196,118 @@ export function createGreekPane(chart: IChartApi, label: string, opts: GreekPane
   return {
     setData(points, mode, showCalls, showPuts, mapTime = defaultMapper) {
       const showTotals = mode === 'totals' || mode === 'both';
-      const showDiff   = mode === 'diff'   || mode === 'both';
+      const showDiff = mode === 'diff' || mode === 'both';
 
       const apply = (s: ISeriesApi<'Line'>, visible: boolean, line: LinePoint[]) => {
         s.applyOptions({ visible });
         s.setData(visible ? line : []);
       };
 
-      apply(ceTotal, showTotals && showCalls, toLine(points, p => p.ceTotal, mapTime));
-      apply(peTotal, showTotals && showPuts,  toLine(points, p => p.peTotal, mapTime));
-      apply(ceDiff,  showDiff   && showCalls, toLine(points, p => p.ceDiff, mapTime));
-      apply(peDiff,  showDiff   && showPuts,  toLine(points, p => p.peDiff, mapTime));
+      apply(
+        ceTotal,
+        showTotals && showCalls,
+        toLine(points, (p) => p.ceTotal, mapTime),
+      );
+      apply(
+        peTotal,
+        showTotals && showPuts,
+        toLine(points, (p) => p.peTotal, mapTime),
+      );
+      apply(
+        ceDiff,
+        showDiff && showCalls,
+        toLine(points, (p) => p.ceDiff, mapTime),
+      );
+      apply(
+        peDiff,
+        showDiff && showPuts,
+        toLine(points, (p) => p.peDiff, mapTime),
+      );
     },
-    setHeight(px) { pane?.setHeight(px); },
+    setHeight(px) {
+      pane?.setHeight(px);
+    },
     destroy() {
-      for (const s of all) { try { chart.removeSeries(s); } catch { /* already gone */ } }
-      if (pane) { try { chart.removePane(pane.paneIndex()); } catch { /* pane auto-removed */ } }
+      for (const s of all) {
+        try {
+          chart.removeSeries(s);
+        } catch {
+          /* already gone */
+        }
+      }
+      if (pane) {
+        try {
+          chart.removePane(pane.paneIndex());
+        } catch {
+          /* pane auto-removed */
+        }
+      }
+    },
+  };
+}
+
+// ─── Single-line pane for constant-delta IV measures ─────────────────────────────
+//
+// IV is one scalar per snapshot (not a CE/PE pair with totals and diffs), so it gets a
+// one-line pane rather than being forced through GreekPane's four-series shape.
+
+export interface IvPane {
+  setData(points: ReadonlyArray<IvPoint>, mapTime?: TimeMapper): void;
+  setHeight(px: number): void;
+  destroy(): void;
+}
+
+/** IV measures are vol points, so 2dp with no compaction — they never reach 1e3. */
+function ivAxis(v: number): string {
+  return v.toFixed(2);
+}
+
+export function createIvPane(chart: IChartApi, label: string, opts: GreekPaneOpts = {}): IvPane {
+  const inline = !!opts.inline;
+  const pane = inline ? null : chart.addPane();
+  if (pane) pane.setHeight(opts.height ?? 120);
+  const paneIndex = inline ? (opts.paneIndex ?? 0) : pane!.paneIndex();
+
+  const scaleId = inline ? `iv-${opts.scaleKey ?? scaleSuffix(label)}` : undefined;
+
+  const line = chart.addSeries(
+    LineSeries,
+    {
+      color: opts.ceColor ?? '#38bdf8',
+      lineWidth: 2,
+      lineStyle: LineStyle.Solid,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: true,
+      title: label,
+      priceFormat: { type: 'custom' as const, minMove: 0.01, formatter: ivAxis },
+      ...(scaleId ? { priceScaleId: scaleId } : {}),
+    },
+    paneIndex,
+  );
+
+  if (inline) line.priceScale().applyOptions({ scaleMargins: { top: 0.1, bottom: 0.08 } });
+
+  return {
+    setData(points, mapTime = defaultMapper) {
+      line.setData(toLine(points, (p) => p.value, mapTime));
+    },
+    setHeight(px) {
+      pane?.setHeight(px);
+    },
+    destroy() {
+      try {
+        chart.removeSeries(line);
+      } catch {
+        /* already gone */
+      }
+      if (pane) {
+        try {
+          chart.removePane(pane.paneIndex());
+        } catch {
+          /* pane auto-removed */
+        }
+      }
     },
   };
 }

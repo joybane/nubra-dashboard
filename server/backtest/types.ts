@@ -11,7 +11,7 @@
 export type Underlying = 'NIFTY' | 'SENSEX';
 export type ExpiryFlag = 'WEEK' | 'MONTH';
 export type OptionType = 'CALL' | 'PUT';
-export type Side       = 'BUY' | 'SELL';
+export type Side = 'BUY' | 'SELL';
 
 // ── Strike selection ─────────────────────────────────────────────────────────
 // Implemented: ATM, CLOSEST_PREMIUM, POINTS_FROM_SPOT, PERCENT_FROM_SPOT,
@@ -23,26 +23,26 @@ export type StrikeMethod =
   | 'PERCENT_FROM_SPOT'
   | 'FIXED_STRIKE'
   | 'DELTA'
-  | 'PREMIUM_GTE'              // cheapest strike with premium ≥ premiumTarget
-  | 'PREMIUM_LTE'              // richest strike with premium ≤ premiumTarget
-  | 'PREMIUM_RANGE'           // strike whose premium ∈ [premiumMin, premiumMax]
-  | 'DELTA_RANGE'             // strike whose |delta| ∈ [deltaMin, deltaMax]
-  | 'STRADDLE_WIDTH'          // ATM ± (straddleWidthMult × ATM straddle premium)
+  | 'PREMIUM_GTE' // cheapest strike with premium ≥ premiumTarget
+  | 'PREMIUM_LTE' // richest strike with premium ≤ premiumTarget
+  | 'PREMIUM_RANGE' // strike whose premium ∈ [premiumMin, premiumMax]
+  | 'DELTA_RANGE' // strike whose |delta| ∈ [deltaMin, deltaMax]
+  | 'STRADDLE_WIDTH' // ATM ± (straddleWidthMult × ATM straddle premium)
   | 'ATM_STRADDLE_PREMIUM_PCT'; // strike whose premium ≈ straddlePremiumPct% of ATM straddle
 
 export interface StrikeSelection {
-  method:          StrikeMethod;
-  atmOffset?:      number;  // ATM: ± strike steps (e.g. +2 = 2 strikes OTM/ITM by sign)
-  premiumTarget?:  number;  // CLOSEST_PREMIUM / PREMIUM_GTE / PREMIUM_LTE: premium target/threshold
-  pointsFromSpot?: number;  // POINTS_FROM_SPOT: signed offset in index points
-  percentFromSpot?:number;  // PERCENT_FROM_SPOT: signed % of spot
-  absoluteStrike?: number;  // FIXED_STRIKE
-  targetDelta?:    number;  // DELTA: pick strike whose |delta| ≈ this (0–1, e.g. 0.25)
-  premiumMin?:     number;  // PREMIUM_RANGE: lower premium bound
-  premiumMax?:     number;  // PREMIUM_RANGE: upper premium bound
-  deltaMin?:       number;  // DELTA_RANGE: lower |delta| bound
-  deltaMax?:       number;  // DELTA_RANGE: upper |delta| bound
-  straddleWidthMult?:  number; // STRADDLE_WIDTH: × ATM straddle premium (default 1)
+  method: StrikeMethod;
+  atmOffset?: number; // ATM: ± strike steps (e.g. +2 = 2 strikes OTM/ITM by sign)
+  premiumTarget?: number; // CLOSEST_PREMIUM / PREMIUM_GTE / PREMIUM_LTE: premium target/threshold
+  pointsFromSpot?: number; // POINTS_FROM_SPOT: signed offset in index points
+  percentFromSpot?: number; // PERCENT_FROM_SPOT: signed % of spot
+  absoluteStrike?: number; // FIXED_STRIKE
+  targetDelta?: number; // DELTA: pick strike whose |delta| ≈ this (0–1, e.g. 0.25)
+  premiumMin?: number; // PREMIUM_RANGE: lower premium bound
+  premiumMax?: number; // PREMIUM_RANGE: upper premium bound
+  deltaMin?: number; // DELTA_RANGE: lower |delta| bound
+  deltaMax?: number; // DELTA_RANGE: upper |delta| bound
+  straddleWidthMult?: number; // STRADDLE_WIDTH: × ATM straddle premium (default 1)
   straddlePremiumPct?: number; // ATM_STRADDLE_PREMIUM_PCT: % of ATM straddle premium
 }
 
@@ -60,7 +60,7 @@ export type SLTargetType =
   | 'DELTA';
 
 export interface SLTarget {
-  type:   SLTargetType;
+  type: SLTargetType;
   value?: number;
 }
 
@@ -75,11 +75,11 @@ export interface SLTarget {
 export type TrailType = 'NONE' | 'LOCK' | 'TRAIL' | 'LOCK_AND_TRAIL' | 'TO_COST';
 
 export interface TrailStop {
-  type:     TrailType;
-  trigger?: number;  // favourable premium move (pts) that activates the trail
-  lock?:    number;  // LOCK / LOCK_AND_TRAIL: profit (pts) to lock
-  step?:    number;  // TRAIL: favourable move increment (pts)
-  trail?:   number;  // TRAIL: stop movement per step (pts)
+  type: TrailType;
+  trigger?: number; // favourable premium move (pts) that activates the trail
+  lock?: number; // LOCK / LOCK_AND_TRAIL: profit (pts) to lock
+  step?: number; // TRAIL: favourable move increment (pts)
+  trail?: number; // TRAIL: stop movement per step (pts)
 }
 
 // ── Re-entry (Phase 2) ───────────────────────────────────────────────────────
@@ -89,46 +89,46 @@ export interface TrailStop {
 export type ReentryMode = 'NONE' | 'ASAP' | 'COST' | 'REVERSE_ASAP';
 
 export interface Reentry {
-  mode:        ReentryMode;
-  max?:        number;   // max re-entries per leg per day (default 0)
-  onStopLoss?: boolean;  // re-enter after a stop-loss exit (default true)
-  onTarget?:   boolean;  // re-enter after a target exit (default false)
+  mode: ReentryMode;
+  max?: number; // max re-entries per leg per day (default 0)
+  onStopLoss?: boolean; // re-enter after a stop-loss exit (default true)
+  onTarget?: boolean; // re-enter after a target exit (default false)
 }
 
 export interface ExpirySelection {
-  flag:   ExpiryFlag;  // WEEK | MONTH
-  offset: number;      // 0 = nearest expiry ≥ trade date, 1 = next, ...
+  flag: ExpiryFlag; // WEEK | MONTH
+  offset: number; // 0 = nearest expiry ≥ trade date, 1 = next, ...
 }
 
 export interface Leg {
-  id:         string;
-  enabled:    boolean;
+  id: string;
+  enabled: boolean;
   optionType: OptionType;
-  side:       Side;
-  lots:       number;
-  expiry:     ExpirySelection;
-  strike:     StrikeSelection;
-  stopLoss:   SLTarget;
-  target:     SLTarget;
-  trail?:     TrailStop;  // Phase 2 — optional, default NONE
-  reentry?:   Reentry;    // Phase 2 — optional, default NONE
+  side: Side;
+  lots: number;
+  expiry: ExpirySelection;
+  strike: StrikeSelection;
+  stopLoss: SLTarget;
+  target: SLTarget;
+  trail?: TrailStop; // Phase 2 — optional, default NONE
+  reentry?: Reentry; // Phase 2 — optional, default NONE
 }
 
 // ── Entry filters (Phase 2) ──────────────────────────────────────────────────
 // Day-level gates evaluated at entry. A day failing any active filter is skipped.
 export interface EntryFilters {
-  dteMin?:       number;  // reference expiry days-to-expiry ≥ this
-  dteMax?:       number;  // reference expiry days-to-expiry ≤ this
-  ivMin?:        number;  // reference contract IV at entry ≥ this
-  ivMax?:        number;  // reference contract IV at entry ≤ this
-  premiumMin?:   number;  // combined per-unit entry premium of all legs ≥ this
-  premiumMax?:   number;  // combined per-unit entry premium of all legs ≤ this
-  waitTradePct?: number;  // delay entry until reference premium moves this % from entryTime
+  dteMin?: number; // reference expiry days-to-expiry ≥ this
+  dteMax?: number; // reference expiry days-to-expiry ≤ this
+  ivMin?: number; // reference contract IV at entry ≥ this
+  ivMax?: number; // reference contract IV at entry ≤ this
+  premiumMin?: number; // combined per-unit entry premium of all legs ≥ this
+  premiumMax?: number; // combined per-unit entry premium of all legs ≤ this
+  waitTradePct?: number; // delay entry until reference premium moves this % from entryTime
 }
 
 export interface PortfolioRisk {
-  maxProfit?: number;  // absolute ₹ on combined MTM → square off all (0/undef = off)
-  maxLoss?:   number;  // absolute ₹ loss (positive number) → square off all
+  maxProfit?: number; // absolute ₹ on combined MTM → square off all (0/undef = off)
+  maxLoss?: number; // absolute ₹ loss (positive number) → square off all
 }
 
 // ── Position sizing (Phase 4) ────────────────────────────────────────────────
@@ -142,12 +142,12 @@ export interface PortfolioRisk {
 export type SizingMode = 'FIXED' | 'CAPITAL_PERCENT' | 'VOLATILITY_TARGET' | 'MARTINGALE';
 
 export interface PositionSizing {
-  mode:        SizingMode;
-  capital?:    number;   // CAPITAL_PERCENT: account capital ₹
-  riskPct?:    number;   // CAPITAL_PERCENT: % of capital to deploy per day
-  baselineIv?: number;   // VOLATILITY_TARGET: IV at which lots = base
-  factor?:     number;   // MARTINGALE: lot multiplier per consecutive loss
-  maxLots?:    number;   // MARTINGALE/CAPITAL: hard cap on total lots multiple
+  mode: SizingMode;
+  capital?: number; // CAPITAL_PERCENT: account capital ₹
+  riskPct?: number; // CAPITAL_PERCENT: % of capital to deploy per day
+  baselineIv?: number; // VOLATILITY_TARGET: IV at which lots = base
+  factor?: number; // MARTINGALE: lot multiplier per consecutive loss
+  maxLots?: number; // MARTINGALE/CAPITAL: hard cap on total lots multiple
 }
 
 // ── Position adjustment (Phase 5) ────────────────────────────────────────────
@@ -167,263 +167,262 @@ export interface PositionSizing {
 //
 // `maxAdjustments` caps how many times this can fire per day (default 1).
 export type AdjustmentTrigger =
-  | 'ON_ANY_LEG_SL'
-  | 'ON_ANY_LEG_TGT'
-  | 'ON_PORTFOLIO_SL'
-  | 'ON_PORTFOLIO_TP';
+  'ON_ANY_LEG_SL' | 'ON_ANY_LEG_TGT' | 'ON_PORTFOLIO_SL' | 'ON_PORTFOLIO_TP';
 
 export interface Adjustment {
-  enabled:          boolean;
-  trigger:          AdjustmentTrigger;
-  replacementLegs:  Leg[];          // the new legs to enter after exiting
-  maxAdjustments?:  number;         // per day cap (default 1)
-  delayBars?:       number;         // bars to wait before re-entering (default 0 = next bar)
+  enabled: boolean;
+  trigger: AdjustmentTrigger;
+  replacementLegs: Leg[]; // the new legs to enter after exiting
+  maxAdjustments?: number; // per day cap (default 1)
+  delayBars?: number; // bars to wait before re-entering (default 0 = next bar)
 }
 
 export type WeekdayCode = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI';
 
 export interface BacktestConfig {
-  underlying:     Underlying;
-  from:           string;        // yyyy-mm-dd (inclusive)
-  to:             string;        // yyyy-mm-dd (inclusive)
-  entryTime:      string;        // HH:MM IST
-  exitTime:       string;        // HH:MM IST — hard square-off
-  tradingDays?:   WeekdayCode[]; // optional weekday filter (default all)
-  lotSize:        number;        // contract multiplier (qty per lot)
-  slippagePct:    number;        // % slippage applied to every fill
-  brokeragePerLot?: number;      // flat ₹ per lot per side (default 0)
-  legs:           Leg[];
+  underlying: Underlying;
+  from: string; // yyyy-mm-dd (inclusive)
+  to: string; // yyyy-mm-dd (inclusive)
+  entryTime: string; // HH:MM IST
+  exitTime: string; // HH:MM IST — hard square-off
+  tradingDays?: WeekdayCode[]; // optional weekday filter (default all)
+  lotSize: number; // contract multiplier (qty per lot)
+  slippagePct: number; // % slippage applied to every fill
+  brokeragePerLot?: number; // flat ₹ per lot per side (default 0)
+  legs: Leg[];
   portfolioRisk?: PortfolioRisk;
-  entryFilters?:  EntryFilters;  // Phase 2 — optional day-level gates
-  sizing?:        PositionSizing; // Phase 4 — optional dynamic lot sizing
-  adjustments?:   Adjustment[];   // Phase 5 — optional position adjustments
+  entryFilters?: EntryFilters; // Phase 2 — optional day-level gates
+  sizing?: PositionSizing; // Phase 4 — optional dynamic lot sizing
+  adjustments?: Adjustment[]; // Phase 5 — optional position adjustments
 }
 
 // ── Results ──────────────────────────────────────────────────────────────────
 export type ExitReason =
-  | 'TARGET' | 'STOPLOSS' | 'EOD' | 'PORTFOLIO_TP' | 'PORTFOLIO_SL' | 'TRAIL_SL';
+  'TARGET' | 'STOPLOSS' | 'EOD' | 'PORTFOLIO_TP' | 'PORTFOLIO_SL' | 'TRAIL_SL';
 
 export interface TradeLegResult {
-  legId:      string;
+  legId: string;
   optionType: OptionType;
-  side:       Side;
-  strike:     number;
-  expiry:     string;
-  lots:       number;
-  entryTime:  string;
-  exitTime:   string;
-  entryPrice: number;  // post-slippage fill
-  exitPrice:  number;  // post-slippage fill
-  entrySpot:  number;  // underlying spot at this episode's entry (re-entries differ)
-  pnl:        number;  // ₹, includes lotSize & lots, net of slippage, gross of charges
+  side: Side;
+  strike: number;
+  expiry: string;
+  lots: number;
+  entryTime: string;
+  exitTime: string;
+  entryPrice: number; // post-slippage fill
+  exitPrice: number; // post-slippage fill
+  entrySpot: number; // underlying spot at this episode's entry (re-entries differ)
+  pnl: number; // ₹, includes lotSize & lots, net of slippage, gross of charges
   exitReason: ExitReason;
-  seq?:       number;  // 0 = original entry, 1+ = re-entry episode index
-  highAfterEntry: number;  // highest premium seen after entry (intraday)
-  lowAfterEntry:  number;  // lowest premium seen after entry (intraday)
+  seq?: number; // 0 = original entry, 1+ = re-entry episode index
+  highAfterEntry: number; // highest premium seen after entry (intraday)
+  lowAfterEntry: number; // lowest premium seen after entry (intraday)
 }
 
 // Itemised statutory + broker cost stack for one day (Indian index F&O).
 export interface ChargeBreakdown {
-  brokerage:   number;  // flat ₹/order (or 0.03% if lower), entry + exit per leg
-  stt:         number;  // securities transaction tax — sell-side premium
-  exchange:    number;  // exchange transaction charges — both sides
-  sebi:        number;  // SEBI turnover fee — both sides
-  stampDuty:   number;  // stamp duty — buy-side premium
-  gst:         number;  // 18% on (brokerage + exchange + sebi)
-  slippage:    number;  // modelled slippage cost (gross − net fills)
-  total:       number;  // sum of all of the above (== DayTrade.costs)
+  brokerage: number; // flat ₹/order (or 0.03% if lower), entry + exit per leg
+  stt: number; // securities transaction tax — sell-side premium
+  exchange: number; // exchange transaction charges — both sides
+  sebi: number; // SEBI turnover fee — both sides
+  stampDuty: number; // stamp duty — buy-side premium
+  gst: number; // 18% on (brokerage + exchange + sebi)
+  slippage: number; // modelled slippage cost (gross − net fills)
+  total: number; // sum of all of the above (== DayTrade.costs)
 }
 
 export interface DayTrade {
-  date:       string;
-  entrySpot:  number;
-  exitSpot:   number;
-  legs:       TradeLegResult[];
-  grossPnl:   number;
-  costs:      number;
-  pnl:        number;   // net = gross − costs
-  cumPnl:     number;
+  date: string;
+  entrySpot: number;
+  exitSpot: number;
+  legs: TradeLegResult[];
+  grossPnl: number;
+  costs: number;
+  pnl: number; // net = gross − costs
+  cumPnl: number;
   exitReason: ExitReason; // dominant reason for the day
-  margin:     number;   // approximate margin to ENTER the initial legs (SPAN-like estimate)
-  maxMargin:  number;   // peak concurrent margin during the day (≥ margin; re-entry/adjustment)
-  roiPct:     number;   // % return on margin
-  charges?:   ChargeBreakdown; // itemised cost stack (item 5)
+  margin: number; // approximate margin to ENTER the initial legs (SPAN-like estimate)
+  maxMargin: number; // peak concurrent margin during the day (≥ margin; re-entry/adjustment)
+  roiPct: number; // % return on margin
+  charges?: ChargeBreakdown; // itemised cost stack (item 5)
 }
 
 // ── Single-day detail (intraday P&L curve for one backtested day) ──────────────
 export interface IntradayLegPoint {
   legId: string;
-  seq:   number;
-  pnl:   number;   // ₹ mark-to-market for this leg/episode at this minute (gross)
-  price: number;   // option premium (raw) at this minute
+  seq: number;
+  pnl: number; // ₹ mark-to-market for this leg/episode at this minute (gross)
+  price: number; // option premium (raw) at this minute
 }
 export interface IntradayPoint {
-  hhmm:  string;
-  spot:  number;
-  total: number;   // total ₹ MTM across all legs (gross)
-  legs:  IntradayLegPoint[];
+  hhmm: string;
+  spot: number;
+  total: number; // total ₹ MTM across all legs (gross)
+  legs: IntradayLegPoint[];
 }
 export interface DayDetailResponse {
-  ok:      boolean;
-  trade?:  DayTrade;
+  ok: boolean;
+  trade?: DayTrade;
   series?: IntradayPoint[];
-  error?:  string;
+  error?: string;
 }
 
 export interface EquityPoint {
-  date:     string;
-  cumPnl:   number;
-  drawdown: number;  // ₹ below running peak (≤ 0)
+  date: string;
+  cumPnl: number;
+  drawdown: number; // ₹ below running peak (≤ 0)
 }
 
 export interface MonthlyBucket {
-  month:    string;  // yyyy-MM
-  pnl:      number;
-  trades:   number;
-  wins:     number;
-  winRate:  number;
+  month: string; // yyyy-MM
+  pnl: number;
+  trades: number;
+  wins: number;
+  winRate: number;
 }
 
 export interface WeekdayBucket {
-  day:     WeekdayCode;
-  pnl:     number;
-  trades:  number;
+  day: WeekdayCode;
+  pnl: number;
+  trades: number;
   winRate: number;
 }
 
 export interface Metrics {
-  totalTrades:    number;
-  wins:           number;
-  losses:         number;
-  winRate:        number;
-  totalPnl:       number;
-  avgPnl:         number;
-  avgWin:         number;
-  avgLoss:        number;
-  maxWin:         number;
-  maxLoss:        number;
-  profitFactor:   number;   // gross profit / gross loss
-  expectancy:     number;   // avg ₹ per trade
-  maxDrawdown:    number;   // ₹ (positive magnitude)
-  maxDrawdownPct: number;   // vs peak equity
-  sharpe:         number;   // annualised on daily P&L
-  sortino:        number;
-  calmar:         number;   // annualised return / maxDD (P&L based proxy)
-  longestWinStreak:  number;
+  totalTrades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  totalPnl: number;
+  avgPnl: number;
+  avgWin: number;
+  avgLoss: number;
+  maxWin: number;
+  maxLoss: number;
+  profitFactor: number; // gross profit / gross loss
+  expectancy: number; // avg ₹ per trade
+  maxDrawdown: number; // ₹ (positive magnitude)
+  maxDrawdownPct: number; // vs peak equity
+  sharpe: number; // annualised on daily P&L
+  sortino: number;
+  calmar: number; // annualised return / maxDD (P&L based proxy)
+  longestWinStreak: number;
   longestLossStreak: number;
-  totalCosts:     number;
+  totalCosts: number;
   // Phase 3 extended
-  recoveryFactor: number;   // totalPnl / maxDrawdown
-  sqn:            number;   // System Quality Number = sqrt(N) * mean / stdDev
-  payoffRatio:    number;   // avgWin / |avgLoss|
-  cagrPct:        number;   // annualised return proxy (mean daily × 252 / risk capital × 100)
-  tail:           number;   // tail ratio = 95th percentile / |5th percentile| of daily P&L
+  recoveryFactor: number; // totalPnl / maxDrawdown
+  sqn: number; // System Quality Number = sqrt(N) * mean / stdDev
+  payoffRatio: number; // avgWin / |avgLoss|
+  cagrPct: number; // annualised return proxy (mean daily × 252 / risk capital × 100)
+  tail: number; // tail ratio = 95th percentile / |5th percentile| of daily P&L
   // AlgoTest-report parity metrics
-  expectancyRatio:     number; // avg P&L per trade / |avg loss|
-  maxDdDays:           number; // calendar days of the deepest drawdown (peak→trough, inclusive)
-  maxDdFrom:           string; // date the deepest drawdown began (first day in the red)
-  maxDdTo:             string; // date the deepest drawdown bottomed
+  expectancyRatio: number; // avg P&L per trade / |avg loss|
+  maxDdDays: number; // calendar days of the deepest drawdown (peak→trough, inclusive)
+  maxDdFrom: string; // date the deepest drawdown began (first day in the red)
+  maxDdTo: string; // date the deepest drawdown bottomed
   maxTradesInDrawdown: number; // most consecutive trades spent below a prior equity peak
 }
 
 // ── Monte Carlo ─────────────────────────────────────────────────────────────
 export interface MonteCarloPercentile {
-  pct:         number;   // 5, 25, 50, 75, 95
+  pct: number; // 5, 25, 50, 75, 95
   finalEquity: number;
   maxDrawdown: number;
 }
 export interface MonteCarloResult {
-  simulations:  number;
-  percentiles:  MonteCarloPercentile[];
-  medianCurve:  number[];  // median equity at each trade index
-  p5Curve:      number[];
-  p95Curve:     number[];
+  simulations: number;
+  percentiles: MonteCarloPercentile[];
+  medianCurve: number[]; // median equity at each trade index
+  p5Curve: number[];
+  p95Curve: number[];
 }
 
 // ── Strategy Score ──────────────────────────────────────────────────────────
 export type StrategyGrade = 'A' | 'B' | 'C' | 'D' | 'F';
 export interface StrategyScore {
-  grade:      StrategyGrade;
-  score:      number;   // 0–100
-  breakdown:  { factor: string; score: number; weight: number }[];
+  grade: StrategyGrade;
+  score: number; // 0–100
+  breakdown: { factor: string; score: number; weight: number }[];
 }
 
 // ── Parameter Sweep ─────────────────────────────────────────────────────────
 export interface SweepParam {
-  path:  string;   // dot-path into BacktestConfig, e.g. "legs.0.stopLoss.value"
-  from:  number;
-  to:    number;
-  step:  number;
+  path: string; // dot-path into BacktestConfig, e.g. "legs.0.stopLoss.value"
+  from: number;
+  to: number;
+  step: number;
   label?: string;
 }
 export interface SweepRequest {
-  base:    BacktestConfig;
-  param1:  SweepParam;
-  param2?: SweepParam;       // optional 2nd axis for heatmap
-  metric:  keyof Metrics;    // which metric to optimise
+  base: BacktestConfig;
+  param1: SweepParam;
+  param2?: SweepParam; // optional 2nd axis for heatmap
+  metric: keyof Metrics; // which metric to optimise
 }
 export interface SweepCell {
-  v1:      number;           // param1 value
-  v2?:     number;           // param2 value (if 2D)
-  metric:  number;           // the selected metric's value
-  trades:  number;
+  v1: number; // param1 value
+  v2?: number; // param2 value (if 2D)
+  metric: number; // the selected metric's value
+  trades: number;
 }
 export interface SweepResponse {
-  ok:      boolean;
-  cells:   SweepCell[];
-  bestV1:  number;
+  ok: boolean;
+  cells: SweepCell[];
+  bestV1: number;
   bestV2?: number;
   bestMetric: number;
 }
 
 // ── Walk-forward optimisation ─────────────────────────────────────────────────
 export interface WalkForwardRequest {
-  base:      BacktestConfig;
-  param:     SweepParam;     // single parameter optimised in each in-sample window
-  metric:    keyof Metrics;  // metric maximised in-sample
-  windows:   number;         // number of in-sample/out-of-sample splits
-  oosPct:    number;         // % of each window reserved for out-of-sample (e.g. 30)
+  base: BacktestConfig;
+  param: SweepParam; // single parameter optimised in each in-sample window
+  metric: keyof Metrics; // metric maximised in-sample
+  windows: number; // number of in-sample/out-of-sample splits
+  oosPct: number; // % of each window reserved for out-of-sample (e.g. 30)
 }
 export interface WalkForwardWindow {
-  index:      number;
-  isFrom:     string;  isTo:  string;
-  oosFrom:    string;  oosTo: string;
-  bestParam:  number;
-  isMetric:   number;
-  oosPnl:     number;
-  oosTrades:  number;
+  index: number;
+  isFrom: string;
+  isTo: string;
+  oosFrom: string;
+  oosTo: string;
+  bestParam: number;
+  isMetric: number;
+  oosPnl: number;
+  oosTrades: number;
 }
 export interface WalkForwardResponse {
-  ok:            boolean;
-  windows:       WalkForwardWindow[];
-  oosTotalPnl:   number;   // stitched out-of-sample P&L
-  oosWinRate:    number;   // % of windows with positive OOS P&L
-  efficiency:    number;   // OOS total / sum of in-sample-implied P&L proxy (0–1+)
-  equityCurve:   { date: string; cumPnl: number }[];
-  error?:        string;
+  ok: boolean;
+  windows: WalkForwardWindow[];
+  oosTotalPnl: number; // stitched out-of-sample P&L
+  oosWinRate: number; // % of windows with positive OOS P&L
+  efficiency: number; // OOS total / sum of in-sample-implied P&L proxy (0–1+)
+  equityCurve: { date: string; cumPnl: number }[];
+  error?: string;
 }
 
 export interface BacktestResponse {
-  ok:          boolean;
-  trades:      DayTrade[];
-  metrics:     Metrics;
+  ok: boolean;
+  trades: DayTrade[];
+  metrics: Metrics;
   equityCurve: EquityPoint[];
-  monthly:     MonthlyBucket[];
-  weekday:     WeekdayBucket[];
-  warnings:    string[];
+  monthly: MonthlyBucket[];
+  weekday: WeekdayBucket[];
+  warnings: string[];
   tradingDaysScanned: number;
-  config:      BacktestConfig;
+  config: BacktestConfig;
   monteCarlo?: MonteCarloResult;
-  score?:      StrategyScore;
+  score?: StrategyScore;
 }
 
 // ── Meta (data coverage) ─────────────────────────────────────────────────────
 export interface UnderlyingMeta {
-  underlying:  Underlying;
-  flags:       ExpiryFlag[];
+  underlying: Underlying;
+  flags: ExpiryFlag[];
   expiryCount: number;
   firstExpiry: string;
-  lastExpiry:  string;
+  lastExpiry: string;
 }
 export interface BacktestMeta {
   underlyings: UnderlyingMeta[];

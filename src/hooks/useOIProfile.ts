@@ -3,7 +3,13 @@ import type { ISeriesApi } from 'lightweight-charts';
 import type { Instrument, OhlcBar, OptionChainData, WsMessage } from '../types';
 import { getSymbol } from '../types';
 import { formatExpiry, IST_OFFSET } from '../lib/utils';
-import { drawOI as renderOI, hitTestOIBar, normalizeStrike, type OiLeg, type OiSnap } from '../lib/oiRenderer';
+import {
+  drawOI as renderOI,
+  hitTestOIBar,
+  normalizeStrike,
+  type OiLeg,
+  type OiSnap,
+} from '../lib/oiRenderer';
 import { useWs } from './useWsContext';
 
 export interface OIProfileApi {
@@ -26,7 +32,9 @@ export interface OIProfileApi {
   setShowPuts: (v: boolean) => void;
   setOiFromTime: (v: string) => void;
   setOiToTime: (v: string) => void;
-  setOiHover: (v: { x: number; y: number; strike: number; ceOi: number; peOi: number } | null) => void;
+  setOiHover: (
+    v: { x: number; y: number; strike: number; ceOi: number; peOi: number } | null,
+  ) => void;
   // actions
   toggleOI: () => void;
   openSettings: () => void;
@@ -56,7 +64,13 @@ interface Deps {
   allBarsRef: React.RefObject<OhlcBar[]>;
 }
 
-export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRef, allBarsRef }: Deps): OIProfileApi {
+export function useOIProfile({
+  containerRef,
+  canvasRef,
+  candleRef,
+  currentInstRef,
+  allBarsRef,
+}: Deps): OIProfileApi {
   const { subscribe, subscribeOC, unsubscribeOC } = useWs();
 
   // ── Refs ──────────────────────────────────────────────────────────────────
@@ -79,7 +93,10 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
   const oiFromMsRef = useRef<number | null>(null);
   const oiToMsRef = useRef<number | null>(null);
   const oiDeltasRef = useRef<Record<number, { ceDelta: number; peDelta: number }>>({});
-  const oiSymbolMapRef = useRef<{ ce: Map<number, string>; pe: Map<number, string> }>({ ce: new Map(), pe: new Map() });
+  const oiSymbolMapRef = useRef<{ ce: Map<number, string>; pe: Map<number, string> }>({
+    ce: new Map(),
+    pe: new Map(),
+  });
   const oiDrawPendingRef = useRef(false);
   const oiHistDateRef = useRef<string>('');
   const oiHistFailedRef = useRef(false);
@@ -94,7 +111,13 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
   const [showPuts, setShowPuts] = useState(true);
   const [oiFromTime, setOiFromTime] = useState('');
   const [oiToTime, setOiToTime] = useState('');
-  const [oiHover, setOiHover] = useState<{ x: number; y: number; strike: number; ceOi: number; peOi: number } | null>(null);
+  const [oiHover, setOiHover] = useState<{
+    x: number;
+    y: number;
+    strike: number;
+    ceOi: number;
+    peOi: number;
+  } | null>(null);
 
   const oiModeRef = useRef(oiMode);
   oiModeRef.current = oiMode;
@@ -129,28 +152,40 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
 
       const ceOiMap: Record<number, { oi: number; prevOi: number }> = {};
       const peOiMap: Record<number, { oi: number; prevOi: number }> = {};
-      for (const leg of (data.ce || [])) {
+      for (const leg of data.ce || []) {
         const sp = normalizeStrike(Number(leg.sp));
         const oi = Number(leg.oi ?? (leg as { open_interest?: number }).open_interest) || 0;
-        const prevOi = Number((leg as { prevOi?: number; prev_oi?: number }).prevOi ?? (leg as { prevOi?: number; prev_oi?: number }).prev_oi) || 0;
+        const prevOi =
+          Number(
+            (leg as { prevOi?: number; prev_oi?: number }).prevOi ??
+              (leg as { prevOi?: number; prev_oi?: number }).prev_oi,
+          ) || 0;
         if (sp > 0 && oi > 0) ceOiMap[sp] = { oi, prevOi };
       }
-      for (const leg of (data.pe || [])) {
+      for (const leg of data.pe || []) {
         const sp = normalizeStrike(Number(leg.sp));
         const oi = Number(leg.oi ?? (leg as { open_interest?: number }).open_interest) || 0;
-        const prevOi = Number((leg as { prevOi?: number; prev_oi?: number }).prevOi ?? (leg as { prevOi?: number; prev_oi?: number }).prev_oi) || 0;
+        const prevOi =
+          Number(
+            (leg as { prevOi?: number; prev_oi?: number }).prevOi ??
+              (leg as { prevOi?: number; prev_oi?: number }).prev_oi,
+          ) || 0;
         if (sp > 0 && oi > 0) peOiMap[sp] = { oi, prevOi };
       }
       if (!Object.keys(ceOiMap).length && !Object.keys(peOiMap).length) return;
 
       oiChainRef.current = {
-        ce: oiChainRef.current.ce.map(leg => {
+        ce: oiChainRef.current.ce.map((leg) => {
           const spRs = normalizeStrike(Number(leg.sp));
-          return spRs in ceOiMap ? { ...leg, oi: ceOiMap[spRs].oi, prevOi: ceOiMap[spRs].prevOi } : leg;
+          return spRs in ceOiMap
+            ? { ...leg, oi: ceOiMap[spRs].oi, prevOi: ceOiMap[spRs].prevOi }
+            : leg;
         }),
-        pe: oiChainRef.current.pe.map(leg => {
+        pe: oiChainRef.current.pe.map((leg) => {
           const spRs = normalizeStrike(Number(leg.sp));
-          return spRs in peOiMap ? { ...leg, oi: peOiMap[spRs].oi, prevOi: peOiMap[spRs].prevOi } : leg;
+          return spRs in peOiMap
+            ? { ...leg, oi: peOiMap[spRs].oi, prevOi: peOiMap[spRs].prevOi }
+            : leg;
         }),
       };
       requestDraw();
@@ -161,11 +196,14 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
   // Release the OI snapshot interval and server-side OI subscription on unmount —
   // otherwise an enabled overlay leaks a 30s timer and a live feed after the host
   // chart is gone (both stop functions are ref-based, so the mount-time closure is safe).
-  useEffect(() => () => {
-    stopSnapshotTimer();
-    unsubscribeOiWs();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(
+    () => () => {
+      stopSnapshotTimer();
+      unsubscribeOiWs();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   function safePriceToCoordinate(s: ISeriesApi<'Candlestick'> | null, p: number): number | null {
     if (!s) return null;
@@ -210,15 +248,15 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
         showPuts,
         mode: oiModeRef.current,
         histFetched: oiHistFetchedRef.current,
-      historicalMap: oiHistoricalRef.current,
-      symbolMap: oiSymbolMapRef.current,
-      fromMs: oiFromMsRef.current,
-      toMs: oiToMsRef.current,
-      baseline: oiBaselineRef.current,
-      toSnap: oiToSnapRef.current,
-      deltasOut: oiDeltasRef.current,
-      isToday,
-    });
+        historicalMap: oiHistoricalRef.current,
+        symbolMap: oiSymbolMapRef.current,
+        fromMs: oiFromMsRef.current,
+        toMs: oiToMsRef.current,
+        baseline: oiBaselineRef.current,
+        toSnap: oiToSnapRef.current,
+        deltasOut: oiDeltasRef.current,
+        isToday,
+      });
     } catch (e) {
       console.warn('[OI] Draw error:', e);
     }
@@ -228,7 +266,10 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
   function requestDraw() {
     if (!oiEnabledRef.current || oiDrawPendingRef.current) return;
     oiDrawPendingRef.current = true;
-    requestAnimationFrame(() => { drawOIRef.current(); oiDrawPendingRef.current = false; });
+    requestAnimationFrame(() => {
+      drawOIRef.current();
+      oiDrawPendingRef.current = false;
+    });
   }
 
   // ── Fetch / reload ──────────────────────────────────────────────────────
@@ -237,14 +278,18 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     const sym = getSymbol(currentInstRef.current);
     try {
       const res = await fetch(`/api/optionchain/${encodeURIComponent(sym)}`);
-      const data = await res.json() as { chain?: { all_expiries?: string[]; ce?: OiLeg[]; pe?: OiLeg[] } };
+      const data = (await res.json()) as {
+        chain?: { all_expiries?: string[]; ce?: OiLeg[]; pe?: OiLeg[] };
+      };
       if (!data.chain) return;
       const expiries = data.chain.all_expiries || [];
       setOiExpiries(expiries);
       const first = expiries.slice(0, 1);
       setSelExpiries(first);
       await reloadOIExpiries(first);
-    } catch (e) { console.warn('[OI] loadOIChain failed:', e); }
+    } catch (e) {
+      console.warn('[OI] loadOIChain failed:', e);
+    }
   }
 
   async function reloadOIExpiries(expiries: string[]) {
@@ -257,36 +302,54 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     const ceSymMap = new Map<number, string>();
     const peSymMap = new Map<number, string>();
 
-    const results = await Promise.all(expiries.map(async (exp) => {
-      try {
-        const res = await fetch(`/api/optionchain/${encodeURIComponent(sym)}?expiry=${encodeURIComponent(exp)}`);
-        return await res.json() as { chain?: { ce?: OiLeg[]; pe?: OiLeg[] } };
-      } catch (e) { console.warn('[OI] Expiry fetch failed:', exp, e); return null; }
-    }));
+    const results = await Promise.all(
+      expiries.map(async (exp) => {
+        try {
+          const res = await fetch(
+            `/api/optionchain/${encodeURIComponent(sym)}?expiry=${encodeURIComponent(exp)}`,
+          );
+          return (await res.json()) as { chain?: { ce?: OiLeg[]; pe?: OiLeg[] } };
+        } catch (e) {
+          console.warn('[OI] Expiry fetch failed:', exp, e);
+          return null;
+        }
+      }),
+    );
 
     for (const data of results) {
       if (!data?.chain) continue;
-      for (const ce of (data.chain.ce || [])) {
+      for (const ce of data.chain.ce || []) {
         const sp = normalizeStrike(Number(ce.sp));
         const oi = Number(ce.oi ?? ce.open_interest) || 0;
         ceMap[sp] = (ceMap[sp] || 0) + oi;
         cePrevMap[sp] = (cePrevMap[sp] || 0) + (Number(ce.prev_oi) || 0);
-        if (ce.symbol && !ceSymMap.has(Number(ce.sp))) ceSymMap.set(Number(ce.sp), String(ce.symbol));
+        if (ce.symbol && !ceSymMap.has(Number(ce.sp)))
+          ceSymMap.set(Number(ce.sp), String(ce.symbol));
       }
-      for (const pe of (data.chain.pe || [])) {
+      for (const pe of data.chain.pe || []) {
         const sp = normalizeStrike(Number(pe.sp));
         const oi = Number(pe.oi ?? pe.open_interest) || 0;
         peMap[sp] = (peMap[sp] || 0) + oi;
         pePrevMap[sp] = (pePrevMap[sp] || 0) + (Number(pe.prev_oi) || 0);
-        if (pe.symbol && !peSymMap.has(Number(pe.sp))) peSymMap.set(Number(pe.sp), String(pe.symbol));
+        if (pe.symbol && !peSymMap.has(Number(pe.sp)))
+          peSymMap.set(Number(pe.sp), String(pe.symbol));
       }
     }
     oiSymbolMapRef.current = { ce: ceSymMap, pe: peSymMap };
-    const hasData = Object.values(ceMap).some(v => v > 0) || Object.values(peMap).some(v => v > 0);
+    const hasData =
+      Object.values(ceMap).some((v) => v > 0) || Object.values(peMap).some((v) => v > 0);
     if (hasData) {
       oiChainRef.current = {
-        ce: Object.entries(ceMap).map(([sp, oi]) => ({ sp: Number(sp) * 100, oi, prevOi: cePrevMap[Number(sp)] || 0 })),
-        pe: Object.entries(peMap).map(([sp, oi]) => ({ sp: Number(sp) * 100, oi, prevOi: pePrevMap[Number(sp)] || 0 })),
+        ce: Object.entries(ceMap).map(([sp, oi]) => ({
+          sp: Number(sp) * 100,
+          oi,
+          prevOi: cePrevMap[Number(sp)] || 0,
+        })),
+        pe: Object.entries(peMap).map(([sp, oi]) => ({
+          sp: Number(sp) * 100,
+          oi,
+          prevOi: pePrevMap[Number(sp)] || 0,
+        })),
       };
     }
     oiHistoricalRef.current = new Map();
@@ -330,8 +393,14 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     const seen = new Set<string>();
     for (const [sp, ceSym] of symMap.ce.entries()) {
       const peSym = symMap.pe.get(sp);
-      if (ceSym && !seen.has(ceSym)) { seen.add(ceSym); values.push(ceSym); }
-      if (peSym && !seen.has(peSym)) { seen.add(peSym); values.push(peSym); }
+      if (ceSym && !seen.has(ceSym)) {
+        seen.add(ceSym);
+        values.push(ceSym);
+      }
+      if (peSym && !seen.has(peSym)) {
+        seen.add(peSym);
+        values.push(peSym);
+      }
     }
 
     try {
@@ -349,20 +418,39 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
       console.log(`[OI] Fetching ${values.length} instruments in ${chunks.length} batches`);
 
       const map = new Map<string, { ts: number; v: number }[]>();
-      const results = await Promise.all(chunks.map(async (chunk) => {
-        const res = await fetch('/api/historical', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: [{ exchange, type: 'OPT', values: chunk, fields: ['cumulative_oi'], startDate: startDate.toISOString(), endDate: endDate.toISOString(), interval: '1m', intraDay: true, realTime: false }] }),
-        });
-        if (!res.ok) return null;
-        return res.json();
-      }));
+      const results = await Promise.all(
+        chunks.map(async (chunk) => {
+          const res = await fetch('/api/historical', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: [
+                {
+                  exchange,
+                  type: 'OPT',
+                  values: chunk,
+                  fields: ['cumulative_oi'],
+                  startDate: startDate.toISOString(),
+                  endDate: endDate.toISOString(),
+                  interval: '1m',
+                  intraDay: true,
+                  realTime: false,
+                },
+              ],
+            }),
+          });
+          if (!res.ok) return null;
+          return res.json();
+        }),
+      );
 
       for (const data of results) {
         if (!data?.result?.[0]?.values) continue;
         for (const row of data.result[0].values) {
-          for (const [name, series] of Object.entries(row) as [string, { cumulative_oi?: { ts: number; v: number }[] }][]) {
+          for (const [name, series] of Object.entries(row) as [
+            string,
+            { cumulative_oi?: { ts: number; v: number }[] },
+          ][]) {
             if (series?.cumulative_oi?.length) map.set(name, series.cumulative_oi);
           }
         }
@@ -376,8 +464,9 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     } catch (e) {
       console.error('[OI] Historical fetch failed:', e);
       oiHistFailedRef.current = true;
+    } finally {
+      oiHistLoadingRef.current = false;
     }
-    finally { oiHistLoadingRef.current = false; }
   }
 
   // ── Snapshot timer (replaces the old 10fps OI loop) ──────────────────────
@@ -387,7 +476,10 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
       if (!oiChainRef.current || !oiEnabledRef.current) return;
       const now = Date.now();
       if (now - lastOiSnapTimeRef.current > 30000) {
-        oiSnapshotsRef.current.set(now, { ce: [...oiChainRef.current.ce], pe: [...oiChainRef.current.pe] });
+        oiSnapshotsRef.current.set(now, {
+          ce: [...oiChainRef.current.ce],
+          pe: [...oiChainRef.current.pe],
+        });
         lastOiSnapTimeRef.current = now;
         const cutoff = now - 8 * 3_600_000;
         for (const [ts] of oiSnapshotsRef.current) {
@@ -400,7 +492,10 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
   }
 
   function stopSnapshotTimer() {
-    if (oiLoopRef.current) { clearInterval(oiLoopRef.current); oiLoopRef.current = null; }
+    if (oiLoopRef.current) {
+      clearInterval(oiLoopRef.current);
+      oiLoopRef.current = null;
+    }
   }
 
   // ── Mouse handlers ──────────────────────────────────────────────────────
@@ -409,7 +504,8 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
     const rect = containerRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const priceScaleW = 72;
-    const maxBarW = (containerRef.current.clientWidth - priceScaleW) * 0.35 * oiWidthScaleRef.current;
+    const maxBarW =
+      (containerRef.current.clientWidth - priceScaleW) * 0.35 * oiWidthScaleRef.current;
     const handleX = containerRef.current.clientWidth - priceScaleW - maxBarW;
     if (Math.abs(x - handleX) > 15) return;
 
@@ -421,7 +517,10 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
       const rx = ev.clientX - containerRef.current.getBoundingClientRect().left;
       const dx = oiDragRef.current.startX - rx;
       const base = (containerRef.current.clientWidth - 72) * 0.35;
-      oiWidthScaleRef.current = Math.max(0.2, Math.min(3.0, oiDragRef.current.startScale + dx / base));
+      oiWidthScaleRef.current = Math.max(
+        0.2,
+        Math.min(3.0, oiDragRef.current.startScale + dx / base),
+      );
       drawOIRef.current();
     };
     const onUp = () => {
@@ -451,7 +550,9 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
 
     if (oiEnabledRef.current && oiChainRef.current && candleRef.current && x >= handleX - 5) {
       const hit = hitTestOIBar({
-        x, y, containerW: w,
+        x,
+        y,
+        containerW: w,
         widthScale: oiWidthScaleRef.current,
         oiChain: oiChainRef.current,
         priceToCoordinate: (p) => safePriceToCoordinate(candleRef.current, p),
@@ -460,7 +561,10 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
         histFetched: oiHistFetchedRef.current,
         deltas: oiDeltasRef.current,
       });
-      if (hit) { setOiHover({ x, y, ...hit }); return; }
+      if (hit) {
+        setOiHover({ x, y, ...hit });
+        return;
+      }
     }
     setOiHover(null);
   }
@@ -556,7 +660,7 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
   }
 
   function openSettings() {
-    setShowOiPopup(v => !v);
+    setShowOiPopup((v) => !v);
     if (!oiExpiries.length && currentInstRef.current) loadOIChain();
   }
 
@@ -566,7 +670,10 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
   }
 
   function clearForInstrumentChange() {
-    if (oiEnabledRef.current) { oiEnabledRef.current = false; setOiOn(false); }
+    if (oiEnabledRef.current) {
+      oiEnabledRef.current = false;
+      setOiOn(false);
+    }
     stopSnapshotTimer();
     oiChainRef.current = null;
     oiHistoricalRef.current = new Map();
@@ -580,14 +687,40 @@ export function useOIProfile({ containerRef, canvasRef, candleRef, currentInstRe
   }
 
   return {
-    oiOn, showOiPopup, oiExpiries, selExpiries, oiMode, showCalls, showPuts,
-    oiFromTime, oiToTime, oiHover,
-    setShowOiPopup, setSelExpiries, setOiMode, setShowCalls, setShowPuts,
-    setOiFromTime, setOiToTime, setOiHover,
-    toggleOI, openSettings, applyExpiries, fetchOIHistory, drawOI, requestDraw,
-    handleMouseDown, handleMouseMove, handleMouseLeave,
-    handleSliderChange, handleFromTimeChange, handleToTimeChange, resetTimeRange,
+    oiOn,
+    showOiPopup,
+    oiExpiries,
+    selExpiries,
+    oiMode,
+    showCalls,
+    showPuts,
+    oiFromTime,
+    oiToTime,
+    oiHover,
+    setShowOiPopup,
+    setSelExpiries,
+    setOiMode,
+    setShowCalls,
+    setShowPuts,
+    setOiFromTime,
+    setOiToTime,
+    setOiHover,
+    toggleOI,
+    openSettings,
+    applyExpiries,
+    fetchOIHistory,
+    drawOI,
+    requestDraw,
+    handleMouseDown,
+    handleMouseMove,
+    handleMouseLeave,
+    handleSliderChange,
+    handleFromTimeChange,
+    handleToTimeChange,
+    resetTimeRange,
     clearForInstrumentChange,
-    oiEnabledRef, drawOIRef, oiDrawPendingRef,
+    oiEnabledRef,
+    drawOIRef,
+    oiDrawPendingRef,
   };
 }

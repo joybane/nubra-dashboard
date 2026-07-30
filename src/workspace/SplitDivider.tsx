@@ -1,36 +1,39 @@
 import { useCallback, useRef } from 'react';
 
 interface SplitDividerProps {
-  direction:  'horizontal' | 'vertical';
-  onResize:   (delta: number) => void;
+  direction: 'horizontal' | 'vertical';
+  onResize: (delta: number) => void;
 }
 
 export default function SplitDivider({ direction, onResize }: SplitDividerProps) {
   const dragging = useRef(false);
-  const lastPos  = useRef(0);
+  const lastPos = useRef(0);
 
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
-    dragging.current = true;
-    lastPos.current  = direction === 'horizontal' ? e.clientX : e.clientY;
-    e.preventDefault();
+  const onMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      dragging.current = true;
+      lastPos.current = direction === 'horizontal' ? e.clientX : e.clientY;
+      e.preventDefault();
 
-    const onMove = (ev: MouseEvent) => {
-      if (!dragging.current) return;
-      const pos   = direction === 'horizontal' ? ev.clientX : ev.clientY;
-      const delta = pos - lastPos.current;
-      lastPos.current = pos;
-      onResize(delta);
-    };
+      const onMove = (ev: MouseEvent) => {
+        if (!dragging.current) return;
+        const pos = direction === 'horizontal' ? ev.clientX : ev.clientY;
+        const delta = pos - lastPos.current;
+        lastPos.current = pos;
+        onResize(delta);
+      };
 
-    const onUp = () => {
-      dragging.current = false;
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-    };
+      const onUp = () => {
+        dragging.current = false;
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
 
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-  }, [direction, onResize]);
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [direction, onResize],
+  );
 
   const isH = direction === 'horizontal';
 

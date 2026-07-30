@@ -92,11 +92,23 @@ export function pruneOcSubKeys(
   const keep: string[] = [];
   const drop: Array<{ key: string; reason: string }> = [];
   for (const key of keys) {
-    if (pinned.has(key))            { keep.push(key); continue; }
-    if (!isValidFeedKey(key))       { drop.push({ key, reason: 'malformed' }); continue; }
+    if (pinned.has(key)) {
+      keep.push(key);
+      continue;
+    }
+    if (!isValidFeedKey(key)) {
+      drop.push({ key, reason: 'malformed' });
+      continue;
+    }
     const [asset, expiry] = key.split(':');
-    if (expiry < todayIst)          { drop.push({ key, reason: 'expired' }); continue; }
-    if (!liveAssets.has(asset))     { drop.push({ key, reason: 'no open position or order' }); continue; }
+    if (expiry < todayIst) {
+      drop.push({ key, reason: 'expired' });
+      continue;
+    }
+    if (!liveAssets.has(asset)) {
+      drop.push({ key, reason: 'no open position or order' });
+      continue;
+    }
     keep.push(key);
   }
   return { keep, drop };

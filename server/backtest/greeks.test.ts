@@ -60,8 +60,9 @@ test('calendarYearsToExpiry: reads as plain calendar time, and is monotonic acro
   // 30 days out really is ~30/365 of a year — yearsToExpiry reports ~1/3 of that.
   expect(calendarYearsToExpiry('2026-08-25', '10:00', '2026-09-24') * 365).toBeCloseTo(30.23, 1);
   expect(calendarYearsToExpiry('2026-08-25', '10:00', '2027-08-25')).toBeCloseTo(1, 2);
-  const ts = ['2026-08-25', '2026-08-26', '2026-08-27', '2026-09-04']
-    .map(e => calendarYearsToExpiry('2026-08-25', '10:00', e));
+  const ts = ['2026-08-25', '2026-08-26', '2026-08-27', '2026-09-04'].map((e) =>
+    calendarYearsToExpiry('2026-08-25', '10:00', e),
+  );
   for (let i = 1; i < ts.length; i++) expect(ts[i]).toBeGreaterThan(ts[i - 1]);
 });
 
@@ -85,7 +86,11 @@ test('bsPrice: its own slope reproduces bsDelta', () => {
 
 test('impliedVolPct: round-trips back to the premium it was solved from', () => {
   const t = calendarYearsToExpiry('2026-08-25', '10:00', '2026-09-04');
-  for (const [ot, k, prem] of [['CALL', 24000, 150], ['CALL', 24300, 120], ['PUT', 23800, 100]] as const) {
+  for (const [ot, k, prem] of [
+    ['CALL', 24000, 150],
+    ['CALL', 24300, 120],
+    ['PUT', 23800, 100],
+  ] as const) {
     const iv = impliedVolPct(ot, 24000, k, prem, t);
     expect(iv).not.toBeNull();
     expect(bsPrice(ot, 24000, k, iv!, t)).toBeCloseTo(prem, 2);
