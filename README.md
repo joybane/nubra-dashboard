@@ -409,11 +409,61 @@ fallback poll once WS has been silent for 6 seconds. Precedence in `mergeHistory
 
 **Probed live 2026-07-30:** the timeseries *does* serve historical `delta`/`vega`/`theta`
 (values match the live chain), so path 1 normally wins — an older assumption that the broker
-stores no historical Greeks is out of date. But there is **no `iv` field under any name**
-(`iv`, `implied_volatility`, `impliedVolatility`, `implied_vol`, `ivPct`, `volatility` all
-absent). Because path 1 bypasses reconstruction, the IV measures would have no history at all,
-so `mergeHistory` derives IV by inversion even on the broker-Greek path — gated on the IV
-overlay being active, since Vega/Theta never read it.
+stores no historical Greeks is out of date.
+
+**Corrected 2026-08-03: the timeseries also serves historical IV**, as `iv_bid` / `iv_mid` /
+`iv_ask`. The 2026-07-30 probe concluded otherwise, but it only tried `iv`,
+`implied_volatility`, `impliedVolatility`, `implied_vol`, `ivPct`, and `volatility` — never the
+`iv_*` names, which are the ones the V3 field list documents. Re-probed against
+`NIFTY2680424750CE` (1 DTE ATM CE) over a full session: 376/376 one-minute points populated on
+all three, no nulls or zeros, `iv_bid < iv_mid < iv_ask` throughout, range 0.1106–0.1201 —
+a genuine bid/ask volatility spread, matching `close` and `delta` point-for-point.
+
+#### What `iv_*` actually is — measured 2026-08-03
+
+Nubra support was asked directly and answered "Black-Scholes on spot", then contradicted
+itself in the same paragraph ("if forward-based… put-call parity or spot compounded at a
+risk-free rate… the exact method may depend") and gave no rate. So it was measured instead.
+
+Sample: NIFTY expiry 20260811 (8 DTE), 49 strikes spanning ±5% of ATM, both sides, full
+session at 1m — 25,436 usable points from 25,734 considered. The probe reuses `GexService`'s
+own `forwardFromParity` / `impliedVolatility` rather than reimplementing them, and its delta
+control reproduces the broker's own `delta` to a mean 0.00133, so the harness is sound.
+
+| forward source | unpriceable | mean \|IV − `iv_mid`\| |
+| -------------- | ----------- | ---------------------- |
+| parity         | 17 / 25436  | **0.057 vol pts**      |
+| spot           | 500 / 25436 | 0.757 vol pts          |
+| `spot·e^{rT}`  | 1325/ 25436 | 0.750 vol pts          |
+
+**The vendor prices off the forward, not spot** — parity beats spot by 13×, and there is no
+residual skew tilt (median signed error 0.000 vol pts on both the ITM and OTM wings; a wrong
+forward tilts the wings in opposite directions). Backing their forward out of their own
+`iv_mid` + `delta` at near-ATM strikes puts it **0.4 index points** from the parity forward
+(n=7437). Their support answer was wrong on the one question that mattered.
+
+**Chain `iv` and timeseries `iv_mid` are the same series** — bit-identical across 10 near-ATM
+legs, to every digit served. There are not two vendor volatilities; there is one.
+
+The bid/ask IV band is real but narrow: median width 0.023 vol pts (≈7 ticks at this expiry's
+vega). Our `close`-inverted IV lands inside it 41.6% of the time, and when outside misses by a
+median 0.008 vol pts, biased above the mid 3.5:1 — last trade sits above mid more often than
+below, which is a price-selection artifact and not a model difference.
+
+`mergeHistory` still derives IV by inversion on the broker-Greek path (gated on the IV overlay
+being active, since Vega/Theta never read it). Given the above that is now a *choice* rather
+than a necessity, and a cheap one to revisit — [useGreekOverlay.ts](src/hooks/useGreekOverlay.ts)
+requests `'iv'` in `HIST_FIELDS`, the one name that is never served, so a single-word change to
+`'iv_mid'` would switch history onto the vendor series. **Left as-is deliberately.** The
+~0.26 vol-point offset documented in `server/backtest/ivHistory.ts` is against the *parquet*
+`iv` column, which this measurement shows is a different product from the API series — so that
+offset neither justifies nor forbids the switch, and nothing has yet measured the parquet
+column against `iv_mid` on an overlapping date. Until that is done, one pipeline end to end
+beats two that agree to 0.057 vol points for reasons nobody has pinned down.
+
+One incidental constraint found while sampling: `charts/timeseries` rejects more than
+**10 symbols per query** (`"maximum 10 values allowed in one query"`), so wide ladders must be
+batched.
 
 **Black-76 prices off the forward, and the forward's *level* is what matters.** Use
 `forwardFromParity(K, C, P, r, T)` — `F = K + (C − P)·e^{rT}` at the strike nearest spot —
@@ -426,12 +476,19 @@ whenever a CE/PE pair is available. Measured against a live NIFTY chain (spot 24
 | spot           | 11 / 122    | 0.79 vol pts           |
 | `spot·e^{rT}`  | 14 / 122    | 1.33 vol pts           |
 
-NIFTY's basis is **negative** — parity implied 24231.48 against a 24257.45 spot, and inverting
-the broker's own IV+delta independently gave 24232.12, agreeing to 0.6 points. So compounding
-spot at `+r` moves the forward the *wrong way*, and makes genuinely-traded ITM calls look
-sub-intrinsic (11 of 122 legs traded below spot-intrinsic) which the no-arb guard then rejects.
-The carry rate barely matters by comparison: `r = 0` versus `r = 0.07` moved the mean error
-only 0.79 → 0.79.
+On that occasion NIFTY's basis was **negative** — parity implied 24231.48 against a 24257.45
+spot, and inverting the broker's own IV+delta independently gave 24232.12, agreeing to 0.6
+points. Compounding spot at `+r` therefore moved the forward the *wrong way*, and made
+genuinely-traded ITM calls look sub-intrinsic (11 of 122 legs traded below spot-intrinsic)
+which the no-arb guard then rejects. The carry rate barely matters by comparison: `r = 0`
+versus `r = 0.07` moved the mean error only 0.79 → 0.79.
+
+**The sign is not a constant, so do not encode it.** The 2026-08-03 sweep above measured the
+same basis at a **median +18.1 points** (mean +12.8, range −172.3 to +38.8 across the session)
+on the 8 DTE expiry — positive, where the earlier reading was negative. That is not a
+contradiction so much as the point: the basis moves with the session and the tenor, which is
+precisely why parity is read per timestamp rather than assumed. Any static carry constant,
+of either sign, is wrong somewhere.
 
 The historical path was validated the same way, against the broker's own historical `delta`
 across 8988 one-minute points: parity reproduced it to a mean error of **0.00092** with 0
