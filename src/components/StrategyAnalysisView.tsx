@@ -18,11 +18,25 @@ import {
   type ISeriesApi,
   type CandlestickSeriesOptions,
 } from 'lightweight-charts';
-import type { PaperPosition, PaperOrder, WsMessage, OptionChainData, OptionLeg } from '../types';
-import { fmtPrice, IST_OFFSET, toChartTime } from '../lib/utils';
+import type {
+  Instrument,
+  PaperPosition,
+  PaperOrder,
+  WsMessage,
+  OptionChainData,
+  OptionLeg,
+} from '../types';
+import { fmtPrice, IST_OFFSET, marketSession, toChartTime } from '../lib/utils';
 import { useWs } from '../hooks/useWsContext';
 import { chartFrame, isChartLive, removeChart } from '../lib/chartLifecycle';
 import { blackScholes, impliedVolatility, RISK_FREE } from '../lib/GexService';
+import {
+  resolveMcxStrategyFuture,
+  strategyChartSubscription,
+  strategyPositionAsset,
+  strategyPositionExchange,
+  strategyPositionExpiry,
+} from '../lib/strategyPositionMeta';
 
 interface StrategyAnalysisViewProps {
   basketGroupId: string;
@@ -250,7 +264,7 @@ async function fetchStrategyMarginPaise(positions: PaperPosition[]): Promise<num
   const res = await fetch('/paper/margin/basket', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ exchange: 'NSE', multiplier: 1, orders }),
+    body: JSON.stringify({ exchange: deriveExchange(positions), multiplier: 1, orders }),
   });
   if (!res.ok) return 0;
   const data = (await res.json()) as Record<string, unknown>;
@@ -290,12 +304,12 @@ function activeGreekSource(filter: Set<string>): GreekSource {
 }
 
 function deriveUnderlying(positions: PaperPosition[]): string | null {
-  for (const p of positions) {
-    const name = p.display_name || p.zanskar_name || '';
-    const match = name.match(/^(NIFTY|BANKNIFTY|FINNIFTY|SENSEX|MIDCPNIFTY)/i);
-    if (match) return match[1].toUpperCase();
-  }
-  return null;
+  return strategyPositionAsset(positions);
+}
+
+/** Exchange for the derived underlying, read off the same names. */
+function deriveExchange(positions: PaperPosition[]): string {
+  return strategyPositionExchange(positions);
 }
 
 interface HistBar {
@@ -312,11 +326,12 @@ async function fetchHistorical(
   interval: string,
   startDate: Date,
   endDate: Date,
+  exchange = 'NSE',
 ): Promise<HistBar[]> {
   const body = {
     query: [
       {
-        exchange: 'NSE',
+        exchange,
         type,
         values: [symbol],
         fields: ['open', 'high', 'low', 'close'],
@@ -567,6 +582,7 @@ export default function StrategyAnalysisView({
     legs: new Map(),
   });
   const [chartData, setChartData] = useState<ChartDataCache | null>(null);
+  const [historicalEnrichmentReady, setHistoricalEnrichmentReady] = useState(false);
   const chartDataRef = useRef<ChartDataCache | null>(null);
   chartDataRef.current = chartData;
   const hasInitialFittedRef = useRef(false);
@@ -597,6 +613,9 @@ export default function StrategyAnalysisView({
   const [legGreeks, setLegGreeks] = useState<
     Map<number, { delta: number; gamma: number; theta: number; vega: number; iv: number }>
   >(new Map());
+  // Live Greeks mutate their own history cache. Keep a separate revision so a Greeks tick
+  // redraws only that pane instead of re-applying every price and P&L series via chartData.
+  const [greeksDataRevision, setGreeksDataRevision] = useState(0);
   const [selectedGreeks, setSelectedGreeks] = useState<Set<string>>(
     new Set(['delta', 'gamma', 'theta', 'vega']),
   );
@@ -658,6 +677,60 @@ export default function StrategyAnalysisView({
   );
   allPositionsRef.current = allPositions;
   const underlying = useMemo(() => deriveUnderlying(allPositions), [allPositions]);
+  const underlyingExchange = useMemo(() => deriveExchange(allPositions), [allPositions]);
+  const [mcxChartUnderlying, setMcxChartUnderlying] = useState<string | null>(null);
+  const positionContractKey = useMemo(
+    () =>
+      allPositions
+        .map(
+          (position) =>
+            `${position.zanskar_name || position.display_name || position.ref_id}:${strategyPositionExpiry(position) || ''}`,
+        )
+        .sort()
+        .join('|'),
+    [allPositions],
+  );
+  const chartUnderlying =
+    underlyingExchange !== 'MCX'
+      ? underlying
+      : mcxChartUnderlying?.startsWith(`FUT_${underlying}_`)
+        ? mcxChartUnderlying
+        : null;
+
+  // Commodity options settle into a specific futures contract. Resolve that contract
+  // once per strategy composition so history and the live chart use the real symbol.
+  useEffect(() => {
+    if (!underlying) {
+      setMcxChartUnderlying(null);
+      return;
+    }
+    if (underlyingExchange !== 'MCX') {
+      setMcxChartUnderlying(null);
+      return;
+    }
+
+    let cancelled = false;
+    setMcxChartUnderlying(null);
+    fetch(
+      `/api/instruments/search?q=${encodeURIComponent(`FUT_${underlying}_`)}&exchange=MCX&type=FUT&limit=50`,
+    )
+      .then((response) => response.json() as Promise<{ results?: Instrument[] }>)
+      .then(({ results }) => {
+        if (cancelled) return;
+        const currentPositions = positionsRef.current.length
+          ? positionsRef.current
+          : allPositionsRef.current;
+        setMcxChartUnderlying(
+          resolveMcxStrategyFuture(underlying, currentPositions, results || []),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setMcxChartUnderlying(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [underlying, underlyingExchange, positionContractKey]);
 
   const legMetas: LegMeta[] = useMemo(() => {
     const seen = new Set<number>();
@@ -708,20 +781,21 @@ export default function StrategyAnalysisView({
         const all = Array.isArray(d) ? d : (d.portfolio?.stock_positions ?? []);
         openPos = all.filter((p) => p.basket_group_id === basketGroupId);
 
+        for (const position of openPos) {
+          if (!position.expiry) position.expiry = strategyPositionExpiry(position) || undefined;
+        }
+
         // Dynamically resolve missing expiries from the backend so Option Chain live WS works
         const missing = openPos.filter(
-          (p) =>
-            !p.expiry &&
-            p.zanskar_name &&
-            /CE|PE$/.test(p.zanskar_name) &&
-            !expiryCacheRef.current.has(p.zanskar_name),
+          (p) => !p.expiry && p.zanskar_name && !expiryCacheRef.current.has(p.zanskar_name),
         );
         if (missing.length > 0) {
           await Promise.all(
             missing.map(async (p) => {
               try {
+                const exchange = strategyPositionExchange([p]);
                 const res = await fetch(
-                  `/api/instruments/search?q=${encodeURIComponent(p.zanskar_name!)}&limit=1`,
+                  `/api/instruments/search?q=${encodeURIComponent(p.zanskar_name!)}&exchange=${exchange}&limit=1`,
                 );
                 const searchData = (await res.json()) as { results: any[] };
                 const match = searchData.results?.[0];
@@ -741,6 +815,9 @@ export default function StrategyAnalysisView({
       if (closedRes.ok) {
         const d = (await closedRes.json()) as PaperPosition[];
         closedPos = (Array.isArray(d) ? d : []).filter((p) => p.basket_group_id === basketGroupId);
+        for (const position of closedPos) {
+          if (!position.expiry) position.expiry = strategyPositionExpiry(position) || undefined;
+        }
         setClosedPositions(closedPos);
       }
       if (ordersRes.ok) {
@@ -755,6 +832,8 @@ export default function StrategyAnalysisView({
       if (allPos.length > 0 && !greeksFetchedRef.current) {
         greeksFetchedRef.current = true;
         const ul = deriveUnderlying(allPos);
+        const ulExch = deriveExchange(allPos);
+        const ocExch = ulExch === 'NSE' ? '' : `&exchange=${ulExch}`;
         if (!ul) return;
 
         // Parse expiry/strike/optType from zanskar_name: {UL}{YY}{M}{DD}{STRIKE}{CE|PE}
@@ -781,7 +860,7 @@ export default function StrategyAnalysisView({
 
         let chainSpotPrice = 0;
         const ocFetches = [...expiries].map((expiry) =>
-          fetch(`/api/optionchain/${ul}?expiry=${expiry}`)
+          fetch(`/api/optionchain/${ul}?expiry=${expiry}${ocExch}`)
             .then((r) => (r.ok ? r.json() : null))
             .catch(() => null),
         );
@@ -809,7 +888,9 @@ export default function StrategyAnalysisView({
           let spotPrice = chainSpotPrice;
           if (spotPrice <= 0) {
             try {
-              const priceRes = await fetch(`/api/optionchain/${ul}/price`);
+              const priceRes = await fetch(
+                `/api/optionchain/${ul}/price${ulExch === 'NSE' ? '' : `?exchange=${ulExch}`}`,
+              );
               if (priceRes.ok) {
                 const priceData = (await priceRes.json()) as Record<string, unknown>;
                 spotPrice =
@@ -892,12 +973,13 @@ export default function StrategyAnalysisView({
 
   // ── Subscribe for live underlying ticks ──
   useEffect(() => {
-    if (isSnapshot || !underlying) return;
-    subscribeChart({ indexes: [underlying] }, '1m', 'NSE');
+    if (isSnapshot || !chartUnderlying) return;
+    const payload = strategyChartSubscription(chartUnderlying, underlyingExchange);
+    subscribeChart(payload, '1m', underlyingExchange);
     return () => {
-      unsubscribeChart({ indexes: [underlying] }, '1m', 'NSE');
+      unsubscribeChart(payload, '1m', underlyingExchange);
     };
-  }, [underlying, subscribeChart, unsubscribeChart, isSnapshot]);
+  }, [chartUnderlying, underlyingExchange, subscribeChart, unsubscribeChart, isSnapshot]);
 
   // ── Subscribe option chain for strategy legs (ensures live ticks flow) ──
   useEffect(() => {
@@ -910,15 +992,15 @@ export default function StrategyAnalysisView({
     if (keys.size === 0) return;
     for (const key of keys) {
       const [asset, expiry] = key.split(':');
-      subscribeOC(asset, expiry, 'NSE');
+      subscribeOC(asset, expiry, underlyingExchange);
     }
     return () => {
       for (const key of keys) {
         const [asset, expiry] = key.split(':');
-        unsubscribeOC(asset, expiry, 'NSE');
+        unsubscribeOC(asset, expiry, underlyingExchange);
       }
     };
-  }, [underlying, positions, subscribeOC, unsubscribeOC, isSnapshot]);
+  }, [underlying, underlyingExchange, positions, subscribeOC, unsubscribeOC, isSnapshot]);
 
   // ════════════════════════════════════════════════════════════════════════════
   // CHART SECTION — rebuilt from scratch
@@ -942,7 +1024,7 @@ export default function StrategyAnalysisView({
       wickDownColor: '#ef4444',
       priceLineVisible: true,
       lastValueVisible: true,
-      title: underlying || 'Underlying',
+      title: chartUnderlying || underlying || 'Underlying',
       priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
     } as Partial<CandlestickSeriesOptions>);
     seriesRef.current.underlying = candleSeries;
@@ -993,7 +1075,7 @@ export default function StrategyAnalysisView({
       removeChart(chart);
       setChartEpoch((e) => e + 1);
     };
-  }, [theme, underlying, priceVisible]);
+  }, [theme, underlying, chartUnderlying, priceVisible]);
 
   // ── 2. Create P&L chart ──
   useEffect(() => {
@@ -1052,7 +1134,7 @@ export default function StrategyAnalysisView({
 
   // ── 3a. Fetch historical data (stores in state — decoupled from chart refs) ──
   useEffect(() => {
-    if (isSnapshot || !dataLoaded || !underlying) return;
+    if (isSnapshot || !dataLoaded || !underlying || !chartUnderlying) return;
     const positions = allPositionsRef.current;
     const metas = legMetasRef.current;
 
@@ -1066,41 +1148,52 @@ export default function StrategyAnalysisView({
     const earliestNs = Math.min(...entryTimes);
     const latestNs = exitTimes.length > 0 ? Math.max(...exitTimes) : 0;
     const entryDate = new Date(earliestNs / 1_000_000);
-    const sessionOpen =
-      Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 3, 45, 0) /
-        1000 +
-      IST_OFFSET;
-    const sessionClose =
-      Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 10, 0, 0) /
-        1000 +
-      IST_OFFSET;
+    // The session bounds used to be the 03:45/10:00 UTC literals — NSE's 09:15–15:30.
+    // Derived per exchange now, which reproduces those exactly for NSE and extends the
+    // grid to 23:30 for MCX.
+    const { openMin, closeMin } = marketSession(underlyingExchange);
+    const utcMs = (istMin: number) =>
+      Date.UTC(
+        entryDate.getFullYear(),
+        entryDate.getMonth(),
+        entryDate.getDate(),
+        0,
+        istMin - IST_OFFSET / 60,
+        0,
+      );
+    const sessionOpen = utcMs(openMin) / 1000 + IST_OFFSET;
+    const sessionClose = utcMs(closeMin) / 1000 + IST_OFFSET;
     const pnlFrom = Math.floor(earliestNs / 1_000_000_000 / 60) * 60 + IST_OFFSET;
     const pnlTo =
       latestNs > 0
         ? Math.min(Math.ceil(latestNs / 1_000_000_000 / 60) * 60 + IST_OFFSET, sessionClose)
         : sessionClose;
-    const startDate = new Date(
-      Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 3, 45, 0),
-    );
-    const endDate = new Date(
-      Date.UTC(entryDate.getFullYear(), entryDate.getMonth(), entryDate.getDate(), 10, 0, 0),
-    );
-    const ul = underlying;
+    const startDate = new Date(utcMs(openMin));
+    const endDate = new Date(utcMs(closeMin));
+    const ulExch = underlyingExchange;
 
     let cancelled = false;
+    setHistoricalEnrichmentReady(false);
     (async () => {
       const legFetches = metas
         .filter((l) => l.zanskarName)
         .map((leg) => {
           const type =
             leg.derivativeType === 'OPT' ? 'OPT' : leg.derivativeType === 'FUT' ? 'FUT' : 'STOCK';
-          return fetchHistorical(leg.zanskarName, type, '1m', startDate, endDate).then((bars) => ({
-            leg,
-            bars,
-          }));
+          return fetchHistorical(leg.zanskarName, type, '1m', startDate, endDate, ulExch).then(
+            (bars) => ({ leg, bars }),
+          );
         });
       const [underlyingRaw, ...legResults] = await Promise.all([
-        fetchHistorical(ul, 'INDEX', '1m', startDate, endDate),
+        // MCX has no spot index; its underlying is charted as a futures contract.
+        fetchHistorical(
+          chartUnderlying,
+          ulExch === 'MCX' ? 'FUT' : 'INDEX',
+          '1m',
+          startDate,
+          endDate,
+          ulExch,
+        ),
         ...legFetches,
       ]);
       if (cancelled) return;
@@ -1162,6 +1255,23 @@ export default function StrategyAnalysisView({
         number,
         Array<{ time: number; delta: number; gamma: number; theta: number; vega: number }>
       >();
+
+      // Price and P&L are the primary view. Publish them as soon as their parallel
+      // requests complete; historical Greeks are a separate, slower enrichment and
+      // must not leave both visible chart panes blank while it loads.
+      const initialChartData: ChartDataCache = {
+        underlyingBars,
+        legPriceData,
+        legPnlData,
+        basketPnlData,
+        legGreeksHist,
+        pnlFrom,
+        pnlTo,
+        sessionOpen,
+        sessionClose,
+      };
+      setChartData(initialChartData);
+
       const greekSymbols = metas
         .filter((l) => l.zanskarName && l.derivativeType === 'OPT')
         .map((l) => l.zanskarName);
@@ -1173,7 +1283,7 @@ export default function StrategyAnalysisView({
             body: JSON.stringify({
               query: [
                 {
-                  exchange: 'NSE',
+                  exchange: ulExch,
                   type: 'OPT',
                   values: greekSymbols,
                   fields: ['delta', 'gamma', 'theta', 'vega'],
@@ -1238,23 +1348,17 @@ export default function StrategyAnalysisView({
       }
 
       if (!cancelled) {
-        setChartData({
-          underlyingBars,
-          legPriceData,
-          legPnlData,
-          basketPnlData,
-          legGreeksHist,
-          pnlFrom,
-          pnlTo,
-          sessionOpen,
-          sessionClose,
-        });
+        // The map belongs to initialChartData and was enriched in place. Only the
+        // Greeks pane needs a redraw; re-setting chartData would reload the complete
+        // price/P&L histories and reintroduce the visible chart shake.
+        setGreeksDataRevision((revision) => revision + 1);
+        setHistoricalEnrichmentReady(true);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [dataLoaded, underlying, isSnapshot]);
+  }, [dataLoaded, underlying, chartUnderlying, underlyingExchange, isSnapshot]);
 
   // ── 3a-snapshot. Load a frozen saved snapshot ──
   useEffect(() => {
@@ -1300,6 +1404,7 @@ export default function StrategyAnalysisView({
         greeksFetchedRef.current = true;
         setDataLoaded(true);
         setChartData(cache);
+        setHistoricalEnrichmentReady(true);
       } catch (e) {
         console.warn('[StrategyAnalysis] snapshot load failed:', e);
       }
@@ -1739,7 +1844,7 @@ export default function StrategyAnalysisView({
   useEffect(() => {
     if (isSnapshot) return;
     const unsub1 = subscribe('ohlcv', (msg: WsMessage) => {
-      if (msg.type !== 'ohlcv' || !underlying || !seriesRef.current.underlying) return;
+      if (msg.type !== 'ohlcv' || !chartUnderlying || !seriesRef.current.underlying) return;
       const data = msg.data as {
         indexes?: Array<{
           indexname?: string;
@@ -1749,9 +1854,17 @@ export default function StrategyAnalysisView({
           low?: string;
           close?: string;
         }>;
+        instruments?: Array<{
+          indexname?: string;
+          timestamp?: string;
+          open?: string;
+          high?: string;
+          low?: string;
+          close?: string;
+        }>;
       };
-      const idx = data.indexes?.find(
-        (i) => (i.indexname || '').toUpperCase() === underlying.toUpperCase(),
+      const idx = [...(data.indexes || []), ...(data.instruments || [])].find(
+        (item) => (item.indexname || '').toUpperCase() === chartUnderlying.toUpperCase(),
       );
       if (!idx?.timestamp) return;
       const t = Math.floor((Number(BigInt(idx.timestamp)) / 1e9 + IST_OFFSET) / 60) * 60;
@@ -1853,7 +1966,7 @@ export default function StrategyAnalysisView({
       unsub2();
       unsub3();
     };
-  }, [subscribe, underlying, isSnapshot]);
+  }, [subscribe, chartUnderlying, isSnapshot]);
 
   // ── 6b. Polling fallback ──
   useEffect(() => {
@@ -2082,7 +2195,7 @@ export default function StrategyAnalysisView({
               vega: g.vega,
             });
           }
-          setChartData({ ...cached, legGreeksHist: new Map(cached.legGreeksHist) });
+          if (greeksVisible) setGreeksDataRevision((revision) => revision + 1);
         }
         setLegGreeks((prev) => {
           const next = new Map(prev);
@@ -2092,7 +2205,7 @@ export default function StrategyAnalysisView({
       }
     });
     return () => unsub();
-  }, [subscribe, isSnapshot]);
+  }, [subscribe, isSnapshot, greeksVisible]);
 
   // ── 10. Greeks chart ──
   useEffect(() => {
@@ -2295,6 +2408,7 @@ export default function StrategyAnalysisView({
     }
   }, [
     chartData,
+    greeksDataRevision,
     greeksMode,
     lotSizeOverride,
     selectedGreeks,
@@ -2391,10 +2505,10 @@ export default function StrategyAnalysisView({
   // Auto-upsert once when a live (non-snapshot) chart finishes building, so viewing a strategy persists it.
   const autoSavedRef = useRef(false);
   useEffect(() => {
-    if (isSnapshot || !chartData || autoSavedRef.current) return;
+    if (isSnapshot || !chartData || !historicalEnrichmentReady || autoSavedRef.current) return;
     autoSavedRef.current = true;
     saveSnapshot('auto');
-  }, [chartData, isSnapshot, saveSnapshot]);
+  }, [chartData, historicalEnrichmentReady, isSnapshot, saveSnapshot]);
 
   // ── Close panel-toggle popups on outside click ──
   const chartsPopupRef = useRef<HTMLDivElement>(null);
@@ -2498,10 +2612,24 @@ export default function StrategyAnalysisView({
     const first = allPositions.find((p) => p.margin_required && p.margin_required > 0);
     return first ? first.margin_required! / 100 : 0;
   }, [allPositions, strategyMarginPaise]);
+  const marginPositionKey = useMemo(
+    () =>
+      allPositions
+        .map(
+          (position) =>
+            `${position.ref_id}:${position.order_side || ''}:${position.qty || 0}:${position.avg_price || 0}:${position.product || ''}`,
+        )
+        .sort()
+        .join('|'),
+    [allPositions],
+  );
 
   useEffect(() => {
     if (isSnapshot) return;
-    const marginPositions = positions.length ? positions : allPositions;
+    const currentOpenPositions = positionsRef.current;
+    const marginPositions = currentOpenPositions.length
+      ? currentOpenPositions
+      : allPositionsRef.current;
     if (!marginPositions.length) {
       setStrategyMarginPaise(0);
       return;
@@ -2515,7 +2643,7 @@ export default function StrategyAnalysisView({
     return () => {
       cancelled = true;
     };
-  }, [positions, allPositions, isSnapshot]);
+  }, [marginPositionKey, isSnapshot]);
   const displayPositions = posSubTab === 'open' ? positions : closedPositions;
   const effectiveObHeight = orderBookCollapsed ? 32 : orderBookHeight;
   // The first visible chart panel flexes to fill remaining space; the rest keep their fixed heights.
@@ -3162,7 +3290,6 @@ export default function StrategyAnalysisView({
                           'P&L',
                           'P&L %',
                           'Entry Time',
-                          'Margin',
                         ]
                       : [
                           'Symbol',
@@ -3186,7 +3313,10 @@ export default function StrategyAnalysisView({
                 <tbody>
                   {displayPositions.length === 0 && (
                     <tr>
-                      <td colSpan={10} className="text-center py-6 text-[var(--text-muted)]">
+                      <td
+                        colSpan={posSubTab === 'open' ? 9 : 7}
+                        className="text-center py-6 text-[var(--text-muted)]"
+                      >
                         No {posSubTab} positions for this strategy
                       </td>
                     </tr>
@@ -3247,9 +3377,6 @@ export default function StrategyAnalysisView({
                           </td>
                           <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
                             {fmtTime(p.entry_time)}
-                          </td>
-                          <td className="px-3 py-1.5 text-[var(--text-secondary)]">
-                            {strategyMargin > 0 ? `₹${fmtPrice(strategyMargin)}` : '—'}
                           </td>
                         </tr>
                       );

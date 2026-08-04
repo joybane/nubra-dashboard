@@ -171,7 +171,24 @@ Auth states are `idle`, `awaiting_otp`, `awaiting_mpin`, and `authenticated`.
 | GET    | `/api/instruments/lookup`            | Look up one instrument by `ref_id`           |
 | POST   | `/api/historical`                    | Proxy Nubra chart timeseries data            |
 | GET    | `/api/optionchain/:instrument`       | Get an enriched option chain                 |
-| GET    | `/api/optionchain/:instrument/price` | Get the underlying price                     |
+| GET    | `/api/optionchain/:instrument/price` | Get the underlying price (NSE/BSE only — MCX 500s upstream) |
+
+All of these accept `?exchange=` (`NSE` default, plus `BSE` and `MCX`). It is omitted from the
+outbound request when NSE, so those calls stay byte-identical to what they have always been.
+
+#### Historical data retention — the docs are wrong below one minute
+
+The vendor docs say "intervals less than 1 day → last 3 months". That holds for `1m` and
+coarser. **Sub-minute is a rolling 7×24 hours**, and only `1s` and `10s` exist — `5s` is
+accepted but returns nothing, `15s`/`30s` return 500. Measured 2026-08-03 on both NSE and MCX:
+at 21:07 IST, 27 Jul 20:00 IST returned 500 while 27 Jul 22:00 IST returned data, so the cutoff
+is exactly `now − 168h`.
+
+A window that **straddles** that edge fails the *entire* query with a 500 rather than clipping,
+so `startDate` must be clamped — `clampSubMinuteStart` in `src/lib/utils.ts`, applied inside
+`fetchRange`, which every historical fetch goes through. Note also that 1s bars are tick-driven
+rather than filled: over one 20-minute window NIFTY yields 1200, a crude future 413, a crude
+option 35.
 
 ### Local Parquet backtesting
 
@@ -589,6 +606,79 @@ Basket margin follows this chain:
 
 `normalizeMarginResponse()` converts supported broker response shapes into total margin,
 SPAN, exposure, option premium, margin benefit, and per-leg margin values.
+
+---
+
+## Commodities (MCX)
+
+Added 2026-08-03. MCX is reached through the same endpoints as NSE/BSE with `exchange=MCX`, and
+the app treats it as a first-class asset class everywhere except the local-Parquet backtest tab,
+which reads an NSE-only tree. Everything below was measured against the live API, not taken from
+the vendor docs.
+
+**Scale.** 15,766 instruments, 30 commodities. Options exist on 11 — CRUDEOIL, CRUDEOILM,
+NATURALGAS, NATGASMINI, GOLD, GOLDM, SILVER, SILVERM, COPPER, ZINC, MCXBULLDEX; the other 19 are
+futures-only and degrade to a chartable instrument with no chain.
+
+**Symbols are the zanskar form, and that is the trading symbol.** On MCX `stock_name` equals
+`zanskar_name` (unlike NSE): `FUT_CRUDEOIL_20260819`, `OPT_CRUDEOIL_20260817_CE_875000`.
+`charts/timeseries` takes them verbatim with `type: "FUT"` / `"OPT"`. Refdata carries four
+fields NSE rows lack — `prev_close`, `freeze_qty_limit`, `asset_code`, `zanskar_id` — and
+`asset_type` is `COM_FO`.
+
+#### The forward is observable, so none of the NIFTY parity machinery applies
+
+Commodity options are options **on futures**, and the option expiry is not the futures expiry.
+The rule is: option expiry → the *next* futures expiry. Verified exactly across 12 chains and
+four commodities, where each chain's `cp` equalled its future's LTP **to the paisa**:
+
+| option expiry              | underlying future       | note                        |
+| -------------------------- | ----------------------- | --------------------------- |
+| CRUDEOIL 20260817          | `FUT_CRUDEOIL_20260819` |                             |
+| GOLD 20260831 and 20260925 | `FUT_GOLD_20261005`     | two options, one future     |
+| SILVERM 20260924 / 20261027| `FUT_SILVERM_20261130`  | same                        |
+
+So Black-76 with `F` = the futures price is exact, and `buildParityForwards` is bypassed
+entirely on MCX. `mcxUnderlyingFutureExpiry` and `mcxFutureSymbol` in `src/lib/GexService.ts`
+do the mapping. This makes commodity Greeks *simpler* than NIFTY's, where the forward must be
+implied — see the forward section above, none of which is relevant here.
+
+**Session is 09:00–23:30 IST, 870 one-minute bars a day** against NSE's 375.
+`MARKET_SESSIONS` / `marketSession(exchange)` in `src/lib/utils.ts` is the single source of
+truth, mirrored by hand into `server/ocFeedGuard.ts` (the server cannot import the app bundle —
+**keep the two tables in step**). Every session filter and time grid derives from it; before
+this, anything after 15:30 was silently discarded.
+
+**Expiry settles at the exchange close, not 15:30** (`expiryInstantMs`). Measured by inverting
+the vendor's own `vega` + `iv_mid` for `T` under Black-76 — vega scales as √T so `T` is well
+determined, whereas delta barely moves with `T` and scattered uselessly. 4,344 points put MCX
+expiry at ~00:20 IST the following day after bias removal; the same method on NIFTY, where
+15:30 is known, returns +41 min. So ~1 h of residual is inside the method's own error bar, and
+15:30 is excluded for MCX by roughly nine hours.
+
+**The chain is keyed by the commodity; the underlying is a futures contract.** Fetch and
+subscribe as `CRUDEOIL`, price off `FUT_CRUDEOIL_20260819`. `getChainAsset(inst)` versus
+`getSymbol(inst)` in `src/types.ts` is that distinction — do not collapse them. Positions and
+orders only ever carry a name, so `exchangeFromName()` (client) and `parseDisplayName()`
+(server) read the exchange off the zanskar shape; the old `/^([A-Z]+)/` asset rule returns
+**"OPT"** for every MCX instrument, which would have left commodity positions holding no feed.
+
+**Verification.** Reconstructing delta from our own Black-76 and comparing against the broker's
+historical `delta` scores **0.00137** mean error on crude (15,638 points) versus **0.00125** on
+NIFTY measured identically — one control that validates `F`, `T` and the model together. Our
+close-inverted IV sits 0.256 vol points from the vendor's `iv_mid` on crude against 0.043 on
+NIFTY, which is the same *relative* accuracy given crude runs ~65 % IV and NIFTY ~11 %.
+
+**Two caveats, both deliberate:**
+
+- **Margin is not calibrated for MCX.** Every constant in `server/marginEngine.ts` is an NSE
+  equity-derivatives parameter, and the broker margin API is dead, so there is nothing to defer
+  to. Commodity legs run the same model-driven 16-scenario simulation and the response says
+  "NOT calibrated to exchange parameters" outright rather than passing off an NSE-rated number.
+  `LOCAL_MARGIN_ELM_COMMODITY` and `LOCAL_MARGIN_PSR_COMMODITY` take real figures once obtained.
+- **`optionchains/{sym}/price` returns 500 for MCX** in every documented symbol form, while NSE
+  works through the identical code path — an upstream limitation. Harmless: its only caller is a
+  fallback that fires when the chain reports no `cp`, and the MCX chain always carries one.
 
 ---
 

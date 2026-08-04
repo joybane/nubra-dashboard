@@ -60,43 +60,50 @@ export function registerMarketDataRoutes({
         }
 
         function matchScore(item: Record<string, unknown>): number {
-          const name = (
-            (item.stock_name || item.asset || item.display_name || '') as string
-          ).toLowerCase();
-          const sym = (
-            (item.zanskar_name ||
-              item.nubra_name ||
-              item.symbol ||
-              item.trading_symbol ||
-              '') as string
-          ).toLowerCase();
-          if (name === q2 || sym === q2) return 0;
-          if (name.startsWith(q2) || sym.startsWith(q2)) return 1;
+          const terms = searchTerms(item);
+          if (terms.some((term) => term === q2)) return 0;
+          if (terms.some((term) => term.startsWith(q2))) return 1;
           return 2;
+        }
+
+        function searchTerms(item: Record<string, unknown>): string[] {
+          return [
+            item.asset,
+            item.stock_name,
+            item.display_name,
+            item.zanskar_name,
+            item.nubra_name,
+            item.symbol,
+            item.trading_symbol,
+          ]
+            .filter(Boolean)
+            .map((value) => String(value).toLowerCase());
+        }
+
+        function expiryValue(item: Record<string, unknown>): number {
+          const symbolExpiry = /(?:^|_)(\d{8})(?:_|$)/.exec(
+            String(item.zanskar_name || item.nubra_name || item.symbol || item.stock_name || ''),
+          )?.[1];
+          const raw = String(item.expiry ?? symbolExpiry ?? '');
+          if (/^\d{8}$/.test(raw)) return Number(raw);
+          const time = new Date(raw).getTime();
+          return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER;
         }
 
         const filtered = arr
           .filter((item) => {
-            const name = (
-              (item.stock_name || item.asset || item.symbol || item.display_name || '') as string
-            ).toLowerCase();
-            const sym = (
-              (item.zanskar_name ||
-                item.nubra_name ||
-                item.symbol ||
-                item.trading_symbol ||
-                '') as string
-            ).toLowerCase();
             const tm =
               !type ||
               ((item.derivative_type || item.asset_type || '') as string).toUpperCase() ===
                 type.toUpperCase();
-            return tm && (name.includes(q2) || sym.includes(q2));
+            return tm && searchTerms(item).some((term) => term.includes(q2));
           })
           .sort((a, b) => {
             const ms = matchScore(a) - matchScore(b);
             if (ms !== 0) return ms;
-            return typePriority(a) - typePriority(b);
+            const tp = typePriority(a) - typePriority(b);
+            if (tp !== 0) return tp;
+            return expiryValue(a) - expiryValue(b);
           })
           .slice(0, Number(limit));
 
@@ -188,12 +195,17 @@ export function registerMarketDataRoutes({
     }
   });
 
-  fastify.get<{ Params: { instrument: string } }>(
+  fastify.get<{ Params: { instrument: string }; Querystring: { exchange?: string } }>(
     '/api/optionchain/:instrument/price',
     async (req, reply) => {
       if (!requireAuth(reply)) return;
       try {
-        const data = await nubraGet(`/optionchains/${req.params.instrument}/price`);
+        // Omitted for NSE so the upstream call is byte-identical to what it was.
+        const exchange = (req.query.exchange || '').toUpperCase();
+        const data = await nubraGet(
+          `/optionchains/${req.params.instrument}/price`,
+          exchange && exchange !== 'NSE' ? { exchange } : undefined,
+        );
         return reply.send(data);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Instrument, InstrumentType } from '../types';
 import { getInstrumentType } from '../types';
 import { fetchRefdata } from '../db';
+import { formatInstrumentName, instrumentSearchAlias } from '../lib/instrumentDisplay';
 import NubraWorker from '../workers/nubraSearch.worker?worker';
 
 const POPULAR_INDICES: Instrument[] = [
@@ -20,6 +21,7 @@ const FILTER_TABS: { label: string; types: InstrumentType[] }[] = [
   { label: 'Indices', types: ['INDEX'] },
   { label: 'F&O', types: ['FUT', 'OPT'] },
   { label: 'ETFs', types: ['ETF'] },
+  { label: 'Commodities', types: ['FUT', 'OPT'] },
 ];
 
 const BADGE_COLORS: Record<InstrumentType, string> = {
@@ -44,6 +46,7 @@ export default function InstrumentSearch({
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState('All');
   const [workerReady, setWorkerReady] = useState(false);
+  const [searching, setSearching] = useState(false);
   const workerRef = useRef<Worker | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -56,14 +59,16 @@ export default function InstrumentSearch({
     workerRef.current = worker;
 
     worker.onmessage = (
-      e: MessageEvent<{ type: string; results?: Instrument[]; count?: number }>,
+      e: MessageEvent<{ type: string; q?: string; results?: Instrument[]; count?: number }>,
     ) => {
       if (e.data.type === 'loaded') setWorkerReady(true);
       if (e.data.type === 'results') {
+        if (e.data.q !== queryRef.current) return;
         const res = e.data.results || [];
         const q2 = queryRef.current.toLowerCase();
         if (q2.length < 2) {
           setResults(res);
+          setSearching(false);
           return;
         }
         const matched = POPULAR_INDICES.filter(
@@ -76,15 +81,20 @@ export default function InstrumentSearch({
           ...res.filter((r) => !matched.some((m) => m.nubra_name === r.nubra_name)),
         ];
         setResults(combined);
+        setSearching(false);
       }
     };
 
     // Load major exchange refdata into worker so chart search can find indices,
-    // equities, futures, and options across NSE/BSE.
-    Promise.all([fetchRefdata('NSE'), fetchRefdata('BSE')])
-      .then(([nse, bse]) => {
+    // equities, futures, and options across NSE/BSE/MCX.
+    Promise.all([fetchRefdata('NSE'), fetchRefdata('BSE'), fetchRefdata('MCX')])
+      .then(([nse, bse, mcx]) => {
         const seen = new Set<string>();
-        const items = [...(nse as Instrument[]), ...(bse as Instrument[])].filter((item) => {
+        const items = [
+          ...(nse as Instrument[]),
+          ...(bse as Instrument[]),
+          ...(mcx as Instrument[]),
+        ].filter((item) => {
           const key = `${item.exchange || ''}:${item.ref_id || item.stock_name || item.nubra_name || item.zanskar_name || item.symbol || ''}`;
           if (seen.has(key)) return false;
           seen.add(key);
@@ -103,7 +113,7 @@ export default function InstrumentSearch({
       if (!workerRef.current || !workerReady) {
         // Fallback: server search while the worker is still warming up.
         Promise.all(
-          ['NSE', 'BSE'].map((exchange) =>
+          ['NSE', 'BSE', 'MCX'].map((exchange) =>
             fetch(
               `/api/instruments/search?q=${encodeURIComponent(q)}&exchange=${exchange}&limit=20`,
             )
@@ -113,6 +123,7 @@ export default function InstrumentSearch({
           ),
         )
           .then((sets) => {
+            if (q !== queryRef.current) return;
             const q2 = q.toLowerCase();
             const matched = POPULAR_INDICES.filter(
               (p) =>
@@ -129,8 +140,13 @@ export default function InstrumentSearch({
               return true;
             });
             setResults([...matched, ...merged]);
+            setSearching(false);
           })
-          .catch(() => setResults([]));
+          .catch(() => {
+            if (q !== queryRef.current) return;
+            setResults([]);
+            setSearching(false);
+          });
         return;
       }
       workerRef.current.postMessage({ type: 'search', q, limit: 30 });
@@ -145,10 +161,14 @@ export default function InstrumentSearch({
     if (timerRef.current) clearTimeout(timerRef.current);
     if (q.length < 2) {
       setResults(POPULAR_INDICES);
+      setSearching(false);
       setOpen(true);
       return;
     }
-    timerRef.current = setTimeout(() => doSearch(q), 200);
+    setResults([]);
+    setSearching(true);
+    if (workerReady) doSearch(q);
+    else timerRef.current = setTimeout(() => doSearch(q), 75);
     setOpen(true);
   }
 
@@ -178,9 +198,14 @@ export default function InstrumentSearch({
   }, []);
 
   const activeFilter = FILTER_TABS.find((t) => t.label === filter)!;
-  const filtered = activeFilter.types.length
-    ? results.filter((r) => activeFilter.types.includes(getInstrumentType(r)))
-    : results;
+  const filtered = results.filter((item) => {
+    if (!activeFilter.types.length) return true;
+    if (!activeFilter.types.includes(getInstrumentType(item))) return false;
+    const isMcx = (item.exchange || '').toUpperCase() === 'MCX';
+    if (filter === 'Commodities') return isMcx;
+    if (filter === 'F&O') return !isMcx;
+    return true;
+  });
 
   return (
     <div className="relative w-full">
@@ -207,7 +232,7 @@ export default function InstrumentSearch({
           className="absolute top-[calc(100%+6px)] left-[-60px] right-0 min-w-[340px] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl max-h-[420px] overflow-y-auto z-[200]"
         >
           {/* Filter tabs */}
-          <div className="flex gap-1 px-2.5 pt-2.5 pb-2 border-b border-[var(--border)] sticky top-0 bg-[var(--bg-card)] z-10">
+          <div className="flex gap-1 px-2.5 pt-2.5 pb-2 border-b border-[var(--border)] sticky top-0 bg-[var(--bg-card)] z-10 overflow-x-auto">
             {FILTER_TABS.map(({ label }) => (
               <button
                 key={label}
@@ -229,12 +254,12 @@ export default function InstrumentSearch({
           {/* Results */}
           {!filtered.length ? (
             <div className="px-4 py-5 text-center text-[var(--text-muted)] text-[13px]">
-              No results
+              {searching ? 'Searching…' : 'No results'}
             </div>
           ) : (
             filtered.slice(0, 15).map((item, i) => {
-              const name = item.stock_name || item.asset || item.symbol || 'Unknown';
-              const nname = item.nubra_name || item.zanskar_name || '';
+              const name = formatInstrumentName(item);
+              const alias = instrumentSearchAlias(item);
               const exch = (item.exchange || 'NSE').toUpperCase();
               const type = getInstrumentType(item);
               return (
@@ -254,9 +279,7 @@ export default function InstrumentSearch({
                     </span>
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
-                    {nname && nname !== name && (
-                      <span className="text-[11px] text-[var(--text-muted)]">{nname}</span>
-                    )}
+                    {alias && <span className="text-[11px] text-[var(--text-muted)]">{alias}</span>}
                     <span
                       className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${BADGE_COLORS[type]}`}
                     >

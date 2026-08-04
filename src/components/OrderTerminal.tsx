@@ -11,6 +11,7 @@ import type {
   LegPositionRule,
   GroupPositionRule,
 } from '../types';
+import { exchangeFromName } from '../types';
 import { fmtPrice } from '../lib/utils';
 import { liveLevels } from '../lib/positionRuleLevels';
 import { usePaperTrading } from '../hooks/usePaperTrading';
@@ -644,7 +645,11 @@ async function fetchPositionGroupMarginPaise(
   const res = await fetch('/paper/margin/basket', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ exchange: 'NSE', multiplier: 1, orders }),
+    body: JSON.stringify({
+      exchange: exchangeFromName(positions[0]?.display_name || positions[0]?.zanskar_name),
+      multiplier: 1,
+      orders,
+    }),
   });
   if (!res.ok) return { total: 0, estimated: false };
   const data = (await res.json()) as Record<string, unknown>;
@@ -885,6 +890,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
             order_delivery_type:
               p.product === 'MIS' ? 'ORDER_DELIVERY_TYPE_IDAY' : 'ORDER_DELIVERY_TYPE_CNC',
             validity_type: 'DAY',
+            exchange: exchangeFromName(nubraName || p.display_name),
             basket_group_id: p.basket_group_id || undefined,
             strategy_name: p.strategy_name || undefined,
           }),
@@ -1053,7 +1059,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                   onViewChart({
                     stock_name: p.display_name || p.zanskar_name || String(p.ref_id),
                     ref_id: p.ref_id,
-                    exchange: 'NSE',
+                    exchange: exchangeFromName(p.display_name || p.zanskar_name),
                     derivative_type: p.derivative_type,
                     option_type: p.option_type,
                     strike_price: p.strike_price,
@@ -2003,7 +2009,7 @@ export default function OrderTerminal({
           stock_name: p.display_name || p.zanskar_name || String(p.ref_id),
           zanskar_name: p.zanskar_name,
           ref_id: p.ref_id,
-          exchange: 'NSE',
+          exchange: exchangeFromName(p.display_name || p.zanskar_name),
           derivative_type: p.derivative_type,
           option_type: p.option_type,
           strike_price: p.strike_price,

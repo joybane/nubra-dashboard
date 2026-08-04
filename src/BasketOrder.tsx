@@ -3,6 +3,7 @@ import SvgChart from './components/SvgChart';
 import type { Instrument } from './types';
 import { getSymbol } from './types';
 import { fmtPrice, generateId, formatExpiry } from './lib/utils';
+import { formatInstrumentName } from './lib/instrumentDisplay';
 import { payoffAtExpiry, daysToExpiry } from './lib/GexService';
 import { STRATEGY_TEMPLATES, type Sentiment } from './lib/strategyTemplates';
 import { useBasket, type BasketLeg } from './hooks/useBasketContext';
@@ -182,19 +183,29 @@ export default function BasketOrder({ instrument }: Props) {
     }
     symSearchTimer.current = setTimeout(async () => {
       try {
-        const res = await fetch(
-          `/api/instruments/search?q=${encodeURIComponent(q)}&limit=8&type=INDEX`,
+        const resultSets = await Promise.all(
+          ['NSE', 'BSE', 'MCX'].map(async (exchange) => {
+            const type = exchange === 'MCX' ? '&type=FUT' : '';
+            const res = await fetch(
+              `/api/instruments/search?q=${encodeURIComponent(q)}&exchange=${exchange}&limit=20${type}`,
+            );
+            const data = (await res.json()) as Record<string, unknown>;
+            return (data.results || data) as Array<Record<string, unknown>>;
+          }),
         );
-        const data = (await res.json()) as Record<string, unknown>;
-        const r1 = (data.results || data) as Array<Record<string, unknown>>;
-        const res2 = await fetch(`/api/instruments/search?q=${encodeURIComponent(q)}&limit=8`);
-        const data2 = (await res2.json()) as Record<string, unknown>;
-        const r2 = (data2.results || data2) as Array<Record<string, unknown>>;
         const seen = new Set<string>();
-        const merged = [...r1, ...r2]
+        const merged = resultSets
+          .flat()
           .filter((it) => {
-            const k = String(it.asset || it.stock_name || '');
-            if (!k || seen.has(k)) return false;
+            const exchange = String(it.exchange || 'NSE').toUpperCase();
+            const derivativeType = String(it.derivative_type || it.asset_type || '').toUpperCase();
+            if (exchange !== 'MCX' && (derivativeType === 'FUT' || derivativeType === 'OPT')) {
+              return false;
+            }
+            const asset = String(it.asset || it.stock_name || '');
+            if (!asset) return false;
+            const k = `${exchange}:${asset}`;
+            if (seen.has(k)) return false;
             seen.add(k);
             return true;
           })
@@ -203,7 +214,7 @@ export default function BasketOrder({ instrument }: Props) {
       } catch {
         setSymResults([]);
       }
-    }, 250);
+    }, 75);
   }
 
   function selectSymbol(inst: Record<string, unknown>) {
@@ -227,14 +238,21 @@ export default function BasketOrder({ instrument }: Props) {
     }
     addScripTimer.current = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/instruments/search?q=${encodeURIComponent(q)}&limit=10`);
-        const data = (await res.json()) as Record<string, unknown>;
-        const results = (data.results || data) as Array<Record<string, unknown>>;
-        setAddScripResults(Array.isArray(results) ? results : []);
+        const resultSets = await Promise.all(
+          ['NSE', 'BSE', 'MCX'].map(async (exchange) => {
+            const res = await fetch(
+              `/api/instruments/search?q=${encodeURIComponent(q)}&exchange=${exchange}&limit=15`,
+            );
+            const data = (await res.json()) as Record<string, unknown>;
+            const results = (data.results || data) as Array<Record<string, unknown>>;
+            return Array.isArray(results) ? results : [];
+          }),
+        );
+        setAddScripResults(resultSets.flat().slice(0, 30));
       } catch {
         setAddScripResults([]);
       }
-    }, 300);
+    }, 75);
   }
 
   function addScripToBasket(inst: Record<string, unknown>) {
@@ -1095,7 +1113,7 @@ export default function BasketOrder({ instrument }: Props) {
                           }}
                         >
                           <span style={{ fontWeight: 700 }}>
-                            {String(inst.asset || inst.stock_name || '')}
+                            {formatInstrumentName(inst as Instrument)}
                           </span>
                           <span style={{ color: 'var(--text-muted)', marginLeft: 6, fontSize: 10 }}>
                             {String(inst.exchange || '')} ·{' '}
@@ -2489,7 +2507,7 @@ export default function BasketOrder({ instrument }: Props) {
                 >
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 600, fontSize: 12 }}>
-                      {String(inst.stock_name || inst.symbol || inst.zanskar_name || '')}
+                      {formatInstrumentName(inst as Instrument)}
                     </div>
                     <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
                       {String(inst.exchange || '')} · {String(inst.derivative_type || 'EQ')}

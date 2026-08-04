@@ -17,7 +17,7 @@ import {
   type ISeriesApi,
   type UTCTimestamp,
 } from 'lightweight-charts';
-import { IST_OFFSET, chartTimeDayKey, isNseMarketSessionChartTime } from './utils.ts';
+import { IST_OFFSET, chartTimeDayKey, isMarketSessionChartTime } from './utils.ts';
 import type { IvPoint, SeriesPoint } from './greekAggregator.ts';
 
 export type SeriesMode = 'totals' | 'diff' | 'both';
@@ -70,11 +70,12 @@ function toLine<T extends { ts: number }>(
   points: ReadonlyArray<T>,
   pick: (p: T) => number,
   mapTime: TimeMapper,
+  exchange?: string,
 ): LinePoint[] {
   const byTime = new Map<number, number>();
   for (const p of points) {
     const t = mapTime(p.ts);
-    if (t == null || !Number.isFinite(t) || !isNseMarketSessionChartTime(t)) continue;
+    if (t == null || !Number.isFinite(t) || !isMarketSessionChartTime(t, exchange)) continue;
     byTime.set(t, pick(p));
   }
 
@@ -121,6 +122,16 @@ export interface GreekPaneOpts {
    * labels differ only by characters the sanitiser strips.
    */
   scaleKey?: string;
+  /**
+   * Which exchange's session to keep points inside. Defaults to NSE (09:15–15:30);
+   * MCX runs to 23:30, and filtering a commodity against NSE hours throws away two
+   * thirds of its session.
+   *
+   * A resolver rather than a value because panes outlive the instrument — they are
+   * created once and reused across symbol switches, so a captured string would go
+   * stale the moment the user moves from NIFTY to crude.
+   */
+  exchange?: () => string | undefined;
 }
 
 /**
@@ -206,22 +217,22 @@ export function createGreekPane(
       apply(
         ceTotal,
         showTotals && showCalls,
-        toLine(points, (p) => p.ceTotal, mapTime),
+        toLine(points, (p) => p.ceTotal, mapTime, opts.exchange?.()),
       );
       apply(
         peTotal,
         showTotals && showPuts,
-        toLine(points, (p) => p.peTotal, mapTime),
+        toLine(points, (p) => p.peTotal, mapTime, opts.exchange?.()),
       );
       apply(
         ceDiff,
         showDiff && showCalls,
-        toLine(points, (p) => p.ceDiff, mapTime),
+        toLine(points, (p) => p.ceDiff, mapTime, opts.exchange?.()),
       );
       apply(
         peDiff,
         showDiff && showPuts,
-        toLine(points, (p) => p.peDiff, mapTime),
+        toLine(points, (p) => p.peDiff, mapTime, opts.exchange?.()),
       );
     },
     setHeight(px) {
@@ -290,7 +301,7 @@ export function createIvPane(chart: IChartApi, label: string, opts: GreekPaneOpt
 
   return {
     setData(points, mapTime = defaultMapper) {
-      line.setData(toLine(points, (p) => p.value, mapTime));
+      line.setData(toLine(points, (p) => p.value, mapTime, opts.exchange?.()));
     },
     setHeight(px) {
       pane?.setHeight(px);

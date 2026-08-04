@@ -25,6 +25,8 @@ import { registerPaperRoutes } from './paperRoutes.ts';
 import { SimBroker, type SimPosition } from './simBroker.ts';
 import {
   feedKey,
+  parseFeedKey,
+  parseDisplayName,
   requiredFeedKeys,
   staleRequiredFeeds,
   isMarketHours,
@@ -33,6 +35,7 @@ import {
   type FeedIndex,
 } from './ocFeedGuard.ts';
 import { loadPositionRules, evaluateAndFire } from './positionRules.ts';
+import { chartSubscriptionKey, type ChartSubscription } from '../src/lib/chartSubRegistry.ts';
 import protobuf from 'protobufjs';
 
 dotenv.config();
@@ -512,6 +515,76 @@ let nubraWs: WebSocket | null = null;
 const browserClients = new Set<WebSocket>();
 const pendingSubs: string[] = [];
 
+// Chart subscriptions must survive a reconnect of the server's upstream Nubra
+// socket. Browser sockets remain connected during that outage, so they do not
+// naturally re-send their subscriptions the way they do after a browser reconnect.
+const browserChartSubs = new Map<string, { count: number; subscription: ChartSubscription }>();
+const clientChartSubs = new Map<WebSocket, Map<string, number>>();
+const chartLastTick = new Map<string, number>();
+
+function acquireBrowserChart(ws: WebSocket, subscription: ChartSubscription): boolean {
+  const key = chartSubscriptionKey(subscription);
+  let own = clientChartSubs.get(ws);
+  if (!own) {
+    own = new Map();
+    clientChartSubs.set(ws, own);
+  }
+  own.set(key, (own.get(key) ?? 0) + 1);
+  const current = browserChartSubs.get(key);
+  if (current) {
+    current.count += 1;
+    return false;
+  }
+  browserChartSubs.set(key, { count: 1, subscription });
+  return true;
+}
+
+function releaseBrowserChart(ws: WebSocket, subscription: ChartSubscription): boolean {
+  const key = chartSubscriptionKey(subscription);
+  const own = clientChartSubs.get(ws);
+  const held = own?.get(key) ?? 0;
+  if (held <= 0) return false;
+  if (held === 1) own!.delete(key);
+  else own!.set(key, held - 1);
+  const current = browserChartSubs.get(key);
+  if (!current) return false;
+  if (current.count === 1) {
+    browserChartSubs.delete(key);
+    return true;
+  }
+  current.count -= 1;
+  return false;
+}
+
+function releaseAllBrowserCharts(ws: WebSocket): ChartSubscription[] {
+  const own = clientChartSubs.get(ws);
+  clientChartSubs.delete(ws);
+  if (!own) return [];
+  const freed: ChartSubscription[] = [];
+  for (const [key, count] of own) {
+    const current = browserChartSubs.get(key);
+    if (!current) continue;
+    current.count -= count;
+    if (current.count <= 0) {
+      browserChartSubs.delete(key);
+      freed.push(current.subscription);
+    }
+  }
+  return freed;
+}
+
+function sendChartCmd(
+  verb: 'batch_subscribe' | 'batch_unsubscribe',
+  subscription: ChartSubscription,
+): void {
+  const token = authState.sessionToken;
+  if (!token) return;
+  const payload = JSON.stringify({ instruments: [], indexes: [], ...subscription.payload });
+  const cmd = `${verb} ${token} index_bucket ${payload} ${subscription.interval} ${subscription.exchange}`;
+  if (nubraWs?.readyState === WebSocket.OPEN) nubraWs.send(cmd);
+  else if (verb === 'batch_subscribe') connectNubraWs();
+}
+
 // Browser option-chain interest, reference counted here rather than written into
 // the persisted `simOcSubs`. Panes refcount within a tab (src/lib/ocSubRegistry),
 // but two tabs used to fight — one closing a chain unsubscribed it from under the
@@ -607,6 +680,9 @@ function connectNubraWs(): void {
     broadcast({ type: 'ws_status', connected: true });
     for (const cmd of pendingSubs) nubraWs!.send(cmd);
     pendingSubs.length = 0;
+    for (const { subscription } of browserChartSubs.values()) {
+      sendChartCmd('batch_subscribe', subscription);
+    }
     bootstrapPositionSubs()
       .then(() => sendAllOcSubs())
       .catch((e) => console.error('[Bootstrap]', e));
@@ -617,6 +693,13 @@ function connectNubraWs(): void {
       const decoded = decodeBinaryMsg(data);
       if (decoded) {
         noteOcTick(decoded);
+        if (decoded.type === 'ohlcv') {
+          const buckets = decoded.data as { indexes?: unknown[]; instruments?: unknown[] };
+          for (const raw of [...(buckets.indexes ?? []), ...(buckets.instruments ?? [])]) {
+            const name = String((raw as Record<string, unknown>).indexname || '').toUpperCase();
+            if (name) chartLastTick.set(name, Date.now());
+          }
+        }
         broadcast(decoded);
         routeTickToSim(decoded); // feed live prices into SimBroker for fill simulation
       }
@@ -660,9 +743,9 @@ function requiredOcFeeds(): Set<string> {
 
 function noteOcTick(decoded: { type: string; data: unknown }): void {
   if (decoded.type !== 'option_chain') return;
-  const d = decoded.data as { asset?: string; expiry?: string };
+  const d = decoded.data as { asset?: string; expiry?: string; exchange?: string };
   if (!d.asset || !d.expiry) return;
-  ocLastTick.set(feedKey(String(d.asset), d.expiry), Date.now());
+  ocLastTick.set(feedKey(String(d.asset), d.expiry, d.exchange), Date.now());
 }
 
 function broadcast(obj: unknown): void {
@@ -691,18 +774,18 @@ wss.on('connection', (ws) => {
       const msg = JSON.parse(data.toString()) as WsMsg;
 
       if (msg.action === 'subscribe' || msg.action === 'unsubscribe') {
-        const verb = msg.action === 'subscribe' ? 'batch_subscribe' : 'batch_unsubscribe';
-        const token = authState.sessionToken!;
         const userPayload = (msg.payload || {}) as Record<string, unknown>;
-        const payload = JSON.stringify({ instruments: [], indexes: [], ...userPayload });
-        const interval = msg.interval || '1m';
-        const exchange = msg.exchange || 'NSE';
-        const cmd = `${verb} ${token} index_bucket ${payload} ${interval} ${exchange}`;
-        if (nubraWs && nubraWs.readyState === WebSocket.OPEN) {
-          nubraWs.send(cmd);
-        } else if (msg.action === 'subscribe') {
-          pendingSubs.push(cmd);
-          connectNubraWs();
+        const subscription: ChartSubscription = {
+          payload: userPayload,
+          interval: msg.interval || '1m',
+          exchange: (msg.exchange || 'NSE').toUpperCase(),
+        };
+        if (msg.action === 'subscribe') {
+          if (acquireBrowserChart(ws, subscription)) {
+            sendChartCmd('batch_subscribe', subscription);
+          }
+        } else if (releaseBrowserChart(ws, subscription)) {
+          sendChartCmd('batch_unsubscribe', subscription);
         }
       }
 
@@ -710,7 +793,7 @@ wss.on('connection', (ws) => {
         const asset = msg.asset || '';
         const expiry = msg.expiry || '';
         if (!asset || !expiry) return;
-        const key = feedKey(asset, expiry);
+        const key = feedKey(asset, expiry, msg.exchange);
 
         if (msg.action === 'subscribe_oc') {
           clearOcTsGuard(asset, expiry, msg.exchange || 'NSE');
@@ -741,12 +824,15 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     browserClients.delete(ws);
+    for (const subscription of releaseAllBrowserCharts(ws)) {
+      sendChartCmd('batch_unsubscribe', subscription);
+    }
     // A tab that closes without unsubscribing must not leak its holds, or the
     // refcount never returns to zero and the feed is held for the session.
     for (const key of releaseAllBrowserOc(ws)) {
       if (requiredOcFeeds().has(key) || simOcSubs.has(key)) continue;
-      const [asset, expiry] = key.split(':');
-      sendOcCmd('batch_unsubscribe', asset, expiry);
+      const { asset, expiry, exchange } = parseFeedKey(key);
+      sendOcCmd('batch_unsubscribe', asset, expiry, exchange);
     }
   });
 });
@@ -878,17 +964,18 @@ function subscribeForSim(
   derivativeType?: string,
   asset?: string,
   expiry?: string,
+  exchange = 'NSE',
 ): void {
   simBroker.registerName(nubraName, refId);
   if (asset && expiry) {
-    const key = `${asset}:${expiry}`;
+    const key = feedKey(asset, expiry, exchange);
     if (!simOcSubs.has(key)) {
       simOcSubs.add(key);
       dbUpsertOcSub(key);
       if (nubraWs && nubraWs.readyState === WebSocket.OPEN && authState.sessionToken) {
-        const payload = JSON.stringify([{ exchange: 'NSE', asset, expiry }]);
+        const payload = JSON.stringify([{ exchange, asset, expiry }]);
         nubraWs.send(`batch_subscribe ${authState.sessionToken} option ${payload}`);
-        console.log(`[SimBroker] Auto-subscribed option chain: ${asset} ${expiry}`);
+        console.log(`[SimBroker] Auto-subscribed option chain: ${exchange} ${asset} ${expiry}`);
       }
     }
   }
@@ -902,8 +989,8 @@ function sendAllOcSubs(): void {
   if (!nubraWs || nubraWs.readyState !== WebSocket.OPEN || !authState.sessionToken) return;
   const keys = new Set([...simOcSubs, ...browserOcSubs.keys()]);
   for (const key of keys) {
-    const [asset, expiry] = key.split(':');
-    sendOcCmd('batch_subscribe', asset, expiry);
+    const { asset, expiry, exchange } = parseFeedKey(key);
+    sendOcCmd('batch_subscribe', asset, expiry, exchange);
   }
   if (keys.size > 0)
     console.log(
@@ -918,8 +1005,8 @@ function sendAllOcSubs(): void {
 function reconcileOcSubs(): void {
   const liveAssets = new Set<string>();
   const addAsset = (displayName: string) => {
-    const m = displayName.match(/^([A-Z]+)/);
-    if (m) liveAssets.add(m[1]);
+    const { asset } = parseDisplayName(displayName);
+    if (asset) liveAssets.add(asset);
   };
   for (const p of simBroker.getPositions()) addAsset(p.display_name);
   for (const o of simBroker.getOrders('live')) addAsset(o.display_name);
@@ -946,21 +1033,24 @@ async function bootstrapPositionSubs(): Promise<void> {
     sendAllOcSubs();
     return;
   }
-  const assets = new Set<string>();
+  // Asset alone is not enough to address a chain — the same name could exist on
+  // two exchanges, and MCX chains must be fetched with exchange=MCX or the
+  // lookup 404s.
+  const assets = new Map<string, { asset: string; exchange: string }>();
   for (const p of positions) {
-    const m = p.display_name.match(/^([A-Z]+)/);
-    if (m) assets.add(m[1]);
+    const { asset, exchange } = parseDisplayName(p.display_name);
+    if (asset) assets.set(`${asset}:${exchange}`, { asset, exchange });
   }
-  for (const asset of assets) {
+  for (const { asset, exchange } of assets.values()) {
     try {
-      const data = await nubraGet(`/optionchains/${asset}`, { exchange: 'NSE' });
+      const data = await nubraGet(`/optionchains/${asset}`, { exchange });
       const chain = (data.chain || data) as Record<string, unknown>;
       const allExp = (chain.all_expiries || []) as string[];
       const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
       const future = allExp.filter((e) => e >= today).sort();
       const toSub = future.slice(0, 4);
       for (const exp of toSub) {
-        const key = `${asset}:${exp}`;
+        const key = feedKey(asset, exp, exchange);
         if (!simOcSubs.has(key)) {
           simOcSubs.add(key);
           dbUpsertOcSub(key);
@@ -989,15 +1079,16 @@ setInterval(reconcileOcSubs, 60 * 60 * 1000);
 setInterval(() => {
   if (!nubraWs || nubraWs.readyState !== WebSocket.OPEN || !authState.sessionToken) return;
   const now = Date.now();
-  // Outside the session a silent feed is expected, not broken.
-  if (!isMarketHours(now)) return;
 
   const stale = staleRequiredFeeds(requiredOcFeeds(), ocLastTick, now);
   for (const key of _ocResubCount.keys()) if (!stale.includes(key)) _ocResubCount.delete(key);
 
   for (const key of stale) {
-    const [asset, expiry] = key.split(':');
-    const payload = JSON.stringify([{ exchange: 'NSE', asset, expiry }]);
+    const { asset, expiry, exchange } = parseFeedKey(key);
+    // Outside its own session a silent feed is expected, not broken — and the
+    // session depends on the exchange, since MCX trades until 23:30.
+    if (!isMarketHours(now, exchange)) continue;
+    const payload = JSON.stringify([{ exchange, asset, expiry }]);
     nubraWs.send(`batch_subscribe ${authState.sessionToken} option ${payload}`);
     const n = (_ocResubCount.get(key) ?? 0) + 1;
     _ocResubCount.set(key, n);
@@ -1043,11 +1134,17 @@ function fireRules(refId: number): void {
 
 function routeTickToSim(decoded: { type: string; data: unknown }): void {
   if (decoded.type === 'option_chain') {
-    const d = decoded.data as { asset?: string; expiry?: string; ce?: unknown[]; pe?: unknown[] };
+    const d = decoded.data as {
+      asset?: string;
+      expiry?: string;
+      exchange?: string;
+      ce?: unknown[];
+      pe?: unknown[];
+    };
     const allItems = [...(d.ce ?? []), ...(d.pe ?? [])];
     // Record which feed serves each open position, so the unsubscribe guard and
     // the staleness watchdog below know which feeds are load bearing.
-    const key = d.asset && d.expiry ? feedKey(String(d.asset), d.expiry) : null;
+    const key = d.asset && d.expiry ? feedKey(String(d.asset), d.expiry, d.exchange) : null;
     const openIds = key ? new Set(simBroker.getPositions().map((p) => p.ref_id)) : null;
     if (!_ocFieldLogDone && allItems.length > 0) {
       const sample = allItems[0] as Record<string, unknown>;
@@ -1114,6 +1211,20 @@ function buildPaperDebugResponse(): Record<string, unknown> {
   return {
     ocSubs: [...simOcSubs],
     ocFeeds,
+    chartFeeds: [...browserChartSubs.values()].map(({ count, subscription }) => ({
+      ...subscription,
+      browserHolds: count,
+      symbols: Object.values(subscription.payload as Record<string, unknown>).flat(),
+      ageSec: Math.min(
+        ...Object.values(subscription.payload as Record<string, unknown>)
+          .flat()
+          .map((symbol) =>
+            chartLastTick.has(String(symbol).toUpperCase())
+              ? Math.round((now - chartLastTick.get(String(symbol).toUpperCase())!) / 1000)
+              : Infinity,
+          ),
+      ),
+    })),
     posFeedIndex: Object.fromEntries(posFeedIndex),
     marketHours: isMarketHours(now),
     positionRefIds: posRefIds,

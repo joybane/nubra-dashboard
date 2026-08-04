@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ISeriesApi } from 'lightweight-charts';
 import type { Instrument, OhlcBar, OptionChainData, WsMessage } from '../types';
-import { getSymbol } from '../types';
-import { formatExpiry, IST_OFFSET } from '../lib/utils';
+import { getChainAsset } from '../types';
+import { formatExpiry, IST_OFFSET, marketSession } from '../lib/utils';
 import {
   drawOI as renderOI,
   hitTestOIBar,
@@ -272,12 +272,21 @@ export function useOIProfile({
     });
   }
 
+  /**
+   * `&exchange=…` for the chain endpoint, empty on NSE so the request URL stays
+   * exactly what it has always been.
+   */
+  function ocExchangeQuery(joiner = '?'): string {
+    const ex = (currentInstRef.current?.exchange || 'NSE').toUpperCase();
+    return ex === 'NSE' ? '' : `${joiner}exchange=${ex}`;
+  }
+
   // ── Fetch / reload ──────────────────────────────────────────────────────
   async function loadOIChain() {
     if (!currentInstRef.current) return;
-    const sym = getSymbol(currentInstRef.current);
+    const sym = getChainAsset(currentInstRef.current);
     try {
-      const res = await fetch(`/api/optionchain/${encodeURIComponent(sym)}`);
+      const res = await fetch(`/api/optionchain/${encodeURIComponent(sym)}${ocExchangeQuery()}`);
       const data = (await res.json()) as {
         chain?: { all_expiries?: string[]; ce?: OiLeg[]; pe?: OiLeg[] };
       };
@@ -294,7 +303,7 @@ export function useOIProfile({
 
   async function reloadOIExpiries(expiries: string[]) {
     if (!currentInstRef.current || expiries.length === 0) return;
-    const sym = getSymbol(currentInstRef.current);
+    const sym = getChainAsset(currentInstRef.current);
     const ceMap: Record<number, number> = {};
     const peMap: Record<number, number> = {};
     const cePrevMap: Record<number, number> = {};
@@ -306,7 +315,7 @@ export function useOIProfile({
       expiries.map(async (exp) => {
         try {
           const res = await fetch(
-            `/api/optionchain/${encodeURIComponent(sym)}?expiry=${encodeURIComponent(exp)}`,
+            `/api/optionchain/${encodeURIComponent(sym)}?expiry=${encodeURIComponent(exp)}${ocExchangeQuery('&')}`,
           );
           return (await res.json()) as { chain?: { ce?: OiLeg[]; pe?: OiLeg[] } };
         } catch (e) {
@@ -358,7 +367,7 @@ export function useOIProfile({
     setOiOn(true);
     if (expiries.length === 1 && currentInstRef.current) {
       subscribeOiWs(
-        getSymbol(currentInstRef.current).toUpperCase(),
+        getChainAsset(currentInstRef.current).toUpperCase(),
         expiries[0],
         currentInstRef.current.exchange || 'NSE',
       );
@@ -405,11 +414,17 @@ export function useOIProfile({
 
     try {
       const chartDate = getChartDate();
-      const startDate = new Date(chartDate);
-      startDate.setUTCHours(3, 45, 0, 0);
-      const endDate = new Date(chartDate);
-      endDate.setUTCHours(10, 0, 0, 0);
       const exchange = currentInstRef.current.exchange || 'NSE';
+      // Span the instrument's own session. These used to be 03:45/10:00 UTC — the NSE
+      // 09:15–15:30 window — which on MCX would stop at 15:30 and lose the evening.
+      // IST minutes-of-day converted to UTC. For NSE this reproduces the previous
+      // literals exactly: 555−330 = 03:45 UTC open, 930−330 = 10:00 UTC close.
+      const { openMin, closeMin } = marketSession(exchange);
+      const istMinToUtc = (min: number) => min - IST_OFFSET / 60;
+      const startDate = new Date(chartDate);
+      startDate.setUTCHours(0, istMinToUtc(openMin), 0, 0);
+      const endDate = new Date(chartDate);
+      endDate.setUTCHours(0, istMinToUtc(closeMin), 0, 0);
 
       const BATCH = 10;
       const chunks: string[][] = [];

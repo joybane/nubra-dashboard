@@ -25,6 +25,40 @@ Older exports on disk, for reference: `~/Downloads/nubra-api-rest-api-llm-builde
   *parquet* `iv` column in the backtest tree is a separate product and does not match.)
 - **`charts/timeseries` rejects >10 symbols per query** — `"maximum 10 values allowed in one
   query"`. Batch wide strike ladders; 60 REST req/min is the ceiling.
+- **Sub-minute history is a rolling 7×24h window, NOT the documented 3 months.** The doc's
+  "intervals less than 1 day → last 3 months" holds for `1m` and coarser only. Measured
+  2026-08-03: at 21:07 IST, 27 Jul 20:00 IST returned 500 and 27 Jul 22:00 IST returned data —
+  the cutoff is exactly `now − 168h`, on both NSE and MCX. Only `1s` and `10s` exist below a
+  minute (`5s` is accepted but returns nothing; `15s`/`30s` 500). A window that **straddles**
+  the edge fails the whole query rather than clipping, so clamp `startDate`
+  (`clampSubMinuteStart` in `src/lib/utils.ts`). 1s bars are tick-driven, not filled.
+- **`optionchains/{instrument}/price` is broken for MCX** — 500 for every documented symbol
+  form (`FUT_CRUDEOIL_20260819`, bare `CRUDEOIL`), with `exchange=MCX` set. NSE works through
+  the identical code path, so this is upstream. No loss in practice: the MCX chain's `cp`
+  already carries the underlying future's LTP exactly (verified to the paisa on 12 chains
+  across 4 commodities), which is what that endpoint would have been used for.
+
+## MCX / commodities
+
+- Every market-data endpoint takes `exchange=MCX`. **15,766 instruments, 30 commodities**;
+  options exist on 11 — CRUDEOIL, CRUDEOILM, NATURALGAS, NATGASMINI, GOLD, GOLDM, SILVER,
+  SILVERM, COPPER, ZINC, MCXBULLDEX. The other 19 are futures-only.
+- **Symbols are the zanskar form and that IS the trading symbol** — `stock_name` ==
+  `zanskar_name` on MCX, unlike NSE: `FUT_CRUDEOIL_20260819`,
+  `OPT_CRUDEOIL_20260817_CE_875000`. `charts/timeseries` takes them verbatim with
+  `type: "FUT"` / `"OPT"`. Extra refdata fields: `prev_close`, `freeze_qty_limit`,
+  `asset_code`, `zanskar_id`; `asset_type` is `COM_FO`.
+- **The chain is keyed by the commodity, the underlying is a futures contract.** Fetch and
+  subscribe as `CRUDEOIL`; the thing it prices off is `FUT_CRUDEOIL_20260819`.
+- **Options are options ON FUTURES and the expiries differ.** Option expiry → the *next*
+  futures expiry. Verified exactly (chain `cp` == that future's LTP to the paisa):
+  20260817→20260819, 20260917→20260921, 20261015→20261019. Several option expiries can share
+  one future (GOLD 20260831 and 20260925 both settle into FUT_GOLD_20261005). This makes the
+  forward **directly observable** — no put-call parity needed, Black-76 with F = the futures
+  price is exact.
+- **Session is 09:00–23:30 IST — 870 one-minute bars a day** against NSE's 375.
+- Commodity options carry the full vendor greek set (`delta`/`vega`/`theta`/`iv_*`) at 1m.
+- Margin is **not** calibrated for MCX anywhere in this repo — see `server/marginEngine.ts`.
 - `GET /ipaddress/validate` returns `current_ip_address` vs registered primary/secondary and
   an `is_matched` boolean. This is the direct diagnostic for the dead V3 margin API —
   it says whether the static-IP gate is what's rejecting calls, rather than inferring it.

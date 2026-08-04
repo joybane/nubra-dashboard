@@ -23,14 +23,63 @@
 export const FEED_STALE_MS = 45_000;
 
 /**
+ * Trading session per exchange, in IST minutes-of-day. Mirrors `MARKET_SESSIONS`
+ * in `src/lib/utils.ts` — the server cannot import from the app bundle, so the
+ * two have to be kept in step by hand. MCX runs 09:00–23:30.
+ */
+const MARKET_SESSIONS: Record<string, { openMin: number; closeMin: number }> = {
+  NSE: { openMin: 9 * 60 + 15, closeMin: 15 * 60 + 30 },
+  BSE: { openMin: 9 * 60 + 15, closeMin: 15 * 60 + 30 },
+  MCX: { openMin: 9 * 60, closeMin: 23 * 60 + 30 },
+};
+
+/**
  * `ref_id → "ASSET:EXPIRY"`, learned from the ticks themselves rather than
  * parsed out of instrument names — `NIFTY26JUL23850PE` does not contain the
  * weekly expiry (20260728) it actually trades on, so name parsing cannot work.
  */
 export type FeedIndex = Map<number, string>;
 
-export function feedKey(asset: string, expiry: string): string {
-  return `${asset.toUpperCase()}:${expiry}`;
+/**
+ * Feed identity. NSE keeps the original two-part `ASSET:EXPIRY` form byte for
+ * byte — every persisted `simOcSubs` row, every `ocLastTick` entry and every
+ * comparison against them keeps working untouched. Only non-NSE feeds take the
+ * three-part form, so commodities get their own namespace without migrating
+ * anything.
+ */
+export function feedKey(asset: string, expiry: string, exchange = 'NSE'): string {
+  const ex = exchange.toUpperCase();
+  const base = `${asset.toUpperCase()}:${expiry}`;
+  return ex === 'NSE' ? base : `${base}:${ex}`;
+}
+
+/** Inverse of `feedKey`. A two-part key is NSE, which is what it always meant. */
+export function parseFeedKey(key: string): { asset: string; expiry: string; exchange: string } {
+  const [asset = '', expiry = '', exchange] = key.split(':');
+  return { asset, expiry, exchange: exchange || 'NSE' };
+}
+
+/**
+ * Underlying asset (and, where the name carries it, expiry and exchange) from an
+ * instrument's display name.
+ *
+ * MCX trades under the zanskar form — `OPT_CRUDEOIL_20260817_CE_875000`,
+ * `FUT_CRUDEOIL_20260819` — where the leading token is the derivative type, not
+ * the asset. The old `/^([A-Z]+)/` rule returns "OPT" for every one of them,
+ * which would leave commodity positions holding no feed at all.
+ *
+ * NSE names (`NIFTY2570329900CE`) cannot match the zanskar pattern, so they fall
+ * through to the original rule and are unaffected.
+ */
+export function parseDisplayName(displayName: string): {
+  asset: string;
+  expiry: string | null;
+  exchange: string;
+} {
+  const zanskar = /^(?:OPT|FUT)_([A-Z][A-Z0-9]*)_(\d{8})/.exec(displayName);
+  if (zanskar) return { asset: zanskar[1], expiry: zanskar[2], exchange: 'MCX' };
+  const nse = /^([A-Z]+)/.exec(displayName);
+  return { asset: nse ? nse[1] : '', expiry: null, exchange: 'NSE' };
 }
 
 /** The feeds serving at least one currently-open position. */
@@ -71,8 +120,11 @@ export function staleRequiredFeeds(
  */
 export function isValidFeedKey(key: string): boolean {
   const parts = key.split(':');
-  if (parts.length !== 2) return false;
-  const [asset, expiry] = parts;
+  if (parts.length !== 2 && parts.length !== 3) return false;
+  const [asset, expiry, exchange] = parts;
+  // Canonical NSE keys are two-part, so a third segment must name a real, other
+  // exchange. `NIFTY:20260728:NSE` stays malformed — nothing ever writes it.
+  if (parts.length === 3 && (exchange === 'NSE' || !MARKET_SESSIONS[exchange])) return false;
   return /^[A-Z][A-Z0-9&-]*$/.test(asset) && /^\d{8}$/.test(expiry);
 }
 
@@ -100,7 +152,7 @@ export function pruneOcSubKeys(
       drop.push({ key, reason: 'malformed' });
       continue;
     }
-    const [asset, expiry] = key.split(':');
+    const { asset, expiry } = parseFeedKey(key);
     if (expiry < todayIst) {
       drop.push({ key, reason: 'expired' });
       continue;
@@ -121,14 +173,16 @@ export function istToday(nowMs: number): string {
 }
 
 /**
- * NSE equity-derivatives session, Mon–Fri 09:15–15:30 IST. Outside it a silent
- * feed is expected, so the watchdog must not re-subscribe (or log) all night.
+ * Mon–Fri session for the given exchange. Outside it a silent feed is expected,
+ * so the watchdog must not re-subscribe (or log) all night. Defaults to NSE, so
+ * callers that predate commodity support keep their existing behaviour.
  */
-export function isMarketHours(nowMs: number): boolean {
+export function isMarketHours(nowMs: number, exchange = 'NSE'): boolean {
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
   const ist = new Date(nowMs + IST_OFFSET_MS);
   const dow = ist.getUTCDay();
   if (dow === 0 || dow === 6) return false;
   const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-  return mins >= 9 * 60 + 15 && mins <= 15 * 60 + 30;
+  const { openMin, closeMin } = MARKET_SESSIONS[exchange.toUpperCase()] ?? MARKET_SESSIONS.NSE;
+  return mins >= openMin && mins <= closeMin;
 }

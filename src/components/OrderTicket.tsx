@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Instrument } from '../types';
-import { fmtPrice, formatExpiry } from '../lib/utils';
+import { fmtPrice } from '../lib/utils';
+import { formatInstrumentName } from '../lib/instrumentDisplay';
 import { getSymbol } from '../types';
 import { usePaperTrading } from '../hooks/usePaperTrading';
 import InstrumentSearch from './InstrumentSearch';
@@ -22,13 +23,7 @@ function orderTypeToApi(t: OrderTypeUI): string {
 
 function instrumentLabel(inst: Instrument | null): string {
   if (!inst) return '';
-  const name = inst.stock_name || inst.asset || '';
-  const exp = inst.expiry ? ` ${formatExpiry(inst.expiry).toUpperCase()}` : '';
-  const sp = inst.strike_price
-    ? ` ${(inst.strike_price > 10000 ? inst.strike_price / 100 : inst.strike_price).toLocaleString('en-IN')}`
-    : '';
-  const ot = inst.option_type ? ` ${inst.option_type}` : '';
-  return `${name}${exp}${sp}${ot}`.trim() || getSymbol(inst);
+  return formatInstrumentName(inst) || getSymbol(inst);
 }
 
 export default function OrderTicket() {
@@ -106,6 +101,14 @@ export default function OrderTicket() {
             order_price: p,
             order_delivery_type: productToApi(product),
             exchange: instrument.exchange ?? 'NSE',
+            // Contract detail so the server can fall back to the local margin engine
+            // when the broker is unreachable — a ref_id alone is not priceable.
+            strike: instrument.strike_price,
+            option_type: instrument.option_type,
+            expiry: instrument.expiry != null ? String(instrument.expiry) : undefined,
+            symbol: instrument.asset,
+            lot_size: instrument.lot_size,
+            ltp,
           }),
         });
         const d = (await res.json()) as { total_margin?: number; message?: string; error?: string };
@@ -210,6 +213,7 @@ export default function OrderTicket() {
           trigger_price: apiTrigger,
           asset: instrument.asset,
           expiry: instrument.expiry,
+          exchange: instrument.exchange,
           derivative_type: instrument.derivative_type,
         }),
       });

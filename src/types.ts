@@ -42,6 +42,33 @@ export function getSymbol(item: Instrument): string {
   );
 }
 
+/**
+ * The name an option chain is addressed by, which is not always the instrument's
+ * own symbol.
+ *
+ * On NSE the underlying and the chain key coincide — NIFTY's chain is `NIFTY`. On
+ * MCX they do not: the underlying is a specific futures contract
+ * (`FUT_CRUDEOIL_20260819`) but its chain is fetched and subscribed as `CRUDEOIL`.
+ * Refdata already carries that in `asset`, so prefer it and fall back to the symbol.
+ */
+export function getChainAsset(item: Instrument): string {
+  if ((item.exchange || '').toUpperCase() === 'MCX' && item.asset) return item.asset;
+  return getSymbol(item);
+}
+
+/**
+ * Which exchange an instrument name belongs to, for the places that only ever get a
+ * name back (positions, orders) and no refdata row.
+ *
+ * MCX names are the zanskar form — `OPT_CRUDEOIL_20260817_CE_875000`,
+ * `FUT_CRUDEOIL_20260819`. NSE names (`NIFTY2570329900CE`) cannot match that shape,
+ * so they keep returning 'NSE' exactly as before. Mirrors `parseDisplayName` in
+ * server/ocFeedGuard.ts.
+ */
+export function exchangeFromName(name: string | undefined | null): string {
+  return /^(?:OPT|FUT)_[A-Z][A-Z0-9]*_\d{8}/.test(String(name ?? '')) ? 'MCX' : 'NSE';
+}
+
 // ─── Chart / OHLCV ───────────────────────────────────────────────────────────
 export interface OhlcBar {
   time: number | { year: number; month: number; day: number };

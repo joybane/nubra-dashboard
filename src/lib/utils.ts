@@ -64,6 +64,25 @@ export const IST_OFFSET = 5.5 * 60 * 60; // seconds
 export const NSE_MARKET_OPEN_MIN = 9 * 60 + 15;
 export const NSE_MARKET_CLOSE_MIN = 15 * 60 + 30;
 
+/**
+ * Trading session per exchange, in IST minutes-of-day.
+ *
+ * MCX runs 09:00–23:30 — 870 one-minute bars a day against NSE's 375 (measured
+ * 2026-08-03 across CRUDEOIL and GOLD, every day identical). Anything that
+ * filters bars by session has to ask the exchange rather than assume NSE, or
+ * two thirds of a commodity session is silently discarded.
+ */
+export const MARKET_SESSIONS: Record<string, { openMin: number; closeMin: number }> = {
+  NSE: { openMin: NSE_MARKET_OPEN_MIN, closeMin: NSE_MARKET_CLOSE_MIN },
+  BSE: { openMin: NSE_MARKET_OPEN_MIN, closeMin: NSE_MARKET_CLOSE_MIN },
+  MCX: { openMin: 9 * 60, closeMin: 23 * 60 + 30 },
+};
+
+/** Unknown exchanges fall back to the NSE session, which is what they got before. */
+export function marketSession(exchange?: string): { openMin: number; closeMin: number } {
+  return MARKET_SESSIONS[(exchange || 'NSE').toUpperCase()] ?? MARKET_SESSIONS.NSE;
+}
+
 export function chartTimeDayKey(
   t: number | { year: number; month: number; day: number },
 ): string | null {
@@ -81,17 +100,76 @@ export function chartTimeMinuteOfDay(
   return d.getUTCHours() * 60 + d.getUTCMinutes();
 }
 
-export function isNseMarketSessionChartTime(
+export function isMarketSessionChartTime(
   t: number | { year: number; month: number; day: number },
+  exchange?: string,
 ): boolean {
   const min = chartTimeMinuteOfDay(t);
   if (min == null) return true;
-  return min >= NSE_MARKET_OPEN_MIN && min <= NSE_MARKET_CLOSE_MIN;
+  const { openMin, closeMin } = marketSession(exchange);
+  return min >= openMin && min <= closeMin;
+}
+
+/** @deprecated Prefer `isMarketSessionChartTime(t, exchange)` — this is the NSE-only form. */
+export function isNseMarketSessionChartTime(
+  t: number | { year: number; month: number; day: number },
+): boolean {
+  return isMarketSessionChartTime(t, 'NSE');
+}
+
+/**
+ * The instant an option expires, as epoch ms. Options settle at their exchange's
+ * close, so this derives from `MARKET_SESSIONS` rather than repeating a literal:
+ * NSE/BSE 15:30 IST, MCX 23:30 IST.
+ *
+ * The MCX figure was measured, not assumed (2026-08-03, CRUDEOIL 20260817, five
+ * strikes, 4344 points): inverting the vendor's own `vega` + `iv_mid` for T under
+ * Black-76 puts their expiry at ~00:20 IST on 18 Aug once the method's bias is
+ * removed — within about an hour of the 23:30 close, and roughly nine hours away
+ * from 15:30. The same inversion run against NIFTY, where 15:30 is known, comes
+ * back +41 min, so an hour of residual is inside the method's own error bar and
+ * 15:30 is comfortably excluded for MCX.
+ *
+ * Accepts 'YYYYMMDD' or 'YYYY-MM-DD'. Returns NaN on anything else.
+ */
+export function expiryInstantMs(expiry: string, exchange?: string): number {
+  const s = String(expiry).replace(/-/g, '');
+  if (!/^\d{8}$/.test(s)) return NaN;
+  const midnightUtc = Date.parse(`${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T00:00:00Z`);
+  if (Number.isNaN(midnightUtc)) return NaN;
+  // Midnight IST, then forward to the close.
+  return midnightUtc - IST_OFFSET * 1000 + marketSession(exchange).closeMin * 60_000;
+}
+
+/**
+ * Sub-minute history (`1s`, `10s`) is retained for a rolling 7×24 hours. Asking for
+ * anything older does not return a short series — it fails the entire query with a
+ * 500, taking the in-window part of the request with it. Measured 2026-08-03 on both
+ * NSE and MCX; the vendor docs' "3 months for intervals below a day" holds for `1m`
+ * and above only.
+ *
+ * Returns the clamped start, leaving non-sub-minute intervals untouched. The margin
+ * keeps a request issued moments before the boundary moves from landing outside it.
+ */
+export const SUB_MINUTE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function isSubMinuteInterval(iv: string): boolean {
+  return iv === '1s' || iv === '10s';
+}
+
+export function clampSubMinuteStart(start: Date, iv: string, nowMs: number = Date.now()): Date {
+  if (!isSubMinuteInterval(iv)) return start;
+  const earliest = nowMs - SUB_MINUTE_RETENTION_MS + 5 * 60_000;
+  return start.getTime() < earliest ? new Date(earliest) : start;
+}
+
+export function isMarketOpenNow(exchange?: string): boolean {
+  const nowChartTime = Math.floor(Date.now() / 1000) + IST_OFFSET;
+  return isMarketSessionChartTime(nowChartTime, exchange);
 }
 
 export function isNseMarketOpenNow(): boolean {
-  const nowChartTime = Math.floor(Date.now() / 1000) + IST_OFFSET;
-  return isNseMarketSessionChartTime(nowChartTime);
+  return isMarketOpenNow('NSE');
 }
 export function toChartTime(
   tsNs: bigint | string | number,

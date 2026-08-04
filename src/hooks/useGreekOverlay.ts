@@ -18,11 +18,12 @@ type HistoricalResp = {
 } | null;
 /** `/api/iv-history` response, or `{ error }` when the underlying has no parquet baseline. */
 type IvHistoryResp = { observations?: IvObservation[]; from?: string; to?: string; error?: string };
-import { getSymbol } from '../types';
+import { getChainAsset, getSymbol } from '../types';
 import {
   IST_OFFSET,
-  isNseMarketOpenNow,
-  isNseMarketSessionChartTime,
+  expiryInstantMs,
+  isMarketOpenNow,
+  isMarketSessionChartTime,
   strikeRs,
 } from '../lib/utils';
 import {
@@ -47,16 +48,29 @@ import {
   type SeriesMode,
   type TimeMapper,
 } from '../lib/greekRenderer';
-import { blackScholes, forwardFromParity, impliedVolatility, RISK_FREE } from '../lib/GexService';
+import {
+  blackScholes,
+  forwardFromParity,
+  impliedVolatility,
+  mcxFutureSymbol,
+  mcxUnderlyingFutureExpiry,
+  RISK_FREE,
+} from '../lib/GexService';
 import { computeIvRank, dteFromExpiry, type IvObservation, type IvRankResult } from '../lib/ivRank';
 import { sharedJson } from '../lib/sharedRequest';
 import { useWs } from './useWsContext';
 
-/** Option chain for one asset (optionally one expiry), shared across overlay instances. */
-function fetchChainShared(sym: string, expiry?: string): Promise<ChainResp> {
-  const url = expiry
-    ? `/api/optionchain/${encodeURIComponent(sym)}?expiry=${encodeURIComponent(expiry)}`
-    : `/api/optionchain/${encodeURIComponent(sym)}`;
+/**
+ * Option chain for one asset (optionally one expiry), shared across overlay instances.
+ * `exchange` is omitted for NSE so the request URL — and therefore the share key —
+ * stays byte-identical to what it has always been.
+ */
+function fetchChainShared(sym: string, expiry?: string, exchange?: string): Promise<ChainResp> {
+  const params = new URLSearchParams();
+  if (expiry) params.set('expiry', expiry);
+  if (exchange && exchange.toUpperCase() !== 'NSE') params.set('exchange', exchange.toUpperCase());
+  const qs = params.toString();
+  const url = `/api/optionchain/${encodeURIComponent(sym)}${qs ? `?${qs}` : ''}`;
   return sharedJson<ChainResp>(`chain:${url}`, CHAIN_TTL_MS, async () => {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`chain ${res.status}`);
@@ -121,10 +135,14 @@ const normTs = (ts: number | string): number => {
   return n * 1000; // seconds      → ms
 };
 
-/** Years to expiry at a given epoch-ms instant (expiry assumed 15:30 IST = 10:00 UTC). */
-function yearsToExpiry(expiry: string, ms: number): number {
-  const iso = /^\d{8}$/.test(expiry) ? expiry.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : expiry;
-  const exp = new Date(`${iso}T10:00:00Z`).getTime();
+/**
+ * Years to expiry at a given epoch-ms instant. Options settle at their exchange's
+ * close — 15:30 IST on NSE/BSE, 23:30 on MCX — so the instant comes from
+ * `expiryInstantMs` rather than a literal here. See its doc comment for how the
+ * MCX close was measured off the vendor's own vega.
+ */
+function yearsToExpiry(expiry: string, ms: number, exchange?: string): number {
+  const exp = expiryInstantMs(expiry, exchange);
   const days = Number.isFinite(exp) ? Math.max(0, (exp - ms) / 86_400_000) : 1;
   return Math.max(days / 365, 1 / (365 * 24));
 }
@@ -392,6 +410,9 @@ export function useGreekOverlay({
       ...(inline ? { inline: true, paneIndex: 0 } : {}),
       ceColor: palette.ce,
       peColor: palette.pe,
+      // Resolved per draw: panes are reused across instrument switches, so this has to
+      // follow the current symbol rather than whatever was showing when it was created.
+      exchange: () => currentInstRef.current?.exchange,
     };
 
     // IV is one line and has no method/basket dimension — a single pane, retitled when the
@@ -480,7 +501,8 @@ export function useGreekOverlay({
     const n = times.length;
     return (ms: number): number | null => {
       const ct = Math.floor(ms / 1000) + IST_OFFSET;
-      if (!Number.isFinite(ct) || !isNseMarketSessionChartTime(ct)) return null;
+      if (!Number.isFinite(ct) || !isMarketSessionChartTime(ct, currentInstRef.current?.exchange))
+        return null;
       if (!n) return ct;
       if (ct < times[0]) return null; // before chart range — don't render
       if (ct >= times[n - 1]) return times[n - 1]; // live/future → clamp to last bar
@@ -582,7 +604,8 @@ export function useGreekOverlay({
   }
 
   function storeSnapshot(snap: ChainSnapshot, force = false) {
-    if (!isNseMarketSessionChartTime(Math.floor(snap.ts / 1000) + IST_OFFSET)) return;
+    const ct = Math.floor(snap.ts / 1000) + IST_OFFSET;
+    if (!isMarketSessionChartTime(ct, currentInstRef.current?.exchange)) return;
     if (!force && snap.ts - lastSnapMsRef.current < SNAP_MIN_GAP_MS) {
       // overwrite the live tail without adding a new bucket
       snapshotsRef.current.set(lastSnapMsRef.current, { ...snap, ts: lastSnapMsRef.current });
@@ -602,7 +625,7 @@ export function useGreekOverlay({
       if (!wsExpiriesRef.current.has(exp)) return;
       // Live ticks only belong on the latest day; skip while inspecting a past day.
       if (greekDateRef.current && greekDateRef.current !== defaultDayRef.current) return;
-      if (!isNseMarketOpenNow()) return;
+      if (!isMarketOpenNow(currentInstRef.current?.exchange)) return;
       lastWsTickRef.current = Date.now(); // WS is alive → fallback poll stays idle
       mergeLiveLegs(exp, legsFromChain(data, exp));
       storeCombinedLive();
@@ -654,7 +677,7 @@ export function useGreekOverlay({
     pollTimerRef.current = window.setInterval(() => {
       if (!enabledRef.current) return;
       if (greekDateRef.current !== defaultDayRef.current) return; // inspecting a past day
-      if (!isNseMarketOpenNow()) return;
+      if (!isMarketOpenNow(currentInstRef.current?.exchange)) return;
       if (Date.now() - lastWsTickRef.current < WS_QUIET_MS) return; // WS feed is live — leave it
       void pollLiveOnce();
     }, LIVE_POLL_MS);
@@ -666,12 +689,12 @@ export function useGreekOverlay({
     if (!inst || pollBusyRef.current) return;
     pollBusyRef.current = true;
     try {
-      const sym = getSymbol(inst);
+      const sym = getChainAsset(inst);
       const exps = [...wsExpiriesRef.current];
       let any = false;
       for (const exp of exps) {
         try {
-          const data = await fetchChainShared(sym, exp);
+          const data = await fetchChainShared(sym, exp, inst.exchange);
           if (data.chain) {
             liveLegsRef.current.set(exp, legsFromChain(data.chain, exp));
             any = true;
@@ -693,9 +716,9 @@ export function useGreekOverlay({
   async function loadChain() {
     const inst = currentInstRef.current;
     if (!inst) return;
-    const sym = getSymbol(inst);
+    const sym = getChainAsset(inst);
     try {
-      const data = await fetchChainShared(sym);
+      const data = await fetchChainShared(sym, undefined, inst.exchange);
       if (!data.chain) return;
       const exps = data.chain.all_expiries || [];
       setExpiries(exps);
@@ -713,15 +736,17 @@ export function useGreekOverlay({
   async function reloadAll(expiriesSel: string[]) {
     const inst = currentInstRef.current;
     if (!inst || !expiriesSel.length) return;
-    const sym = getSymbol(inst);
+    // On MCX the chain is keyed by the commodity, not by the futures contract that
+    // underlies it; everywhere else the two are the same string.
+    const sym = getChainAsset(inst);
     try {
       const meta = new Map<string, { sp: number; type: 'CE' | 'PE'; exp: string }>();
       const liveLegs = new Map<string, { ce: AggLeg[]; pe: AggLeg[] }>();
-      const open = isNseMarketOpenNow();
+      const open = isMarketOpenNow(currentInstRef.current?.exchange);
       let asset = '';
 
       for (const exp of expiriesSel) {
-        const data = await fetchChainShared(sym, exp);
+        const data = await fetchChainShared(sym, exp, inst.exchange);
         if (!data.chain) continue;
         if (typeof data.chain.lot_size === 'number' && data.chain.lot_size > 0)
           lotSizeRef.current = data.chain.lot_size;
@@ -737,7 +762,12 @@ export function useGreekOverlay({
       if (!meta.size) return;
 
       metaRef.current = meta;
-      underlyingRef.current = asset || sym.toUpperCase();
+      // What `fetchSpotHistory` charts as the underlying. NSE has a spot index of
+      // this name; MCX has none, so the tracked futures contract stands in.
+      underlyingRef.current =
+        (inst.exchange || '').toUpperCase() === 'MCX'
+          ? getSymbol(inst).toUpperCase()
+          : asset || sym.toUpperCase();
       liveLegsRef.current = liveLegs;
 
       snapshotsRef.current = new Map();
@@ -794,7 +824,11 @@ export function useGreekOverlay({
     snapshotsRef.current = new Map();
     lastSnapMsRef.current = 0;
     // Re-seed the live point only when returning to the latest day during market hours.
-    if (dateStr === defaultDayRef.current && liveLegsRef.current.size && isNseMarketOpenNow())
+    if (
+      dateStr === defaultDayRef.current &&
+      liveLegsRef.current.size &&
+      isMarketOpenNow(currentInstRef.current?.exchange)
+    )
       storeCombinedLive(true);
     requestDraw();
 
@@ -820,6 +854,7 @@ export function useGreekOverlay({
     exchange: string,
     start: Date,
     end: Date,
+    fields: string[] = HIST_FIELDS,
   ) {
     const BATCH = 10;
     const chunks: string[][] = [];
@@ -835,7 +870,7 @@ export function useGreekOverlay({
                 exchange,
                 type,
                 values: chunk,
-                fields: HIST_FIELDS,
+                fields,
                 startDate: start.toISOString(),
                 endDate: end.toISOString(),
                 interval: HIST_INTERVAL,
@@ -861,6 +896,73 @@ export function useGreekOverlay({
   }
 
   /** Time-sorted spot series for the underlying (paise → rupees). */
+  /**
+   * MCX futures expiries for the tracked asset, cached per asset. Needed to map each
+   * option expiry onto the contract it settles into — see `mcxUnderlyingFutureExpiry`.
+   * Returns [] on any failure, which makes the caller fall back to the parity path.
+   */
+  const futExpiryCacheRef = useRef<Map<string, string[]>>(new Map());
+  async function fetchMcxFutureExpiries(asset: string): Promise<string[]> {
+    const cached = futExpiryCacheRef.current.get(asset);
+    if (cached) return cached;
+    try {
+      const res = await fetch(
+        `/api/instruments/search?q=${encodeURIComponent(`FUT_${asset}_`)}&exchange=MCX&type=FUT&limit=50`,
+      );
+      const { results } = (await res.json()) as { results?: Array<{ expiry?: number | string }> };
+      const expiries = (results ?? [])
+        .map((r) => String(r.expiry ?? ''))
+        .filter((e) => /^\d{8}$/.test(e))
+        .sort();
+      futExpiryCacheRef.current.set(asset, expiries);
+      return expiries;
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Per-expiry forward for MCX, read straight off the backing futures contract.
+   *
+   * Commodities have no spot, and the future a chain settles into *is* its forward, so
+   * there is nothing to imply — this is exact where `buildParityForwards` is inferred.
+   */
+  async function fetchMcxForwards(
+    asset: string,
+    optionExpiries: string[],
+    start: Date,
+    end: Date,
+  ): Promise<Map<string, Map<number, number>>> {
+    const out = new Map<string, Map<number, number>>();
+    const futExpiries = await fetchMcxFutureExpiries(asset);
+    if (!futExpiries.length) return out;
+
+    // Several option expiries can share one future, so fetch each contract once.
+    const symbolByOptExpiry = new Map<string, string>();
+    for (const exp of optionExpiries) {
+      const futExp = mcxUnderlyingFutureExpiry(exp, futExpiries);
+      if (futExp) symbolByOptExpiry.set(exp, mcxFutureSymbol(asset, futExp));
+    }
+    const symbols = [...new Set(symbolByOptExpiry.values())];
+    if (!symbols.length) return out;
+
+    const perSymbol = await requestHistory(symbols, 'FUT', 'MCX', start, end, ['close']);
+    const seriesBySymbol = new Map<string, Map<number, number>>();
+    for (const [name, series] of perSymbol) {
+      const m = new Map<number, number>();
+      for (const e of series.close || []) {
+        const v = e.v / 100;
+        if (v > 0) m.set(normTs(e.ts), v);
+      }
+      seriesBySymbol.set(name, m);
+    }
+    for (const [optExp, symbol] of symbolByOptExpiry) {
+      const s = seriesBySymbol.get(symbol);
+      if (s?.size) out.set(optExp, s);
+    }
+    return out;
+  }
+
   async function fetchSpotHistory(exchange: string, start: Date, end: Date): Promise<TsV[]> {
     if (!underlyingRef.current) return [];
     try {
@@ -868,7 +970,8 @@ export function useGreekOverlay({
         query: [
           {
             exchange,
-            type: 'INDEX',
+            // MCX has no spot index — the underlying is a futures contract.
+            type: exchange.toUpperCase() === 'MCX' ? 'FUT' : 'INDEX',
             values: [underlyingRef.current],
             fields: ['close'],
             startDate: start.toISOString(),
@@ -909,19 +1012,30 @@ export function useGreekOverlay({
     setHistState('loading');
 
     const names = [...meta.keys()];
-    const endDate = new Date(`${dateStr}T10:00:00Z`); // 15:30 IST of the selected day
-    const startDate = new Date(endDate.getTime() - GREEK_HIST_DAYS * 86_400_000); // trailing window
     const exchange = inst.exchange || 'NSE';
+    // End the window at the exchange's own close, or an MCX day would be cut off at
+    // 15:30 and lose its evening session.
+    const endDate = new Date(expiryInstantMs(dateStr, exchange));
+    const startDate = new Date(endDate.getTime() - GREEK_HIST_DAYS * 86_400_000); // trailing window
+    const isMcx = exchange.toUpperCase() === 'MCX';
 
     try {
-      const [perName, spot] = await Promise.all([
+      const [perName, spot, observedFwd] = await Promise.all([
         requestHistory(names, 'OPT', exchange, startDate, endDate),
         fetchSpotHistory(exchange, startDate, endDate),
+        isMcx
+          ? fetchMcxForwards(
+              wsAssetRef.current || '',
+              [...new Set([...meta.values()].map((m) => m.exp))],
+              startDate,
+              endDate,
+            )
+          : Promise.resolve(new Map<string, Map<number, number>>()),
       ]);
 
       if (gen !== histGenRef.current) return; // a newer day was requested — discard
 
-      const { added, dropped } = mergeHistory(perName, spot);
+      const { added, dropped } = mergeHistory(perName, spot, observedFwd);
       const ok = added > 0;
       setDroppedLegs(dropped);
       setHistState(ok ? (dropped > 0 ? 'partial' : 'ok') : 'nogreeks');
@@ -1002,7 +1116,16 @@ export function useGreekOverlay({
           }
         }
         if (bestK > 0)
-          fwd.set(ts, forwardFromParity(bestK, bestCe, bestPe, RISK_FREE, yearsToExpiry(exp, ts)));
+          fwd.set(
+            ts,
+            forwardFromParity(
+              bestK,
+              bestCe,
+              bestPe,
+              RISK_FREE,
+              yearsToExpiry(exp, ts, currentInstRef.current?.exchange),
+            ),
+          );
       }
       out.set(exp, fwd);
     }
@@ -1012,18 +1135,25 @@ export function useGreekOverlay({
   function mergeHistory(
     perName: Map<string, Record<string, TsV[]>>,
     spot: TsV[],
+    /**
+     * Observed forwards per option expiry. Supplied for MCX, where the backing future
+     * *is* the forward; empty elsewhere, where it has to be implied from parity.
+     */
+    observedFwd: Map<string, Map<number, number>> = new Map(),
   ): { added: number; dropped: number } {
     const meta = metaRef.current;
+    const exchange = currentInstRef.current?.exchange;
     const buckets = new Map<number, ChainSnapshot>();
-    const parityFwd = buildParityForwards(perName, spot);
+    // Only pay for the parity solve where the forward is not already known.
+    const parityFwd = observedFwd.size ? new Map() : buildParityForwards(perName, spot);
     let dropped = 0;
 
-    /** Best available forward at `ts`: market-implied if a CE/PE pair exists, else spot. */
+    /** Best available forward at `ts`: observed, else market-implied from parity, else spot. */
     const forwardAt = (exp: string, ts: number, S: number): number =>
-      parityFwd.get(exp)?.get(ts) ?? S;
+      observedFwd.get(exp)?.get(ts) ?? parityFwd.get(exp)?.get(ts) ?? S;
 
     const addLeg = (ts: number, type: 'CE' | 'PE', leg: AggLeg) => {
-      if (!isNseMarketSessionChartTime(Math.floor(ts / 1000) + IST_OFFSET)) return;
+      if (!isMarketSessionChartTime(Math.floor(ts / 1000) + IST_OFFSET, exchange)) return;
       if (!withinPruneBand(leg.delta)) return;
       let snap = buckets.get(ts);
       if (!snap) {
@@ -1054,11 +1184,12 @@ export function useGreekOverlay({
         put('vega', series.vega);
         put('theta', series.theta);
 
-        // Probed live 2026-07-30: the timeseries DOES serve historical delta/vega/theta, but
-        // there is no `iv` field under any name. Without deriving it here the constant-delta
-        // IV measures would have no history at all — only the live tail — because this branch
-        // bypasses the reconstruction path below. Derive it by inversion from the `close`
-        // series we already fetched.
+        // The timeseries serves historical delta/vega/theta, and `HIST_FIELDS` requests `iv`,
+        // which is the one name it does NOT serve — the real fields are `iv_bid`/`iv_mid`/
+        // `iv_ask` (confirmed live 2026-08-03). So `ivByTs` is empty in practice and this
+        // branch derives IV by inversion from the `close` series instead. Switching
+        // HIST_FIELDS to `iv_mid` would take the vendor's own series; deliberately not done,
+        // see the IV section of README.md.
         //
         // Gated on `isIv`: the Vega/Theta overlays never read `iv`, and per-point inversion
         // across a whole basket is the expensive path we deliberately keep off the 1s route.
@@ -1071,7 +1202,7 @@ export function useGreekOverlay({
             const price = closeByTs.get(ts);
             const S = price != null && price > 0 ? nearestSpot(spot, ts) : 0;
             if (price != null && price > 0 && S > 0) {
-              const T = yearsToExpiry(m.exp, ts);
+              const T = yearsToExpiry(m.exp, ts, exchange);
               const solved = impliedVolatility(
                 price,
                 forwardAt(m.exp, ts, S),
@@ -1168,7 +1299,11 @@ export function useGreekOverlay({
   // Rank the live reading only against observations at a comparable maturity, and only for the
   // ATM measure: 25Δ RR and 25Δ Fly are skew/smile numbers, so placing either inside a range
   // built from ATM vol levels would be a category error, not just imprecise.
-  const rankDte = selExpiries.length ? Math.min(...selExpiries.map((e) => dteFromExpiry(e))) : NaN;
+  const rankDte = selExpiries.length
+    ? Math.min(
+        ...selExpiries.map((e) => dteFromExpiry(e, Date.now(), currentInstRef.current?.exchange)),
+      )
+    : NaN;
   const ivRank: IvRankResult | null = useMemo(
     () =>
       isIv && ivMeasure === 'atm' && ivObs.length

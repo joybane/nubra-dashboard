@@ -32,12 +32,7 @@ function AppInner() {
   const [auth, setAuth] = useState<AuthStatus>('unknown');
   const [strategyChart, setStrategyChart] = useState<StrategyChartTarget | null>(null);
 
-  const {
-    state: workspaceState,
-    setActivePane,
-    setPaneView,
-    loadInstrumentInActivePane,
-  } = useWorkspaceState();
+  const { loadInstrumentInActivePane } = useWorkspaceState();
   const { subscribe } = useWs();
 
   const openStrategyChart = useCallback(
@@ -47,22 +42,11 @@ function AppInner() {
     [],
   );
 
-  const openInstrumentChart = useCallback(
+  const selectInstrument = useCallback(
     (instrument: Instrument) => {
-      const paneId = workspaceState.activePane || workspaceState.panes[0]?.id;
-      if (paneId) {
-        setActivePane(paneId);
-        setPaneView(paneId, 'chart');
-      }
       loadInstrumentInActivePane(instrument);
     },
-    [
-      workspaceState.activePane,
-      workspaceState.panes,
-      setActivePane,
-      setPaneView,
-      loadInstrumentInActivePane,
-    ],
+    [loadInstrumentInActivePane],
   );
 
   useEffect(() => {
@@ -126,7 +110,7 @@ function AppInner() {
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       <Navbar
-        onInstrumentSelect={openInstrumentChart}
+        onInstrumentSelect={selectInstrument}
         theme={theme}
         onThemeToggle={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
       />

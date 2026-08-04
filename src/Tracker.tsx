@@ -20,7 +20,7 @@ import {
   IST_OFFSET,
   chartTimeDayKey,
   fmtPrice,
-  isNseMarketSessionChartTime,
+  isMarketSessionChartTime,
   sortKey,
 } from './lib/utils';
 
@@ -59,11 +59,24 @@ function isSameISTDay(chartTimeSec: unknown, nowMs: number): boolean {
 }
 
 /**
- * Today's session at 1-second resolution. Sub-minute history is current-day-only and only
- * via `intraDay:true` (which ignores the date range), supporting 1s/10s. INDEX values return
- * `close` ONLY — requesting OHLC 500s with "db error" — so fetch close-only and synthesize a
- * flat o/h/l/c (the line uses close; the greek overlay only needs bar times). Works for stocks
- * too. Returns [] on holiday / pre-open / unsupported instrument → caller keeps the 1m history.
+ * Today's session at 1-second resolution.
+ *
+ * Sub-minute data is `1s` or `10s` only — `5s` is accepted but returns nothing, and
+ * `15s`/`30s` 500. It is retained for a rolling **7×24 hours**, not the three months
+ * the vendor docs claim for "intervals below a day" (measured 2026-08-03: at 21:07
+ * IST, 27 Jul 20:00 IST returned 500 and 27 Jul 22:00 IST returned data). Requesting
+ * a window that straddles that edge fails the *whole* query with a 500 rather than
+ * clipping, so callers must clamp — see `clampSubMinuteStart`.
+ *
+ * `intraDay:true` is used here because this function only ever wants today, but it is
+ * not a requirement: `intraDay:false` with an explicit range works anywhere inside the
+ * 7-day window.
+ *
+ * INDEX values return `close` ONLY — requesting OHLC 500s with "db error" — so fetch
+ * close-only and synthesize a flat o/h/l/c (the line uses close; the greek overlay only
+ * needs bar times). Works for stocks and MCX futures too. Note 1s bars are tick-driven,
+ * not filled: NIFTY yields ~1 per second, a crude future far fewer. Returns [] on
+ * holiday / pre-open / unsupported instrument → caller keeps the 1m history.
  */
 async function fetchTodayTick(instrument: Instrument): Promise<OhlcBar[]> {
   const now = Date.now();
@@ -109,7 +122,7 @@ async function fetchTodayTick(instrument: Instrument): Promise<OhlcBar[]> {
     }
   }
   bars.sort((a, b) => sortKey(a.time) - sortKey(b.time));
-  return bars.filter((b) => isNseMarketSessionChartTime(b.time));
+  return bars.filter((b) => isMarketSessionChartTime(b.time, instrument.exchange));
 }
 
 // ── Crosshair-tooltip helpers (module-level: pure, no per-render churn) ─────────
@@ -142,14 +155,29 @@ function tipRow(color: string, label: string, val: string): string {
   );
 }
 
+/**
+ * Can this instrument stand in as the thing being tracked? Indices always could.
+ * MCX publishes no spot for a commodity — every option chain settles into a
+ * specific future, and `chain.cp` is that future's price — so an MCX future is
+ * the underlying and belongs here too.
+ */
+function isTrackableUnderlying(inst: Instrument): boolean {
+  const type = nubraType(inst);
+  if (type === 'INDEX') return true;
+  return type === 'FUT' && (inst.exchange || '').toUpperCase() === 'MCX';
+}
+
 interface Props {
   instrument: Instrument | null;
   theme: 'dark' | 'light';
 }
 
 export default function Tracker({ instrument, theme }: Props) {
-  // Track the passed instrument if it's an index, otherwise default to NIFTY.
-  const tracked = instrument && nubraType(instrument) === 'INDEX' ? instrument : NIFTY;
+  // Track the passed instrument if it is an underlying, otherwise default to NIFTY.
+  // Commodities have no spot index — the front-month future *is* the underlying,
+  // so an MCX future is trackable in exactly the way an index is.
+  const tracked = instrument && isTrackableUnderlying(instrument) ? instrument : NIFTY;
+  const trackedExchange = tracked.exchange || 'NSE';
 
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
@@ -383,7 +411,7 @@ export default function Tracker({ instrument, theme }: Props) {
   }
 
   function marketBars(bars: OhlcBar[]) {
-    return bars.filter((b) => isNseMarketSessionChartTime(b.time));
+    return bars.filter((b) => isMarketSessionChartTime(b.time, trackedExchange));
   }
 
   function toLine(bars: OhlcBar[]) {
@@ -502,7 +530,7 @@ export default function Tracker({ instrument, theme }: Props) {
       if (!close) return;
 
       const tickTime = utcSec + IST_OFFSET;
-      if (!isNseMarketSessionChartTime(tickTime)) return;
+      if (!isMarketSessionChartTime(tickTime, trackedExchange)) return;
       const minuteTime = Math.floor(tickTime / 60) * 60;
       const open = Number(b.open) / 100 || close;
       const high = Number(b.high) / 100 || close;
@@ -542,12 +570,7 @@ export default function Tracker({ instrument, theme }: Props) {
 
     if (currentInstRef.current) {
       const oldSym = getSymbol(currentInstRef.current);
-      const wasIndex = nubraType(currentInstRef.current) === 'INDEX';
-      unsubscribeChart(
-        wasIndex ? { indexes: [oldSym] } : { instruments: [oldSym] },
-        TRACK_IV,
-        currentInstRef.current.exchange || 'NSE',
-      );
+      unsubscribeChart({ indexes: [oldSym] }, TRACK_IV, currentInstRef.current.exchange || 'NSE');
     }
     vega.clearForInstrumentChange();
     theta.clearForInstrumentChange();
@@ -614,12 +637,7 @@ export default function Tracker({ instrument, theme }: Props) {
       setLoading(null);
       updatePrice(allBarsRef.current[allBarsRef.current.length - 1].close, dayOpenRef.current);
 
-      const isIndex = nubraType(tracked) === 'INDEX';
-      subscribeChart(
-        isIndex ? { indexes: [sym] } : { instruments: [sym] },
-        TRACK_IV,
-        tracked.exchange || 'NSE',
-      );
+      subscribeChart({ indexes: [sym] }, TRACK_IV, tracked.exchange || 'NSE');
     } catch (err: unknown) {
       setLoading(`Error: ${(err as Error).message}`);
     }

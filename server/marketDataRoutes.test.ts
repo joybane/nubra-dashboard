@@ -83,6 +83,38 @@ test('preserves search ordering and result envelope', async () => {
   });
 });
 
+test('ranks an exact commodity asset first and its contracts by nearest expiry', async () => {
+  getRefdata.mockResolvedValueOnce([
+    {
+      stock_name: 'FUT_CRUDEOILM_20260819',
+      asset: 'CRUDEOILM',
+      derivative_type: 'FUT',
+    },
+    {
+      stock_name: 'FUT_CRUDEOIL_20270919',
+      asset: 'CRUDEOIL',
+      derivative_type: 'FUT',
+    },
+    {
+      stock_name: 'FUT_CRUDEOIL_20260819',
+      asset: 'CRUDEOIL',
+      derivative_type: 'FUT',
+    },
+  ]);
+
+  const response = await app.inject({
+    method: 'GET',
+    url: '/api/instruments/search?q=crudeoil&exchange=MCX',
+  });
+
+  expect(response.statusCode).toBe(200);
+  expect(
+    (response.json<{ results: Array<{ stock_name: string }> }>().results || []).map(
+      (item) => item.stock_name,
+    ),
+  ).toEqual(['FUT_CRUDEOIL_20260819', 'FUT_CRUDEOIL_20270919', 'FUT_CRUDEOILM_20260819']);
+});
+
 test('preserves the authentication guard ahead of market-data work', async () => {
   await app.close();
   app = Fastify();

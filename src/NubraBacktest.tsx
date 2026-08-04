@@ -268,9 +268,15 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const [spot, setSpot] = useState(0);
   const [chainLoading, setChainLoading] = useState(false);
   const [chainError, setChainError] = useState<string | null>(null);
+  const chainRequestRef = useRef(0);
 
   const [activeExpiry, setActiveExpiry] = useState('');
   const [activeFlag, setActiveFlag] = useState('');
+  const activeExchange = useMemo(() => {
+    const explicit = String(instrument?.exchange || '').toUpperCase();
+    if (explicit === 'NSE' || explicit === 'BSE' || explicit === 'MCX') return explicit;
+    return underlying === 'SENSEX' || underlying === 'BANKEX' ? 'BSE' : 'NSE';
+  }, [instrument?.exchange, underlying]);
 
   // Legs
   const [legs, setLegs] = useState<Leg[]>([]);
@@ -416,20 +422,36 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     }
   }, [closestStrike, chain]);
 
+  const selectedInstrumentAsset = useMemo(
+    () =>
+      String(
+        instrument?.asset ||
+          instrument?.nubra_name ||
+          instrument?.symbol ||
+          instrument?.display_name ||
+          '',
+      ).toUpperCase(),
+    [instrument],
+  );
+
   // Determine underlying from selected instrument
   useEffect(() => {
-    if (!instrument) return;
-    const sym = (
-      instrument.asset ||
-      instrument.nubra_name ||
-      instrument.symbol ||
-      instrument.display_name ||
-      ''
-    ).toUpperCase();
+    const sym = selectedInstrumentAsset;
     if (sym) {
+      // Invalidate any NIFTY/SENSEX request that was already in flight when the
+      // global search changed this pane to a commodity.
+      chainRequestRef.current += 1;
       setUnderlying(sym);
+      setChain([]);
+      setSpot(0);
+      setAvailableExpiries([]);
+      setExpiry('');
+      setActiveExpiry('');
+      setActiveFlag('');
+      setLegs([]);
+      setEvalResult(null);
     }
-  }, [instrument]);
+  }, [selectedInstrumentAsset]);
 
   // Dynamic Greeks Calculation
   const spotMap = useMemo(() => {
@@ -654,37 +676,52 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
   // ── Load chain ────────────────────────────────────────────────────────────
 
-  const loadChain = useCallback(async (und: string, dt: string, tm: string, exp?: string) => {
-    setChainLoading(true);
-    setChainError(null);
-    try {
-      const qs = new URLSearchParams({ underlying: und, date: dt, time: tm });
-      if (exp) qs.set('expiry', exp);
-      const res = await fetch(`/api/nubra-backtest/chain?${qs}`);
-      const data = (await res.json()) as ChainResponse;
-      if (!data.ok) {
-        setChainError(data.error || 'Failed to load chain.');
+  const loadChain = useCallback(
+    async (und: string, dt: string, tm: string, exp?: string) => {
+      const requestId = ++chainRequestRef.current;
+      setChainLoading(true);
+      setChainError(null);
+      try {
+        const qs = new URLSearchParams({
+          underlying: und,
+          date: dt,
+          time: tm,
+          exchange: activeExchange,
+        });
+        if (exp) qs.set('expiry', exp);
+        const res = await fetch(`/api/nubra-backtest/chain?${qs}`);
+        const data = (await res.json()) as ChainResponse;
+        if (requestId !== chainRequestRef.current) return;
+        if (!data.ok) {
+          setChainError(data.error || 'Failed to load chain.');
+          setChain([]);
+          return;
+        }
+        setChain(data.chain);
+        setSpot(data.spot);
+        setAvailableExpiries(data.availableExpiries);
+        setActiveExpiry(data.expiry);
+        setActiveFlag(data.expiryFlag);
+        if (!exp) setExpiry(data.expiry);
+      } catch (e) {
+        if (requestId !== chainRequestRef.current) return;
+        setChainError((e as Error).message);
         setChain([]);
-        return;
+      } finally {
+        if (requestId === chainRequestRef.current) setChainLoading(false);
       }
-      setChain(data.chain);
-      setSpot(data.spot);
-      setAvailableExpiries(data.availableExpiries);
-      setActiveExpiry(data.expiry);
-      setActiveFlag(data.expiryFlag);
-      if (!exp) setExpiry(data.expiry);
-    } catch (e) {
-      setChainError((e as Error).message);
-      setChain([]);
-    } finally {
-      setChainLoading(false);
-    }
-  }, []);
+    },
+    [activeExchange],
+  );
 
   // Load on date / underlying / entry time change
   useEffect(() => {
-    if (date) loadChain(underlying, date, entryTime);
-  }, [underlying, date, entryTime, loadChain]);
+    // instrument.exchange updates one render before the mirrored underlying state.
+    // Do not issue the transient, invalid combination (for example NIFTY + MCX).
+    if (date && (!selectedInstrumentAsset || selectedInstrumentAsset === underlying)) {
+      loadChain(underlying, date, entryTime);
+    }
+  }, [underlying, date, entryTime, loadChain, selectedInstrumentAsset]);
 
   // Load on expiry change
   function switchExpiry(exp: string) {
@@ -721,6 +758,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           underlying,
+          exchange: activeExchange,
           date,
           expiry: activeExpiry,
           expiryFlag: activeFlag,
@@ -759,6 +797,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           underlying,
+          exchange: activeExchange,
           date,
           expiry: activeExpiry,
           expiryFlag: activeFlag,
@@ -808,21 +847,34 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       priceChartRef.current = priceChart;
       activeCharts.push(priceChart);
 
-      // Index Line (NIFTY/SENSEX spot close)
-      indexSeries = priceChart.addSeries(LineSeries, {
-        priceScaleId: 'left',
-        color: '#2962ff',
-        lineWidth: 2,
-        crosshairMarkerRadius: 4,
+      // Underlying candles on the right scale, matching the live Positions view.
+      indexSeries = priceChart.addSeries(CandlestickSeries, {
+        priceScaleId: 'right',
+        upColor: '#22c55e',
+        downColor: '#ef4444',
+        borderUpColor: '#22c55e',
+        borderDownColor: '#ef4444',
+        wickUpColor: '#22c55e',
+        wickDownColor: '#ef4444',
         priceLineVisible: true,
         lastValueVisible: true,
         visible: showSpotPrice,
+        title: underlying,
+        priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
       });
       const indexBars = evalResult.underlyingBars || [];
       const grid = indexBars.map((b) => b.time);
 
       if (indexBars.length) {
-        indexSeries.setData(indexBars.map((b) => ({ time: b.time, value: b.close })) as any);
+        indexSeries.setData(
+          indexBars.map((b) => ({
+            time: b.time,
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+          })) as any,
+        );
       }
 
       // Option leg prices (Colored green for CE, red for PE)
@@ -832,7 +884,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
           if (!leg) return;
           const color = leg.optionType === 'CE' ? '#22c55e' : '#ef4444';
           const s = priceChart!.addSeries(LineSeries, {
-            priceScaleId: 'right',
+            priceScaleId: 'left',
             color,
             lineWidth: 1,
             crosshairMarkerRadius: 4,
@@ -845,6 +897,12 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
           legPriceSeriesList.push({ legIndex: ld.legIndex, series: s });
         });
       }
+      priceChart.priceScale('right').applyOptions({
+        scaleMargins: { top: 0.08, bottom: 0.08 },
+      });
+      priceChart.priceScale('left').applyOptions({
+        scaleMargins: { top: 0.15, bottom: 0.15 },
+      });
     } else {
       priceChartRef.current = null;
     }

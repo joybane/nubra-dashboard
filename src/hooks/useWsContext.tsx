@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import type { WsMessage } from '../types';
+import { createChartSubRegistry } from '../lib/chartSubRegistry';
 import { createOcSubRegistry, ocKey } from '../lib/ocSubRegistry';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -29,6 +30,9 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
   // Option-chain subscriptions are shared by many consumers, so they are
   // reference counted here rather than sent per caller — see lib/ocSubRegistry.
   const ocSubs = useRef(createOcSubRegistry());
+  // Unlike listeners, upstream chart subscriptions belong to a particular socket.
+  // Retain the wanted set so a reconnect can restore every live chart feed.
+  const chartSubs = useRef(createChartSubRegistry());
   const [wsReady, setWsReady] = useState(false);
 
   const dispatch = useCallback((msg: WsMessage) => {
@@ -65,6 +69,17 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
       for (const key of ocSubs.current.active()) {
         const [asset, expiry, exchange] = key.split('|');
         ws.send(JSON.stringify({ action: 'subscribe_oc', asset, expiry, exchange }));
+      }
+      for (const { payload, interval, exchange } of chartSubs.current.active()) {
+        ws.send(
+          JSON.stringify({
+            action: 'subscribe',
+            bucket: 'index_bucket',
+            payload,
+            interval,
+            exchange,
+          }),
+        );
       }
     });
 
@@ -119,14 +134,20 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
 
   const subscribeChart = useCallback(
     (payload: object, interval: string, exchange = 'NSE') => {
-      send({ action: 'subscribe', bucket: 'index_bucket', payload, interval, exchange });
+      const subscription = { payload, interval, exchange };
+      if (chartSubs.current.acquire(subscription)) {
+        send({ action: 'subscribe', bucket: 'index_bucket', payload, interval, exchange });
+      }
     },
     [send],
   );
 
   const unsubscribeChart = useCallback(
     (payload: object, interval: string, exchange = 'NSE') => {
-      send({ action: 'unsubscribe', bucket: 'index_bucket', payload, interval, exchange });
+      const subscription = { payload, interval, exchange };
+      if (chartSubs.current.release(subscription)) {
+        send({ action: 'unsubscribe', bucket: 'index_bucket', payload, interval, exchange });
+      }
     },
     [send],
   );

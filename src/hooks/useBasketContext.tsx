@@ -425,6 +425,7 @@ export function BasketProvider({ children }: { children: React.ReactNode }) {
               validity_type: 'DAY',
               asset: l.asset,
               expiry: l.expiry,
+              exchange: l.exchange,
               derivative_type: 'OPT',
             })),
           }),

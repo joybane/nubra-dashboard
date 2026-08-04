@@ -4,10 +4,41 @@ import {
   forwardFromParity,
   forwardFromSpot,
   impliedVolatility,
+  mcxFutureSymbol,
+  mcxUnderlyingFutureExpiry,
   payoffAtExpiry,
   daysToExpiry,
   RISK_FREE,
 } from './GexService.ts';
+
+// ─── MCX: which future an option expiry settles into ──────────────────────────
+// Verified live 2026-08-03 — each chain's `cp` equalled its future's LTP exactly.
+const CRUDE_FUT = ['20260819', '20260921', '20261019', '20261119', '20261218', '20270119'];
+
+test('mcxUnderlyingFutureExpiry: picks the nearest future expiring on or after the option', () => {
+  expect(mcxUnderlyingFutureExpiry('20260817', CRUDE_FUT)).toBe('20260819');
+  expect(mcxUnderlyingFutureExpiry('20260917', CRUDE_FUT)).toBe('20260921');
+  expect(mcxUnderlyingFutureExpiry('20261015', CRUDE_FUT)).toBe('20261019');
+});
+
+test('mcxUnderlyingFutureExpiry: an option expiring the same day as its future takes that future', () => {
+  expect(mcxUnderlyingFutureExpiry('20260819', CRUDE_FUT)).toBe('20260819');
+});
+
+test('mcxUnderlyingFutureExpiry: order of the input list does not matter', () => {
+  expect(mcxUnderlyingFutureExpiry('20260817', [...CRUDE_FUT].reverse())).toBe('20260819');
+});
+
+test('mcxUnderlyingFutureExpiry: returns null rather than a stale future once none is left', () => {
+  expect(mcxUnderlyingFutureExpiry('20270201', CRUDE_FUT)).toBeNull();
+  expect(mcxUnderlyingFutureExpiry('20260817', [])).toBeNull();
+});
+
+test('mcxFutureSymbol: builds the zanskar name, which is also the trading symbol', () => {
+  expect(mcxFutureSymbol('CRUDEOIL', '20260819')).toBe('FUT_CRUDEOIL_20260819');
+  expect(mcxFutureSymbol('crudeoil', '20260819')).toBe('FUT_CRUDEOIL_20260819');
+  expect(mcxFutureSymbol('NATGASMINI', '20260824')).toBe('FUT_NATGASMINI_20260824');
+});
 
 // ─── blackScholes (Black-76 futures model) ─────────────────────────────────────────
 test('blackScholes: ATM greeks have the expected signs and magnitudes', () => {

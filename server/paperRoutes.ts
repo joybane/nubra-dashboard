@@ -96,6 +96,7 @@ interface PaperRouteDeps {
     derivativeType?: string,
     asset?: string,
     expiry?: string,
+    exchange?: string,
   ) => void;
   fireRules: (refId: number) => void;
   buildDebugResponse: () => Record<string, unknown>;
@@ -151,6 +152,7 @@ export function registerPaperRoutes({
     // For auto-subscription to the live option chain feed
     asset?: string;
     expiry?: string;
+    exchange?: string;
     derivative_type?: string;
     basket_group_id?: string;
     strategy_name?: string;
@@ -173,6 +175,7 @@ export function registerPaperRoutes({
         tag,
         asset,
         expiry,
+        exchange,
         derivative_type,
         basket_group_id,
         strategy_name,
@@ -181,7 +184,7 @@ export function registerPaperRoutes({
         return reply.status(400).send({ error: 'liveRefId is required for live simulation.' });
 
       // Auto-subscribe option chain so fills happen against real-time prices
-      subscribeForSim(nubraName, liveRefId, derivative_type, asset, expiry);
+      subscribeForSim(nubraName, liveRefId, derivative_type, asset, expiry, exchange);
 
       const order = simBroker.placeOrder({
         nubraName,
@@ -217,6 +220,7 @@ export function registerPaperRoutes({
     trigger_price?: number;
     asset?: string;
     expiry?: string;
+    exchange?: string;
     derivative_type?: string;
   }
 
@@ -226,7 +230,7 @@ export function registerPaperRoutes({
       if (!Array.isArray(req.body?.orders) || req.body.orders.length === 0)
         return reply.status(400).send({ error: 'orders must be a non-empty array' });
       const results = req.body.orders.map((o) => {
-        subscribeForSim(o.nubraName, o.liveRefId, o.derivative_type, o.asset, o.expiry);
+        subscribeForSim(o.nubraName, o.liveRefId, o.derivative_type, o.asset, o.expiry, o.exchange);
         return simBroker.placeOrder({
           nubraName: o.nubraName,
           liveRefId: o.liveRefId,
@@ -348,7 +352,8 @@ export function registerPaperRoutes({
         const asset = o.asset as string | undefined;
         const expiry = o.expiry as string | undefined;
         const derivType = o.derivative_type as string | undefined;
-        subscribeForSim(nubraName, liveRefId, derivType, asset, expiry);
+        const exchange = o.exchange as string | undefined;
+        subscribeForSim(nubraName, liveRefId, derivType, asset, expiry, exchange);
         return simBroker.placeOrder({
           nubraName,
           liveRefId,
@@ -502,6 +507,15 @@ export function registerPaperRoutes({
     order_price?: number;
     order_delivery_type: string;
     exchange?: string;
+    // Optional contract detail. The broker needs only the ref_id, but the local engine
+    // cannot price a leg it cannot identify, so without these the order ticket has no
+    // fallback at all and simply errors when the broker is unreachable.
+    strike?: number;
+    option_type?: string;
+    expiry?: string;
+    symbol?: string;
+    lot_size?: number;
+    ltp?: number;
   }
 
   interface BasketMarginBody {
@@ -524,6 +538,15 @@ export function registerPaperRoutes({
       iv?: number;
     }>;
   }
+
+  /**
+   * Nubra V3 rejects an order carrying more than one strategy tag:
+   *   "an order may carry at most one strategy tag, but this request would leave it
+   *    with 2: [nubra-dashboard, single-margin]"
+   * That HTTP 400 is what made the margin API look dead — it was never the static IP.
+   * One tag, everywhere.
+   */
+  const STRAT_TAG = 'nubra-dashboard';
 
   function v3Side(side: string | undefined): 'BUY' | 'SELL' {
     return (side || '').includes('SELL') ? 'SELL' : 'BUY';
@@ -551,13 +574,16 @@ export function registerPaperRoutes({
 
   function normalizeMarginResponse(data: Record<string, unknown>): Record<string, unknown> {
     const multiplier = 1.0; // remove the buffer to match raw broker margins exactly
+    // `marginInfo.totalMargin` is the margin the exchange actually blocks;
+    // `totalFundsRequired` is that plus brokerage/STT/GST, so it must stay a fallback —
+    // reading it first inflated every broker figure by the charges (₹2.8k on a NIFTY lot).
     const totalMargin = readNumber(data, [
       'total_margin',
-      'totalMargin',
-      'totalFundsRequired',
       'marginInfo.totalMargin',
+      'totalMargin',
       'data.total_margin',
       'data.totalMargin',
+      'totalFundsRequired',
     ]);
     const marginBenefit = readNumber(data, [
       'margin_benefit',
@@ -609,24 +635,33 @@ export function registerPaperRoutes({
     };
   }
 
-  function buildV3MarginOrders(orders: BasketMarginBody['orders']): Array<Record<string, unknown>> {
-    if (orders.length <= 1) {
-      const o = orders[0];
-      return [
-        {
-          refId: o.ref_id,
-          qty: o.order_qty,
-          side: v3Side(o.order_side),
-          deliveryType: v3Delivery(o.order_delivery_type),
-          priceType: o.order_price ? 'LIMIT' : 'MARKET',
-          validityType: 'IOC',
-          isMultiLeg: false,
-          executionMode: 'ENTRY',
-          entryPrice: o.order_price ?? 0,
-          stratTags: ['nubra-dashboard', 'single-margin'],
-        },
-      ];
-    }
+  function singleV3Order(o: BasketMarginBody['orders'][number]): Record<string, unknown> {
+    return {
+      refId: o.ref_id,
+      qty: o.order_qty,
+      side: v3Side(o.order_side),
+      deliveryType: v3Delivery(o.order_delivery_type),
+      priceType: o.order_price ? 'LIMIT' : 'MARKET',
+      validityType: 'IOC',
+      isMultiLeg: false,
+      executionMode: 'ENTRY',
+      entryPrice: o.order_price ?? 0,
+      stratTags: [STRAT_TAG],
+    };
+  }
+
+  function buildV3MarginOrders(
+    orders: BasketMarginBody['orders'],
+    exchange: string,
+  ): Array<Record<string, unknown>> {
+    if (orders.length <= 1) return [singleV3Order(orders[0])];
+
+    // MCX rejects the multi-leg ("Flexi") shape outright — "Strategy Flexi is not
+    // supported in MCX" — so a commodity basket is quoted as independent single orders
+    // in one request instead. The broker still prices them together; what is lost is
+    // only the cross-leg netting the Flexi wrapper would have expressed, and MCX SPAN
+    // nets by underlying anyway.
+    if (exchange.toUpperCase() === 'MCX') return orders.map(singleV3Order);
 
     const baseQty = Math.max(
       1,
@@ -651,7 +686,7 @@ export function registerPaperRoutes({
             unitQty: isSell ? -multiplier : multiplier,
           };
         }),
-        stratTags: ['nubra-dashboard', 'basket-margin'],
+        stratTags: [STRAT_TAG],
       },
     ];
   }
@@ -697,6 +732,80 @@ export function registerPaperRoutes({
     return clean;
   }
 
+  /**
+   * Fill each order in place with the live ref_id, LTP, IV and underlying spot from the
+   * option chain, and return the resolved leg detail for the client. The local margin
+   * engine prices from exactly these fields, so without this it would be working off
+   * whatever stale (or absent) values the client sent.
+   */
+  async function resolveOrdersFromChain(
+    orders: BasketMarginBody['orders'],
+    exchange: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const resolvedLegs: Array<Record<string, unknown>> = [];
+    const chainCache = new Map<string, any>();
+
+    for (const o of orders) {
+      const cleanExpiry = parseExpiryToYYYYMMDD(o.expiry);
+      if (o.symbol && cleanExpiry && o.strike && o.option_type) {
+        const cacheKey = `${o.symbol}__${cleanExpiry}`;
+        let chain = chainCache.get(cacheKey);
+        if (!chain) {
+          try {
+            const resData = await nubraGet(`/optionchains/${o.symbol}`, {
+              exchange,
+              expiry: cleanExpiry,
+            });
+            chain = resData.chain || resData;
+            chainCache.set(cacheKey, chain);
+          } catch (e: any) {
+            console.warn(`[basket-margin] failed to load optionchain for ${cacheKey}:`, e.message);
+          }
+        }
+        if (chain) {
+          const list = (o.option_type.toUpperCase() === 'CE' ? chain.ce : chain.pe) || [];
+          const matched = list.find((c: any) => {
+            const sp = Number(c.sp);
+            return o.strike != null && (sp === o.strike || sp === o.strike * 100);
+          });
+          if (matched) {
+            o.ref_id = Number(matched.ref_id || matched.refId);
+            // Feed the freshly resolved market data back onto the order itself, not only
+            // into resolvedLegs. The local margin engine prices from these fields and
+            // would otherwise use whatever stale (or absent) values the client sent.
+            const freshLtp = matched.ltp != null ? Number(matched.ltp) / 100 : 0;
+            if (freshLtp > 0) o.ltp = freshLtp;
+            // The chain reports IV as a decimal (0.1905); the margin engine wants percent.
+            if (matched.iv != null && Number(matched.iv) > 0) o.iv = Number(matched.iv) * 100;
+            const rawSpot = Number(chain.cp ?? chain.currentprice ?? 0) / 100; // cp is paise
+            if (rawSpot > 0) o.spot = rawSpot;
+            resolvedLegs.push({
+              strike: o.strike,
+              optionType: o.option_type,
+              expiry: o.expiry,
+              refId: o.ref_id,
+              ltp: matched.ltp ? Number(matched.ltp) / 100 : o.ltp || 0,
+              iv: matched.iv != null ? Number(matched.iv) : null,
+              delta: matched.delta != null ? Number(matched.delta) : null,
+              gamma: matched.gamma != null ? Number(matched.gamma) : null,
+              theta: matched.theta != null ? Number(matched.theta) : null,
+              vega: matched.vega != null ? Number(matched.vega) : null,
+              nubraName: String(matched.zanskar_name || matched.nubra_name || matched.symbol || ''),
+              lotSize: Number(matched.ls || matched.lot_size || o.lot_size || 1),
+            });
+            if (matched.symbol || matched.zanskar_name || matched.nubra_name) {
+              const name = String(
+                matched.zanskar_name || matched.nubra_name || matched.symbol || '',
+              );
+              simBroker.registerName(name, o.ref_id);
+            }
+          }
+        }
+      }
+    }
+    return resolvedLegs;
+  }
+
   fastify.post<{ Body: BasketMarginBody }>('/paper/margin/basket', async (req, reply) => {
     if (!requireAuth(reply)) return;
     try {
@@ -704,76 +813,11 @@ export function registerPaperRoutes({
       if (!Array.isArray(orders) || orders.length === 0)
         return reply.status(400).send({ error: 'orders must be non-empty' });
 
-      const resolvedLegs: Array<Record<string, unknown>> = [];
-      const chainCache = new Map<string, any>();
-
-      for (const o of orders) {
-        const cleanExpiry = parseExpiryToYYYYMMDD(o.expiry);
-        if (o.symbol && cleanExpiry && o.strike && o.option_type) {
-          const cacheKey = `${o.symbol}__${cleanExpiry}`;
-          let chain = chainCache.get(cacheKey);
-          if (!chain) {
-            try {
-              const resData = await nubraGet(`/optionchains/${o.symbol}`, {
-                exchange,
-                expiry: cleanExpiry,
-              });
-              chain = resData.chain || resData;
-              chainCache.set(cacheKey, chain);
-            } catch (e: any) {
-              console.warn(
-                `[basket-margin] failed to load optionchain for ${cacheKey}:`,
-                e.message,
-              );
-            }
-          }
-          if (chain) {
-            const list = (o.option_type.toUpperCase() === 'CE' ? chain.ce : chain.pe) || [];
-            const matched = list.find((c: any) => {
-              const sp = Number(c.sp);
-              return o.strike != null && (sp === o.strike || sp === o.strike * 100);
-            });
-            if (matched) {
-              o.ref_id = Number(matched.ref_id || matched.refId);
-              // Feed the freshly resolved market data back onto the order itself, not only
-              // into resolvedLegs. The local margin engine prices from these fields and
-              // would otherwise use whatever stale (or absent) values the client sent.
-              const freshLtp = matched.ltp != null ? Number(matched.ltp) / 100 : 0;
-              if (freshLtp > 0) o.ltp = freshLtp;
-              // The chain reports IV as a decimal (0.1905); the margin engine wants percent.
-              if (matched.iv != null && Number(matched.iv) > 0) o.iv = Number(matched.iv) * 100;
-              const rawSpot = Number(chain.cp ?? chain.currentprice ?? 0) / 100; // cp is paise
-              if (rawSpot > 0) o.spot = rawSpot;
-              resolvedLegs.push({
-                strike: o.strike,
-                optionType: o.option_type,
-                expiry: o.expiry,
-                refId: o.ref_id,
-                ltp: matched.ltp ? Number(matched.ltp) / 100 : o.ltp || 0,
-                iv: matched.iv != null ? Number(matched.iv) : null,
-                delta: matched.delta != null ? Number(matched.delta) : null,
-                gamma: matched.gamma != null ? Number(matched.gamma) : null,
-                theta: matched.theta != null ? Number(matched.theta) : null,
-                vega: matched.vega != null ? Number(matched.vega) : null,
-                nubraName: String(
-                  matched.zanskar_name || matched.nubra_name || matched.symbol || '',
-                ),
-                lotSize: Number(matched.ls || matched.lot_size || o.lot_size || 1),
-              });
-              if (matched.symbol || matched.zanskar_name || matched.nubra_name) {
-                const name = String(
-                  matched.zanskar_name || matched.nubra_name || matched.symbol || '',
-                );
-                simBroker.registerName(name, o.ref_id);
-              }
-            }
-          }
-        }
-      }
+      const resolvedLegs = await resolveOrdersFromChain(orders, exchange);
 
       const v3Payload = {
         requestType: 'NEW',
-        orders: buildV3MarginOrders(orders),
+        orders: buildV3MarginOrders(orders, exchange),
       };
       console.log('[basket-margin-v3] request:', JSON.stringify(v3Payload));
       try {
@@ -790,7 +834,7 @@ export function registerPaperRoutes({
         throw new Error('Broker returned no total margin.');
       } catch (err) {
         const v3Error = (err as Error).message;
-        const localMargin = calculateLocalBasketMargin(orders);
+        const localMargin = calculateLocalBasketMargin(orders, undefined, undefined, exchange);
         if (localMargin && Number(localMargin.total_margin || 0) > 0) {
           const normalizedLocal = normalizeMarginResponse(localMargin as any);
           console.warn(
@@ -953,8 +997,15 @@ export function registerPaperRoutes({
   fastify.post<{ Body: MarginBody }>('/paper/margin', async (req, reply) => {
     if (!requireAuth(reply)) return;
     try {
-      const { liveRefId, order_qty, order_side, order_type, order_price, order_delivery_type } =
-        req.body;
+      const {
+        liveRefId,
+        order_qty,
+        order_side,
+        order_type,
+        order_price,
+        order_delivery_type,
+        exchange = 'NSE',
+      } = req.body;
       // Nubra API: ORDER_TYPE_MARKET is deprecated — use REGULAR + price_type
       const isMarket = order_type === 'ORDER_TYPE_MARKET' || !order_price;
       const priceType = isMarket ? 'MARKET' : 'LIMIT';
@@ -967,11 +1018,14 @@ export function registerPaperRoutes({
             side: v3Side(order_side),
             deliveryType: v3Delivery(order_delivery_type),
             priceType,
-            validityType: 'DAY',
+            // "Use a Limit Order for Day validity." — the broker rejects MARKET+DAY
+            // outright, which 502'd every single-order margin quote. Validity does not
+            // change the figure; IOC is what the basket route has always sent.
+            validityType: isMarket ? 'IOC' : 'DAY',
             isMultiLeg: false,
             executionMode: 'ENTRY',
             entryPrice: order_price ?? 0,
-            stratTags: ['nubra-dashboard', 'single-margin'],
+            stratTags: [STRAT_TAG],
           },
         ],
       };
@@ -985,11 +1039,44 @@ export function registerPaperRoutes({
         );
         const normalized = normalizeMarginResponse(v3Data);
         console.log('[margin-v3] response:', JSON.stringify(normalized));
-        return reply.send(normalized);
+        if (Number(normalized.total_margin ?? 0) > 0) return reply.send(normalized);
+        throw new Error('Broker returned no total margin.');
       } catch (err) {
-        return reply
-          .status(502)
-          .send({ error: `Broker margin unavailable. V3: ${(err as Error).message}` });
+        const v3Error = (err as Error).message;
+        // Same fallback the basket route has always had. It needs the contract detail the
+        // client optionally sends; with only a ref_id there is nothing to price.
+        const { strike, option_type, expiry, symbol, lot_size, ltp } = req.body;
+        if (strike && option_type && symbol) {
+          const orders = [
+            {
+              ref_id: liveRefId,
+              order_qty,
+              order_side,
+              order_type,
+              order_price,
+              order_delivery_type,
+              strike,
+              option_type,
+              expiry,
+              symbol,
+              lot_size,
+              ltp,
+            },
+          ];
+          await resolveOrdersFromChain(orders, exchange);
+          const localMargin = calculateLocalBasketMargin(orders, symbol, undefined, exchange);
+          if (localMargin && Number(localMargin.total_margin || 0) > 0) {
+            console.warn(
+              '[margin] broker unavailable, using local margin:',
+              JSON.stringify({ source: localMargin.source, broker_error: `V3: ${v3Error}` }),
+            );
+            return reply.send({
+              ...normalizeMarginResponse(localMargin as any),
+              broker_error: `Broker margin unavailable. V3: ${v3Error}`,
+            });
+          }
+        }
+        return reply.status(502).send({ error: `Broker margin unavailable. V3: ${v3Error}` });
       }
     } catch (err: unknown) {
       return reply.status(500).send({ error: (err as Error).message });

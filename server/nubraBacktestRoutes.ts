@@ -67,6 +67,9 @@ export function registerNubraBacktestRoutes({
 
   interface NbBar {
     ts: string;
+    open: number;
+    high: number;
+    low: number;
     close: number;
     iv: number;
     vol: number;
@@ -74,6 +77,9 @@ export function registerNubraBacktestRoutes({
   }
 
   function nbParseBars(chart: Record<string, unknown>): NbBar[] {
+    const opens = (chart.open || []) as Array<{ ts?: string | number; v: number }>;
+    const highs = (chart.high || []) as Array<{ ts?: string | number; v: number }>;
+    const lows = (chart.low || []) as Array<{ ts?: string | number; v: number }>;
     const closes = (chart.close || []) as Array<{ ts?: string | number; v: number }>;
     const ivs = (chart.iv_mid || []) as Array<{ ts?: string | number; v: number }>;
     const vols = (chart.cumulative_volume || []) as Array<{ ts?: string | number; v: number }>;
@@ -89,6 +95,9 @@ export function registerNubraBacktestRoutes({
     };
 
     const sortedCloses = sortByTs(closes);
+    const sortedOpens = sortByTs(opens);
+    const sortedHighs = sortByTs(highs);
+    const sortedLows = sortByTs(lows);
     const sortedIvs = sortByTs(ivs);
     const sortedVols = sortByTs(vols);
     const sortedOis = sortByTs(ois);
@@ -112,9 +121,16 @@ export function registerNubraBacktestRoutes({
     const bars: NbBar[] = [];
     for (const c of sortedCloses) {
       const ts = String(c.ts!);
+      const close = c.v / 100;
+      const open = getAlignedValue(sortedOpens, ts) / 100 || close;
+      const high = getAlignedValue(sortedHighs, ts) / 100 || Math.max(open, close);
+      const low = getAlignedValue(sortedLows, ts) / 100 || Math.min(open, close);
       bars.push({
         ts,
-        close: c.v / 100,
+        open,
+        high,
+        low,
+        close,
         iv: getAlignedValue(sortedIvs, ts),
         vol: getAlignedValue(sortedVols, ts),
         oi: getAlignedValue(sortedOis, ts),
@@ -201,6 +217,43 @@ export function registerNubraBacktestRoutes({
     return out;
   }
 
+  function nbResolveExchange(underlying: string, requested?: string): string {
+    const explicit = String(requested || '').toUpperCase();
+    if (explicit === 'NSE' || explicit === 'BSE' || explicit === 'MCX') return explicit;
+    return underlying === 'SENSEX' || underlying === 'BANKEX' ? 'BSE' : 'NSE';
+  }
+
+  function nbResolveUnderlyingSeries(
+    underlying: string,
+    exchange: string,
+    refdata: Record<string, unknown>[],
+    optionExpiry: number,
+  ): { symbol: string; type: 'INDEX' | 'STOCK' | 'FUT' } | null {
+    if (exchange === 'MCX') {
+      const futures = refdata
+        .filter((item) => item.asset === underlying && item.derivative_type === 'FUT')
+        .map((item) => ({
+          expiry: Number(item.expiry || 0),
+          symbol: String(item.stock_name || item.zanskar_name || ''),
+        }))
+        .filter((item) => item.expiry > 0 && item.symbol)
+        .sort((a, b) => a.expiry - b.expiry);
+      const future = futures.find((item) => item.expiry >= optionExpiry) || futures[0];
+      return future ? { symbol: future.symbol, type: 'FUT' } : null;
+    }
+
+    const isIndex = [
+      'NIFTY',
+      'BANKNIFTY',
+      'FINNIFTY',
+      'MIDCPNIFTY',
+      'SENSEX',
+      'BANKEX',
+      'INDIAVIX',
+    ].includes(underlying);
+    return { symbol: underlying, type: isIndex ? 'INDEX' : 'STOCK' };
+  }
+
   // ─── Debug timeseries endpoint ───
   fastify.get('/api/debug-chart', async (req, reply) => {
     try {
@@ -218,7 +271,13 @@ export function registerNubraBacktestRoutes({
   // ─── Nubra Backtest — Routes ──────────────────────────────────────────────────
 
   fastify.get<{
-    Querystring: { underlying?: string; date?: string; time?: string; expiry?: string };
+    Querystring: {
+      underlying?: string;
+      date?: string;
+      time?: string;
+      expiry?: string;
+      exchange?: string;
+    };
   }>('/api/nubra-backtest/chain', async (req, reply) => {
     if (!requireAuth(reply)) return;
     const { underlying = 'NIFTY', date, time = '09:20', expiry } = req.query;
@@ -229,18 +288,76 @@ export function registerNubraBacktestRoutes({
 
     try {
       const t0 = Date.now();
-      const exchange = underlying === 'SENSEX' || underlying === 'BANKEX' ? 'BSE' : 'NSE';
-      const indexName = underlying;
-      const isIndex = [
-        'NIFTY',
-        'BANKNIFTY',
-        'FINNIFTY',
-        'MIDCPNIFTY',
-        'SENSEX',
-        'BANKEX',
-        'INDIAVIX',
-      ].includes(underlying);
-      const spotType = isIndex ? 'INDEX' : 'STOCK';
+      const exchange = nbResolveExchange(underlying, req.query.exchange);
+      const expiryFlag = exchange === 'MCX' ? 'MONTH' : 'WEEK';
+
+      // Resolve the option expiry first. MCX has no cash/index ticker named
+      // CRUDEOIL; its historical underlying is the futures contract backing the
+      // selected option expiry (for example FUT_CRUDEOIL_20260819).
+      const refdata = await nbGetRefdataForDate(exchange, date);
+      if (!refdata.length) {
+        return {
+          ok: false,
+          error: `Could not fetch option refdata for ${date}.`,
+          underlying,
+          date,
+          time,
+          spot: 0,
+          expiry: expiry || '',
+          expiryFlag,
+          availableExpiries: [],
+          chain: [],
+        };
+      }
+      const assetRef = refdata.filter(
+        (item) => item.asset === underlying && item.derivative_type === 'OPT',
+      );
+      if (!assetRef.length) {
+        return {
+          ok: false,
+          error: `No options found for ${underlying} on ${date}.`,
+          underlying,
+          date,
+          time,
+          spot: 0,
+          expiry: expiry || '',
+          expiryFlag,
+          availableExpiries: [],
+          chain: [],
+        };
+      }
+      const expiryNumbers = Array.from(new Set(assetRef.map((item) => Number(item.expiry)))).sort(
+        (a, b) => a - b,
+      );
+      const expiries = expiryNumbers.map((num) => {
+        const value = String(num);
+        return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+      });
+      const selectedExpiry = expiry && expiries.includes(expiry) ? expiry : expiries[0];
+      const targetExpiryNum = Number(selectedExpiry.replace(/-/g, ''));
+      const expiryOptions = assetRef.filter((item) => Number(item.expiry) === targetExpiryNum);
+      const underlyingSeries = nbResolveUnderlyingSeries(
+        underlying,
+        exchange,
+        refdata,
+        targetExpiryNum,
+      );
+      if (!underlyingSeries) {
+        return {
+          ok: false,
+          error: `Could not resolve the ${underlying} futures contract for expiry ${selectedExpiry}.`,
+          underlying,
+          date,
+          time,
+          spot: 0,
+          expiry: selectedExpiry,
+          expiryFlag,
+          availableExpiries: expiries.map((value) => ({ expiry: value, flag: expiryFlag })),
+          chain: [],
+        };
+      }
+      const indexName = underlyingSeries.symbol;
+      const spotType = underlyingSeries.type;
 
       // 1. Fetch spot on trade date (1m interval to get precise spot at selected entryTime)
       const spotRes = await nbFetchTs(
@@ -283,7 +400,7 @@ export function registerNubraBacktestRoutes({
             query: [
               {
                 exchange,
-                type: 'INDEX',
+                type: spotType,
                 values: [indexName],
                 fields: ['close'],
                 startDate: `${date}T00:00:00.000Z`,
@@ -312,56 +429,11 @@ export function registerNubraBacktestRoutes({
           time,
           spot: 0,
           expiry: expiry || '',
-          expiryFlag: 'WEEK',
+          expiryFlag,
           availableExpiries: [],
           chain: [],
         };
       }
-
-      // 2. Fetch historical refdata for the target date to resolve option symbols and expiries
-      const refdata = await nbGetRefdataForDate(exchange, date);
-      if (!refdata.length) {
-        return {
-          ok: false,
-          error: `Could not fetch option refdata for ${date}.`,
-          underlying,
-          date,
-          time,
-          spot,
-          expiry: expiry || '',
-          expiryFlag: 'WEEK',
-          availableExpiries: [],
-          chain: [],
-        };
-      }
-
-      // Filter NSE/BSE options for the requested underlying asset
-      const assetRef = refdata.filter((x) => x.asset === underlying && x.derivative_type === 'OPT');
-      if (!assetRef.length) {
-        return {
-          ok: false,
-          error: `No options found for ${underlying} on ${date}.`,
-          underlying,
-          date,
-          time,
-          spot,
-          expiry: expiry || '',
-          expiryFlag: 'WEEK',
-          availableExpiries: [],
-          chain: [],
-        };
-      }
-
-      // Collect all unique available expiries and format as YYYY-MM-DD
-      const expiryNumbers = Array.from(new Set(assetRef.map((x) => x.expiry as number))).sort();
-      const expiries = expiryNumbers.map((num) => {
-        const s = String(num);
-        return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
-      });
-
-      const selectedExpiry = expiry && expiries.includes(expiry) ? expiry : expiries[0];
-      const targetExpiryNum = Number(selectedExpiry.replace(/-/g, ''));
-      const expiryOptions = assetRef.filter((x) => x.expiry === targetExpiryNum);
 
       // 3. Generate ATM ± 14 strikes
       const availableStrikes = Array.from(
@@ -500,8 +572,8 @@ export function registerNubraBacktestRoutes({
         time,
         spot,
         expiry: selectedExpiry,
-        expiryFlag: 'WEEK',
-        availableExpiries: expiries.map((e) => ({ expiry: e, flag: 'WEEK' })),
+        expiryFlag,
+        availableExpiries: expiries.map((e) => ({ expiry: e, flag: expiryFlag })),
         chain,
       };
     } catch (e) {
@@ -519,6 +591,7 @@ export function registerNubraBacktestRoutes({
   }
   interface NbEvalBody {
     underlying: string;
+    exchange?: string;
     date: string;
     expiry: string;
     entryTime: string;
@@ -540,22 +613,25 @@ export function registerNubraBacktestRoutes({
     try {
       const t0 = Date.now();
       const { underlying, date, expiry, entryTime, exitTime, legs, lotSize } = body;
-      const exchange = underlying === 'SENSEX' || underlying === 'BANKEX' ? 'BSE' : 'NSE';
-      const indexName = underlying;
-      const isIndex = [
-        'NIFTY',
-        'BANKNIFTY',
-        'FINNIFTY',
-        'MIDCPNIFTY',
-        'SENSEX',
-        'BANKEX',
-        'INDIAVIX',
-      ].includes(underlying);
-      const spotType = isIndex ? 'INDEX' : 'STOCK';
+      const exchange = nbResolveExchange(underlying, body.exchange);
 
       // 1. Fetch historical refdata to map legs to option symbols
       const refdata = await nbGetRefdataForDate(exchange, date);
       const targetExpiryNum = Number(expiry.replace(/-/g, ''));
+      const underlyingSeries = nbResolveUnderlyingSeries(
+        underlying,
+        exchange,
+        refdata,
+        targetExpiryNum,
+      );
+      if (!underlyingSeries) {
+        return {
+          ok: false,
+          error: `Could not resolve the ${underlying} futures contract for expiry ${expiry}.`,
+        };
+      }
+      const indexName = underlyingSeries.symbol;
+      const spotType = underlyingSeries.type;
       const expiryOptions = refdata.filter(
         (x) =>
           x.asset === underlying && x.derivative_type === 'OPT' && x.expiry === targetExpiryNum,
@@ -581,7 +657,15 @@ export function registerNubraBacktestRoutes({
       // 2. Fetch 1m candles for option legs + 1m spot index close
       const [optRes, spotRes] = await Promise.all([
         nbFetchTs(exchange, 'OPT', legSymbols, ['close'], date, '1m', false),
-        nbFetchTs(exchange, spotType, [indexName], ['close'], date, '1m', false),
+        nbFetchTs(
+          exchange,
+          spotType,
+          [indexName],
+          ['open', 'high', 'low', 'close'],
+          date,
+          '1m',
+          false,
+        ),
       ]);
       const optAll = nbCollect(optRes);
       const spotAll = nbCollect(spotRes);
@@ -590,9 +674,9 @@ export function registerNubraBacktestRoutes({
 
       const underlyingBars = spotBars.map((b) => ({
         time: Number(BigInt(b.ts) / 1000000000n) + IST_OFFSET,
-        open: b.close,
-        high: b.close,
-        low: b.close,
+        open: b.open,
+        high: b.high,
+        low: b.low,
         close: b.close,
       }));
 
@@ -606,7 +690,7 @@ export function registerNubraBacktestRoutes({
             query: [
               {
                 exchange,
-                type: 'INDEX',
+                type: spotType,
                 values: [indexName],
                 fields: ['close'],
                 startDate: `${date}T00:00:00.000Z`,

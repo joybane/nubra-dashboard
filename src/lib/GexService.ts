@@ -140,6 +140,43 @@ export function forwardFromParity(
 }
 
 /**
+ * Which futures contract an MCX option expiry settles into.
+ *
+ * Commodity options are options ON FUTURES, and the two expiries do not coincide —
+ * CRUDEOIL options expire a couple of days before the future they deliver. The rule
+ * is the nearest futures expiry at or after the option's, verified exactly against
+ * live data on 2026-08-03, where each chain's `cp` equalled its future's LTP to the
+ * paisa:
+ *
+ *   option 20260817 → FUT_CRUDEOIL_20260819   both 7608.00
+ *   option 20260917 → FUT_CRUDEOIL_20260921   both 7449.00
+ *   option 20261015 → FUT_CRUDEOIL_20261019   both 7287.00
+ *
+ * This matters because it makes the forward directly observable. On NIFTY the forward
+ * has to be implied from put-call parity (see `forwardFromParity`); on MCX the futures
+ * price *is* the forward, so Black-76 needs no inference at all.
+ *
+ * Returns null when no futures expiry is on or after the option's — the contract has
+ * rolled off and the caller should fall back rather than price against a stale future.
+ */
+export function mcxUnderlyingFutureExpiry(
+  optionExpiry: string,
+  futureExpiries: readonly string[],
+): string | null {
+  let best: string | null = null;
+  for (const e of futureExpiries) {
+    if (e < optionExpiry) continue;
+    if (best === null || e < best) best = e;
+  }
+  return best;
+}
+
+/** Zanskar name of an MCX futures contract, which is also its trading symbol. */
+export function mcxFutureSymbol(asset: string, futureExpiry: string): string {
+  return `FUT_${asset.toUpperCase()}_${futureExpiry}`;
+}
+
+/**
  * Risk-free rate used by every client-side Greek reconstruction, so the overlay, the strategy
  * view and the backtest views all price legs off one forward convention.
  *

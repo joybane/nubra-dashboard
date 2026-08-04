@@ -21,6 +21,8 @@
 // within its own band. A far-dated selection whose band holds no data reports no
 // rank rather than borrowing a shorter one.
 
+import { expiryInstantMs } from './utils';
+
 export interface IvObservation {
   date: string;
   dte: number;
@@ -169,13 +171,12 @@ export function computeIvRank(
 
 /**
  * Calendar days from now to an expiry, accepting both wire formats the chain
- * uses ('YYYYMMDD' and 'YYYY-MM-DD'). Expiry is taken as 15:30 IST, matching
- * yearsToExpiry in useGreekOverlay, so a reading taken on expiry morning is 0 DTE
- * rather than −1.
+ * uses ('YYYYMMDD' and 'YYYY-MM-DD'). Expiry is taken as the exchange's close —
+ * 15:30 IST on NSE/BSE, 23:30 on MCX — matching yearsToExpiry in useGreekOverlay,
+ * so a reading taken on expiry morning is 0 DTE rather than −1.
  */
-export function dteFromExpiry(expiry: string, nowMs = Date.now()): number {
-  const iso = /^\d{8}$/.test(expiry) ? expiry.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : expiry;
-  const end = Date.parse(`${iso}T10:00:00Z`); // 15:30 IST
+export function dteFromExpiry(expiry: string, nowMs = Date.now(), exchange?: string): number {
+  const end = expiryInstantMs(expiry, exchange);
   if (!Number.isFinite(end)) return NaN;
   return Math.max(0, Math.round((end - nowMs) / 86_400_000));
 }

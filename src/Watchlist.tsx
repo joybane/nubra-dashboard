@@ -13,16 +13,6 @@ import type {
 } from './types';
 import { fmtPrice } from './lib/utils';
 
-const KNOWN_INDICES = new Set([
-  'NIFTY',
-  'BANKNIFTY',
-  'FINNIFTY',
-  'MIDCPNIFTY',
-  'SENSEX',
-  'BANKEX',
-  'NIFTY50',
-]);
-
 interface LivePrice {
   ltp: number;
   chg?: number;
@@ -109,8 +99,7 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
     // Subscribe each item to the OHLCV feed so ticks flow
     for (const item of spotItems) {
       const sym = (item.nubraName || item.underlying).toUpperCase();
-      const isIdx = KNOWN_INDICES.has(item.underlying.toUpperCase());
-      const payload = isIdx ? { indexes: [sym] } : { instruments: [sym] };
+      const payload = { indexes: [sym] };
       subscribeChart(payload, '1m', item.exchange);
     }
 
@@ -157,8 +146,7 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
       unsub2();
       for (const item of spotItems) {
         const sym = (item.nubraName || item.underlying).toUpperCase();
-        const isIdx = KNOWN_INDICES.has(item.underlying.toUpperCase());
-        const payload = isIdx ? { indexes: [sym] } : { instruments: [sym] };
+        const payload = { indexes: [sym] };
         unsubscribeChart(payload, '1m', item.exchange);
       }
     };

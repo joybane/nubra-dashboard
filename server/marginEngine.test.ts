@@ -73,8 +73,11 @@ test('BULL call spread (debit) is defined-risk, not a naked short', () => {
 });
 
 test('BEAR put spread (debit) is defined-risk too', () => {
-  const r = calc([leg('BUY', 'PE', 24300, 120), leg('SELL', 'PE', 24200, 80)]);
-  expect(rupees(r.span)).toBeLessThan((24300 - 24200) * QTY);
+  // Priced above intrinsic, or the IV solve fails and the legs are not real options.
+  const r = calc([leg('BUY', 'PE', 24300, 420), leg('SELL', 'PE', 24200, 330)]);
+  const naked = calc([leg('SELL', 'PE', 24200, 330)]);
+  expect(rupees(r.opt_prem)).toBeCloseTo((420 - 330) * QTY, 0); // the debit, in cash
+  expect(r.total_margin).toBeLessThan(naked.total_margin);
   expect(rupees(r.total_margin)).toBeLessThan(60_000);
 });
 
@@ -83,11 +86,10 @@ test('credit spread costs far less than the naked short it hedges', () => {
   const spread = calc([leg('SELL', 'CE', 24300, 120), leg('BUY', 'CE', 24400, 80)]);
   expect(spread.total_margin).toBeLessThan(naked.total_margin);
   expect(spread.margin_benefit).toBeGreaterThan(0);
-  // Span lands on the full width: scan risk is the max loss (width less credit) and
-  // net option value adds the credit back, because the credit is received as cash
-  // and must not reduce the margin as well. Nothing payable — it is a net credit.
-  expect(rupees(spread.span)).toBeCloseTo((24400 - 24300) * QTY, -2);
-  expect(rupees(spread.opt_prem)).toBe(0);
+  // The long wing caps scan risk at the width, but the short still has to be bought
+  // back, so span keeps that leg's value. It must stay well under the naked short's.
+  expect(spread.span).toBeLessThan(naked.span);
+  expect(rupees(spread.opt_prem)).toBe(0); // net credit — nothing payable
 });
 
 test('short strangle nets to roughly one leg of span, but ELM on both', () => {
@@ -101,14 +103,21 @@ test('short strangle nets to roughly one leg of span, but ELM on both', () => {
 });
 
 test('iron condor is defined-risk on both wings', () => {
-  const r = calc([
-    leg('BUY', 'PE', 24200, 60),
-    leg('SELL', 'PE', 24300, 90),
-    leg('SELL', 'CE', 24400, 90),
-    leg('BUY', 'CE', 24500, 60),
-  ]);
-  expect(rupees(r.span)).toBeLessThan(100 * QTY * 2); // both wings capped by width
-  expect(r.margin_benefit).toBeGreaterThan(0);
+  // Both shorts out of the money and both wings 300 wide, so the premiums are
+  // arbitrage-consistent and the IV solve has something real to work with.
+  const wings = [
+    leg('BUY', 'PE', 23400, 55),
+    leg('SELL', 'PE', 23700, 90),
+    leg('SELL', 'CE', 24300, 95),
+    leg('BUY', 'CE', 24600, 50),
+  ];
+  const condor = calc(wings);
+  const strangle = calc([wings[1], wings[2]]);
+  // The wings cap the scan loss at the widths; what is left in span is the cost of
+  // buying the two shorts back.
+  expect(rupees(condor.span)).toBeLessThan(300 * QTY * 2 + (90 + 95) * QTY);
+  expect(condor.span).toBeLessThan(strangle.span);
+  expect(condor.margin_benefit).toBeGreaterThan(0);
 });
 
 test('a diagonal is not priced as if it were a vertical', () => {
@@ -201,6 +210,131 @@ test('IV is calibrated from the traded premium, so a wider premium costs more sp
   const cheap = calc([leg('SELL', 'CE', 24000, 100)]);
   const rich = calc([leg('SELL', 'CE', 24000, 400)]);
   expect(rich.span).toBeGreaterThan(cheap.span);
+});
+
+// ─── Calibration anchors ─────────────────────────────────────────────────────
+// Real positions quoted by the broker on 2026-08-04, captured by
+// scripts/collectMarginDataset.ts. These are the only tests here that can tell you the
+// engine is *right* rather than merely self-consistent — everything above checks shape.
+// A change that improves the model moves these closer; a change that breaks it moves
+// them apart. Tolerances are the measured residual with headroom, not aspirations.
+
+const anchor = (
+  name: string,
+  exchange: string,
+  symbol: string,
+  brokerRupees: number,
+  tolPct: number,
+  orders: BasketMarginOrder[],
+) =>
+  test(`broker anchor: ${name}`, () => {
+    const r = calculateLocalBasketMargin(orders, symbol, ON('2026-08-04'), exchange)!;
+    const err = (rupees(r.total_margin) - brokerRupees) / brokerRupees;
+    expect(Math.abs(err) * 100).toBeLessThan(tolPct);
+  });
+
+const nifty = (
+  side: 'BUY' | 'SELL',
+  ot: 'CE' | 'PE',
+  strike: number,
+  ltp: number,
+  iv: number,
+): BasketMarginOrder => ({
+  order_qty: 65,
+  order_side: side,
+  option_type: ot,
+  strike,
+  ltp,
+  iv,
+  symbol: 'NIFTY',
+  expiry: '20260811',
+  spot: 24598.6,
+});
+
+anchor('NIFTY short ATM CE', 'NSE', 'NIFTY', 180593.79, 4, [
+  nifty('SELL', 'CE', 24600, 144.9, 10.27),
+]);
+anchor('NIFTY short ATM PE', 'NSE', 'NIFTY', 168411.29, 6, [
+  nifty('SELL', 'PE', 24600, 139.4, 10.26),
+]);
+anchor('NIFTY short straddle', 'NSE', 'NIFTY', 212800.38, 4, [
+  nifty('SELL', 'CE', 24600, 144.9, 10.27),
+  nifty('SELL', 'PE', 24600, 139.4, 10.26),
+]);
+// The vertical is the case the old single netted option-value term got wrong: it
+// returned ~₹34.7k against the broker's ₹41.6k until long and short value were split.
+anchor('NIFTY call vertical', 'NSE', 'NIFTY', 41638.09, 8, [
+  nifty('BUY', 'CE', 24600, 144.9, 10.27),
+  nifty('SELL', 'CE', 24900, 38.45, 9.97),
+]);
+anchor('NIFTY iron condor', 'NSE', 'NIFTY', 84693.82, 8, [
+  nifty('SELL', 'CE', 24900, 38.45, 9.97),
+  nifty('BUY', 'CE', 25200, 8.85, 10.65),
+  nifty('SELL', 'PE', 24300, 44.1, 10.91),
+  nifty('BUY', 'PE', 24000, 15.15, 12.49),
+]);
+
+const crude = (side: 'BUY' | 'SELL', ot: 'CE' | 'PE', ltp: number): BasketMarginOrder => ({
+  order_qty: 100,
+  order_side: side,
+  option_type: ot,
+  strike: 7750,
+  ltp,
+  iv: 63.76,
+  symbol: 'CRUDEOIL',
+  expiry: '20260817',
+  spot: 7749,
+});
+
+anchor('CRUDEOIL short ATM CE', 'MCX', 'CRUDEOIL', 271776.25, 4, [crude('SELL', 'CE', 377.5)]);
+anchor('CRUDEOIL short straddle', 'MCX', 'CRUDEOIL', 554292.5, 4, [
+  crude('SELL', 'CE', 377.5),
+  crude('SELL', 'PE', 381.6),
+]);
+anchor('GOLDM short ATM CE', 'MCX', 'GOLDM', 157268.52, 4, [
+  {
+    order_qty: 10,
+    order_side: 'SELL',
+    option_type: 'CE',
+    strike: 142500,
+    ltp: 2870,
+    iv: 19.01,
+    symbol: 'GOLDM',
+    expiry: '20260828',
+    spot: 142617,
+  },
+]);
+
+test('MCX gives no portfolio netting — a straddle costs exactly its two legs', () => {
+  // The opposite of NSE, where the same straddle saves 39%. Measured: ₹554,292.50 for
+  // the pair against ₹271,776.25 + ₹282,516.25 apart, to the paisa.
+  const ce = calculateLocalBasketMargin([crude('SELL', 'CE', 377.5)], 'CRUDEOIL', NOW, 'MCX')!;
+  const pe = calculateLocalBasketMargin([crude('SELL', 'PE', 381.6)], 'CRUDEOIL', NOW, 'MCX')!;
+  const both = calculateLocalBasketMargin(
+    [crude('SELL', 'CE', 377.5), crude('SELL', 'PE', 381.6)],
+    'CRUDEOIL',
+    NOW,
+    'MCX',
+  )!;
+  expect(both.total_margin).toBe(ce.total_margin + pe.total_margin);
+  expect(both.margin_benefit).toBe(0);
+});
+
+test('an MCX commodity outside the measured table is flagged, not quoted silently', () => {
+  const r = calculateLocalBasketMargin(
+    [{ ...crude('SELL', 'CE', 377.5), symbol: 'MCXBULLDEX' }],
+    'MCXBULLDEX',
+    NOW,
+    'MCX',
+  )!;
+  expect(r.message).toMatch(/not in the measured rate table/i);
+  expect(r.total_margin).toBeGreaterThan(0);
+});
+
+test('MCX never routes through the NSE scenario engine', () => {
+  const r = calculateLocalBasketMargin([crude('SELL', 'CE', 377.5)], 'CRUDEOIL', NOW, 'MCX')!;
+  expect(r.source).toBe('local-mcx-rate');
+  expect(r.exposure).toBe(0); // MCX quotes one blended charge, no separate ELM
 });
 
 test('non-option legs are reported as excluded rather than dropped silently', () => {

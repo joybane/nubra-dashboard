@@ -41,6 +41,18 @@ function saveState(s: WorkspaceState): void {
   }
 }
 
+/** Replace the active pane's instrument without changing the user's current view/tab. */
+export function withInstrumentInActivePane(
+  state: WorkspaceState,
+  instrument: Instrument,
+): WorkspaceState {
+  const paneId = state.activePane || state.panes[0]?.id;
+  return {
+    ...state,
+    panes: state.panes.map((pane) => (pane.id === paneId ? { ...pane, instrument } : pane)),
+  };
+}
+
 export const LAYOUT_PANE_COUNT: Record<LayoutType, number> = {
   single: 1,
   hsplit: 2,
@@ -115,12 +127,7 @@ export function useWorkspaceStateCore() {
 
   const loadInstrumentInActivePane = useCallback(
     (instrument: Instrument) => {
-      update((prev) => ({
-        ...prev,
-        panes: prev.panes.map((p) =>
-          p.id === (prev.activePane || prev.panes[0]?.id) ? { ...p, instrument } : p,
-        ),
-      }));
+      update((prev) => withInstrumentInActivePane(prev, instrument));
     },
     [update],
   );

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWs } from './hooks/useWsContext';
 import type { Instrument, OptionChainData, OptionLeg, ViewType, WsMessage } from './types';
-import { getSymbol } from './types';
+import { getChainAsset, getSymbol } from './types';
 import { useWatchlist } from './hooks/useWatchlistContext';
 import { usePaperTrading } from './hooks/usePaperTrading';
 import { useBasket } from './hooks/useBasketContext';
@@ -356,9 +356,12 @@ export default function OptionChain({
     } else {
       sym = getSymbol(instrument).toUpperCase();
     }
-    // Safety: always strip expiry/strike suffixes so we pass just the index/stock name.
-    sym = extractUnderlying(sym) || sym;
     const exch = instrument.exchange || 'NSE';
+    // Safety: strip expiry/strike suffixes so we pass just the index/stock name.
+    // Skipped when refdata already gave us the asset outright, which it always does
+    // on MCX — the suffix strip is name-shaped guesswork and would cut a trailing
+    // digit off assets like SILVER100.
+    if (!(exch.toUpperCase() === 'MCX' && instrument.asset)) sym = extractUnderlying(sym) || sym;
     setSymInput(sym);
     setSymbol(sym);
     setExchange(exch);
@@ -656,22 +659,48 @@ export default function OptionChain({
     }
     sugTimerRef.current = setTimeout(async () => {
       try {
-        const res = await fetch(`/api/instruments/search?q=${encodeURIComponent(q)}&limit=10`);
-        const data = (await res.json()) as { results: Instrument[] };
-        const items = (data.results || []).filter((it) => {
+        // MCX has to be asked for separately — the search endpoint takes one exchange
+        // and defaults to NSE.
+        const [nse, bse, mcx] = await Promise.all(
+          [
+            `/api/instruments/search?q=${encodeURIComponent(q)}&limit=10`,
+            `/api/instruments/search?q=${encodeURIComponent(q)}&exchange=BSE&limit=10`,
+            `/api/instruments/search?q=${encodeURIComponent(q)}&exchange=MCX&type=FUT&limit=25`,
+          ].map((url) =>
+            fetch(url)
+              .then((r) => r.json() as Promise<{ results?: Instrument[] }>)
+              .then((d) => d.results ?? [])
+              .catch(() => [] as Instrument[]),
+          ),
+        );
+
+        const items = [...nse, ...bse].filter((it) => {
           const dt = (it.derivative_type || '').toUpperCase();
           return dt !== 'OPT' && dt !== 'FUT'; // only allow underlying assets (INDEX/STOCK/ETF)
         });
+
+        // On MCX the underlying IS a future, so the filter above cannot apply. Collapse
+        // the six-odd contracts per commodity down to one row keyed by asset.
+        const seenAssets = new Set<string>();
+        for (const it of mcx) {
+          const asset = (it.asset || '').toUpperCase();
+          if (!asset || seenAssets.has(asset)) continue;
+          seenAssets.add(asset);
+          items.push({ ...it, stock_name: asset, nubra_name: asset });
+        }
+
         setSuggestions(items.slice(0, 8));
         setShowSug(true);
       } catch (e) {
         console.warn('[OC] Search failed:', e);
       }
-    }, 200);
+    }, 75);
   }
 
   function selectSuggestion(item: Instrument) {
-    const sym = getSymbol(item).toUpperCase();
+    // MCX rows are futures contracts standing in for their commodity; the chain is
+    // keyed by the commodity.
+    const sym = getChainAsset(item).toUpperCase();
     setSymInput(sym);
     setSymbol(sym);
     setExchange(item.exchange || 'NSE');
@@ -929,7 +958,19 @@ export default function OptionChain({
               )}
               <div
                 className="cursor-pointer text-right"
-                onClick={() => navigateToChart(sp, 'CE', ce)}
+                // Left-click sells, right-click buys — the convention the Nubra BT chain
+                // has always used, now matched here. Only in basket mode: outside it a
+                // left-click still opens the chart, because silently turning that into a
+                // live order would be a nasty surprise.
+                title={basketMode ? 'Left-click: SELL  |  Right-click: BUY' : 'Open chart'}
+                onClick={() =>
+                  basketMode ? addToBasketLeg(sp, 'CE', 'SELL', ce) : navigateToChart(sp, 'CE', ce)
+                }
+                onContextMenu={(e) => {
+                  if (!basketMode) return;
+                  e.preventDefault();
+                  addToBasketLeg(sp, 'CE', 'BUY', ce);
+                }}
               >
                 <div ref={registerCell(sp, 'ce-ltp')}>{fmtLtp(g(ce, 'ltp'))}</div>
                 <div
@@ -965,14 +1006,28 @@ export default function OptionChain({
                       ? 'text-amber-400 bg-amber-500/15 hover:bg-amber-500/40 border border-amber-500/30'
                       : 'text-[var(--accent)] bg-[var(--accent)]/15 hover:bg-[var(--accent)]/40 border border-[var(--accent)]/30'
                   }`}
+                  // Short straddle, to agree with the LTP cells either side of it:
+                  // a plain click sells, and right-click buys.
+                  title={
+                    basketMode
+                      ? 'Left-click: SELL straddle  |  Right-click: BUY straddle'
+                      : 'Open the basket builder'
+                  }
                   onClick={(e) => {
                     e.stopPropagation();
                     if (basketMode) {
-                      if (ce) addToBasketLeg(sp, 'CE', 'BUY', ce);
-                      if (pe) addToBasketLeg(sp, 'PE', 'BUY', pe);
+                      if (ce) addToBasketLeg(sp, 'CE', 'SELL', ce);
+                      if (pe) addToBasketLeg(sp, 'PE', 'SELL', pe);
                     } else {
                       addToBasketFn();
                     }
+                  }}
+                  onContextMenu={(e) => {
+                    if (!basketMode) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (ce) addToBasketLeg(sp, 'CE', 'BUY', ce);
+                    if (pe) addToBasketLeg(sp, 'PE', 'BUY', pe);
                   }}
                 >
                   +
@@ -1002,7 +1057,15 @@ export default function OptionChain({
             <div className="flex items-center justify-start gap-0.5">
               <div
                 className="cursor-pointer flex-1 text-right"
-                onClick={() => navigateToChart(sp, 'PE', pe)}
+                title={basketMode ? 'Left-click: SELL  |  Right-click: BUY' : 'Open chart'}
+                onClick={() =>
+                  basketMode ? addToBasketLeg(sp, 'PE', 'SELL', pe) : navigateToChart(sp, 'PE', pe)
+                }
+                onContextMenu={(e) => {
+                  if (!basketMode) return;
+                  e.preventDefault();
+                  addToBasketLeg(sp, 'PE', 'BUY', pe);
+                }}
               >
                 <div ref={registerCell(sp, 'pe-ltp')}>{fmtLtp(g(pe, 'ltp'))}</div>
                 <div
@@ -1101,8 +1164,11 @@ export default function OptionChain({
       if (spotLine && spot != null && spot > sp) rows.push(spotLine);
     }
     return rows;
+    // basketMode belongs here: the row handlers below close over it, so leaving it
+    // out froze B/S on whatever mode was active when the chain last loaded — turning
+    // basket mode on after loading a chain left the buttons still placing orders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chain, spot, showGreeks]);
+  }, [chain, spot, showGreeks, basketMode]);
 
   // ── JSX ────────────────────────────────────────────────────────────────────
   return (
@@ -1201,6 +1267,7 @@ export default function OptionChain({
         >
           <option value="NSE">NSE</option>
           <option value="BSE">BSE</option>
+          <option value="MCX">MCX</option>
         </select>
 
         <select

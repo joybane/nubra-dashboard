@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   FEED_STALE_MS,
   feedKey,
+  parseFeedKey,
+  parseDisplayName,
   requiredFeedKeys,
   staleRequiredFeeds,
   isMarketHours,
@@ -12,11 +14,68 @@ import {
 
 const NIFTY_JUL28 = 'NIFTY:20260728';
 const NIFTY_AUG04 = 'NIFTY:20260804';
+const CRUDE_AUG17 = 'CRUDEOIL:20260817:MCX';
 
 describe('feedKey', () => {
   it('normalises the asset so browser and tick casing agree', () => {
     expect(feedKey('nifty', '20260728')).toBe(NIFTY_JUL28);
     expect(feedKey('NIFTY', '20260728')).toBe(NIFTY_JUL28);
+  });
+
+  it('leaves NSE keys byte-identical, so nothing already persisted has to migrate', () => {
+    expect(feedKey('NIFTY', '20260728', 'NSE')).toBe(NIFTY_JUL28);
+    expect(feedKey('NIFTY', '20260728')).toBe(NIFTY_JUL28);
+  });
+
+  it('gives every other exchange its own namespace', () => {
+    expect(feedKey('CRUDEOIL', '20260817', 'MCX')).toBe(CRUDE_AUG17);
+    expect(feedKey('crudeoil', '20260817', 'mcx')).toBe(CRUDE_AUG17);
+    expect(feedKey('SENSEX', '20260930', 'BSE')).toBe('SENSEX:20260930:BSE');
+  });
+});
+
+describe('parseFeedKey', () => {
+  it('round-trips both forms', () => {
+    expect(parseFeedKey(NIFTY_JUL28)).toEqual({
+      asset: 'NIFTY',
+      expiry: '20260728',
+      exchange: 'NSE',
+    });
+    expect(parseFeedKey(CRUDE_AUG17)).toEqual({
+      asset: 'CRUDEOIL',
+      expiry: '20260817',
+      exchange: 'MCX',
+    });
+  });
+
+  it('reads a legacy two-part key as NSE — which is what it always meant', () => {
+    expect(parseFeedKey('SENSEX:20260930').exchange).toBe('NSE');
+  });
+});
+
+describe('parseDisplayName', () => {
+  it('reads the MCX zanskar form, where the leading token is the derivative type', () => {
+    expect(parseDisplayName('OPT_CRUDEOIL_20260817_CE_875000')).toEqual({
+      asset: 'CRUDEOIL',
+      expiry: '20260817',
+      exchange: 'MCX',
+    });
+    expect(parseDisplayName('FUT_CRUDEOIL_20260819')).toEqual({
+      asset: 'CRUDEOIL',
+      expiry: '20260819',
+      exchange: 'MCX',
+    });
+    expect(parseDisplayName('OPT_NATGASMINI_20260824_PE_250000').asset).toBe('NATGASMINI');
+  });
+
+  it('leaves NSE names on the original rule', () => {
+    expect(parseDisplayName('NIFTY2570329900CE')).toEqual({
+      asset: 'NIFTY',
+      expiry: null,
+      exchange: 'NSE',
+    });
+    expect(parseDisplayName('BANKNIFTY26JUL52000PE').asset).toBe('BANKNIFTY');
+    expect(parseDisplayName('RELIANCE').asset).toBe('RELIANCE');
   });
 });
 
@@ -87,6 +146,12 @@ describe('isValidFeedKey', () => {
     expect(isValidFeedKey(NIFTY_JUL28)).toBe(true);
     expect(isValidFeedKey('M&MFIN:20260728')).toBe(true);
     expect(isValidFeedKey('NIFTY50:20260728')).toBe(true);
+  });
+
+  it('accepts the three-part form only for a real non-NSE exchange', () => {
+    expect(isValidFeedKey(CRUDE_AUG17)).toBe(true);
+    expect(isValidFeedKey('SENSEX:20260930:BSE')).toBe(true);
+    expect(isValidFeedKey('CRUDEOIL:20260817:NYMEX')).toBe(false);
   });
 
   it('rejects the malformed keys found in the live DB', () => {
@@ -167,5 +232,23 @@ describe('isMarketHours', () => {
   it('is closed at the weekend', () => {
     expect(isMarketHours(ist('2026-07-25', '12:00'))).toBe(false);
     expect(isMarketHours(ist('2026-07-26', '12:00'))).toBe(false);
+  });
+
+  it('defaults to NSE, so callers that predate commodities are unaffected', () => {
+    expect(isMarketHours(ist('2026-07-27', '20:00'))).toBe(false);
+    expect(isMarketHours(ist('2026-07-27', '20:00'), 'NSE')).toBe(false);
+  });
+
+  it('runs MCX to 23:30 — measured, 870 one-minute bars a day', () => {
+    expect(isMarketHours(ist('2026-07-27', '09:00'), 'MCX')).toBe(true);
+    expect(isMarketHours(ist('2026-07-27', '20:00'), 'MCX')).toBe(true);
+    expect(isMarketHours(ist('2026-07-27', '23:30'), 'MCX')).toBe(true);
+    expect(isMarketHours(ist('2026-07-27', '08:59'), 'MCX')).toBe(false);
+    expect(isMarketHours(ist('2026-07-27', '23:31'), 'MCX')).toBe(false);
+  });
+
+  it('an unknown exchange falls back to the NSE session rather than trading forever', () => {
+    expect(isMarketHours(ist('2026-07-27', '20:00'), 'NYMEX')).toBe(false);
+    expect(isMarketHours(ist('2026-07-27', '12:00'), 'NYMEX')).toBe(true);
   });
 });

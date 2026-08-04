@@ -39,29 +39,31 @@ import {
   fmtPrice,
   formatExpiry,
   fmtOI,
+  marketSession,
+  clampSubMinuteStart,
 } from './lib/utils';
 
 const INTERVALS = ['1m', '2m', '3m', '5m', '10m', '15m', '30m', '1h', '1d', '1w', '1mt'] as const;
 type Interval = (typeof INTERVALS)[number];
 
-const MARKET_OPEN = 9 * 60 + 15; // 9:15 in minutes
-const MARKET_CLOSE = 15 * 60 + 30; // 15:30 in minutes
-const TOTAL_MINUTES = MARKET_CLOSE - MARKET_OPEN; // 375
-
-function minToLabel(min: number): string {
-  const t = min + MARKET_OPEN;
+// The OI slider spans one trading session. Its length is exchange-specific: NSE is
+// 375 minutes, MCX 870 (09:00–23:30), so these are derived per render rather than
+// frozen as module constants.
+function minToLabel(min: number, openMin: number): string {
+  const t = min + openMin;
   return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
 }
 
-function timeStrToMin(t: string): number {
+function timeStrToMin(t: string, openMin: number): number {
   if (!t) return 0;
   const [h, m] = t.split(':').map(Number);
-  return h * 60 + m - MARKET_OPEN;
+  return h * 60 + m - openMin;
 }
 
-function nowMin(): number {
+function nowMin(openMin: number, closeMin: number): number {
   const n = new Date();
-  return Math.min(TOTAL_MINUTES, Math.max(0, n.getHours() * 60 + n.getMinutes() - MARKET_OPEN));
+  const total = closeMin - openMin;
+  return Math.min(total, Math.max(0, n.getHours() * 60 + n.getMinutes() - openMin));
 }
 
 function OiTimeSlider({
@@ -70,20 +72,23 @@ function OiTimeSlider({
   onChange,
   onReset,
   isChangeMode,
+  exchange,
 }: {
   fromTime: string;
   toTime: string;
   onChange: (fromMin: number, toMin: number, sliderMax: number) => void;
   onReset: () => void;
   isChangeMode: boolean;
+  exchange?: string;
 }) {
   const trackRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef<'from' | 'to' | null>(null);
   const fromRef = useRef(0);
   const toRef = useRef(0);
-  const max = nowMin();
-  const fromVal = isChangeMode ? timeStrToMin(fromTime) : 0;
-  const toVal = isChangeMode ? Math.min(timeStrToMin(toTime), max) : max;
+  const { openMin, closeMin } = marketSession(exchange);
+  const max = nowMin(openMin, closeMin);
+  const fromVal = isChangeMode ? timeStrToMin(fromTime, openMin) : 0;
+  const toVal = isChangeMode ? Math.min(timeStrToMin(toTime, openMin), max) : max;
   fromRef.current = fromVal;
   toRef.current = toVal;
 
@@ -135,7 +140,9 @@ function OiTimeSlider({
       <div className="bg-[var(--bg-secondary)]/90 backdrop-blur-sm border border-[var(--border)] rounded-lg px-3 py-1.5 min-w-[280px]">
         <div className="flex items-center justify-between mb-1">
           <span className="text-[10px] text-[var(--text-muted)]">
-            {isChangeMode ? `${minToLabel(fromVal)} → ${minToLabel(toVal)}` : 'OI Time Range'}
+            {isChangeMode
+              ? `${minToLabel(fromVal, openMin)} → ${minToLabel(toVal, openMin)}`
+              : 'OI Time Range'}
           </span>
           {isChangeMode && (
             <button
@@ -174,7 +181,7 @@ function OiTimeSlider({
         </div>
         <div className="flex justify-between text-[9px] text-[var(--text-muted)] mt-0.5">
           <span>9:15</span>
-          <span>{minToLabel(max)}</span>
+          <span>{minToLabel(max, openMin)}</span>
         </div>
       </div>
     </div>
@@ -672,12 +679,7 @@ export default function CandleChart({ instrument, theme }: Props) {
 
       if (currentInstRef.current) {
         const oldSym = getSymbol(currentInstRef.current);
-        const wasIndex = nubraType(currentInstRef.current) === 'INDEX';
-        unsubscribeChart(
-          wasIndex ? { indexes: [oldSym] } : { instruments: [oldSym] },
-          iv,
-          currentInstRef.current.exchange || 'NSE',
-        );
+        unsubscribeChart({ indexes: [oldSym] }, iv, currentInstRef.current.exchange || 'NSE');
         if (nubraType(currentInstRef.current) === 'OPT') unsubscribeOptTickWs();
       }
       oi.clearForInstrumentChange();
@@ -773,12 +775,7 @@ export default function CandleChart({ instrument, theme }: Props) {
         });
 
         const chartSym = getSymbol(inst);
-        const isIndex = nubraType(inst) === 'INDEX';
-        subscribeChart(
-          isIndex ? { indexes: [chartSym] } : { instruments: [chartSym] },
-          iv,
-          inst.exchange || 'NSE',
-        );
+        subscribeChart({ indexes: [chartSym] }, iv, inst.exchange || 'NSE');
         if (nubraType(inst) === 'OPT') {
           subscribeOptTickWs(
             inst.asset || chartSym,
@@ -886,7 +883,10 @@ export default function CandleChart({ instrument, theme }: Props) {
     }
     const nowUtc = Math.floor(Date.now() / 1000);
     const istSec = (nowUtc + IST_OFFSET) % 86400;
-    if (istSec < 9 * 3600 + 15 * 60 || istSec > 15 * 3600 + 30 * 60) {
+    // The bar countdown only means anything inside the instrument's own session,
+    // and MCX runs to 23:30 rather than 15:30.
+    const { openMin, closeMin } = marketSession(currentInstRef.current.exchange);
+    if (istSec < openMin * 60 || istSec > closeMin * 60) {
       setCountdown(null);
       return;
     }
@@ -1175,6 +1175,7 @@ export default function CandleChart({ instrument, theme }: Props) {
             onChange={oi.handleSliderChange}
             onReset={oi.resetTimeRange}
             isChangeMode={oi.oiMode === 'oi_change'}
+            exchange={instrument?.exchange}
           />
         )}
 
@@ -1300,6 +1301,9 @@ export async function fetchRange(
   const type = nubraType(instrument);
   const symbol = getSymbol(instrument);
   const exch = instrument.exchange || 'NSE';
+  // 1s/10s are retained for a rolling 7 days, and a request that reaches past that
+  // edge 500s the whole query instead of returning the part that is in range.
+  const start = clampSubMinuteStart(startDate, interval);
 
   const body = {
     query: [
@@ -1308,7 +1312,7 @@ export async function fetchRange(
         type,
         values: [symbol],
         fields: ['open', 'high', 'low', 'close', 'cumulative_volume'],
-        startDate: startDate.toISOString(),
+        startDate: start.toISOString(),
         endDate: endDate.toISOString(),
         interval,
         intraDay: false,
