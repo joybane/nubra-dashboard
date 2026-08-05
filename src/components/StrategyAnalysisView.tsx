@@ -535,7 +535,36 @@ import {
   PriceTooltipRef,
   PnlTooltipRef,
   GreeksTooltipRef,
+  PriceTooltipBody,
+  PnlTooltipBody,
+  GreeksTooltipBody,
 } from './ChartTooltips';
+import PinnedCrosshairLayer from './PinnedCrosshairLayer';
+import PinCompareStrip, { type CompareRow } from './PinCompareStrip';
+import { usePinnedTimes, bindPinTrigger, PIN_COLORS } from '../lib/chartPins';
+
+// Nearest sample at or before `targetTime`. Shared by the hover tooltips and the pinned cards,
+// which is why it sits outside the crosshair effect that used to own it.
+function findLatestAt<T extends { time: any }>(
+  arr: T[] | undefined,
+  targetTime: number,
+): T | undefined {
+  if (!arr || arr.length === 0) return undefined;
+  let l = 0,
+    r = arr.length - 1;
+  let res: T | undefined = undefined;
+  while (l <= r) {
+    const m = (l + r) >> 1;
+    const time = arr[m].time as number;
+    if (time <= targetTime) {
+      res = arr[m];
+      l = m + 1;
+    } else {
+      r = m - 1;
+    }
+  }
+  return res;
+}
 
 export default function StrategyAnalysisView({
   basketGroupId,
@@ -1243,9 +1272,18 @@ export default function StrategyAnalysisView({
       const basketPnlData: Array<{ time: any; value: number }> = [];
       if (pnlByTime.size > 0) {
         const times = [...pnlByTime.keys()].sort((a, b) => a - b);
+        // An illiquid leg simply has no bar in a minute it didn't trade. Summing only the legs
+        // present at each timestamp therefore dropped the missing leg from the total, spiking the
+        // basket curve toward whichever leg did tick — while the per-leg curves stayed smooth,
+        // because those are forward-filled later by fillPnlToGrid. Carry each leg's last known
+        // P&L instead, which is what the live tick path already does via lastLtpRef.
+        const lastByLeg = new Map<number, number>();
         for (const t of times) {
+          for (const [refId, v] of pnlByTime.get(t)!) lastByLeg.set(refId, v);
           let total = 0;
-          for (const v of pnlByTime.get(t)!.values()) total += v;
+          // Legs with no bar yet are absent from lastByLeg and contribute nothing, which is
+          // correct: before a leg's first bar it has no mark-to-market P&L.
+          for (const v of lastByLeg.values()) total += v;
           basketPnlData.push({ time: t as any, value: total });
         }
       }
@@ -1506,6 +1544,101 @@ export default function StrategyAnalysisView({
     }
   }, [chartData]);
 
+  // ── Pinned crosshairs (middle-click) ──
+  // Entirely additive: pins never touch lightweight-charts' crosshair state, so the hover sync
+  // below behaves exactly as it did before when no pin exists.
+  const { pins, togglePinAt, removePin, clearPins } = usePinnedTimes(2);
+  const togglePinRef = useRef(togglePinAt);
+  togglePinRef.current = togglePinAt;
+  // Time under the cursor as of the last crosshair move — already snapped to a bar, so a pin
+  // lands exactly on what the hover tooltip was showing when the wheel button went down.
+  const lastHoverTimeRef = useRef<number | null>(null);
+
+  // Pins hold a bare timestamp and recompute their contents, so a pinned card can never end up
+  // contradicting the chart behind it after a leg-filter or lot/unit change.
+  const buildPaneSnapshots = useCallback(
+    (t: number) => {
+      const cd = chartDataRef.current;
+      const timeStr = fmtChartTime(t);
+
+      let spot = 0;
+      let ohlc: { o: number; h: number; l: number; c: number } | null = null;
+      const priceLegs: Array<{ name: string; color: string; value: number }> = [];
+      if (cd) {
+        const b = findLatestAt(cd.underlyingBars, t);
+        if (b) {
+          spot = b.close;
+          ohlc = { o: b.open, h: b.high, l: b.low, c: b.close };
+        }
+        for (const leg of legMetasRef.current) {
+          const d = findLatestAt(cd.legPriceData.get(leg.refId), t);
+          if (d) priceLegs.push({ name: leg.displayName, color: leg.color, value: d.value });
+        }
+      }
+
+      let totalPnl = 0;
+      const pnlLegs: Array<{ name: string; color: string; value: number }> = [];
+      if (cd) {
+        const p = findLatestAt(cd.basketPnlData, t);
+        if (p) totalPnl = p.value;
+        for (const leg of legMetasRef.current) {
+          const d = findLatestAt(cd.legPnlData.get(leg.refId), t);
+          if (d) pnlLegs.push({ name: leg.displayName, color: leg.color, value: d.value });
+        }
+      }
+
+      const tv: Record<string, Record<string, number>> = {};
+      for (const src of ['net', 'CE', 'PE'] as const)
+        tv[src] = { delta: 0, gamma: 0, theta: 0, vega: 0 };
+      if (cd) {
+        for (const leg of legMetasRef.current) {
+          const pt = findLatestAt(cd.legGreeksHist.get(leg.refId), t);
+          if (!pt) continue;
+          const mult = lotSizeOverride || 1;
+          const pos = allPositionsRef.current.find((p) => p.ref_id === leg.refId);
+          const side = pos ? (pos.order_side?.includes('BUY') ? 1 : -1) : 0;
+          const qty = pos ? pos.qty || 0 : 0;
+          const weight = greeksMode === 'lot' ? qty : side * mult;
+          const src = positionGreekSource(pos || ({} as any));
+          tv.net.delta += pt.delta * weight;
+          tv.net.gamma += pt.gamma * weight;
+          tv.net.theta += pt.theta * weight;
+          tv.net.vega += pt.vega * weight;
+          if (src) {
+            tv[src].delta += pt.delta * weight;
+            tv[src].gamma += pt.gamma * weight;
+            tv[src].theta += pt.theta * weight;
+            tv[src].vega += pt.vega * weight;
+          }
+        }
+      }
+      const f = greekFactorsRef.current['delta'] || { mid: 0, half: 1 };
+      const greekNorm = f.half ? (tv.net.delta - f.mid) / f.half : 0;
+
+      return {
+        timeStr,
+        price: { ohlc, legs: priceLegs, spot },
+        pnl: { legs: pnlLegs, total: totalPnl },
+        greeks: { values: tv, greekNorm },
+      };
+    },
+    [greeksMode, lotSizeOverride],
+  );
+  const buildPaneSnapshotsRef = useRef(buildPaneSnapshots);
+  buildPaneSnapshotsRef.current = buildPaneSnapshots;
+
+  // The pinned instants belong to one dataset; drop them when that dataset is replaced.
+  useEffect(() => {
+    clearPins();
+  }, [positionContractKey, underlying, clearPins]);
+
+  const pinnedSnapshots = useMemo(
+    () => pins.map((pin) => ({ pin, snap: buildPaneSnapshots(pin.time) })),
+    // chartData/greeksDataRevision are what make a snapshot's inputs change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pins, buildPaneSnapshots, chartData, greeksDataRevision, legGreeks],
+  );
+
   // ── 4. Chart scroll & crosshair sync ──
   useEffect(() => {
     const pc = priceChartRef.current;
@@ -1532,9 +1665,28 @@ export default function StrategyAnalysisView({
       };
       el.addEventListener('mouseenter', onEnter);
       el.addEventListener('mouseleave', onLeave);
+      // Middle-click (or Alt+click) pins the bar under the cursor across every pane at once.
+      // Prefer the crosshair's own time; fall back to the click x so a pin still lands if the
+      // crosshair happened not to be live at that instant.
+      const unbindPin = bindPinTrigger(
+        el,
+        (ev) => {
+          if (lastHoverTimeRef.current != null) return lastHoverTimeRef.current;
+          try {
+            const rect = el.getBoundingClientRect();
+            const leftScale = chart.priceScale('left').width() ?? 0;
+            const t = chart.timeScale().coordinateToTime(ev.clientX - rect.left - leftScale);
+            return typeof t === 'number' ? t : null;
+          } catch {
+            return null;
+          }
+        },
+        (t) => togglePinRef.current(t),
+      );
       hoverCleanups.push(() => {
         el.removeEventListener('mouseenter', onEnter);
         el.removeEventListener('mouseleave', onLeave);
+        unbindPin();
       });
     }
 
@@ -1580,27 +1732,6 @@ export default function StrategyAnalysisView({
     // three tooltips (data + position + visibility) and pushes the crosshair onto the
     // other panes with real in-range values. No shared re-entrancy flag — programmatic
     // crosshair echoes are recognised by the (point === undefined, time !== undefined) branch.
-    const findLatest = <T extends { time: any }>(
-      arr: T[] | undefined,
-      targetTime: number,
-    ): T | undefined => {
-      if (!arr || arr.length === 0) return undefined;
-      let l = 0,
-        r = arr.length - 1;
-      let res: T | undefined = undefined;
-      while (l <= r) {
-        const m = (l + r) >> 1;
-        const time = arr[m].time as number;
-        if (time <= targetTime) {
-          res = arr[m];
-          l = m + 1;
-        } else {
-          r = m - 1;
-        }
-      }
-      return res;
-    };
-
     const activeGreekSeries = (): ISeriesApi<any> | null => {
       const g = greeksSeriesRef.current;
       if (g['net_delta']) return g['net_delta'];
@@ -1635,6 +1766,10 @@ export default function StrategyAnalysisView({
       tip.setVisibility(true);
     };
 
+    // Captured at effect setup, not read live, so the hover path keeps closing over exactly the
+    // render's values it always did (this effect re-runs whenever the panes are rebuilt).
+    const buildSnapshot = buildPaneSnapshotsRef.current;
+
     const updateAllTooltips = (
       t: number | null,
       x: number | null,
@@ -1647,27 +1782,14 @@ export default function StrategyAnalysisView({
         greeksTooltipRef.current?.setVisibility(false);
         return null;
       }
-      const cd = chartDataRef.current;
-      const tStr = fmtChartTime(t);
-      let spot = 0,
-        totalPnl = 0,
-        greekNorm = 0;
+      const snap = buildSnapshot(t);
+      const tStr = snap.timeStr;
+      const spot = snap.price.spot;
+      const totalPnl = snap.pnl.total;
+      const greekNorm = snap.greeks.greekNorm;
 
       if (pc) {
-        let newOhlc = null;
-        const legs: Array<{ name: string; color: string; value: number }> = [];
-        if (cd) {
-          const b = findLatest(cd.underlyingBars, t);
-          if (b) {
-            spot = b.close;
-            newOhlc = { o: b.open, h: b.high, l: b.low, c: b.close };
-          }
-          for (const leg of legMetasRef.current) {
-            const d = findLatest(cd.legPriceData.get(leg.refId), t);
-            if (d) legs.push({ name: leg.displayName, color: leg.color, value: d.value });
-          }
-        }
-        priceTooltipRef.current?.setData(tStr, newOhlc, legs, underlying || '');
+        priceTooltipRef.current?.setData(tStr, snap.price.ohlc, snap.price.legs, underlying || '');
         place(
           priceTooltipRef.current,
           pc,
@@ -1680,16 +1802,7 @@ export default function StrategyAnalysisView({
       }
 
       if (nc) {
-        const legs: Array<{ name: string; color: string; value: number }> = [];
-        if (cd) {
-          const p = findLatest(cd.basketPnlData, t);
-          if (p) totalPnl = p.value;
-          for (const leg of legMetasRef.current) {
-            const d = findLatest(cd.legPnlData.get(leg.refId), t);
-            if (d) legs.push({ name: leg.displayName, color: leg.color, value: d.value });
-          }
-        }
-        pnlTooltipRef.current?.setData(tStr, { legs, total: totalPnl });
+        pnlTooltipRef.current?.setData(tStr, { legs: snap.pnl.legs, total: totalPnl });
         place(
           pnlTooltipRef.current,
           nc,
@@ -1702,34 +1815,7 @@ export default function StrategyAnalysisView({
       }
 
       if (gc) {
-        const tv: Record<string, Record<string, number>> = {};
-        for (const src of ['net', 'CE', 'PE'] as const)
-          tv[src] = { delta: 0, gamma: 0, theta: 0, vega: 0 };
-        if (cd) {
-          for (const leg of legMetasRef.current) {
-            const pt = findLatest(cd.legGreeksHist.get(leg.refId), t);
-            if (!pt) continue;
-            const mult = lotSizeOverride || 1;
-            const pos = allPositionsRef.current.find((p) => p.ref_id === leg.refId);
-            const side = pos ? (pos.order_side?.includes('BUY') ? 1 : -1) : 0;
-            const qty = pos ? pos.qty || 0 : 0;
-            const weight = greeksMode === 'lot' ? qty : side * mult;
-            const src = positionGreekSource(pos || ({} as any));
-            tv.net.delta += pt.delta * weight;
-            tv.net.gamma += pt.gamma * weight;
-            tv.net.theta += pt.theta * weight;
-            tv.net.vega += pt.vega * weight;
-            if (src) {
-              tv[src].delta += pt.delta * weight;
-              tv[src].gamma += pt.gamma * weight;
-              tv[src].theta += pt.theta * weight;
-              tv[src].vega += pt.vega * weight;
-            }
-          }
-        }
-        greeksTooltipRef.current?.setData(tStr, tv);
-        const f = greekFactorsRef.current['delta'] || { mid: 0, half: 1 };
-        greekNorm = f.half ? (tv.net.delta - f.mid) / f.half : 0;
+        greeksTooltipRef.current?.setData(tStr, snap.greeks.values);
         place(
           greeksTooltipRef.current,
           gc,
@@ -1754,6 +1840,7 @@ export default function StrategyAnalysisView({
           // actually over, or tooltips jitter/relocate on every tick with no mouse motion.
           if (sourceChart !== hoveredChartRef.current) return;
           const t = param.time as number;
+          lastHoverTimeRef.current = t;
           const res = updateAllTooltips(t, param.point.x, param.point.y, sourceChart);
           if (res) {
             for (const c of charts) {
@@ -1776,6 +1863,7 @@ export default function StrategyAnalysisView({
         } else if (param.point === undefined && param.time !== undefined) {
           // Programmatic crosshair echo from setCrosshairPosition — ignore.
         } else {
+          lastHoverTimeRef.current = null;
           updateAllTooltips(null, null, null, null);
           for (const c of charts) {
             if (c !== sourceChart && isChartLive(c)) {
@@ -2612,6 +2700,62 @@ export default function StrategyAnalysisView({
     const first = allPositions.find((p) => p.margin_required && p.margin_required > 0);
     return first ? first.margin_required! / 100 : 0;
   }, [allPositions, strategyMarginPaise]);
+
+  // Δ between the two pinned instants, one row set per pane. Built from the same snapshots the
+  // pinned cards render, so the strip can never disagree with the cards above it.
+  const pinCompare = useMemo(() => {
+    if (pinnedSnapshots.length !== 2) return null;
+    const [a, b] = pinnedSnapshots;
+    const dtSeconds = b.pin.time - a.pin.time;
+
+    const price: CompareRow[] = [];
+    if (a.snap.price.ohlc && b.snap.price.ohlc)
+      price.push({
+        label: underlying || 'Spot',
+        value: b.snap.price.spot - a.snap.price.spot,
+        kind: 'price',
+      });
+    for (const lb of b.snap.price.legs) {
+      const la = a.snap.price.legs.find((l) => l.name === lb.name);
+      if (la) price.push({ label: lb.name, value: lb.value - la.value, kind: 'price' });
+    }
+
+    const pnl: CompareRow[] = [
+      { label: 'Total P&L', value: b.snap.pnl.total - a.snap.pnl.total, kind: 'money' },
+    ];
+    for (const lb of b.snap.pnl.legs) {
+      const la = a.snap.pnl.legs.find((l) => l.name === lb.name);
+      if (la) pnl.push({ label: lb.name, value: lb.value - la.value, kind: 'money' });
+    }
+    if (strategyMargin > 0)
+      pnl.push({
+        label: 'ROI',
+        value: ((b.snap.pnl.total - a.snap.pnl.total) / strategyMargin) * 100,
+        kind: 'percent',
+      });
+
+    const activeSrc = greeksLegFilter.size > 1 ? 'net' : Array.from(greeksLegFilter)[0] || 'net';
+    const greeks: CompareRow[] = [];
+    for (const k of ['delta', 'gamma', 'theta', 'vega'] as const) {
+      if (!selectedGreeks.has(k)) continue;
+      const va = a.snap.greeks.values[activeSrc]?.[k];
+      const vb = b.snap.greeks.values[activeSrc]?.[k];
+      if (va == null || vb == null) continue;
+      greeks.push({
+        label: k.charAt(0).toUpperCase() + k.slice(1),
+        value: vb - va,
+        digits: k === 'gamma' ? 4 : 2,
+      });
+    }
+
+    return { dtSeconds, price, pnl, greeks };
+  }, [pinnedSnapshots, underlying, strategyMargin, greeksLegFilter, selectedGreeks]);
+
+  const pinColors = useMemo(
+    () => [pins[0]?.color ?? PIN_COLORS[0], pins[1]?.color ?? PIN_COLORS[1]] as [string, string],
+    [pins],
+  );
+
   const marginPositionKey = useMemo(
     () =>
       allPositions
@@ -3168,6 +3312,33 @@ export default function StrategyAnalysisView({
               {/* fallback removed */}
             </div>
             <PriceTooltip ref={priceTooltipRef} />
+            <PinnedCrosshairLayer
+              pins={pins}
+              chart={priceChartRef.current}
+              epoch={chartEpoch}
+              onRemove={removePin}
+              renderCard={(pin) => {
+                const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
+                if (!snap) return null;
+                return (
+                  <PriceTooltipBody
+                    timeStr={snap.timeStr}
+                    ohlc={snap.price.ohlc}
+                    legPrices={snap.price.legs}
+                    underlying={underlying || ''}
+                  />
+                );
+              }}
+              compare={
+                pinCompare && (
+                  <PinCompareStrip
+                    dtSeconds={pinCompare.dtSeconds}
+                    rows={pinCompare.price}
+                    colors={pinColors}
+                  />
+                )
+              }
+            />
           </div>
         )}
 
@@ -3196,6 +3367,32 @@ export default function StrategyAnalysisView({
               <PnlTooltip
                 ref={pnlTooltipRef}
                 strategyMargin={strategyMargin > 0 ? strategyMargin : 0}
+              />
+              <PinnedCrosshairLayer
+                pins={pins}
+                chart={pnlChartRef.current}
+                epoch={chartEpoch}
+                onRemove={removePin}
+                renderCard={(pin) => {
+                  const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
+                  if (!snap) return null;
+                  return (
+                    <PnlTooltipBody
+                      timeStr={snap.timeStr}
+                      values={{ legs: snap.pnl.legs, total: snap.pnl.total }}
+                      strategyMargin={strategyMargin > 0 ? strategyMargin : 0}
+                    />
+                  );
+                }}
+                compare={
+                  pinCompare && (
+                    <PinCompareStrip
+                      dtSeconds={pinCompare.dtSeconds}
+                      rows={pinCompare.pnl}
+                      colors={pinColors}
+                    />
+                  )
+                }
               />
             </div>
           </>
@@ -3227,6 +3424,34 @@ export default function StrategyAnalysisView({
                 selectedGreeks={selectedGreeks}
                 greeksLegFilter={greeksLegFilter}
                 colors={GREEK_COLORS}
+              />
+              <PinnedCrosshairLayer
+                pins={pins}
+                chart={greeksChartRef.current}
+                epoch={chartEpoch}
+                onRemove={removePin}
+                renderCard={(pin) => {
+                  const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
+                  if (!snap) return null;
+                  return (
+                    <GreeksTooltipBody
+                      timeStr={snap.timeStr}
+                      values={snap.greeks.values}
+                      selectedGreeks={selectedGreeks}
+                      greeksLegFilter={greeksLegFilter}
+                      colors={GREEK_COLORS}
+                    />
+                  );
+                }}
+                compare={
+                  pinCompare && (
+                    <PinCompareStrip
+                      dtSeconds={pinCompare.dtSeconds}
+                      rows={pinCompare.greeks}
+                      colors={pinColors}
+                    />
+                  )
+                }
               />
             </div>
           </>

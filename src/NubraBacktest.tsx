@@ -13,7 +13,13 @@ import {
   PriceTooltipRef,
   PnlTooltipRef,
   GreeksTooltipRef,
+  PriceTooltipBody,
+  PnlTooltipBody,
+  GreeksTooltipBody,
 } from './components/ChartTooltips';
+import PinnedCrosshairLayer from './components/PinnedCrosshairLayer';
+import PinCompareStrip, { type CompareRow } from './components/PinCompareStrip';
+import { usePinnedTimes, bindPinTrigger, PIN_COLORS } from './lib/chartPins';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -170,6 +176,29 @@ function chartOpts(isDark: boolean, hideLeftScale: boolean = false) {
 }
 
 const LEG_COLORS = ['#3b82f6', '#ec4899', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#14b8a6'];
+
+// Nearest sample at or before `targetTime`. Shared by the hover tooltips and the pinned cards,
+// which is why it sits outside the chart effect that used to own it.
+function findLatestAt<T extends { time: any }>(
+  arr: T[] | undefined,
+  targetTime: number,
+): T | undefined {
+  if (!arr || arr.length === 0) return undefined;
+  let l = 0,
+    r = arr.length - 1;
+  let res: T | undefined = undefined;
+  while (l <= r) {
+    const m = (l + r) >> 1;
+    const time = arr[m].time as number;
+    if (time <= targetTime) {
+      res = arr[m];
+      l = m + 1;
+    } else {
+      r = m - 1;
+    }
+  }
+  return res;
+}
 
 function formatCrosshairTime(timeSec: number): string {
   const totalMin = Math.floor((timeSec % 86400) / 60);
@@ -831,6 +860,198 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     return 'net';
   }
 
+  // ── Pinned crosshairs (middle-click) ──
+  // Entirely additive: pins never touch lightweight-charts' crosshair state, so with no pin on
+  // screen the hover sync below behaves exactly as it did before.
+  const { pins, togglePinAt, removePin, clearPins } = usePinnedTimes(2);
+  const togglePinRef = useRef(togglePinAt);
+  togglePinRef.current = togglePinAt;
+  // Time under the cursor as of the last crosshair move — already snapped to a bar.
+  const lastHoverTimeRef = useRef<number | null>(null);
+
+  // Pins hold a bare timestamp and recompute their contents, so a pinned card can never end up
+  // contradicting the chart behind it after a leg-filter or greek-selection change.
+  const buildPaneSnapshots = useCallback(
+    (timeVal: number) => {
+      const timeStr = formatCrosshairTime(timeVal);
+
+      const indexBars = evalResult?.underlyingBars || [];
+      const spotBar = findLatestAt(indexBars, timeVal);
+      const spot = spotBar?.close ?? null;
+
+      const priceLegs: Array<{ name: string; color: string; value: number }> = [];
+      if (evalResult?.legPriceData) {
+        evalResult.legPriceData.forEach((ld) => {
+          const leg = legs[ld.legIndex];
+          if (!leg) return;
+          const match = findLatestAt(ld.data, timeVal);
+          if (match && match.value > 0) {
+            priceLegs.push({
+              name: `${underlying} ${leg.strike} ${leg.optionType}`,
+              color: leg.optionType === 'CE' ? '#22c55e' : '#ef4444',
+              value: match.value,
+            });
+          }
+        });
+      }
+
+      const pnlPoint = findLatestAt(evalResult?.basketPnlData || [], timeVal);
+      const totalPnl = pnlPoint?.value ?? 0;
+
+      const pnlLegs: Array<{ name: string; color: string; value: number }> = [];
+      if (evalResult?.legPnlData) {
+        evalResult.legPnlData.forEach((ld) => {
+          const leg = legs[ld.legIndex];
+          if (!leg) return;
+          const match = findLatestAt(ld.data, timeVal);
+          if (match) {
+            pnlLegs.push({
+              name: `${underlying} ${leg.strike} ${leg.optionType}`,
+              color: leg.optionType === 'CE' ? '#22c55e' : '#ef4444',
+              value: match.value,
+            });
+          }
+        });
+      }
+
+      let netG: { delta: number; gamma: number; theta: number; vega: number } | undefined;
+      let ceG: { delta: number; gamma: number; theta: number; vega: number } | undefined;
+      let peG: { delta: number; gamma: number; theta: number; vega: number } | undefined;
+      let delta = 0; // fallback delta for syncing
+      if (greeksData) {
+        const getPts = (src: 'net' | 'CE' | 'PE') => {
+          const dPt = findLatestAt(greeksData[src]?.delta, timeVal);
+          const gPt = findLatestAt(greeksData[src]?.gamma, timeVal);
+          const tPt = findLatestAt(greeksData[src]?.theta, timeVal);
+          const vPt = findLatestAt(greeksData[src]?.vega, timeVal);
+          return {
+            delta: dPt?.value ?? 0,
+            gamma: gPt?.value ?? 0,
+            theta: tPt?.value ?? 0,
+            vega: vPt?.value ?? 0,
+          };
+        };
+        if (greeksLegFilter.has('net')) {
+          netG = getPts('net');
+          delta = netG.delta;
+        }
+        if (greeksLegFilter.has('CE')) {
+          ceG = getPts('CE');
+          if (!netG) delta = ceG.delta;
+        }
+        if (greeksLegFilter.has('PE')) {
+          peG = getPts('PE');
+          if (!netG && !ceG) delta = peG.delta;
+        }
+      }
+
+      return {
+        timeStr,
+        price: {
+          ohlc: spotBar
+            ? { o: spotBar.open, h: spotBar.high, l: spotBar.low, c: spotBar.close }
+            : null,
+          legs: priceLegs,
+          spot,
+        },
+        pnl: { legs: pnlLegs, total: totalPnl },
+        greeks: { values: { net: netG, CE: ceG, PE: peG }, delta },
+      };
+    },
+    [evalResult, legs, underlying, greeksData, greeksLegFilter],
+  );
+  const buildPaneSnapshotsRef = useRef(buildPaneSnapshots);
+  buildPaneSnapshotsRef.current = buildPaneSnapshots;
+
+  // The pinned instants belong to one backtest run; drop them when the result is replaced.
+  useEffect(() => {
+    clearPins();
+  }, [evalResult, clearPins]);
+
+  const pinnedSnapshots = useMemo(
+    () => pins.map((pin) => ({ pin, snap: buildPaneSnapshots(pin.time) })),
+    [pins, buildPaneSnapshots],
+  );
+
+  const pinColors = useMemo(
+    () => [pins[0]?.color ?? PIN_COLORS[0], pins[1]?.color ?? PIN_COLORS[1]] as [string, string],
+    [pins],
+  );
+
+  const pinCompare = useMemo(() => {
+    if (pinnedSnapshots.length !== 2) return null;
+    const [a, b] = pinnedSnapshots;
+    const dtSeconds = b.pin.time - a.pin.time;
+
+    const price: CompareRow[] = [];
+    if (a.snap.price.spot != null && b.snap.price.spot != null)
+      price.push({
+        label: underlying,
+        value: b.snap.price.spot - a.snap.price.spot,
+        kind: 'price',
+      });
+    for (const lb of b.snap.price.legs) {
+      const la = a.snap.price.legs.find((l) => l.name === lb.name);
+      if (la) price.push({ label: lb.name, value: lb.value - la.value, kind: 'price' });
+    }
+
+    const pnl: CompareRow[] = [
+      { label: 'Total P&L', value: b.snap.pnl.total - a.snap.pnl.total, kind: 'money' },
+    ];
+    for (const lb of b.snap.pnl.legs) {
+      const la = a.snap.pnl.legs.find((l) => l.name === lb.name);
+      if (la) pnl.push({ label: lb.name, value: lb.value - la.value, kind: 'money' });
+    }
+
+    const activeSrc = activeGreekSource(greeksLegFilter);
+    const greeks: CompareRow[] = [];
+    for (const k of ['delta', 'gamma', 'theta', 'vega'] as const) {
+      if (!selectedGreeks.has(k)) continue;
+      const va = a.snap.greeks.values[activeSrc]?.[k];
+      const vb = b.snap.greeks.values[activeSrc]?.[k];
+      if (va == null || vb == null) continue;
+      greeks.push({
+        label: k.charAt(0).toUpperCase() + k.slice(1),
+        value: vb - va,
+        digits: k === 'gamma' ? 4 : 2,
+      });
+    }
+
+    return { dtSeconds, price, pnl, greeks };
+  }, [pinnedSnapshots, underlying, greeksLegFilter, selectedGreeks]);
+
+  // Middle-click (or Alt+click) pins the bar under the cursor across every pane at once.
+  // Prefer the crosshair's own time; fall back to the click x so a pin still lands if the
+  // crosshair happened not to be live at that instant.
+  useEffect(() => {
+    const panes: Array<[HTMLDivElement | null, IChartApi | null, number]> = [
+      [priceContainerRef.current, priceChartRef.current, 0],
+      [pnlContainerRef.current, pnlChartRef.current, 75],
+      [greeksContainerRef.current, greeksChartRef.current, 0],
+    ];
+    const unbinds = panes.map(([el, chart, padLeft]) =>
+      bindPinTrigger(
+        el,
+        (ev) => {
+          if (lastHoverTimeRef.current != null) return lastHoverTimeRef.current;
+          if (!el || !chart) return null;
+          try {
+            const rect = el.getBoundingClientRect();
+            const leftScale = chart.priceScale('left').width() ?? 0;
+            const t = chart
+              .timeScale()
+              .coordinateToTime(ev.clientX - rect.left - padLeft - leftScale);
+            return typeof t === 'number' ? t : null;
+          } catch {
+            return null;
+          }
+        },
+        (t) => togglePinRef.current(t),
+      ),
+    );
+    return () => unbinds.forEach((u) => u());
+  }, [chartEpoch, greeksVisible]);
+
   // ── Lightweight Charts Synchronization & Lifecycle ─────────────────────────
   useEffect(() => {
     if (!evalResult) return;
@@ -1005,6 +1226,10 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
     // ── autoSize: true handles chart resizing automatically ──
 
+    // Captured at effect setup, not read live, so the hover path keeps closing over exactly the
+    // render's values it always did (this effect re-runs whenever the charts are rebuilt).
+    const buildSnapshot = buildPaneSnapshotsRef.current;
+
     const updateAllTooltips = (
       timeVal: number | null,
       x: number | null,
@@ -1012,6 +1237,9 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       currentActiveChart: 'price' | 'pnl' | 'greeks' | null,
     ) => {
       setActiveTime(timeVal);
+      // What a middle-click would pin: the bar the crosshair is currently on, or nothing once
+      // the cursor leaves the panes.
+      lastHoverTimeRef.current = timeVal;
       if (timeVal === null || x === null) {
         priceTooltipRef.current?.setVisibility(false);
         pnlTooltipRef.current?.setVisibility(false);
@@ -1019,138 +1247,17 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         return null;
       }
 
-      const timeStr = formatCrosshairTime(timeVal);
-      const minuteKey = Math.floor(timeVal / 60) * 60;
+      const snap = buildSnapshot(timeVal);
+      const timeStr = snap.timeStr;
+      const spot = snap.price.spot;
+      const totalPnl = snap.pnl.total;
+      const delta = snap.greeks.delta;
 
-      const findLatest = <T extends { time: any }>(
-        arr: T[] | undefined,
-        targetTime: number,
-      ): T | undefined => {
-        if (!arr || arr.length === 0) return undefined;
-        let l = 0,
-          r = arr.length - 1;
-        let res: T | undefined = undefined;
-        while (l <= r) {
-          const m = (l + r) >> 1;
-          const time = arr[m].time as number;
-          if (time <= targetTime) {
-            res = arr[m];
-            l = m + 1;
-          } else {
-            r = m - 1;
-          }
-        }
-        return res;
-      };
+      priceTooltipRef.current?.setData(timeStr, snap.price.ohlc, snap.price.legs, underlying);
 
-      // 1. Price Tooltip Data
-      const indexBars = evalResult.underlyingBars || [];
-      const spotBar = findLatest(indexBars, timeVal);
-      const spot = spotBar?.close ?? null;
+      pnlTooltipRef.current?.setData(timeStr, { legs: snap.pnl.legs, total: totalPnl });
 
-      const priceLegs: Array<{
-        strike: number;
-        optionType: 'CE' | 'PE';
-        side: 'BUY' | 'SELL';
-        value: number;
-      }> = [];
-      if (evalResult.legPriceData) {
-        evalResult.legPriceData.forEach((ld) => {
-          const leg = legs[ld.legIndex];
-          if (!leg) return;
-          const match = findLatest(ld.data, timeVal);
-          if (match && match.value > 0) {
-            priceLegs.push({
-              strike: leg.strike,
-              optionType: leg.optionType,
-              side: leg.side,
-              value: match.value,
-            });
-          }
-        });
-      }
-
-      // 2. PNL Tooltip Data
-      const pnlPoints = evalResult.basketPnlData || [];
-      const pnlPoint = findLatest(pnlPoints, timeVal);
-      const totalPnl = pnlPoint?.value ?? 0;
-
-      const pnlLegs: Array<{
-        strike: number;
-        optionType: 'CE' | 'PE';
-        side: 'BUY' | 'SELL';
-        value: number;
-      }> = [];
-      if (evalResult.legPnlData) {
-        evalResult.legPnlData.forEach((ld) => {
-          const leg = legs[ld.legIndex];
-          if (!leg) return;
-          const match = findLatest(ld.data, timeVal);
-          if (match) {
-            pnlLegs.push({
-              strike: leg.strike,
-              optionType: leg.optionType,
-              side: leg.side,
-              value: match.value,
-            });
-          }
-        });
-      }
-
-      // 3. Greeks Tooltip Data
-      let netG: { delta: number; gamma: number; theta: number; vega: number } | undefined;
-      let ceG: { delta: number; gamma: number; theta: number; vega: number } | undefined;
-      let peG: { delta: number; gamma: number; theta: number; vega: number } | undefined;
-
-      let delta = 0; // fallback delta for syncing
-      if (greeksData) {
-        const getPts = (src: 'net' | 'CE' | 'PE') => {
-          const dPt = findLatest(greeksData[src]?.delta, timeVal);
-          const gPt = findLatest(greeksData[src]?.gamma, timeVal);
-          const tPt = findLatest(greeksData[src]?.theta, timeVal);
-          const vPt = findLatest(greeksData[src]?.vega, timeVal);
-          return {
-            delta: dPt?.value ?? 0,
-            gamma: gPt?.value ?? 0,
-            theta: tPt?.value ?? 0,
-            vega: vPt?.value ?? 0,
-          };
-        };
-
-        if (greeksLegFilter.has('net')) {
-          netG = getPts('net');
-          delta = netG.delta;
-        }
-        if (greeksLegFilter.has('CE')) {
-          ceG = getPts('CE');
-          if (!netG) delta = ceG.delta;
-        }
-        if (greeksLegFilter.has('PE')) {
-          peG = getPts('PE');
-          if (!netG && !ceG) delta = peG.delta;
-        }
-      }
-
-      const priceMappedLegs = priceLegs.map((leg) => ({
-        name: `${underlying} ${leg.strike} ${leg.optionType}`,
-        color: leg.optionType === 'CE' ? '#22c55e' : '#ef4444',
-        value: leg.value,
-      }));
-      priceTooltipRef.current?.setData(
-        timeStr,
-        spotBar ? { o: spotBar.open, h: spotBar.high, l: spotBar.low, c: spotBar.close } : null,
-        priceMappedLegs,
-        underlying,
-      );
-
-      const pnlMappedLegs = pnlLegs.map((leg) => ({
-        name: `${underlying} ${leg.strike} ${leg.optionType}`,
-        color: leg.optionType === 'CE' ? '#22c55e' : '#ef4444',
-        value: leg.value,
-      }));
-      pnlTooltipRef.current?.setData(timeStr, { legs: pnlMappedLegs, total: totalPnl });
-
-      greeksTooltipRef.current?.setData(timeStr, { net: netG, CE: ceG, PE: peG });
+      greeksTooltipRef.current?.setData(timeStr, snap.greeks.values);
 
       const defaultY = 40;
 
@@ -3032,6 +3139,33 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                   <div ref={priceContainerRef} style={{ width: '100%', height: '100%' }} />
 
                   <PriceTooltip ref={priceTooltipRef} />
+                  <PinnedCrosshairLayer
+                    pins={pins}
+                    chart={priceChartRef.current}
+                    epoch={chartEpoch}
+                    onRemove={removePin}
+                    renderCard={(pin) => {
+                      const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
+                      if (!snap) return null;
+                      return (
+                        <PriceTooltipBody
+                          timeStr={snap.timeStr}
+                          ohlc={snap.price.ohlc}
+                          legPrices={snap.price.legs}
+                          underlying={underlying}
+                        />
+                      );
+                    }}
+                    compare={
+                      pinCompare && (
+                        <PinCompareStrip
+                          dtSeconds={pinCompare.dtSeconds}
+                          rows={pinCompare.price}
+                          colors={pinColors}
+                        />
+                      )
+                    }
+                  />
                 </div>
 
                 {/* Divider 1: Price / PNL */}
@@ -3070,6 +3204,35 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                   />
 
                   <PnlTooltip ref={pnlTooltipRef} strategyMargin={0} />
+                  <PinnedCrosshairLayer
+                    pins={pins}
+                    chart={pnlChartRef.current}
+                    // This pane's chart div carries paddingLeft: 75 (its native left scale is
+                    // hidden), so plot coordinates need the same correction the hover path makes.
+                    xAdjust={75}
+                    epoch={chartEpoch}
+                    onRemove={removePin}
+                    renderCard={(pin) => {
+                      const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
+                      if (!snap) return null;
+                      return (
+                        <PnlTooltipBody
+                          timeStr={snap.timeStr}
+                          values={{ legs: snap.pnl.legs, total: snap.pnl.total }}
+                          strategyMargin={0}
+                        />
+                      );
+                    }}
+                    compare={
+                      pinCompare && (
+                        <PinCompareStrip
+                          dtSeconds={pinCompare.dtSeconds}
+                          rows={pinCompare.pnl}
+                          colors={pinColors}
+                        />
+                      )
+                    }
+                  />
                 </div>
 
                 {/* Divider 2: PNL / Greeks */}
@@ -3111,6 +3274,39 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                       theta: '#22c55e',
                       vega: '#f59e0b',
                     }}
+                  />
+                  <PinnedCrosshairLayer
+                    pins={pins}
+                    chart={greeksChartRef.current}
+                    epoch={chartEpoch}
+                    onRemove={removePin}
+                    renderCard={(pin) => {
+                      const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
+                      if (!snap) return null;
+                      return (
+                        <GreeksTooltipBody
+                          timeStr={snap.timeStr}
+                          values={snap.greeks.values}
+                          selectedGreeks={selectedGreeks}
+                          greeksLegFilter={greeksLegFilter}
+                          colors={{
+                            delta: '#3b82f6',
+                            gamma: '#a78bfa',
+                            theta: '#22c55e',
+                            vega: '#f59e0b',
+                          }}
+                        />
+                      );
+                    }}
+                    compare={
+                      pinCompare && (
+                        <PinCompareStrip
+                          dtSeconds={pinCompare.dtSeconds}
+                          rows={pinCompare.greeks}
+                          colors={pinColors}
+                        />
+                      )
+                    }
                   />
                 </div>
               </div>
