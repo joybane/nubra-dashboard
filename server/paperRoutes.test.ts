@@ -1,6 +1,7 @@
 import Fastify from 'fastify';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { registerPaperRoutes } from './paperRoutes.ts';
+import { clearMarginCalibrations } from './marginEngine.ts';
 
 let app: ReturnType<typeof Fastify>;
 const simBroker = {
@@ -39,6 +40,7 @@ function register(
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  clearMarginCalibrations();
   app = Fastify();
   register();
   await app.ready();
@@ -166,4 +168,196 @@ test('preserves the authentication guard ahead of broker work', async () => {
   expect(response.statusCode).toBe(401);
   expect(response.json()).toEqual({ error: 'Not authenticated. Complete login first.' });
   expect(simBroker.getOrders).not.toHaveBeenCalled();
+});
+
+function optionChain(ts = Date.now()) {
+  return {
+    chain: {
+      cp: 2_400_000,
+      ce: [
+        {
+          sp: 2_400_000,
+          ref_id: 101,
+          ltp: 15_000,
+          iv: 0.12,
+          delta: 0.5,
+          gamma: 0.001,
+          theta: -8,
+          vega: 12,
+          oi: 25_000,
+          volume: 5_000,
+          ls: 65,
+          ts: String(BigInt(ts) * 1_000_000n),
+        },
+      ],
+      pe: [],
+    },
+  };
+}
+
+function dailyHistory() {
+  const end = new Date('2026-08-09T10:00:00Z').getTime();
+  const prices = [23350, 23420, 23510, 23390, 23620, 23700, 23810, 23760, 23900, 23950];
+  return {
+    result: [
+      {
+        values: [
+          {
+            NIFTY: {
+              close: prices.map((price, index) => ({
+                ts: String(BigInt(end - (prices.length - 1 - index) * 86_400_000) * 1_000_000n),
+                v: price * 100,
+              })),
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+const marginPayload = {
+  exchange: 'NSE',
+  orders: [
+    {
+      ref_id: 101,
+      order_qty: 65,
+      order_side: 'ORDER_SIDE_SELL',
+      order_type: 'MARKET',
+      order_delivery_type: 'ORDER_DELIVERY_TYPE_IDAY',
+      strike: 2_400_000, // order-ticket/refdata paise; route must normalize to rupees
+      option_type: 'CE',
+      expiry: '20260904',
+      symbol: 'NIFTY',
+      lot_size: 65,
+    },
+  ],
+};
+
+test('keeps the Nubra quote authoritative and does not load history on success', async () => {
+  nubraGet.mockResolvedValueOnce(optionChain());
+  nubraPostAt.mockResolvedValueOnce({ marginInfo: { totalMargin: 18_000_000 } });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/paper/margin/basket',
+    payload: marginPayload,
+  });
+  const body = response.json();
+
+  expect(response.statusCode).toBe(200);
+  expect(body.total_margin).toBe(18_000_000);
+  expect(body.estimated).toBe(false);
+  expect(body.source).toBe('nubra-margin-api');
+  expect(body.confidence).toBe('authoritative');
+  expect(nubraPostAt).toHaveBeenCalledTimes(1);
+});
+
+test('preserves basket ratios with the quantity GCD in Nubra multi-leg quotes', async () => {
+  nubraGet.mockResolvedValueOnce(optionChain());
+  nubraPostAt.mockResolvedValueOnce({ marginInfo: { totalMargin: 18_000_000 } });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/paper/margin/basket',
+    payload: {
+      ...marginPayload,
+      orders: [
+        { ...marginPayload.orders[0], order_qty: 130, order_side: 'ORDER_SIDE_BUY' },
+        { ...marginPayload.orders[0], ref_id: 102, order_qty: 195 },
+      ],
+    },
+  });
+  const request = nubraPostAt.mock.calls[0][2] as {
+    orders: Array<{ qty: number; legs: Array<{ unitQty: number }> }>;
+  };
+
+  expect(response.statusCode).toBe(200);
+  expect(request.orders[0].qty).toBe(65);
+  expect(request.orders[0].legs.map((leg) => leg.unitQty)).toEqual([2, -3]);
+});
+
+test('normalizes paise strikes and builds a conservative fallback from existing feeds', async () => {
+  nubraGet.mockResolvedValueOnce(optionChain());
+  nubraPostAt
+    .mockRejectedValueOnce(new Error('margin service unavailable'))
+    .mockResolvedValueOnce(dailyHistory());
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/paper/margin/basket',
+    payload: marginPayload,
+  });
+  const body = response.json();
+
+  expect(response.statusCode).toBe(200);
+  expect(body.estimated).toBe(true);
+  expect(body.source).toBe('feed-dynamic-span');
+  expect(body.confidence).toBe('medium');
+  expect(body.total_margin).toBe(body.conservative_total);
+  expect(body.total_margin).toBeGreaterThan(body.raw_estimate);
+  expect(body.resolved_legs[0]).toMatchObject({ strike: 24000, spot: 24000 });
+  expect(body.message).toMatch(/safety buffer/i);
+  expect(nubraPostAt).toHaveBeenNthCalledWith(
+    2,
+    process.env.NUBRA_BASE_URL || 'https://api2.nubra.io',
+    '/charts/timeseries',
+    expect.any(Object),
+    { Authorization: 'Bearer test-session-token' },
+  );
+});
+
+test('normalizes option-chain spot correctly for stocks priced below Rs 100', async () => {
+  const chain = optionChain();
+  chain.chain.cp = 5_000;
+  chain.chain.ce[0].sp = 5_000;
+  nubraGet.mockResolvedValueOnce(chain);
+  nubraPostAt.mockResolvedValueOnce({ marginInfo: { totalMargin: 250_000 } });
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/paper/margin/basket',
+    payload: {
+      ...marginPayload,
+      orders: [{ ...marginPayload.orders[0], strike: 5_000, symbol: 'LOWSTOCK' }],
+    },
+  });
+  const body = response.json();
+
+  expect(response.statusCode).toBe(200);
+  expect(body.resolved_legs[0]).toMatchObject({ strike: 50, spot: 50 });
+});
+
+test('single-order fallback also normalizes refdata strikes before pricing', async () => {
+  nubraGet.mockResolvedValueOnce(optionChain());
+  nubraPostAt
+    .mockRejectedValueOnce(new Error('margin service unavailable'))
+    .mockResolvedValueOnce(dailyHistory());
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/paper/margin',
+    payload: {
+      liveRefId: 101,
+      order_qty: 65,
+      order_side: 'ORDER_SIDE_SELL',
+      order_type: 'ORDER_TYPE_MARKET',
+      order_delivery_type: 'ORDER_DELIVERY_TYPE_IDAY',
+      exchange: 'NSE',
+      strike: 2_400_000,
+      option_type: 'CE',
+      expiry: '20260904',
+      symbol: 'NIFTY',
+      lot_size: 65,
+      ltp: 150,
+    },
+  });
+  const body = response.json();
+
+  expect(response.statusCode).toBe(200);
+  expect(body.estimated).toBe(true);
+  expect(body.source).toBe('feed-dynamic-span');
+  expect(body.confidence).toBe('medium');
+  expect(body.total_margin).toBeGreaterThan(0);
+  expect(body.total_margin).toBeLessThan(50_000_000);
 });

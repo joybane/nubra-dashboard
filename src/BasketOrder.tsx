@@ -1681,13 +1681,38 @@ export default function BasketOrder({ instrument }: Props) {
                       </div>
                     </div>
                     <div>
-                      <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>
-                        Premium Payable
+                      <div
+                        style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}
+                        title={
+                          totalPremium > 0
+                            ? 'Net option premium expected from the sell legs. Margin is blocked separately.'
+                            : 'Net option premium required for the buy legs.'
+                        }
+                      >
+                        {totalPremium > 0
+                          ? 'Premium Receivable'
+                          : totalPremium < 0
+                            ? 'Premium Payable'
+                            : 'Net Premium'}
                       </div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
-                        {margin.premium
-                          ? fmtPrice(margin.premium)
-                          : fmtPrice(Math.abs(totalPremium))}
+                      <div
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 600,
+                          color:
+                            totalPremium > 0
+                              ? 'var(--green)'
+                              : totalPremium < 0
+                                ? 'var(--red)'
+                                : 'var(--text-primary)',
+                        }}
+                      >
+                        {totalPremium > 0 ? '+' : totalPremium < 0 ? '−' : ''}
+                        {fmtPrice(
+                          Math.abs(totalPremium) > 0
+                            ? Math.abs(totalPremium)
+                            : Math.abs(margin.premium || 0),
+                        )}
                       </div>
                     </div>
                   </div>

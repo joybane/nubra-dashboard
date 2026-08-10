@@ -1,5 +1,3 @@
-import { existsSync, readFileSync } from 'fs';
-import path from 'path';
 import { bsPrice, calendarYearsToExpiry, impliedVolPct } from './backtest/greeks.ts';
 
 export interface BasketMarginOrder {
@@ -18,7 +16,21 @@ export interface BasketMarginOrder {
   spot?: number;
   /** Quoted IV percentage for this leg, if the chain lookup resolved it. */
   iv?: number;
+  /** Previous underlying close in rupees, resolved from the live/history feed. */
+  previous_close?: number;
+  /** Annualised 20-session realised volatility percentage from the Nubra feed. */
+  realized_vol?: number;
+  /** Epoch milliseconds for the option-chain observation used by this quote. */
+  market_data_as_of?: number;
+  oi?: number;
+  volume?: number;
+  delta?: number;
+  gamma?: number;
+  theta?: number;
+  vega?: number;
 }
+
+export type MarginConfidence = 'high' | 'medium' | 'low';
 
 export interface LocalMarginResult {
   total_margin: number;
@@ -29,17 +41,18 @@ export interface LocalMarginResult {
   estimated: true;
   source: string;
   message: string;
+  confidence: MarginConfidence;
+  as_of: string | null;
+  raw_estimate: number;
+  conservative_total: number;
+  calibration_samples: number;
 }
 
-interface SpanRiskContract {
-  riskArray?: number[];
-  scanRiskPerUnit?: number;
-  exposureRate?: number;
-}
-
-interface SpanRiskFile {
-  generatedAt?: string;
-  contracts?: Record<string, SpanRiskContract>;
+export interface LocalMarginOptions {
+  /** Apply recent successful Nubra quote calibration. Defaults to true. */
+  useCalibration?: boolean;
+  /** Add a confidence-based safety buffer. Margin routes enable this for fallbacks. */
+  conservative?: boolean;
 }
 
 interface MarginLeg {
@@ -52,6 +65,13 @@ interface MarginLeg {
   premium: number;
   spot: number;
   ivPct: number;
+  marketIvPct: number;
+  hasQuotedIv: boolean;
+  realizedVolPct: number | null;
+  previousClose: number | null;
+  marketDataAsOf: number | null;
+  oi: number | null;
+  volume: number | null;
   tYears: number;
   isIndex: boolean;
   isCommodity: boolean;
@@ -68,91 +88,27 @@ const ELM_INDEX_LONG_DATED = Number(process.env.LOCAL_MARGIN_ELM_LONG_DATED || 0
 const ELM_EXPIRY_DAY_ADDON = Number(process.env.LOCAL_MARGIN_ELM_EXPIRY_ADDON || 0.02);
 const ELM_STOCK_BASE = Number(process.env.LOCAL_MARGIN_ELM_STOCK || 0.035);
 
-/**
- * ─── MCX ─────────────────────────────────────────────────────────────────────
- *
- * Commodity margin does NOT follow the NSE scenario model, and running it through the
- * 16-scenario simulation was wrong by 12–83%. Measured against the broker on 2026-08-04
- * over 152 positions across 9 commodities (every option-bearing MCX asset that quoted),
- * MCX obeys a much simpler law:
- *
- *     span(short leg) = rate(commodity) × spot × qty + premium × qty
- *     long legs       = free, up to the margin already blocked against the shorts
- *     basket          = Σ legs — there is NO portfolio netting whatsoever
- *
- * The evidence for it is unusually clean. `margin − premium` is flat to within ±1% right
- * across the moneyness grid: CRUDEOIL charges 35.1% of notional at the money and 32.1%
- * at 12.9% out of it, and the whole difference is the premium. A short straddle costs
- * exactly what its two legs cost separately (₹554,293 vs ₹271,776 + ₹282,516), and an
- * iron condor costs *more* than the naked strangle inside it — the opposite of NSE,
- * where the wings save 57%. Mini contracts share their parent's per-unit rate to within
- * 0.01pp (CRUDEOIL 30.82% vs CRUDEOILM 30.83%), which is what makes the table per-asset
- * rather than per-contract.
- *
- * Residual after fitting: median 0.6%, p90 2.5%. What is left is stale LTPs on the
- * illiquid contracts (COPPER and ZINC long options), not model error.
- *
- * These are exchange parameters and the exchange revises them. Re-measure with
- * scripts/collectMarginDataset.ts when they drift, or override a single commodity at
- * runtime with LOCAL_MARGIN_MCX_RATE_<ASSET> (e.g. LOCAL_MARGIN_MCX_RATE_CRUDEOIL=0.31).
- */
-const MCX_RATES_MEASURED_ON = '2026-08-04';
-const MCX_SCAN_RATE: Record<string, number> = {
-  CRUDEOIL: 0.3082,
-  CRUDEOILM: 0.3083,
-  NATURALGAS: 0.1424,
-  NATGASMINI: 0.1423,
-  GOLDM: 0.0916,
-  // GOLD did not quote on the measurement day. Its per-unit rate is inherited from
-  // GOLDM, the same underlying — a substitution the crude and natural-gas pairs justify,
-  // since parent and mini agreed to 0.01pp on both.
-  GOLD: 0.0916,
-  SILVER: 0.1242,
-  SILVERM: 0.1257,
-  COPPER: 0.0918,
-  ZINC: 0.0921,
-};
-/** Commodities outside the table (MCXBULLDEX, anything newly listed) charge this. */
-const MCX_DEFAULT_RATE = Number(process.env.LOCAL_MARGIN_MCX_DEFAULT_RATE || 0.15);
-
-function mcxRateFor(symbol: string): { rate: number; calibrated: boolean } {
-  const override = Number(process.env[`LOCAL_MARGIN_MCX_RATE_${symbol}`]);
-  if (override > 0) return { rate: override, calibrated: true };
-  const rate = MCX_SCAN_RATE[symbol];
-  return rate != null ? { rate, calibrated: true } : { rate: MCX_DEFAULT_RATE, calibrated: false };
-}
-
-// Price scan range: 6σ scaled by √2, floored at 9.3% of underlying for index products
-// and 14.2% for single stocks. At normal index IVs the floor is what binds.
+// Exchange floors stay as safety constraints; the active scan range is recomputed from
+// live IV, realised volatility, the overnight gap and liquidity on every request.
 const PSR_FLOOR_INDEX = 0.093;
 const PSR_FLOOR_STOCK = 0.142;
-const VSR_INDEX_PCT = 4; // ± absolute IV percentage points
-const VSR_STOCK_PCT = 10;
-
-// The scan range is a property of the UNDERLYING, but the only volatility we hold is
-// each option's implied vol — and a nearly-expired ATM option implies a far higher
-// number than the index actually diffuses at. Left unbounded that inflates expiry-day
-// margin badly, so the vol feeding the scan range is clamped to a plausible band for
-// the underlying. Repricing still uses each leg's own unclamped IV.
-//
-// The 18% ceiling is measured, not guessed. It was 22, and on expiry day every OTM
-// NIFTY short solved an IV that pinned to the ceiling, widening the scan range to 11.8%
-// against the exchange's ~9.3% and over-margining those strikes by 15–19%. Sweeping the
-// ceiling against 436 broker quotes bottoms out at 18: NSE p90 error falls from 11.3% to
-// 6.0% and the worst case from 18.6% to 12.6%. Below 18 the 9.3% floor binds everywhere
-// and accuracy flattens back out.
-const PSR_VOL_BAND_INDEX: [number, number] = [
-  8,
-  Number(process.env.LOCAL_MARGIN_PSR_VOL_CAP_INDEX || 18),
-];
-const PSR_VOL_BAND_STOCK: [number, number] = [12, 60];
+const VSR_INDEX_FLOOR_PCT = 4;
+const VSR_STOCK_FLOOR_PCT = 10;
+const MCX_RATE_FLOOR = Number(process.env.LOCAL_MARGIN_MCX_RATE_FLOOR || 0.075);
+const MCX_RATE_CAP = Number(process.env.LOCAL_MARGIN_MCX_RATE_CAP || 0.75);
 
 // Short option minimum charge — zero in current NSCCL files, kept configurable.
 const SHORT_OPTION_MINIMUM = Number(process.env.LOCAL_MARGIN_SHORT_OPTION_MIN || 0);
 const DEFAULT_IV_PCT = Number(process.env.LOCAL_MARGIN_DEFAULT_IV || 15);
+const CALIBRATION_TTL_MS = 24 * 60 * 60 * 1000;
 
-const DEFAULT_SPAN_PATH = path.join(process.cwd(), 'data', 'margin', 'nse-span-risk.json');
-const SPAN_RISK_PATH = process.env.NSE_SPAN_RISK_FILE || DEFAULT_SPAN_PATH;
+interface MarginCalibration {
+  riskFactor: number;
+  samples: number;
+  asOf: number;
+}
+
+const marginCalibrations = new Map<string, MarginCalibration>();
 
 const INDEX_SYMBOLS = new Set([
   'NIFTY',
@@ -218,6 +174,11 @@ function normalizeSymbol(value: string | undefined): string {
     .replace(/[^A-Z0-9]/g, '');
 }
 
+function finitePositive(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
 /** Current wall-clock date/time in IST, as the `YYYY-MM-DD` / `HH:MM` pair the clock helper wants. */
 function istNow(now: Date): { date: string; hhmm: string } {
   const ist = new Date(now.getTime() + 5.5 * 3600 * 1000);
@@ -275,7 +236,8 @@ function normalizeLegs(
     // cancel to zero span the way the exchange's own arrays do. Quoted IV is the
     // fallback when the premium carries no time value to solve against.
     const solved = impliedVolPct(bsType, spot, strike, premium, tYears);
-    const ivPct = solved ?? (Number(o.iv) > 0 ? Number(o.iv) : DEFAULT_IV_PCT);
+    const quotedIv = finitePositive(o.iv);
+    const ivPct = solved ?? quotedIv ?? DEFAULT_IV_PCT;
 
     return [
       {
@@ -288,6 +250,13 @@ function normalizeLegs(
         premium,
         spot,
         ivPct,
+        marketIvPct: quotedIv ?? solved ?? DEFAULT_IV_PCT,
+        hasQuotedIv: quotedIv != null,
+        realizedVolPct: finitePositive(o.realized_vol),
+        previousClose: finitePositive(o.previous_close),
+        marketDataAsOf: finitePositive(o.market_data_as_of),
+        oi: finitePositive(o.oi),
+        volume: finitePositive(o.volume),
         tYears,
         isIndex: INDEX_SYMBOLS.has(symbol),
         isCommodity,
@@ -311,6 +280,64 @@ function modelPrice(leg: MarginLeg, spot: number, ivPct: number): number {
   );
 }
 
+interface DynamicRiskParameters {
+  scanFraction: number;
+  baseIvPct: number;
+  volScanPct: number;
+  stressVolPct: number;
+  gapPct: number;
+  liquidityMultiplier: number;
+}
+
+function average(values: number[]): number {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+/**
+ * Converts the current feed state into the two SPAN shocks. The exchange floors are
+ * retained as guardrails, but they no longer pin the model in stressed markets:
+ * realised volatility, implied volatility, an overnight gap and thin liquidity can all
+ * widen the price/volatility scans immediately.
+ */
+function dynamicRiskParameters(legs: MarginLeg[], commodity = false): DynamicRiskParameters {
+  const marketIv = average(legs.map((leg) => leg.marketIvPct).filter((value) => value > 0));
+  const realizedValues = legs
+    .map((leg) => leg.realizedVolPct)
+    .filter((value): value is number => value != null && value > 0);
+  const realizedVol = average(realizedValues);
+  const stressVolPct = Math.max(marketIv || DEFAULT_IV_PCT, realizedVol || 0);
+  const sigmaShock = 6 * (stressVolPct / 100 / Math.sqrt(252)) * Math.SQRT2;
+  const gapPct = legs.reduce((largest, leg) => {
+    if (!leg.previousClose) return largest;
+    return Math.max(largest, Math.abs(leg.spot / leg.previousClose - 1));
+  }, 0);
+
+  const hasLiquidity = legs.some((leg) => leg.oi != null || leg.volume != null);
+  const thinLiquidity = legs.some(
+    (leg) => (leg.oi != null && leg.oi < 500) || (leg.volume != null && leg.volume < 100),
+  );
+  const liquidityMultiplier = hasLiquidity && thinLiquidity ? 1.08 : 1;
+  const exchangeFloor = commodity ? 0 : legs[0]?.isIndex ? PSR_FLOOR_INDEX : PSR_FLOOR_STOCK;
+  const scanFraction = Math.min(
+    0.8,
+    Math.max(exchangeFloor, sigmaShock, gapPct * 2) * liquidityMultiplier,
+  );
+  const volFloor = legs[0]?.isIndex ? VSR_INDEX_FLOOR_PCT : VSR_STOCK_FLOOR_PCT;
+  const volScanPct = Math.min(
+    commodity ? 50 : legs[0]?.isIndex ? 20 : 35,
+    Math.max(volFloor, stressVolPct * 0.25, Math.abs(marketIv - realizedVol) * 0.5),
+  );
+
+  return {
+    scanFraction,
+    baseIvPct: Math.max(1, Math.min(200, marketIv || DEFAULT_IV_PCT)),
+    volScanPct,
+    stressVolPct,
+    gapPct,
+    liquidityMultiplier,
+  };
+}
+
 /**
  * Worst-case portfolio loss across the 16 scenarios, for legs sharing one underlying.
  * Every leg is repriced at its own time to expiry under a common shock, so verticals,
@@ -319,13 +346,7 @@ function modelPrice(leg: MarginLeg, spot: number, ivPct: number): number {
 function scanRisk(legs: MarginLeg[]): number {
   if (!legs.length) return 0;
   const spot = legs[0].spot;
-  const isIndex = legs[0].isIndex;
-  const avgIv = legs.reduce((s, l) => s + l.ivPct, 0) / legs.length;
-  const [ivLo, ivHi] = isIndex ? PSR_VOL_BAND_INDEX : PSR_VOL_BAND_STOCK;
-  const psrIv = Math.min(ivHi, Math.max(ivLo, avgIv));
-  const psrFloor = isIndex ? PSR_FLOOR_INDEX : PSR_FLOOR_STOCK;
-  const psrFrac = Math.max(psrFloor, 6 * (psrIv / 100 / Math.sqrt(252)) * Math.SQRT2);
-  const vsr = isIndex ? VSR_INDEX_PCT : VSR_STOCK_PCT;
+  const { scanFraction: psrFrac, baseIvPct: psrIv, volScanPct: vsr } = dynamicRiskParameters(legs);
 
   // The scan range is a PERCENTAGE, applied multiplicatively — one range up is
   // spot×(1+f), one range down is spot÷(1+f). The down-move is therefore smaller in
@@ -373,9 +394,9 @@ function optionValues(legs: MarginLeg[]): { long: number; short: number } {
 function elmRateFor(leg: MarginLeg): number {
   if (!leg.isIndex) return ELM_STOCK_BASE;
   let rate = ELM_INDEX_BASE;
-  const isOtm = leg.optionType === 'CE' ? leg.strike > leg.spot : leg.strike < leg.spot;
-  // Spec measures moneyness off the previous close; spot is the closest thing we hold.
-  if (isOtm && Math.abs(leg.strike - leg.spot) / leg.spot > 0.1) rate = ELM_INDEX_DEEP_OTM;
+  const reference = leg.previousClose || leg.spot;
+  const isOtm = leg.optionType === 'CE' ? leg.strike > reference : leg.strike < reference;
+  if (isOtm && Math.abs(leg.strike - reference) / reference > 0.1) rate = ELM_INDEX_DEEP_OTM;
   if (leg.tYears > 0.75) rate = Math.max(rate, ELM_INDEX_LONG_DATED);
   if (leg.isExpiryDay) rate += ELM_EXPIRY_DAY_ADDON;
   return rate;
@@ -431,29 +452,30 @@ function computeScenarioMargin(legs: MarginLeg[]): {
 // ─── MCX path ────────────────────────────────────────────────────────────────
 
 /**
- * Commodity margin, per the law documented at MCX_SCAN_RATE. Legs are grouped by
- * commodity only so a mixed basket picks up the right rate for each — the groups do not
- * net against one another, and neither do legs inside a group.
+ * MCX quotes behave like a per-underlying scan charge without cross-leg netting. The
+ * charge is recomputed from current IV, realised volatility, gaps and liquidity instead
+ * of a dated per-commodity rate table.
  */
 function computeCommodityMargin(legs: MarginLeg[]): {
   span: number;
   optPrem: number;
-  uncalibrated: string[];
+  maxRate: number;
 } {
   let span = 0;
   let optPrem = 0;
-  const uncalibrated: string[] = [];
+  let maxRate = 0;
 
   for (const group of groupBySymbol(legs)) {
-    const symbol = group[0].symbol;
-    const { rate, calibrated } = mcxRateFor(symbol);
-    if (!calibrated && !uncalibrated.includes(symbol)) uncalibrated.push(symbol);
+    const marketRate = 0.9 * dynamicRiskParameters(group, true).scanFraction;
+    const rate = Math.max(MCX_RATE_FLOOR, Math.min(MCX_RATE_CAP, marketRate));
+    maxRate = Math.max(maxRate, rate);
 
     let groupSpan = 0;
     let groupLongPrem = 0;
     for (const leg of group) {
-      if (leg.side === 'SELL') groupSpan += (rate * leg.spot + leg.premium) * leg.qty;
-      else groupLongPrem += leg.premium * leg.qty;
+      if (leg.side === 'SELL')
+        groupSpan += Math.round((rate * leg.spot + leg.premium) * leg.qty * 100) / 100;
+      else groupLongPrem += Math.round(leg.premium * leg.qty * 100) / 100;
     }
     span += groupSpan;
     // Premium on a long leg is absorbed by the margin already blocked against the shorts
@@ -462,84 +484,171 @@ function computeCommodityMargin(legs: MarginLeg[]): {
     optPrem += Math.max(0, groupLongPrem - groupSpan);
   }
 
-  return { span, optPrem, uncalibrated };
+  return { span, optPrem, maxRate };
 }
 
-// ─── Exchange risk-array path ────────────────────────────────────────────────
+// ─── Live quote calibration and confidence ──────────────────────────────────
 
-function loadSpanRiskFile(): SpanRiskFile | null {
-  if (!existsSync(SPAN_RISK_PATH)) return null;
-  try {
-    const parsed = JSON.parse(readFileSync(SPAN_RISK_PATH, 'utf8')) as SpanRiskFile;
-    return parsed && parsed.contracts ? parsed : null;
-  } catch (err) {
-    console.warn('[local-margin] failed to parse SPAN risk file:', (err as Error).message);
-    return null;
+function calibrationKey(legs: MarginLeg[], exchange: string): string | null {
+  if (!legs.length) return null;
+  const first = `${normalizeSymbol(exchange)}:${legs[0].symbol}:${legs[0].expiry}`;
+  return legs.every((leg) => `${normalizeSymbol(exchange)}:${leg.symbol}:${leg.expiry}` === first)
+    ? first
+    : null;
+}
+
+function currentCalibration(
+  legs: MarginLeg[],
+  exchange: string,
+  nowMs: number,
+): MarginCalibration | null {
+  const key = calibrationKey(legs, exchange);
+  if (!key) return null;
+  const calibration = marginCalibrations.get(key);
+  if (!calibration || nowMs - calibration.asOf > CALIBRATION_TTL_MS) return null;
+  return calibration;
+}
+
+function feedAssessment(
+  legs: MarginLeg[],
+  calibration: MarginCalibration | null,
+  nowMs: number,
+): { confidence: MarginConfidence; asOf: number | null; buffer: number } {
+  const timestamps = legs
+    .map((leg) => leg.marketDataAsOf)
+    .filter((value): value is number => value != null && value > 0);
+  const asOf = timestamps.length ? Math.min(...timestamps) : null;
+  const ageMs = asOf == null ? Number.POSITIVE_INFINITY : Math.max(0, nowMs - asOf);
+  const quotedIv = legs.every((leg) => leg.hasQuotedIv);
+  const hasHistory = legs.every((leg) => leg.realizedVolPct != null && leg.previousClose != null);
+
+  let confidence: MarginConfidence = 'low';
+  if (
+    ageMs <= 30_000 &&
+    quotedIv &&
+    hasHistory &&
+    calibration != null &&
+    calibration.samples >= 2
+  ) {
+    confidence = 'high';
+  } else if (ageMs <= 120_000 && quotedIv && (hasHistory || calibration != null)) {
+    confidence = 'medium';
   }
+
+  return {
+    confidence,
+    asOf,
+    buffer: confidence === 'high' ? 1.02 : confidence === 'medium' ? 1.07 : 1.12,
+  };
+}
+
+interface MarginComponents {
+  span: number;
+  exposure: number;
+  premium: number;
+  benefit: number;
+}
+
+function finalizeFeedResult(
+  legs: MarginLeg[],
+  components: MarginComponents,
+  exchange: string,
+  now: Date,
+  options: LocalMarginOptions,
+  messageDetail: string,
+): LocalMarginResult {
+  const rawSpan = paise(components.span);
+  const rawExposure = paise(components.exposure);
+  const premium = paise(components.premium);
+  const rawBenefit = paise(components.benefit);
+  const rawEstimate = rawSpan + rawExposure + premium;
+  const calibration =
+    options.useCalibration === false ? null : currentCalibration(legs, exchange, now.getTime());
+  const assessment = feedAssessment(legs, calibration, now.getTime());
+  const calibrationFactor = calibration?.riskFactor ?? 1;
+  const calibratedSpan = Math.round(rawSpan * calibrationFactor);
+  const calibratedExposure = Math.round(rawExposure * calibrationFactor);
+  const calibratedBenefit = Math.round(rawBenefit * calibrationFactor);
+  const conservativeSpan = Math.round(calibratedSpan * assessment.buffer);
+  const conservativeExposure = Math.round(calibratedExposure * assessment.buffer);
+  const useConservative = options.conservative === true;
+  const span = useConservative ? conservativeSpan : calibratedSpan;
+  const exposure = useConservative ? conservativeExposure : calibratedExposure;
+  const benefit = useConservative
+    ? Math.round(calibratedBenefit * assessment.buffer)
+    : calibratedBenefit;
+  const total = span + exposure + premium;
+  const conservativeTotal = conservativeSpan + conservativeExposure + premium;
+  const source = `${exchange.toUpperCase() === 'MCX' ? 'feed-dynamic-mcx' : 'feed-dynamic-span'}${
+    calibration ? '-calibrated' : ''
+  }`;
+  const params = dynamicRiskParameters(legs, exchange.toUpperCase() === 'MCX');
+  const calibrationNote = calibration
+    ? ` Calibrated from ${calibration.samples} successful Nubra quote${calibration.samples === 1 ? '' : 's'}.`
+    : ' No recent Nubra calibration was available.';
+  const freshnessNote = assessment.asOf
+    ? ` Feed as of ${new Date(assessment.asOf).toISOString()}.`
+    : ' Feed timestamp was unavailable.';
+
+  return {
+    total_margin: total,
+    span,
+    exposure,
+    opt_prem: premium,
+    margin_benefit: benefit,
+    estimated: true,
+    source,
+    confidence: assessment.confidence,
+    as_of: assessment.asOf ? new Date(assessment.asOf).toISOString() : null,
+    raw_estimate: rawEstimate,
+    conservative_total: conservativeTotal,
+    calibration_samples: calibration?.samples ?? 0,
+    message: `Broker margin unavailable. ${messageDetail} Live stress volatility ${params.stressVolPct.toFixed(
+      1,
+    )}%, price scan ${(params.scanFraction * 100).toFixed(1)}%, confidence ${assessment.confidence}.${
+      useConservative
+        ? ` A ${Math.round((assessment.buffer - 1) * 100)}% safety buffer is included.`
+        : ''
+    }${calibrationNote}${freshnessNote}`,
+  };
 }
 
 /**
- * Keys are tried most-specific first. Every key carries the symbol, because a bare
- * strike+type would happily match a different underlying's contract at the same strike.
+ * Learns a bounded EWMA correction from successful broker quotes. Only a single
+ * underlying/expiry basket is accepted so a mixed basket cannot contaminate another
+ * contract's future fallback.
  */
-function riskKeys(leg: MarginLeg): string[] {
-  return [
-    [leg.symbol, leg.expiry, String(leg.strike), leg.optionType].filter(Boolean).join(':'),
-    `${leg.symbol}:${leg.strike}:${leg.optionType}`,
-  ];
+export function observeNubraMarginQuote(
+  orders: BasketMarginOrder[],
+  brokerTotalPaise: number,
+  exchange = 'NSE',
+  now = new Date(),
+): void {
+  if (!(brokerTotalPaise > 0)) return;
+  const { legs } = normalizeLegs(orders, undefined, now, exchange);
+  const key = calibrationKey(legs, exchange);
+  if (!key || !legs.some((leg) => leg.side === 'SELL')) return;
+  const raw = calculateLocalBasketMargin(orders, undefined, now, exchange, {
+    useCalibration: false,
+    conservative: false,
+  });
+  if (!raw) return;
+  const localRisk = raw.span + raw.exposure;
+  const brokerRisk = Math.max(0, brokerTotalPaise - raw.opt_prem);
+  if (!(localRisk > 0) || !(brokerRisk > 0)) return;
+  const observed = Math.max(0.5, Math.min(3, brokerRisk / localRisk));
+  const previous = marginCalibrations.get(key);
+  const riskFactor = previous ? previous.riskFactor * 0.75 + observed * 0.25 : observed;
+  marginCalibrations.set(key, {
+    riskFactor,
+    samples: (previous?.samples ?? 0) + 1,
+    asOf: now.getTime(),
+  });
 }
 
-function computeSpanFromRiskFile(
-  legs: MarginLeg[],
-  riskFile: SpanRiskFile,
-): { span: number; exposure: number } | null {
-  const contracts = riskFile.contracts || {};
-  const resolved = legs.map((leg) => {
-    const contract = riskKeys(leg)
-      .map((k) => contracts[k])
-      .find(Boolean);
-    return contract ? { leg, contract } : null;
-  });
-  if (resolved.some((item) => !item)) return null;
-
-  const maxScenarios = Math.max(
-    ...resolved.map((item) => item?.contract.riskArray?.length || 0),
-    0,
-  );
-  let span = 0;
-  if (maxScenarios > 0) {
-    for (let scenario = 0; scenario < maxScenarios; scenario++) {
-      let scenarioLoss = 0;
-      for (const item of resolved) {
-        if (!item) continue;
-        const signedQty = item.leg.side === 'BUY' ? item.leg.qty : -item.leg.qty;
-        const longPnlPerUnit = Number(item.contract.riskArray?.[scenario] || 0);
-        scenarioLoss += -signedQty * longPnlPerUnit;
-      }
-      span = Math.max(span, scenarioLoss);
-    }
-  } else {
-    span = resolved.reduce((sum, item) => {
-      if (!item) return sum;
-      return sum + Math.max(0, Number(item.contract.scanRiskPerUnit || 0)) * item.leg.qty;
-    }, 0);
-  }
-
-  // Same option-value correction the scenario path makes, and asymmetric for the same
-  // reason: long value offsets scan risk only as far as the scan risk goes, short value
-  // is always added. See spanFor.
-  const { long, short } = optionValues(legs);
-  span = Math.max(0, span - long) + short;
-
-  const exposure = resolved
-    .filter((item) => item && item.leg.side === 'SELL')
-    .reduce((sum, item) => {
-      if (!item) return sum;
-      const rate = Number(item.contract.exposureRate ?? elmRateFor(item.leg));
-      return sum + item.leg.spot * item.leg.qty * rate;
-    }, 0);
-
-  return { span: Math.max(0, span), exposure: Math.max(0, exposure) };
+/** Test/support hook; production never clears calibrations during a running session. */
+export function clearMarginCalibrations(): void {
+  marginCalibrations.clear();
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -549,6 +658,7 @@ export function calculateLocalBasketMargin(
   fallbackSymbol = 'NIFTY',
   now = new Date(),
   exchange = 'NSE',
+  options: LocalMarginOptions = {},
 ): LocalMarginResult | null {
   const { legs, dropped } = normalizeLegs(orders, fallbackSymbol, now, exchange);
   if (!legs.length) return null;
@@ -557,25 +667,16 @@ export function calculateLocalBasketMargin(
     dropped > 0
       ? ` ${dropped} non-option leg${dropped > 1 ? 's were' : ' was'} excluded — futures are not yet priced locally.`
       : '';
-  // MCX does not use the NSE scenario model at all — see MCX_SCAN_RATE. It also never
-  // reaches the SPAN risk-file path below, which holds NSE contracts only.
   if (legs[0].isCommodity) {
-    const { span, optPrem, uncalibrated } = computeCommodityMargin(legs);
-    const spanP = paise(span);
-    const premP = paise(optPrem);
-    const warn = uncalibrated.length
-      ? ` ⚠ ${uncalibrated.join(', ')} ${uncalibrated.length > 1 ? 'are' : 'is'} not in the measured rate table and fell back to ${(MCX_DEFAULT_RATE * 100).toFixed(1)}% of notional — treat as indicative.`
-      : '';
-    return {
-      total_margin: spanP + premP,
-      span: spanP,
-      exposure: 0, // MCX quotes one blended charge; SPAN and ELM are not separable from it.
-      opt_prem: premP,
-      margin_benefit: 0, // MCX gives no portfolio netting, so there is none to report.
-      estimated: true,
-      source: 'local-mcx-rate',
-      message: `Broker margin unavailable. Estimated from MCX commodity rates measured ${MCX_RATES_MEASURED_ON} (median error 0.6%).${droppedNote}${warn}`,
-    };
+    const { span, optPrem, maxRate } = computeCommodityMargin(legs);
+    return finalizeFeedResult(
+      legs,
+      { span, exposure: 0, premium: optPrem, benefit: 0 },
+      exchange,
+      now,
+      options,
+      `Estimated from the live MCX feed at a ${(maxRate * 100).toFixed(1)}% dynamic scan rate.${droppedNote}`,
+    );
   }
 
   // Cash actually needed to open the position: premium paid on longs less credit taken
@@ -586,39 +687,18 @@ export function calculateLocalBasketMargin(
     legs.reduce((sum, l) => sum + (l.side === 'BUY' ? 1 : -1) * l.premium * l.qty, 0),
   );
 
-  const riskFile = loadSpanRiskFile();
-  const spanResult = riskFile ? computeSpanFromRiskFile(legs, riskFile) : null;
-
-  // Round each component once, then add — rounding the total separately would leave it
-  // a paisa off the sum of its parts, which the UI shows side by side.
-  const premP = paise(premiumPayable);
-
-  if (spanResult) {
-    const spanP = paise(spanResult.span);
-    const expP = paise(spanResult.exposure);
-    return {
-      total_margin: spanP + expP + premP,
-      span: spanP,
-      exposure: expP,
-      opt_prem: premP,
-      margin_benefit: 0,
-      estimated: true,
-      source: 'local-span-risk-file',
-      message: `Exchange-style margin from local SPAN risk data${riskFile?.generatedAt ? ` (${riskFile.generatedAt})` : ''}. Broker margin still takes priority when Nubra is available.${droppedNote}`,
-    };
-  }
-
   const scenario = computeScenarioMargin(legs);
-  const spanP = paise(scenario.span);
-  const expP = paise(scenario.exposure);
-  return {
-    total_margin: spanP + expP + premP,
-    span: spanP,
-    exposure: expP,
-    opt_prem: premP,
-    margin_benefit: paise(scenario.benefit),
-    estimated: true,
-    source: 'local-scenario-span',
-    message: `Broker margin unavailable. Estimated from a 16-scenario SPAN simulation. Add NSE SPAN risk data at ${SPAN_RISK_PATH} for exchange-exact figures.${droppedNote}`,
-  };
+  return finalizeFeedResult(
+    legs,
+    {
+      span: scenario.span,
+      exposure: scenario.exposure,
+      premium: premiumPayable,
+      benefit: scenario.benefit,
+    },
+    exchange,
+    now,
+    options,
+    `Estimated from a feed-driven 16-scenario SPAN simulation.${droppedNote}`,
+  );
 }

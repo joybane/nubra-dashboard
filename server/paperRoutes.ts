@@ -10,7 +10,7 @@ import {
   dbGetSnapshot,
   dbDeleteSnapshot,
 } from './paperDb.ts';
-import { calculateLocalBasketMargin } from './marginEngine.ts';
+import { calculateLocalBasketMargin, observeNubraMarginQuote } from './marginEngine.ts';
 import {
   upsertLegRule,
   upsertGroupRule,
@@ -118,6 +118,7 @@ export function registerPaperRoutes({
   nubraPostAt,
   marginBaseUrl,
 }: PaperRouteDeps): void {
+  const marginMarketDataBaseUrl = process.env.NUBRA_BASE_URL || 'https://api2.nubra.io';
   // ─── Paper Trading auth status ────────────────────────────────────────────────
   fastify.get('/paper/auth/status', async (_req, reply) => {
     return reply.send({
@@ -536,6 +537,15 @@ export function registerPaperRoutes({
       /** Filled in server-side from the option chain; consumed by the local margin engine. */
       spot?: number;
       iv?: number;
+      previous_close?: number;
+      realized_vol?: number;
+      market_data_as_of?: number;
+      oi?: number;
+      volume?: number;
+      delta?: number;
+      gamma?: number;
+      theta?: number;
+      vega?: number;
     }>;
   }
 
@@ -650,6 +660,13 @@ export function registerPaperRoutes({
     };
   }
 
+  function greatestCommonDivisor(a: number, b: number): number {
+    let left = Math.abs(Math.round(a));
+    let right = Math.abs(Math.round(b));
+    while (right) [left, right] = [right, left % right];
+    return Math.max(1, left);
+  }
+
   function buildV3MarginOrders(
     orders: BasketMarginBody['orders'],
     exchange: string,
@@ -663,10 +680,8 @@ export function registerPaperRoutes({
     // nets by underlying anyway.
     if (exchange.toUpperCase() === 'MCX') return orders.map(singleV3Order);
 
-    const baseQty = Math.max(
-      1,
-      Math.min(...orders.map((o) => Math.max(1, Number(o.order_qty || 1)))),
-    );
+    const quantities = orders.map((order) => Math.max(1, Math.round(Number(order.order_qty || 1))));
+    const baseQty = quantities.reduce(greatestCommonDivisor);
     const first = orders[0];
     return [
       {
@@ -732,6 +747,194 @@ export function registerPaperRoutes({
     return clean;
   }
 
+  interface MarginHistoryState {
+    previousClose: number;
+    realizedVolPct: number;
+    expiresAt: number;
+  }
+
+  const marginHistoryCache = new Map<string, MarginHistoryState>();
+  const marginIndexSymbols = new Set([
+    'NIFTY',
+    'BANKNIFTY',
+    'FINNIFTY',
+    'MIDCPNIFTY',
+    'NIFTYNXT50',
+    'SENSEX',
+    'BANKEX',
+    'SENSEX50',
+  ]);
+
+  function feedPriceInRupees(raw: unknown, reference?: number): number {
+    const value = Number(raw);
+    if (!(value > 0)) return 0;
+    if (reference && reference > 0) {
+      const directDistance = Math.abs(Math.log(value / reference));
+      const paiseDistance = Math.abs(Math.log(value / 100 / reference));
+      return paiseDistance < directDistance ? value / 100 : value;
+    }
+    return value > 10_000 ? value / 100 : value;
+  }
+
+  function feedTimestampMs(raw: unknown): number | null {
+    const value = Number(raw);
+    if (Number.isFinite(value) && value > 0) {
+      if (value > 1e17) return value / 1e6; // nanoseconds
+      if (value > 1e14) return value / 1e3; // microseconds
+      if (value > 1e12) return value; // milliseconds
+      if (value > 1e9) return value * 1000; // seconds
+    }
+    const parsed = typeof raw === 'string' ? Date.parse(raw) : NaN;
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function istDateKey(ms: number): string {
+    return new Date(ms + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  }
+
+  function collectHistoricalCloses(
+    data: Record<string, unknown>,
+    spotReference: number,
+  ): Array<{ ts: number; close: number }> {
+    const points: Array<{ ts: number; close: number }> = [];
+    const result = Array.isArray(data.result) ? data.result : [];
+    for (const group of result as Array<Record<string, unknown>>) {
+      const values = Array.isArray(group.values) ? group.values : [];
+      for (const row of values as Array<Record<string, unknown>>) {
+        for (const series of Object.values(row)) {
+          if (!series || typeof series !== 'object') continue;
+          const closes = (series as Record<string, unknown>).close;
+          if (!Array.isArray(closes)) continue;
+          for (const point of closes as Array<Record<string, unknown>>) {
+            const ts = feedTimestampMs(point.ts);
+            const close = feedPriceInRupees(point.v, spotReference);
+            if (ts != null && close > 0) points.push({ ts, close });
+          }
+        }
+      }
+    }
+    return points.sort((a, b) => a.ts - b.ts);
+  }
+
+  function realizedVolatility(closes: number[]): number {
+    const sample = closes.slice(-21);
+    if (sample.length < 6) return 0;
+    const returns: number[] = [];
+    for (let i = 1; i < sample.length; i++) {
+      if (sample[i - 1] > 0 && sample[i] > 0) returns.push(Math.log(sample[i] / sample[i - 1]));
+    }
+    if (returns.length < 5) return 0;
+    const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
+    const variance =
+      returns.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+      Math.max(1, returns.length - 1);
+    return Math.sqrt(variance) * Math.sqrt(252) * 100;
+  }
+
+  function withMarginFeedTimeout<T>(promise: Promise<T>, timeoutMs = 2_000): Promise<T> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('market-history request timed out')),
+        timeoutMs,
+      );
+      promise.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  async function loadMarginHistory(
+    symbol: string,
+    exchange: string,
+    spotReference: number,
+  ): Promise<MarginHistoryState | null> {
+    const normalizedSymbol = symbol.toUpperCase();
+    const key = `${exchange.toUpperCase()}:${normalizedSymbol}`;
+    const cached = marginHistoryCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached;
+
+    const end = new Date();
+    const start = new Date(end.getTime() - 45 * 24 * 60 * 60 * 1000);
+    const type =
+      exchange.toUpperCase() === 'MCX'
+        ? 'FUT'
+        : marginIndexSymbols.has(normalizedSymbol)
+          ? 'INDEX'
+          : 'STOCK';
+    try {
+      const data = await withMarginFeedTimeout(
+        nubraPostAt(
+          marginMarketDataBaseUrl,
+          '/charts/timeseries',
+          {
+            query: [
+              {
+                exchange,
+                type,
+                values: [normalizedSymbol],
+                fields: ['close'],
+                startDate: start.toISOString(),
+                endDate: end.toISOString(),
+                interval: '1d',
+                intraDay: false,
+                realTime: false,
+              },
+            ],
+          },
+          { Authorization: `Bearer ${getSessionToken()!}` },
+        ),
+      );
+      const points = collectHistoricalCloses(data, spotReference);
+      const today = istDateKey(end.getTime());
+      const completed = points.filter((point) => istDateKey(point.ts) < today);
+      const usable = completed.length ? completed : points;
+      const previousClose = usable.at(-1)?.close ?? 0;
+      const realizedVolPct = realizedVolatility(usable.map((point) => point.close));
+      if (!(previousClose > 0) || !(realizedVolPct > 0)) return null;
+      const state = {
+        previousClose,
+        realizedVolPct,
+        expiresAt: Date.now() + 15 * 60 * 1000,
+      };
+      marginHistoryCache.set(key, state);
+      return state;
+    } catch (error) {
+      console.warn(`[margin-feed] history unavailable for ${key}:`, (error as Error).message);
+      return null;
+    }
+  }
+
+  async function enrichOrdersWithMarginHistory(
+    orders: BasketMarginBody['orders'],
+    exchange: string,
+  ): Promise<void> {
+    const groups = new Map<string, BasketMarginBody['orders']>();
+    for (const order of orders) {
+      if (!order.symbol || !(Number(order.spot) > 0)) continue;
+      const key = order.symbol.toUpperCase();
+      const group = groups.get(key);
+      if (group) group.push(order);
+      else groups.set(key, [order]);
+    }
+    await Promise.all(
+      [...groups.entries()].map(async ([symbol, group]) => {
+        const history = await loadMarginHistory(symbol, exchange, Number(group[0].spot));
+        if (!history) return;
+        for (const order of group) {
+          order.previous_close = history.previousClose;
+          order.realized_vol = history.realizedVolPct;
+        }
+      }),
+    );
+  }
+
   /**
    * Fill each order in place with the live ref_id, LTP, IV and underlying spot from the
    * option chain, and return the resolved leg detail for the client. The local margin
@@ -764,12 +967,23 @@ export function registerPaperRoutes({
         }
         if (chain) {
           const list = (o.option_type.toUpperCase() === 'CE' ? chain.ce : chain.pe) || [];
+          // Option-chain spot is always paise, including stocks below Rs 100 where a
+          // magnitude heuristic would otherwise misread 5,000 paise as Rs 5,000.
+          const chainSpotRaw = Number(chain.cp ?? chain.currentprice ?? 0);
+          const chainSpot = chainSpotRaw > 0 ? chainSpotRaw / 100 : 0;
+          const targetStrike = feedPriceInRupees(o.strike, chainSpot || undefined);
           const matched = list.find((c: any) => {
-            const sp = Number(c.sp);
-            return o.strike != null && (sp === o.strike || sp === o.strike * 100);
+            const strike = feedPriceInRupees(c.sp, chainSpot || undefined);
+            return targetStrike > 0 && Math.abs(strike - targetStrike) < 0.005;
           });
           if (matched) {
             o.ref_id = Number(matched.ref_id || matched.refId);
+            const rawSpot = chainSpot;
+            if (rawSpot > 0) o.spot = rawSpot;
+            // REST refdata/order-ticket strikes may be paise while basket strikes are
+            // rupees. Resolve against spot so the local engine always receives rupees.
+            const normalizedStrike = feedPriceInRupees(matched.sp, rawSpot || undefined);
+            if (normalizedStrike > 0) o.strike = normalizedStrike;
             // Feed the freshly resolved market data back onto the order itself, not only
             // into resolvedLegs. The local margin engine prices from these fields and
             // would otherwise use whatever stale (or absent) values the client sent.
@@ -777,10 +991,24 @@ export function registerPaperRoutes({
             if (freshLtp > 0) o.ltp = freshLtp;
             // The chain reports IV as a decimal (0.1905); the margin engine wants percent.
             if (matched.iv != null && Number(matched.iv) > 0) o.iv = Number(matched.iv) * 100;
-            const rawSpot = Number(chain.cp ?? chain.currentprice ?? 0) / 100; // cp is paise
-            if (rawSpot > 0) o.spot = rawSpot;
+            const previousClose = feedPriceInRupees(
+              chain.prev_close ??
+                chain.prevClose ??
+                chain.previous_close ??
+                chain.previousClose ??
+                chain.pc,
+              rawSpot || undefined,
+            );
+            if (previousClose > 0) o.previous_close = previousClose;
+            o.market_data_as_of = feedTimestampMs(matched.ts) ?? Date.now();
+            if (matched.oi != null) o.oi = Number(matched.oi);
+            if (matched.volume != null) o.volume = Number(matched.volume);
+            if (matched.delta != null) o.delta = Number(matched.delta);
+            if (matched.gamma != null) o.gamma = Number(matched.gamma);
+            if (matched.theta != null) o.theta = Number(matched.theta);
+            if (matched.vega != null) o.vega = Number(matched.vega);
             resolvedLegs.push({
-              strike: o.strike,
+              strike: normalizedStrike || o.strike,
               optionType: o.option_type,
               expiry: o.expiry,
               refId: o.ref_id,
@@ -790,6 +1018,11 @@ export function registerPaperRoutes({
               gamma: matched.gamma != null ? Number(matched.gamma) : null,
               theta: matched.theta != null ? Number(matched.theta) : null,
               vega: matched.vega != null ? Number(matched.vega) : null,
+              oi: matched.oi != null ? Number(matched.oi) : null,
+              volume: matched.volume != null ? Number(matched.volume) : null,
+              spot: rawSpot || null,
+              previousClose: previousClose || null,
+              asOf: o.market_data_as_of,
               nubraName: String(matched.zanskar_name || matched.nubra_name || matched.symbol || ''),
               lotSize: Number(matched.ls || matched.lot_size || o.lot_size || 1),
             });
@@ -829,12 +1062,24 @@ export function registerPaperRoutes({
         );
         const normalized = normalizeMarginResponse(v3Data);
         console.log('[basket-margin-v3] response:', JSON.stringify(normalized));
-        if (Number(normalized.total_margin ?? 0) > 0)
-          return reply.send({ ...normalized, resolved_legs: resolvedLegs });
+        if (Number(normalized.total_margin ?? 0) > 0) {
+          observeNubraMarginQuote(orders, Number(normalized.total_margin), exchange);
+          return reply.send({
+            ...normalized,
+            resolved_legs: resolvedLegs,
+            estimated: false,
+            source: 'nubra-margin-api',
+            confidence: 'authoritative',
+            as_of: new Date().toISOString(),
+          });
+        }
         throw new Error('Broker returned no total margin.');
       } catch (err) {
         const v3Error = (err as Error).message;
-        const localMargin = calculateLocalBasketMargin(orders, undefined, undefined, exchange);
+        await enrichOrdersWithMarginHistory(orders, exchange);
+        const localMargin = calculateLocalBasketMargin(orders, undefined, undefined, exchange, {
+          conservative: true,
+        });
         if (localMargin && Number(localMargin.total_margin || 0) > 0) {
           const normalizedLocal = normalizeMarginResponse(localMargin as any);
           console.warn(
@@ -1039,7 +1284,15 @@ export function registerPaperRoutes({
         );
         const normalized = normalizeMarginResponse(v3Data);
         console.log('[margin-v3] response:', JSON.stringify(normalized));
-        if (Number(normalized.total_margin ?? 0) > 0) return reply.send(normalized);
+        if (Number(normalized.total_margin ?? 0) > 0) {
+          return reply.send({
+            ...normalized,
+            estimated: false,
+            source: 'nubra-margin-api',
+            confidence: 'authoritative',
+            as_of: new Date().toISOString(),
+          });
+        }
         throw new Error('Broker returned no total margin.');
       } catch (err) {
         const v3Error = (err as Error).message;
@@ -1064,7 +1317,10 @@ export function registerPaperRoutes({
             },
           ];
           await resolveOrdersFromChain(orders, exchange);
-          const localMargin = calculateLocalBasketMargin(orders, symbol, undefined, exchange);
+          await enrichOrdersWithMarginHistory(orders, exchange);
+          const localMargin = calculateLocalBasketMargin(orders, symbol, undefined, exchange, {
+            conservative: true,
+          });
           if (localMargin && Number(localMargin.total_margin || 0) > 0) {
             console.warn(
               '[margin] broker unavailable, using local margin:',

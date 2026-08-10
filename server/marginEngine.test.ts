@@ -1,5 +1,12 @@
-import { test, expect } from 'vitest';
-import { calculateLocalBasketMargin, type BasketMarginOrder } from './marginEngine.ts';
+import { afterEach, test, expect } from 'vitest';
+import {
+  calculateLocalBasketMargin,
+  clearMarginCalibrations,
+  observeNubraMarginQuote,
+  type BasketMarginOrder,
+} from './marginEngine.ts';
+
+afterEach(() => clearMarginCalibrations());
 
 // These tests cover the LOCAL margin engine (used when the broker margin API is
 // unavailable). Unlike the earlier structural-only suite, they assert absolute
@@ -212,6 +219,60 @@ test('IV is calibrated from the traded premium, so a wider premium costs more sp
   expect(rich.span).toBeGreaterThan(cheap.span);
 });
 
+test('realised volatility from the feed widens the price scan in stressed markets', () => {
+  const base = { ...leg('SELL', 'CE', 24000, 150), iv: 12, previous_close: 24000 };
+  const calm = calc([{ ...base, realized_vol: 10 }]);
+  const stressed = calc([{ ...base, realized_vol: 45 }]);
+  expect(stressed.span).toBeGreaterThan(calm.span);
+});
+
+test('an overnight gap from previous close widens the live scan', () => {
+  const base = { ...leg('SELL', 'CE', 24000, 150), iv: 12, realized_vol: 10 };
+  const unchanged = calc([{ ...base, previous_close: 24000 }]);
+  const gapped = calc([{ ...base, previous_close: 22000 }]);
+  expect(gapped.span).toBeGreaterThan(unchanged.span);
+});
+
+test('the margin route can request a confidence-based conservative total', () => {
+  const order = {
+    ...leg('SELL', 'CE', 24000, 150),
+    iv: 12,
+    realized_vol: 15,
+    previous_close: 23950,
+    market_data_as_of: NOW.getTime(),
+  };
+  const raw = calculateLocalBasketMargin([order], 'NIFTY', NOW, 'NSE', {
+    conservative: false,
+  })!;
+  const guarded = calculateLocalBasketMargin([order], 'NIFTY', NOW, 'NSE', {
+    conservative: true,
+  })!;
+  expect(guarded.confidence).toBe('medium');
+  expect(guarded.total_margin).toBe(guarded.conservative_total);
+  expect(guarded.total_margin).toBeGreaterThan(raw.total_margin);
+});
+
+test('successful Nubra quotes continuously calibrate the same underlying and expiry', () => {
+  const order = {
+    ...leg('SELL', 'CE', 24000, 150),
+    iv: 12,
+    realized_vol: 15,
+    previous_close: 23950,
+    market_data_as_of: NOW.getTime(),
+  };
+  const raw = calculateLocalBasketMargin([order], 'NIFTY', NOW, 'NSE', {
+    useCalibration: false,
+  })!;
+  const brokerTotal = Math.round(raw.total_margin * 1.25);
+  observeNubraMarginQuote([order], brokerTotal, 'NSE', NOW);
+  observeNubraMarginQuote([order], brokerTotal, 'NSE', NOW);
+  const calibrated = calculateLocalBasketMargin([order], 'NIFTY', NOW, 'NSE')!;
+  expect(calibrated.source).toContain('calibrated');
+  expect(calibrated.calibration_samples).toBe(2);
+  expect(calibrated.confidence).toBe('high');
+  expect(calibrated.total_margin).toBeGreaterThan(raw.total_margin);
+});
+
 // ─── Calibration anchors ─────────────────────────────────────────────────────
 // Real positions quoted by the broker on 2026-08-04, captured by
 // scripts/collectMarginDataset.ts. These are the only tests here that can tell you the
@@ -320,21 +381,38 @@ test('MCX gives no portfolio netting — a straddle costs exactly its two legs',
   expect(both.margin_benefit).toBe(0);
 });
 
-test('an MCX commodity outside the measured table is flagged, not quoted silently', () => {
+test('a newly listed MCX commodity uses the same live volatility model without a table', () => {
   const r = calculateLocalBasketMargin(
     [{ ...crude('SELL', 'CE', 377.5), symbol: 'MCXBULLDEX' }],
     'MCXBULLDEX',
     NOW,
     'MCX',
   )!;
-  expect(r.message).toMatch(/not in the measured rate table/i);
+  expect(r.message).toMatch(/live MCX feed/i);
+  expect(r.source).toBe('feed-dynamic-mcx');
   expect(r.total_margin).toBeGreaterThan(0);
 });
 
 test('MCX never routes through the NSE scenario engine', () => {
   const r = calculateLocalBasketMargin([crude('SELL', 'CE', 377.5)], 'CRUDEOIL', NOW, 'MCX')!;
-  expect(r.source).toBe('local-mcx-rate');
+  expect(r.source).toBe('feed-dynamic-mcx');
   expect(r.exposure).toBe(0); // MCX quotes one blended charge, no separate ELM
+});
+
+test('MCX scan rates rise with current feed volatility', () => {
+  const calm = calculateLocalBasketMargin(
+    [{ ...crude('SELL', 'CE', 377.5), iv: 25 }],
+    'CRUDEOIL',
+    NOW,
+    'MCX',
+  )!;
+  const stressed = calculateLocalBasketMargin(
+    [{ ...crude('SELL', 'CE', 377.5), iv: 70 }],
+    'CRUDEOIL',
+    NOW,
+    'MCX',
+  )!;
+  expect(stressed.total_margin).toBeGreaterThan(calm.total_margin);
 });
 
 test('non-option legs are reported as excluded rather than dropped silently', () => {
