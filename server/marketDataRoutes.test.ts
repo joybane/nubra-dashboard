@@ -4,17 +4,21 @@ import { registerMarketDataRoutes } from './marketDataRoutes.ts';
 
 let app: ReturnType<typeof Fastify>;
 const getRefdata = vi.fn(async () => [] as Record<string, unknown>[]);
+const peekRefdata = vi.fn((): Record<string, unknown>[] | null => null);
 const nubraGet = vi.fn(async () => ({}));
 const nubraPost = vi.fn(async () => ({}));
 
 beforeEach(async () => {
   getRefdata.mockClear();
+  peekRefdata.mockClear();
+  peekRefdata.mockReturnValue(null);
   nubraGet.mockClear();
   nubraPost.mockClear();
   app = Fastify();
   registerMarketDataRoutes({
     fastify: app,
     getRefdata,
+    peekRefdata,
     nubraGet,
     nubraPost,
     requireAuth: () => true,
@@ -121,6 +125,7 @@ test('preserves the authentication guard ahead of market-data work', async () =>
   registerMarketDataRoutes({
     fastify: app,
     getRefdata,
+    peekRefdata,
     nubraGet,
     nubraPost,
     requireAuth: (reply) => {
@@ -134,8 +139,67 @@ test('preserves the authentication guard ahead of market-data work', async () =>
   const response = await app.inject({ method: 'GET', url: '/api/refdata' });
 
   expect(response.statusCode).toBe(401);
+  // Exactly this body — no diagnostic keys leak into auth/validation replies.
   expect(response.json()).toEqual({ error: 'Not authenticated. Complete login first.' });
   expect(getRefdata).not.toHaveBeenCalled();
   expect(nubraGet).not.toHaveBeenCalled();
   expect(nubraPost).not.toHaveBeenCalled();
+});
+
+test('keeps the upstream error message verbatim and adds the cause as detail', async () => {
+  // The frontend substring-matches `error` to decide whether to bail out of the option chain
+  // view, so decorating it would silently change navigation behaviour.
+  nubraGet.mockRejectedValueOnce(
+    new TypeError('fetch failed', {
+      cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+    }),
+  );
+
+  const response = await app.inject({
+    method: 'GET',
+    url: '/api/optionchain/CRUDEOIL?exchange=MCX',
+  });
+
+  expect(response.statusCode).toBe(500);
+  const body = response.json<{ error: string; detail: string; code?: string }>();
+  expect(body.error).toBe('fetch failed');
+  expect(body.detail).toContain('other side closed');
+  expect(body.code).toBe('UND_ERR_SOCKET');
+});
+
+test('enriches option chain legs from the warm refdata cache without awaiting a download', async () => {
+  peekRefdata.mockReturnValue([{ ref_id: 7, stock_name: 'CRUDEOIL_1300_CE' }]);
+  nubraGet.mockResolvedValueOnce({ chain: { ce: [{ ref_id: 7, sp: 130000 }], pe: [] } });
+
+  const response = await app.inject({
+    method: 'GET',
+    url: '/api/optionchain/CRUDEOIL?exchange=MCX',
+  });
+
+  expect(response.statusCode).toBe(200);
+  expect(response.json<{ chain: { ce: Array<{ symbol?: string }> } }>().chain.ce[0].symbol).toBe(
+    'CRUDEOIL_1300_CE',
+  );
+  expect(getRefdata).not.toHaveBeenCalled();
+});
+
+test('replies un-enriched rather than hanging when a cold refdata download stalls', async () => {
+  // The pre-fix behaviour was an unbounded await here: the first MCX chain of the day blocked on
+  // a multi-megabyte instrument download while the pane sat on "Loading option chain…".
+  peekRefdata.mockReturnValue(null);
+  getRefdata.mockReturnValueOnce(new Promise<Record<string, unknown>[]>(() => {}));
+  nubraGet.mockResolvedValueOnce({ chain: { ce: [{ ref_id: 7, sp: 130000 }], pe: [] } });
+
+  vi.useFakeTimers();
+  try {
+    const pending = app.inject({ method: 'GET', url: '/api/optionchain/CRUDEOIL?exchange=MCX' });
+    await vi.advanceTimersByTimeAsync(3_000);
+    const response = await pending;
+
+    expect(response.statusCode).toBe(200);
+    const ce = response.json<{ chain: { ce: Array<{ symbol?: string }> } }>().chain.ce;
+    expect(ce[0].symbol).toBeUndefined();
+  } finally {
+    vi.useRealTimers();
+  }
 });

@@ -1,6 +1,15 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import { sendUpstreamError } from './routeErrors.ts';
+
+/**
+ * How long an option-chain request will wait for a cold refdata download before replying without
+ * leg symbols. The losing download keeps running and populates the cache, so the client's 5s poll
+ * picks up the enriched version shortly after.
+ */
+const REFDATA_ENRICH_BUDGET_MS = 2_500;
 
 type GetRefdata = (exchange: string) => Promise<Record<string, unknown>[]>;
+type PeekRefdata = (exchange: string) => Record<string, unknown>[] | null;
 type NubraGet = (
   endpoint: string,
   params?: Record<string, string>,
@@ -14,6 +23,8 @@ type NubraPost = (
 interface MarketDataRouteDeps {
   fastify: FastifyInstance;
   getRefdata: GetRefdata;
+  /** Synchronous cache read. Returns null when the exchange has not been downloaded yet. */
+  peekRefdata: PeekRefdata;
   nubraGet: NubraGet;
   nubraPost: NubraPost;
   requireAuth: (reply: FastifyReply) => boolean;
@@ -23,11 +34,31 @@ interface MarketDataRouteDeps {
 export function registerMarketDataRoutes({
   fastify,
   getRefdata,
+  peekRefdata,
   nubraGet,
   nubraPost,
   requireAuth,
   getSessionToken,
 }: MarketDataRouteDeps): void {
+  /**
+   * Waits up to REFDATA_ENRICH_BUDGET_MS for a cold exchange's refdata, then gives up and returns
+   * null. The download itself is not cancelled — it keeps going and fills the cache, so this is a
+   * bounded wait rather than a bounded fetch.
+   */
+  async function refdataWithinBudget(exchange: string): Promise<Record<string, unknown>[] | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        getRefdata(exchange).catch(() => null),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), REFDATA_ENRICH_BUDGET_MS);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   // ─── Refdata (instruments) ────────────────────────────────────────────────────
   fastify.get<{ Querystring: { exchange?: string } }>('/api/refdata', async (req, reply) => {
     if (!requireAuth(reply)) return;
@@ -36,8 +67,7 @@ export function registerMarketDataRoutes({
       const arr = await getRefdata(exchange);
       return reply.send({ refdata: arr });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return reply.status(500).send({ error: msg });
+      return sendUpstreamError(reply, err, `GET /api/refdata?exchange=${req.query.exchange || ''}`);
     }
   });
 
@@ -109,8 +139,7 @@ export function registerMarketDataRoutes({
 
         return reply.send({ results: filtered });
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return reply.status(500).send({ error: msg });
+        return sendUpstreamError(reply, err, `GET /api/instruments/search?q=${req.query.q || ''}`);
       }
     },
   );
@@ -127,7 +156,11 @@ export function registerMarketDataRoutes({
         const match = arr.find((item) => (item as Record<string, unknown>).ref_id === refId);
         return reply.send({ instrument: match || null });
       } catch (err: unknown) {
-        return reply.status(500).send({ error: (err as Error).message });
+        return sendUpstreamError(
+          reply,
+          err,
+          `GET /api/instruments/lookup?ref_id=${req.query.ref_id || ''}`,
+        );
       }
     },
   );
@@ -141,8 +174,7 @@ export function registerMarketDataRoutes({
       });
       return reply.send(data);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return reply.status(500).send({ error: msg });
+      return sendUpstreamError(reply, err, 'POST /api/historical');
     }
   });
 
@@ -160,9 +192,18 @@ export function registerMarketDataRoutes({
       const data = await nubraGet(`/optionchains/${instrument}`, params);
       const chain = (data.chain || data) as Record<string, unknown>;
 
-      // Enrich legs with stock_name from refdata so frontend can call historical timeseries
+      // Enrich legs with stock_name from refdata so frontend can call historical timeseries.
+      //
+      // This used to `await getRefdata` unconditionally, which meant the first chain for an
+      // exchange we had not downloaded yet (MCX, typically — only NSE is warmed at startup) paid
+      // a full multi-megabyte instrument dump *inside* the request, and the pane sat on
+      // "Loading option chain…" for as long as that took. Now we only wait a short budget for a
+      // cold exchange. Dropping the enrichment is not free — useGreekOverlay and useOIProfile key
+      // off leg.symbol and bail out entirely without it — so we still wait, just not forever, and
+      // the losing download populates the cache for the next request.
       try {
-        const refdata = await getRefdata(exchange);
+        const refdata = peekRefdata(exchange) ?? (await refdataWithinBudget(exchange));
+        if (!refdata) throw new Error(`refdata for ${exchange} not ready`);
         const refById = new Map<number, string>();
         for (const r of refdata) {
           if (r.ref_id != null && r.stock_name) refById.set(Number(r.ref_id), String(r.stock_name));
@@ -190,8 +231,11 @@ export function registerMarketDataRoutes({
 
       return reply.send(data);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return reply.status(500).send({ error: msg });
+      return sendUpstreamError(
+        reply,
+        err,
+        `GET /api/optionchain/${req.params.instrument}?exchange=${req.query.exchange || ''}`,
+      );
     }
   });
 
@@ -208,8 +252,7 @@ export function registerMarketDataRoutes({
         );
         return reply.send(data);
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return reply.status(500).send({ error: msg });
+        return sendUpstreamError(reply, err, `GET /api/optionchain/${req.params.instrument}/price`);
       }
     },
   );

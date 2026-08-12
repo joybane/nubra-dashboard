@@ -35,6 +35,8 @@ import {
   type FeedIndex,
 } from './ocFeedGuard.ts';
 import { loadPositionRules, evaluateAndFire } from './positionRules.ts';
+import { createRefdataCache } from './refdataCache.ts';
+import { describeUpstreamError, isTransportError, upstreamTimeoutMs } from './upstreamError.ts';
 import { chartSubscriptionKey, type ChartSubscription } from '../src/lib/chartSubRegistry.ts';
 import protobuf from 'protobufjs';
 
@@ -50,30 +52,8 @@ const PORT = Number(process.env.SERVER_PORT || 3000);
 
 // ─── Server-side refdata cache ────────────────────────────────────────────────
 // Avoids fetching 100k+ instrument records from Nubra on every search keystroke.
-// Keyed by exchange; auto-invalidated when the calendar date rolls over.
-const _refdataCache = new Map<string, Record<string, unknown>[]>();
-let _refdataCacheDay = '';
-
-async function getRefdata(exchange: string): Promise<Record<string, unknown>[]> {
-  const today = new Date().toISOString().slice(0, 10);
-  if (_refdataCacheDay !== today) {
-    _refdataCache.clear();
-    _refdataCacheDay = today;
-  }
-  const hit = _refdataCache.get(exchange);
-  if (hit) return hit;
-  const raw = await nubraGet(`/refdata/refdata/${today}`, { exchange });
-  const arr: Record<string, unknown>[] = Array.isArray(raw.refdata)
-    ? (raw.refdata as Record<string, unknown>[])
-    : Array.isArray(raw.data)
-      ? (raw.data as Record<string, unknown>[])
-      : Array.isArray(raw)
-        ? (raw as unknown as Record<string, unknown>[])
-        : [];
-  _refdataCache.set(exchange, arr);
-  console.log(`[Refdata] Cached ${arr.length} instruments for ${exchange}`);
-  return arr;
-}
+// See refdataCache.ts for why this single-flights and evicts empty/failed results.
+const { getRefdata, peekRefdata } = createRefdataCache({ nubraGet: (e, p) => nubraGet(e, p) });
 
 import crypto from 'crypto';
 
@@ -259,18 +239,39 @@ async function nubraPost(
   return nubraPostAt(BASE_URL, endpoint, body, extraHeaders);
 }
 
-async function nubraPostAt(
-  baseUrl: string,
-  endpoint: string,
-  body: object,
-  extraHeaders: Record<string, string> = {},
-): Promise<Record<string, unknown>> {
-  const res = await fetch(`${baseUrl}${endpoint}`, {
-    method: 'POST',
-    headers: baseHeaders(extraHeaders),
-    body: JSON.stringify(body),
-  });
-  const text = await res.text();
+// ─── Upstream HTTP ────────────────────────────────────────────────────────────
+// Every call out to Nubra funnels through these two functions. Neither used to carry a timeout,
+// so a stalled broker socket parked the request handler for undici's defaults — minutes — before
+// finally surfacing as an opaque `fetch failed`. Both now run under a per-endpoint budget and log
+// their duration; see upstreamError.ts for the budget table.
+
+/** Log every upstream call, not just the slow ones. Useful when hunting a stall. */
+const LOG_ALL_UPSTREAM = process.env.NUBRA_HTTP_LOG === '1';
+const SLOW_UPSTREAM_MS = 1_500;
+
+function logUpstream(method: string, endpoint: string, ms: number, outcome: string): void {
+  const failed = outcome.startsWith('FAIL');
+  if (!failed && !LOG_ALL_UPSTREAM && ms < SLOW_UPSTREAM_MS) return;
+  const line = `[upstream] ${method} ${endpoint} ${ms}ms ${outcome}`;
+  // Slow-but-successful is worth seeing, but it is not an error — keep it off stderr.
+  if (failed) console.warn(line);
+  else console.log(line);
+}
+
+/**
+ * Turns an AbortSignal.timeout rejection into a message that names the budget it blew.
+ *
+ * The wording must not contain the substring "option chain" — isOptionChainUnavailableError in
+ * src/OptionChain.tsx matches on that and would navigate the user's pane away to the chart view.
+ */
+function asTimeoutError(err: unknown, method: string, endpoint: string, ms: number): unknown {
+  const kind = describeUpstreamError(err).kind;
+  if (kind !== 'timeout') return err;
+  return new Error(`upstream timeout after ${ms}ms: ${method} ${endpoint}`, { cause: err });
+}
+
+/** Shared response handling: parse, surface auth failures, throw on non-2xx. */
+function parseUpstream(res: Response, text: string): Record<string, unknown> {
   let data: Record<string, unknown> = {};
   if (text.trim()) {
     try {
@@ -285,6 +286,39 @@ async function nubraPostAt(
     throw new Error(msg);
   }
   return data;
+}
+
+async function nubraPostAt(
+  baseUrl: string,
+  endpoint: string,
+  body: object,
+  extraHeaders: Record<string, string> = {},
+): Promise<Record<string, unknown>> {
+  const timeoutMs = upstreamTimeoutMs(endpoint);
+  const startedAt = Date.now();
+  try {
+    const res = await fetch(`${baseUrl}${endpoint}`, {
+      method: 'POST',
+      headers: baseHeaders(extraHeaders),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    // The same signal bounds the body read, which was previously unbounded on its own.
+    const text = await res.text();
+    const data = parseUpstream(res, text);
+    logUpstream('POST', endpoint, Date.now() - startedAt, `ok ${text.length}B`);
+    return data;
+  } catch (err: unknown) {
+    const wrapped = asTimeoutError(err, 'POST', endpoint, timeoutMs);
+    logUpstream(
+      'POST',
+      endpoint,
+      Date.now() - startedAt,
+      `FAIL ${describeUpstreamError(wrapped).detail}`,
+    );
+    // Deliberately never retried: a re-sent /sendphoneotp means a second SMS to the user.
+    throw wrapped;
+  }
 }
 
 async function nubraGet(
@@ -293,28 +327,45 @@ async function nubraGet(
 ): Promise<Record<string, unknown>> {
   const qs = new URLSearchParams(params).toString();
   const url = `${BASE_URL}${endpoint}${qs ? '?' + qs : ''}`;
-  const res = await fetch(url, {
-    headers: baseHeaders({ Authorization: `Bearer ${authState.sessionToken}` }),
-  });
-  const text = await res.text();
-  let data: Record<string, unknown> = {};
-  if (text.trim()) {
+  const timeoutMs = upstreamTimeoutMs(endpoint);
+
+  // Retry once, and only for transport-level failures. Node's connection pool hands out idle
+  // keep-alive sockets that the broker (or an intermediate NAT) may have silently dropped; the
+  // request then fails immediately and a retry gets a fresh socket. That is the per-request
+  // version of restarting the server, which was previously the only cure.
+  //
+  // Explicitly NOT retried: our own timeouts (retrying doubles the wall clock back into a hang)
+  // and HTTP statuses (a 401/403 has already fired onBrokerAuthFailure, and re-firing it would
+  // hammer the re-auth path).
+  for (let attempt = 0; ; attempt++) {
+    const startedAt = Date.now();
     try {
-      data = JSON.parse(text);
-    } catch {
-      data = { message: text };
+      const res = await fetch(url, {
+        headers: baseHeaders({ Authorization: `Bearer ${authState.sessionToken}` }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      const text = await res.text();
+      const data = parseUpstream(res, text);
+      logUpstream('GET', endpoint, Date.now() - startedAt, `ok ${text.length}B`);
+      return data;
+    } catch (err: unknown) {
+      const wrapped = asTimeoutError(err, 'GET', endpoint, timeoutMs);
+      const failure = describeUpstreamError(wrapped);
+      logUpstream('GET', endpoint, Date.now() - startedAt, `FAIL ${failure.detail}`);
+      if (attempt >= 1 || !isTransportError(wrapped)) throw wrapped;
+      console.warn(`[upstream] retrying GET ${endpoint} after ${failure.detail}`);
     }
   }
-  if (!res.ok) {
-    if (res.status === 401 || res.status === 403) onBrokerAuthFailure();
-    const msg = (data.message || data.error || `HTTP ${res.status}: ${text}`) as string;
-    throw new Error(msg);
-  }
-  return data;
 }
 
 // ─── Fastify setup ────────────────────────────────────────────────────────────
 const httpServer = createServer();
+
+// Fastify's own connectionTimeout/requestTimeout options are bypassed when a serverFactory is
+// used, so set them on the underlying server. These bound how long we wait to RECEIVE a request,
+// not how long a handler may take to answer — a long backtest response is unaffected.
+httpServer.requestTimeout = 60_000;
+httpServer.headersTimeout = 65_000;
 
 const fastify = Fastify({
   serverFactory: (handler) => {
@@ -398,6 +449,7 @@ function requireAuth(reply: {
 registerMarketDataRoutes({
   fastify,
   getRefdata,
+  peekRefdata,
   nubraGet,
   nubraPost,
   requireAuth,
@@ -1248,16 +1300,32 @@ registerPaperRoutes({
   marginBaseUrl: MARGIN_BASE_URL,
 });
 
+/**
+ * Pre-download the instrument master for the exchanges the UI actually uses.
+ *
+ * Only NSE was ever warmed, so the first MCX or BSE option chain of the day paid a
+ * multi-megabyte download inside the request. Fire-and-forget: the single-flight cache
+ * de-duplicates against any request that races us, and a failure just leaves the cache cold.
+ */
+function warmRefdata(): void {
+  for (const exchange of ['NSE', 'BSE', 'MCX']) {
+    void getRefdata(exchange).catch((e: unknown) => {
+      console.warn(`[Refdata] warm failed for ${exchange}:`, describeUpstreamError(e).detail);
+    });
+  }
+}
+
 // ─── Startup session restore ──────────────────────────────────────────────────
 async function tryRestoreSession(): Promise<void> {
   if (authState.sessionToken) {
     try {
       console.log('Testing saved session token...');
-      const today = new Date().toISOString().slice(0, 10);
+      // Doubles as the session-token probe: a 401 here rejects and drops us to the PIN path.
       await getRefdata('NSE');
 
       authState.status = 'authenticated';
       console.log('[auth] Saved session token is valid. Zero-prompt bypass successful!');
+      warmRefdata();
       connectNubraWs();
       try {
         broadcast({ type: 'auth_status', status: 'authenticated' });
@@ -1290,6 +1358,7 @@ async function tryRestoreSession(): Promise<void> {
       authState.status = 'authenticated';
       console.log('Session restored — OTP not needed.');
       saveSession();
+      warmRefdata();
       connectNubraWs();
       try {
         broadcast({ type: 'auth_status', status: 'authenticated' });
