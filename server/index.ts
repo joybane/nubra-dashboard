@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import fastifyCompress from '@fastify/compress';
 import fastifyCors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import { createServer } from 'http';
@@ -19,6 +20,7 @@ import {
 import { buildBasketSnapshot, istDateString, type SnapPosition } from './snapshotBuilder.ts';
 import { registerBacktestRoutes } from './backtest/routes.ts';
 import { registerNubraBacktestRoutes } from './nubraBacktestRoutes.ts';
+import { createBacktestRefdataStore } from './backtestRefdataStore.ts';
 import { registerMarketDataRoutes } from './marketDataRoutes.ts';
 import { registerAuthRoutes } from './authRoutes.ts';
 import { registerPaperRoutes } from './paperRoutes.ts';
@@ -53,7 +55,9 @@ const PORT = Number(process.env.SERVER_PORT || 3000);
 // ─── Server-side refdata cache ────────────────────────────────────────────────
 // Avoids fetching 100k+ instrument records from Nubra on every search keystroke.
 // See refdataCache.ts for why this single-flights and evicts empty/failed results.
-const { getRefdata, peekRefdata } = createRefdataCache({ nubraGet: (e, p) => nubraGet(e, p) });
+const { getRefdata, peekRefdata, cacheDay } = createRefdataCache({
+  nubraGet: (e, p) => nubraGet(e, p),
+});
 
 import crypto from 'crypto';
 
@@ -376,6 +380,11 @@ const fastify = Fastify({
 });
 
 await fastify.register(fastifyCors, { origin: true });
+
+// /api/refdata ships the instrument master — a multi-megabyte, ~100k-record array of highly
+// repetitive JSON — and the search worker asks for three exchanges. It went out uncompressed.
+// Registered before the routes so it applies to all of them; small responses are left alone.
+await fastify.register(fastifyCompress, { global: true, threshold: 1024 });
 
 // Serve built frontend in production
 const distPath = path.join(__dirname, '..', 'dist');
@@ -1387,6 +1396,12 @@ registerNubraBacktestRoutes({
   nubraPost,
   requireAuth,
   getSessionToken: () => authState.sessionToken,
+  refdataStore: createBacktestRefdataStore({
+    nubraGet: (e, p) => nubraGet(e, p),
+    getSharedRefdata: getRefdata,
+    sharedDay: cacheDay,
+    cacheDir: path.join(__dirname, '..', '.refdata-cache'),
+  }),
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────

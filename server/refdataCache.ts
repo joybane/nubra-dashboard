@@ -32,6 +32,12 @@ export interface RefdataCache {
   getRefdata(exchange: string): Promise<Record<string, unknown>[]>;
   /** Synchronous cache read; null when this exchange has not been downloaded yet today. */
   peekRefdata(exchange: string): Record<string, unknown>[] | null;
+  /**
+   * The day these entries belong to, as YYYY-MM-DD. Callers keyed by an arbitrary date (the
+   * historical backtest) compare against this to decide whether this cache already holds what
+   * they want, rather than re-deriving the rollover rule and drifting from it.
+   */
+  cacheDay(): string;
 }
 
 /** Unchanged from the original inline implementation — the upstream shape varies by deployment. */
@@ -97,5 +103,7 @@ export function createRefdataCache({ nubraGet, now = Date.now }: RefdataCacheDep
     return pending;
   }
 
-  return { getRefdata, peekRefdata };
+  // currentDay also performs the rollover, so exposing it directly keeps the reported day and the
+  // cached contents consistent — there is no window where one has rolled over and the other has not.
+  return { getRefdata, peekRefdata, cacheDay: currentDay };
 }

@@ -111,7 +111,11 @@ export function isTransportError(err: unknown): boolean {
  * tens of seconds, while an option chain that has not answered in 12s is not coming.
  */
 export function upstreamTimeoutMs(endpoint: string): number {
-  if (endpoint.startsWith('/refdata/refdata/')) return 45_000;
+  // Measured on the live broker: ~34 MB per exchange, and cold calls landed at 40.9 s and 44.5 s.
+  // The old 45 s budget was inside the noise of that — a cold date could blow it and surface as
+  // "Could not fetch option refdata". Doubling it costs nothing when the call succeeds, and the
+  // per-date disk cache means a given date only pays this once (backtestRefdataStore.ts).
+  if (endpoint.startsWith('/refdata/refdata/')) return 90_000;
   if (endpoint.startsWith('/charts/timeseries')) return 30_000;
   // Human-facing OTP/PIN round trips. A false timeout here logs the user out via
   // reauthSilently's catch, so be generous.

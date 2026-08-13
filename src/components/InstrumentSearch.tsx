@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Instrument, InstrumentType } from '../types';
 import { getInstrumentType } from '../types';
-import { fetchRefdata } from '../db';
 import { formatInstrumentName, instrumentSearchAlias } from '../lib/instrumentDisplay';
-import NubraWorker from '../workers/nubraSearch.worker?worker';
+import { acquireSearchWorker, type SearchWorkerHandle } from '../lib/searchWorkerClient';
 
 const POPULAR_INDICES: Instrument[] = [
   { stock_name: 'NIFTY 50', nubra_name: 'NIFTY', exchange: 'NSE', derivative_type: 'INDEX' },
@@ -47,24 +46,19 @@ export default function InstrumentSearch({
   const [filter, setFilter] = useState('All');
   const [workerReady, setWorkerReady] = useState(false);
   const [searching, setSearching] = useState(false);
-  const workerRef = useRef<Worker | null>(null);
+  const handleRef = useRef<SearchWorkerHandle | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const dropRef = useRef<HTMLDivElement>(null);
   const queryRef = useRef('');
 
-  // Boot Web Worker and pre-load refdata
+  // Subscribe to the shared search worker. Index construction is scheduled below, not here.
   useEffect(() => {
-    const worker = new NubraWorker();
-    workerRef.current = worker;
-
-    worker.onmessage = (
-      e: MessageEvent<{ type: string; q?: string; results?: Instrument[]; count?: number }>,
-    ) => {
-      if (e.data.type === 'loaded') setWorkerReady(true);
-      if (e.data.type === 'results') {
-        if (e.data.q !== queryRef.current) return;
-        const res = e.data.results || [];
+    const handle = acquireSearchWorker((msg) => {
+      if (msg.type === 'loaded') setWorkerReady(true);
+      if (msg.type === 'results') {
+        if (msg.q !== queryRef.current) return;
+        const res = msg.results || [];
         const q2 = queryRef.current.toLowerCase();
         if (q2.length < 2) {
           setResults(res);
@@ -83,34 +77,35 @@ export default function InstrumentSearch({
         setResults(combined);
         setSearching(false);
       }
+    });
+    handleRef.current = handle;
+
+    // Building the index downloads the instrument master for NSE, BSE and MCX. This component
+    // lives in the Navbar, so it mounts on every page load regardless of which pane is showing —
+    // doing that work at mount put three multi-megabyte downloads in direct contention with
+    // whatever the active pane was fetching, for connections and for the server's single thread.
+    // Wait for the browser to fall idle instead, or for the user to actually reach for the search
+    // box (see handleFocus), whichever happens first. Typing before the index is ready already
+    // falls back to server-side search, so nothing is lost by waiting.
+    let cancelSchedule: () => void;
+    if (typeof requestIdleCallback === 'function') {
+      const id = requestIdleCallback(() => handle.ensureIndex(), { timeout: 5_000 });
+      cancelSchedule = () => cancelIdleCallback(id);
+    } else {
+      const id = setTimeout(() => handle.ensureIndex(), 2_000);
+      cancelSchedule = () => clearTimeout(id);
+    }
+
+    return () => {
+      cancelSchedule();
+      handleRef.current = null;
+      handle.release();
     };
-
-    // Load major exchange refdata into worker so chart search can find indices,
-    // equities, futures, and options across NSE/BSE/MCX.
-    Promise.all([fetchRefdata('NSE'), fetchRefdata('BSE'), fetchRefdata('MCX')])
-      .then(([nse, bse, mcx]) => {
-        const seen = new Set<string>();
-        const items = [
-          ...(nse as Instrument[]),
-          ...(bse as Instrument[]),
-          ...(mcx as Instrument[]),
-        ].filter((item) => {
-          const key = `${item.exchange || ''}:${item.ref_id || item.stock_name || item.nubra_name || item.zanskar_name || item.symbol || ''}`;
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-        worker.postMessage({ type: 'load', items });
-      })
-      .catch(console.error);
-
-    return () => worker.terminate();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const doSearch = useCallback(
     (q: string) => {
-      if (!workerRef.current || !workerReady) {
+      if (!workerReady) {
         // Fallback: server search while the worker is still warming up.
         Promise.all(
           ['NSE', 'BSE', 'MCX'].map((exchange) =>
@@ -149,7 +144,7 @@ export default function InstrumentSearch({
           });
         return;
       }
-      workerRef.current.postMessage({ type: 'search', q, limit: 30 });
+      handleRef.current?.search(q, 30);
     },
     [workerReady],
   );
@@ -173,6 +168,8 @@ export default function InstrumentSearch({
   }
 
   function handleFocus() {
+    // The user is reaching for search — build the index now rather than waiting for idle.
+    handleRef.current?.ensureIndex();
     if (query.length < 2) setResults(POPULAR_INDICES);
     setOpen(true);
   }

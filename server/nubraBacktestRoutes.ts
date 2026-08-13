@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import { createBacktestRefdataStore, type BacktestRefdataStore } from './backtestRefdataStore.ts';
 
 type NubraGet = (
   endpoint: string,
@@ -17,6 +18,12 @@ interface NubraBacktestRouteDeps {
   nubraPost: NubraPost;
   requireAuth: (reply: FastifyReply) => boolean;
   getSessionToken: () => string | null;
+  /**
+   * Per-date instrument master. Optional: without one, dates are fetched and memoised in-process
+   * exactly as before, which is all the route tests need. The server passes a store wired to the
+   * shared day cache and to disk — see backtestRefdataStore.ts.
+   */
+  refdataStore?: BacktestRefdataStore;
 }
 
 export function registerNubraBacktestRoutes({
@@ -25,28 +32,14 @@ export function registerNubraBacktestRoutes({
   nubraPost,
   requireAuth,
   getSessionToken,
+  refdataStore,
 }: NubraBacktestRouteDeps): void {
   // ─── Nubra Backtest — Utilities ───────────────────────────────────────────────
 
-  const _nbRefdataCache = new Map<string, Record<string, unknown>[]>();
+  const nbRefdata = refdataStore ?? createBacktestRefdataStore({ nubraGet });
 
-  async function nbGetRefdataForDate(
-    exchange: string,
-    date: string,
-  ): Promise<Record<string, unknown>[]> {
-    const key = `${exchange}_${date}`;
-    if (_nbRefdataCache.has(key)) return _nbRefdataCache.get(key)!;
-    try {
-      const raw = await nubraGet(`/refdata/refdata/${date}`, { exchange });
-      const arr = Array.isArray(raw.refdata) ? (raw.refdata as Record<string, unknown>[]) : [];
-      if (arr.length > 0) {
-        _nbRefdataCache.set(key, arr);
-      }
-      return arr;
-    } catch (e) {
-      console.error(`Failed to fetch refdata for date ${date}:`, e);
-      return [];
-    }
+  function nbGetRefdataForDate(exchange: string, date: string): Promise<Record<string, unknown>[]> {
+    return nbRefdata.getRefdataForDate(exchange, date);
   }
 
   function nbTimeToMin(hhmm: string): number {
@@ -102,38 +95,53 @@ export function registerNubraBacktestRoutes({
     const sortedVols = sortByTs(vols);
     const sortedOis = sortByTs(ois);
 
-    const getAlignedValue = (
-      targetArr: Array<{ ts?: string | number; v: number }>,
-      targetTs: string | number,
-    ): number => {
-      const targetStr = String(targetTs);
+    /**
+     * Last-value-at-or-before lookup, as a forward-only cursor.
+     *
+     * This used to restart at index 0 for every close bar and allocate a fresh String() per
+     * element — roughly bars × entries × 7 comparisons per symbol, and the chain route parses 58
+     * symbols per request. Because the close bars and each field array are both sorted ascending,
+     * the answer's index can only move forward, so a cursor that never rewinds visits each entry
+     * once and returns exactly the same value the rescan did.
+     *
+     * Carries `lastVal` across calls, which is what makes a value hold until the next entry
+     * supersedes it; 0 until the first entry at or before the requested timestamp.
+     */
+    const makeAligner = (targetArr: Array<{ ts?: string | number; v: number }>) => {
+      let i = 0;
       let lastVal = 0;
-      for (const item of targetArr) {
-        if (String(item.ts) <= targetStr) {
-          lastVal = item.v;
-        } else {
-          break;
+      return (targetStr: string): number => {
+        while (i < targetArr.length && String(targetArr[i].ts) <= targetStr) {
+          lastVal = targetArr[i].v;
+          i++;
         }
-      }
-      return lastVal;
+        return lastVal;
+      };
     };
+
+    const alignOpen = makeAligner(sortedOpens);
+    const alignHigh = makeAligner(sortedHighs);
+    const alignLow = makeAligner(sortedLows);
+    const alignIv = makeAligner(sortedIvs);
+    const alignVol = makeAligner(sortedVols);
+    const alignOi = makeAligner(sortedOis);
 
     const bars: NbBar[] = [];
     for (const c of sortedCloses) {
       const ts = String(c.ts!);
       const close = c.v / 100;
-      const open = getAlignedValue(sortedOpens, ts) / 100 || close;
-      const high = getAlignedValue(sortedHighs, ts) / 100 || Math.max(open, close);
-      const low = getAlignedValue(sortedLows, ts) / 100 || Math.min(open, close);
+      const open = alignOpen(ts) / 100 || close;
+      const high = alignHigh(ts) / 100 || Math.max(open, close);
+      const low = alignLow(ts) / 100 || Math.min(open, close);
       bars.push({
         ts,
         open,
         high,
         low,
         close,
-        iv: getAlignedValue(sortedIvs, ts),
-        vol: getAlignedValue(sortedVols, ts),
-        oi: getAlignedValue(sortedOis, ts),
+        iv: alignIv(ts),
+        vol: alignVol(ts),
+        oi: alignOi(ts),
       });
     }
     return bars;
@@ -375,24 +383,9 @@ export function registerNubraBacktestRoutes({
       if (spotChart) {
         const bars = nbParseBars(spotChart);
         const bar = nbFindBar(bars, time);
-        console.log(`[debug-chain] bars count: ${bars.length}, time: ${time}`);
-        if (bars.length) {
-          console.log(
-            `[debug-chain] first bar: ${bars[0].ts} (${nbTsToIstHHMM(bars[0].ts)}), close: ${bars[0].close}`,
-          );
-          console.log(
-            `[debug-chain] last bar: ${bars[bars.length - 1].ts} (${nbTsToIstHHMM(bars[bars.length - 1].ts)}), close: ${bars[bars.length - 1].close}`,
-          );
-        }
-        if (bar) {
-          spot = bar.close;
-          console.log(
-            `[debug-chain] matched bar: ${bar.ts} (${nbTsToIstHHMM(bar.ts)}), close: ${bar.close}`,
-          );
-        }
+        if (bar) spot = bar.close;
       }
       if (!spot) {
-        console.log(`[debug-chain] no spot resolved, using fallback`);
         // Fallback to daily bar if 1m is not found (e.g. out of market hours or database lag)
         const dailyRes = await nubraPost(
           '/charts/timeseries',
@@ -522,24 +515,6 @@ export function registerNubraBacktestRoutes({
         if (!mapping) continue;
         const chart = optAll[sym];
         if (!chart) continue;
-
-        console.log(
-          `[debug-chain] symbol: ${sym}, keys of chart: ${Object.keys(chart).join(', ')}`,
-        );
-        if ((chart as any).open_interest) {
-          console.log(`[debug-chain] open_interest length: ${(chart as any).open_interest.length}`);
-          if ((chart as any).open_interest.length) {
-            console.log(
-              `[debug-chain] open_interest[0]: ${JSON.stringify((chart as any).open_interest[0])}`,
-            );
-          }
-        }
-        if ((chart as any).oi) {
-          console.log(`[debug-chain] oi length: ${(chart as any).oi.length}`);
-          if ((chart as any).oi.length) {
-            console.log(`[debug-chain] oi[0]: ${JSON.stringify((chart as any).oi[0])}`);
-          }
-        }
 
         const bars = nbParseBars(chart);
         const bar = nbFindBar(bars, time);

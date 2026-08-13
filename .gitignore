@@ -24,6 +24,9 @@ Thumbs.db
 # Archived one-off patch scripts / backups / logs (kept locally, not tracked)
 _archive/
 
+# Per-date instrument masters, re-downloadable from the broker (see backtestRefdataStore.ts)
+.refdata-cache/
+
 # Runtime logs & editor scratch files
 *.log
 *.bak
