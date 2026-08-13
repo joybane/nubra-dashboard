@@ -22,9 +22,10 @@
 //
 // …and two baseline rules, which decide what t_min means:
 //
-//   • "session"  — t_min resets at every IST trading day, so the fixed basket re-locks
-//                  each morning and the difference series returns to zero at 9:15. Each
-//                  session is self-contained while the whole loaded window stays on screen.
+//   • "session"  — t_min resets at every IST trading day, so the fixed basket re-locks and
+//                  the difference series returns to zero at that day's FIRST snapshot — not
+//                  at a fixed clock time (a partial day starts late, and MCX opens at 09:00).
+//                  Each session is self-contained while the whole loaded window stays on screen.
 //
 //   • "window"   — one t_min for the entire loaded window (the original behavior). The
 //                  difference series runs cumulatively and the fixed basket stays locked

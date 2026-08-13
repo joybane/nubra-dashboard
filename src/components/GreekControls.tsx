@@ -229,7 +229,7 @@ export function GreekButton({ api, label }: { api: GreekOverlayApi; label: strin
                   />
                   <div className="text-[9px] text-[var(--text-muted)] mt-1.5 leading-relaxed">
                     {api.baseline === 'session'
-                      ? 'Re-anchors each day: fixed basket re-locks at 9:15 and Δ returns to zero.'
+                      ? "Re-anchors each day: fixed basket re-locks at the day's first tick and Δ returns to zero."
                       : 'One anchor for the whole loaded window — Δ runs cumulatively across days.'}
                   </div>
                 </div>

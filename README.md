@@ -409,10 +409,11 @@ basket, CE and PE as separate lines. The delta band is CE `[0.05, 0.609]` and PE
 | Series   | totals / diff / both | Absolute sum (solid) vs. change-from-t₀ (dashed, overlay scale) |
 
 **Baseline** matters because history loads a trailing 7-day window. `session` (default)
-re-anchors t₀ at every IST trading day, so the fixed basket re-locks each 9:15 and the diff
-series returns to zero — each session is self-contained while the whole window stays on
-screen. `window` uses one t₀ for the entire range. Totals under a floating basket are
-baseline-independent; only diff and fixed-basket membership respond.
+re-anchors t₀ at every IST trading day, so the fixed basket re-locks and the diff series
+returns to zero at that day's first snapshot — not at a fixed clock time, since a partial
+day starts late and MCX opens at 09:00. Each session is self-contained while the whole
+window stays on screen. `window` uses one t₀ for the entire range. Totals under a floating
+basket are baseline-independent; only diff and fixed-basket membership respond.
 
 ### Historical Greek reconstruction
 

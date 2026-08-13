@@ -38,7 +38,6 @@ import {
   type IvPoint,
   type Method,
   type Basket,
-  type SeriesPoint,
 } from '../lib/greekAggregator';
 import {
   createGreekPane,
@@ -185,11 +184,6 @@ const IV_HIST_TTL_MS = 30 * 60_000;
 const IV_RANK_DAYS = 365;
 const METHOD_LABEL: Record<Method, string> = { mine: 'mine', industry: 'ind' };
 
-export interface GreekLegend {
-  method: Method;
-  point: SeriesPoint;
-}
-
 /** 'iv' plots a constant-delta volatility measure instead of an aggregated Greek. */
 export type OverlayKind = GreekName | 'iv';
 
@@ -204,7 +198,6 @@ export interface GreekOverlayApi {
   seriesMode: SeriesMode;
   showCalls: boolean;
   showPuts: boolean;
-  legend: GreekLegend[];
   /** True when this overlay plots IV — the host can hide Greek-only controls. */
   isIv: boolean;
   ivMeasure: IvMeasure;
@@ -300,7 +293,6 @@ export function useGreekOverlay({
   const [seriesMode, setSeriesModeState] = useState<SeriesMode>('both');
   const [showCalls, setShowCallsState] = useState(true);
   const [showPuts, setShowPutsState] = useState(true);
-  const [legend, setLegend] = useState<GreekLegend[]>([]);
   const [ivMeasure, setIvMeasureState] = useState<IvMeasure>('atm');
   const [ivLegend, setIvLegend] = useState<IvPoint | null>(null);
   const [ivObs, setIvObs] = useState<IvObservation[]>([]);
@@ -541,18 +533,15 @@ export function useGreekOverlay({
     }
 
     const lotSize = lotSizeRef.current;
-    const nextLegend: GreekLegend[] = [];
 
     const draw = (pane: GreekPane | null, mt: Method) => {
       if (!pane) return;
       const pts = buildSeries(snaps, { greek, method: mt, basket: b, baseline: bl, lotSize });
       pane.setData(pts, mode, sc, sp, mapTime);
-      if (pts.length) nextLegend.push({ method: mt, point: pts[pts.length - 1] });
     };
 
     if (m === 'mine' || m === 'both') draw(minePaneRef.current, 'mine');
     if (m === 'industry' || m === 'both') draw(indPaneRef.current, 'industry');
-    setLegend(nextLegend);
   }
 
   // ── Snapshot helpers ───────────────────────────────────────────────────────
@@ -1339,7 +1328,6 @@ export function useGreekOverlay({
       destroyPanes();
       unsubscribeWsAll();
       liveLegsRef.current = new Map();
-      setLegend([]);
       setIvLegend(null);
     } else if (currentInstRef.current) {
       loadChain();
@@ -1375,7 +1363,6 @@ export function useGreekOverlay({
     defaultDayRef.current = '';
     lastSnapMsRef.current = 0;
     histGenRef.current++; // invalidate any in-flight history load
-    setLegend([]);
     setIvLegend(null);
     setIvObs([]); // baseline is per-underlying; refetched when re-enabled
     setIvRankNote('');
@@ -1397,7 +1384,6 @@ export function useGreekOverlay({
     seriesMode,
     showCalls,
     showPuts,
-    legend,
     isIv,
     ivMeasure,
     ivLegend,
