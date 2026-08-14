@@ -110,6 +110,37 @@ export function isMarketSessionChartTime(
   return min >= openMin && min <= closeMin;
 }
 
+type ChartTime = number | { year: number; month: number; day: number };
+
+/**
+ * Bars → line points for a session-aware chart: out-of-session bars dropped, and a valueless
+ * point inserted at each day boundary so lightweight-charts breaks the line instead of drawing
+ * a straight segment across the overnight gap (which reads as a move that never happened).
+ *
+ * Shared by every host that draws an underlying reference line under the Greek overlays, so all
+ * of them break their nights identically.
+ */
+export function barsToSessionLine<T extends { time: ChartTime; close: number }>(
+  bars: ReadonlyArray<T>,
+  exchange?: string,
+): Array<{ time: ChartTime; value?: number }> {
+  const points: Array<{ time: ChartTime; value?: number }> = [];
+  let lastDay: string | null = null;
+  let lastNumericTime: number | null = null;
+
+  for (const b of bars) {
+    if (!isMarketSessionChartTime(b.time, exchange)) continue;
+    const day = chartTimeDayKey(b.time);
+    if (lastDay && day && day !== lastDay && lastNumericTime != null) {
+      points.push({ time: lastNumericTime + 1 });
+    }
+    points.push({ time: b.time, value: b.close });
+    lastDay = day;
+    if (typeof b.time === 'number') lastNumericTime = b.time;
+  }
+  return points;
+}
+
 /** @deprecated Prefer `isMarketSessionChartTime(t, exchange)` — this is the NSE-only form. */
 export function isNseMarketSessionChartTime(
   t: number | { year: number; month: number; day: number },

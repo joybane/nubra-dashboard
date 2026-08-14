@@ -26,6 +26,8 @@ _archive/
 
 # Per-date instrument masters, re-downloadable from the broker (see backtestRefdataStore.ts)
 .refdata-cache/
+# Today's instrument master, so a restart does not re-download it (see refdataCache.ts)
+.refdata-live/
 
 # Per-date historical bars, re-downloadable from the broker (see backtestBarStore.ts)
 .bars-cache/

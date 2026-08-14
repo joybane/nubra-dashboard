@@ -16,6 +16,7 @@ import { useOIProfile } from './hooks/useOIProfile';
 import { useGreekOverlay } from './hooks/useGreekOverlay';
 import { GreekButton } from './components/GreekControls';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
+import { emptyHistoryMessage } from './lib/emptyHistory';
 import type {
   Instrument,
   OhlcBar,
@@ -279,6 +280,10 @@ export default function CandleChart({ instrument, theme }: Props) {
   const oi = useOIProfile({ containerRef, canvasRef, candleRef, currentInstRef, allBarsRef });
   const vega = useGreekOverlay({ greek: 'vega', chartRef, currentInstRef, allBarsRef });
   const theta = useGreekOverlay({ greek: 'theta', chartRef, currentInstRef, allBarsRef });
+  // IV rides the same sub-pane path as its siblings here (the Tracker renders all three inline).
+  // Named `ivOverlay`, not `iv`: the load callback already binds `iv` to the chart INTERVAL, and
+  // a shadowed name there would silently hide the overlay from the teardown it must take part in.
+  const ivOverlay = useGreekOverlay({ greek: 'iv', chartRef, currentInstRef, allBarsRef });
 
   // ── Chart initialization ──────────────────────────────────────────────────
   useEffect(() => {
@@ -685,6 +690,7 @@ export default function CandleChart({ instrument, theme }: Props) {
       oi.clearForInstrumentChange();
       vega.clearForInstrumentChange();
       theta.clearForInstrumentChange();
+      ivOverlay.clearForInstrumentChange();
 
       currentInstRef.current = inst;
       if (nubraType(inst) === 'OPT') {
@@ -730,7 +736,14 @@ export default function CandleChart({ instrument, theme }: Props) {
         const cleanBars = dedupeAndSortBars(sanitized);
         const cleanVolBars = dedupeAndSortBars(volBars);
         if (!cleanBars.length) {
+          // Say something immediately, then refine. The probe below is a second round trip, and an
+          // empty pane with no message at all while it runs would be worse than a vague one.
           setLoading('No historical data available.');
+          if (nubraType(inst) === 'OPT') {
+            const detail = await describeEmptyOptionHistory(inst, iv);
+            // A newer load may have started during the probe; it owns the message now.
+            if (ticket === loadTicketRef.current) setLoading(detail);
+          }
           return;
         }
 
@@ -1124,9 +1137,10 @@ export default function CandleChart({ instrument, theme }: Props) {
           )}
         </div>
 
-        {/* Aggregate Vega / Theta overlays */}
+        {/* Aggregate Vega / Theta / IV overlays */}
         <GreekButton api={vega} label="Vega" />
         <GreekButton api={theta} label="Theta" />
+        <GreekButton api={ivOverlay} label="IV" />
 
         {/* Reset zoom */}
         <button
@@ -1290,6 +1304,43 @@ export function nubraType(item: Instrument): string {
   if (dt === 'OPT' || at === 'OPT') return 'OPT';
   if (dt === 'INDEX' || at === 'INDEX') return 'INDEX';
   return 'STOCK';
+}
+
+/** How far back the daily probe looks before concluding a contract has simply never traded. */
+const EMPTY_PROBE_DAYS = 365;
+
+/**
+ * Explain an option chart that came back with no candles.
+ *
+ * One daily request over a year separates "this strike is too far out of the money to have traded
+ * this week" from "this contract has never traded at all" — the first is fixed by switching to 1d,
+ * the second by picking a different strike, and the old shared message pointed at neither.
+ *
+ * Only for options: an index or an equity returning nothing means something is actually wrong, and
+ * a probe would just delay saying so. Failures fall back to the original wording rather than
+ * asserting anything the probe did not establish.
+ */
+async function describeEmptyOptionHistory(
+  instrument: Instrument,
+  interval: string,
+): Promise<string> {
+  const windowDays = historyDays(interval);
+  // Nothing to learn from probing at the same resolution the request already used.
+  if (!isIntradayInterval(interval)) return 'No historical data available.';
+  try {
+    const end = new Date();
+    const start = new Date(end.getTime() - EMPTY_PROBE_DAYS * 86400000);
+    const { bars } = await fetchRange(instrument, '1d', start, end);
+    const last = bars[bars.length - 1]?.time;
+    return emptyHistoryMessage({
+      interval,
+      windowDays,
+      probeDays: EMPTY_PROBE_DAYS,
+      lastTradedDay: typeof last === 'object' ? last : null,
+    });
+  } catch {
+    return emptyHistoryMessage({ interval, windowDays });
+  }
 }
 
 export async function fetchRange(

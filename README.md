@@ -164,13 +164,13 @@ Auth states are `idle`, `awaiting_otp`, `awaiting_mpin`, and `authenticated`.
 
 ### Market data
 
-| Method | Path                                 | Purpose                                      |
-| ------ | ------------------------------------ | -------------------------------------------- |
-| GET    | `/api/refdata?exchange=NSE`          | Get daily server-cached exchange instruments |
-| GET    | `/api/instruments/search`            | Fuzzy-search refdata                         |
-| GET    | `/api/instruments/lookup`            | Look up one instrument by `ref_id`           |
-| POST   | `/api/historical`                    | Proxy Nubra chart timeseries data            |
-| GET    | `/api/optionchain/:instrument`       | Get an enriched option chain                 |
+| Method | Path                                 | Purpose                                                     |
+| ------ | ------------------------------------ | ----------------------------------------------------------- |
+| GET    | `/api/refdata?exchange=NSE`          | Get daily server-cached exchange instruments                |
+| GET    | `/api/instruments/search`            | Fuzzy-search refdata                                        |
+| GET    | `/api/instruments/lookup`            | Look up one instrument by `ref_id`                          |
+| POST   | `/api/historical`                    | Proxy Nubra chart timeseries data                           |
+| GET    | `/api/optionchain/:instrument`       | Get an enriched option chain                                |
 | GET    | `/api/optionchain/:instrument/price` | Get the underlying price (NSE/BSE only — MCX 500s upstream) |
 
 All of these accept `?exchange=` (`NSE` default, plus `BSE` and `MCX`). It is omitted from the
@@ -184,7 +184,7 @@ accepted but returns nothing, `15s`/`30s` return 500. Measured 2026-08-03 on bot
 at 21:07 IST, 27 Jul 20:00 IST returned 500 while 27 Jul 22:00 IST returned data, so the cutoff
 is exactly `now − 168h`.
 
-A window that **straddles** that edge fails the *entire* query with a 500 rather than clipping,
+A window that **straddles** that edge fails the _entire_ query with a 500 rather than clipping,
 so `startDate` must be clamped — `clampSubMinuteStart` in `src/lib/utils.ts`, applied inside
 `fetchRange`, which every historical fetch goes through. Note also that 1s bars are tick-driven
 rather than filled: over one 20-minute window NIFTY yields 1200, a crude future 413, a crude
@@ -192,13 +192,13 @@ option 35.
 
 ### Local Parquet backtesting
 
-| Method | Path                        | Purpose                                       |
-| ------ | --------------------------- | --------------------------------------------- |
-| GET    | `/api/backtest/meta`        | Get available underlyings and expiry ranges   |
-| POST   | `/api/backtest/run`         | Run a full backtest                           |
-| POST   | `/api/backtest/day`         | Get one trading day's intraday detail         |
-| POST   | `/api/backtest/sweep`       | Run a one- or two-dimensional parameter sweep |
-| POST   | `/api/backtest/walkforward` | Run walk-forward optimisation                 |
+| Method | Path                        | Purpose                                         |
+| ------ | --------------------------- | ----------------------------------------------- |
+| GET    | `/api/backtest/meta`        | Get available underlyings and expiry ranges     |
+| POST   | `/api/backtest/run`         | Run a full backtest                             |
+| POST   | `/api/backtest/day`         | Get one trading day's intraday detail           |
+| POST   | `/api/backtest/sweep`       | Run a one- or two-dimensional parameter sweep   |
+| POST   | `/api/backtest/walkforward` | Run walk-forward optimisation                   |
 | GET    | `/api/iv-history`           | Daily ATM IV baseline for the Tracker's IV rank |
 
 `server/nubraBacktestRoutes.ts` additionally exposes Nubra broker-history chain/evaluation
@@ -393,9 +393,60 @@ interfaces live in `src/types.ts`.
 
 ## Greek and IV overlays
 
-`src/hooks/useGreekOverlay.ts` drives the Vega / Theta / IV overlays shared by the Chart
-(sub-pane) and Tracker (inline on the price pane) views. One hook instance per measure;
-`src/components/GreekControls.tsx` renders the shared toolbar button and settings popup.
+`src/hooks/useGreekOverlay.ts` drives the Vega / Theta / IV overlays. One hook instance per
+measure; `src/components/GreekControls.tsx` renders the shared toolbar button and settings tray.
+Five host views mount them, and none forks the hook, the controls or the maths — a change to a
+Greek formula reaches all five:
+
+| Host                                | How                                        |
+| ----------------------------------- | ------------------------------------------ |
+| Chart (`CandleChart.tsx`)           | Sub-pane below the candles                 |
+| Tracker (`Tracker.tsx`)             | Inline on the price pane                   |
+| Nubra BT (`NubraBacktest.tsx`)      | `Indicators` toggle → `GreekIndicatorPane` |
+| Live / historical positions         | Same toggle in `StrategyAnalysisView.tsx`  |
+| Backtest day (`TradeChartView.tsx`) | Same toggle, under the Net Greeks pane     |
+
+`src/components/GreekIndicatorPane.tsx` is a self-contained chart pane wrapping the three
+overlays — the Tracker's chart block minus the data loading, taking its bars from the host. It
+hands its chart **and its underlying reference series** up via `onChartReady`: the series is what
+a host must name in `setCrosshairPosition` to push a synced crosshair onto the pane.
+
+Each host enrolls it in that host's own scroll and crosshair sync. Where a host builds its charts
+inside one big effect (Nubra BT, the backtest day view) the enrollment lives in a small standalone
+effect, because that effect owns the lifecycle of the charts it syncs while this one belongs to a
+child component. Pushing a crosshair in from outside is safe there because those handlers already
+ignore programmatic echoes — the `param.point === undefined && param.time !== undefined` branch.
+
+`src/lib/greekTooltip.ts` handles that echo from the other side, and is where every "what do the
+overlay lines read at instant X" question is answered:
+
+| Export               | Answers                                                                |
+| -------------------- | ---------------------------------------------------------------------- |
+| `greekRows`          | Every visible overlay line's colour, title and value at a bar          |
+| `seriesValueAt`      | One series' value, carried forward from the last bar at or before it   |
+| `logicalAtTime`      | Bar index for a timestamp — a pin has no cursor, so no `param.logical` |
+| `bindGreekCrosshair` | Wires the above into a pane's hover tooltip                            |
+
+Readings are carried forward with `MismatchDirection.NearestLeft` rather than requiring an exact
+hit, because greek history is 1-minute while a live price line is 1-second: an exact read misses
+at ~59 of every 60 cursor positions and the rows would blink out. The same carry-forward is what
+lets a **synced** crosshair (no `point`, no `seriesData`) and a **pinned** card (no cursor at all)
+show the same numbers a live hover does — including the underlying price row.
+
+**Pins** work on the Indicators pane too. The host owns the pin list (`usePinnedTimes`) and passes
+it down; the pane binds its own trigger and renders its own card, because the hosts' pin cards
+come from `buildPaneSnapshots`, which knows the price / P&L / Greeks shapes and nothing about the
+aggregate overlay. The host must therefore NOT also bind a trigger on the pane's wrapper — both
+listeners are capture-phase, so one middle-click would toggle the pin on and straight back off.
+
+The settings tray is portalled to `document.body` and positioned by `src/lib/popupPlacement.ts`.
+It has to be: as an `absolute` child it was clipped by four nested `overflow-hidden` ancestors,
+and overflow clipping is immune to z-index.
+
+**Live data is gated on the real calendar day, not the last loaded bar.** The two coincide on
+the Chart and Tracker, so the distinction was invisible until a host charted a past window —
+where a loaded-day guard would clamp a `Date.now()` snapshot onto a historical session's last
+bar, printing today's greeks as that day's close. See `istTodayKey` in the hook.
 
 Aggregation lives in `src/lib/greekAggregator.ts` and plots a delta-filtered near-the-money
 basket, CE and PE as separate lines. The delta band is CE `[0.05, 0.609]` and PE
@@ -403,13 +454,18 @@ basket, CE and PE as separate lines. The delta band is CE `[0.05, 0.609]` and PE
 
 | Setting     | Options              | Meaning                                                         |
 | ----------- | -------------------- | --------------------------------------------------------------- |
-| Method      | `mine` / `industry`  | Raw per-contract Greek sum, vs. notional `greek × OI × lotSize`  |
-| Basket      | `fixed` / `floating` | Membership locked at t₀, vs. re-filtered every snapshot          |
-| Composition | `chained` / `raw`    | Splice out membership steps, vs. plain Σ (default `chained`)     |
-| Baseline    | `session` / `window` | Where t₀ sits (default `session`)                                |
-| Series      | totals / diff / both | Absolute sum (solid) vs. change-from-t₀ (dashed, overlay scale)  |
+| Method      | `mine` / `industry`  | Raw per-contract Greek sum, vs. notional `greek × OI × lotSize` |
+| Basket      | `fixed` / `floating` | Membership locked at t₀, vs. re-filtered every snapshot         |
+| Composition | `chained` / `raw`    | Splice out membership steps, vs. plain Σ (default `chained`)    |
+| Baseline    | `session` / `window` | Where t₀ sits (default `session`)                               |
+| Series      | totals / diff / both | Absolute sum (solid) vs. change-from-t₀ (dashed, overlay scale) |
 
-**Baseline** matters because history loads a trailing 7-day window. `session` (default)
+History loads a trailing window ending at the selected day — 7 days by default, matching the
+Chart and Tracker candle loads. Hosts reviewing a single trade pass `histDays={1}`, so a Nubra BT
+run or a position reconstructs just its own session and the `HISTORIC DAY` picker moves to
+another. Cost is linear in this, which is why a backtest's full multi-month range is not fetched.
+
+**Baseline** matters because of that trailing window. `session` (default)
 re-anchors t₀ at every IST trading day, so the fixed basket re-locks and the diff series
 returns to zero at that day's first snapshot — not at a fixed clock time, since a partial
 day starts late and MCX opens at 09:00. Each session is self-contained while the whole
@@ -428,11 +484,14 @@ Continuous-futures back-adjustment, the S&P divisor and CPI chain-linking are al
 algorithm; the continuous-time form is the Divisia index. The offset is additive, not
 multiplicative — vega sums approach zero near expiry and a ratio would blow up there.
 
-Two supporting details. Membership only flips after `MEMBERSHIP_DWELL` consecutive snapshots
-agree with the new state, because the accumulated offset grows with the *number* of splices
+Two supporting details. Membership only flips once a leg has disagreed with it for
+`MEMBERSHIP_DWELL_MS` (60 s), because the accumulated offset grows with the _number_ of splices
 (the well-known drift in back-adjusted futures); this is a dwell timer, not a retention band,
-so the 0.05 / 0.609 thresholds are untouched. And `baseline: 'session'` zeroes the offset every
-day, which caps drift for free.
+so the 0.05 / 0.609 thresholds are untouched. It is denominated in **time, not snapshots**:
+history arrives at 1m and the live tail at ~2s, so a snapshot count would have meant a 2-minute
+debounce on history and a 4-second one live — no real protection exactly where the chart is
+densest. The series should have the same shape however often it is sampled. And
+`baseline: 'session'` zeroes the offset every day, which caps drift for free.
 
 The trade is that a chained level is an artifact in the same sense as a back-adjusted futures
 price: it answers "what would this basket be worth had composition never changed", not "what is
@@ -455,7 +514,7 @@ fallback poll once WS has been silent for 6 seconds. Precedence in `mergeHistory
 2. Broker-served `iv` + Black-76.
 3. Invert IV from `close` + forward, then Black-76.
 
-**Probed live 2026-07-30:** the timeseries *does* serve historical `delta`/`vega`/`theta`
+**Probed live 2026-07-30:** the timeseries _does_ serve historical `delta`/`vega`/`theta`
 (values match the live chain), so path 1 normally wins — an older assumption that the broker
 stores no historical Greeks is out of date.
 
@@ -499,11 +558,11 @@ median 0.008 vol pts, biased above the mid 3.5:1 — last trade sits above mid m
 below, which is a price-selection artifact and not a model difference.
 
 `mergeHistory` still derives IV by inversion on the broker-Greek path (gated on the IV overlay
-being active, since Vega/Theta never read it). Given the above that is now a *choice* rather
+being active, since Vega/Theta never read it). Given the above that is now a _choice_ rather
 than a necessity, and a cheap one to revisit — [useGreekOverlay.ts](src/hooks/useGreekOverlay.ts)
 requests `'iv'` in `HIST_FIELDS`, the one name that is never served, so a single-word change to
 `'iv_mid'` would switch history onto the vendor series. **Left as-is deliberately.** The
-~0.26 vol-point offset documented in `server/backtest/ivHistory.ts` is against the *parquet*
+~0.26 vol-point offset documented in `server/backtest/ivHistory.ts` is against the _parquet_
 `iv` column, which this measurement shows is a different product from the API series — so that
 offset neither justifies nor forbids the switch, and nothing has yet measured the parquet
 column against `iv_mid` on an overlapping date. Until that is done, one pipeline end to end
@@ -513,7 +572,7 @@ One incidental constraint found while sampling: `charts/timeseries` rejects more
 **10 symbols per query** (`"maximum 10 values allowed in one query"`), so wide ladders must be
 batched.
 
-**Black-76 prices off the forward, and the forward's *level* is what matters.** Use
+**Black-76 prices off the forward, and the forward's _level_ is what matters.** Use
 `forwardFromParity(K, C, P, r, T)` — `F = K + (C − P)·e^{rT}` at the strike nearest spot —
 whenever a CE/PE pair is available. Measured against a live NIFTY chain (spot 24257.45,
 5.2 days, 122 populated legs):
@@ -526,7 +585,7 @@ whenever a CE/PE pair is available. Measured against a live NIFTY chain (spot 24
 
 On that occasion NIFTY's basis was **negative** — parity implied 24231.48 against a 24257.45
 spot, and inverting the broker's own IV+delta independently gave 24232.12, agreeing to 0.6
-points. Compounding spot at `+r` therefore moved the forward the *wrong way*, and made
+points. Compounding spot at `+r` therefore moved the forward the _wrong way_, and made
 genuinely-traded ITM calls look sub-intrinsic (11 of 122 legs traded below spot-intrinsic)
 which the no-arb guard then rejects. The carry rate barely matters by comparison: `r = 0`
 versus `r = 0.07` moved the mean error only 0.79 → 0.79.
@@ -571,11 +630,11 @@ a volatility. Measures are interpolated at constant **delta** rather than fixed 
 the series stays comparable as spot moves. Output is in vol points (percent); the broker
 serves `iv` as a decimal.
 
-| Measure | Definition                            | Reads as   |
-| ------- | ------------------------------------- | ---------- |
-| `atm`   | IV at 50Δ, CE and PE averaged         | vol level  |
-| `rr25`  | `IV(25Δ CE) − IV(25Δ PE)`             | skew       |
-| `fly25` | `½·(IV(25Δ CE) + IV(25Δ PE)) − ATM IV` | smile      |
+| Measure | Definition                             | Reads as  |
+| ------- | -------------------------------------- | --------- |
+| `atm`   | IV at 50Δ, CE and PE averaged          | vol level |
+| `rr25`  | `IV(25Δ CE) − IV(25Δ PE)`              | skew      |
+| `fly25` | `½·(IV(25Δ CE) + IV(25Δ PE)) − ATM IV` | smile     |
 
 Each selected expiry is interpolated separately and the per-expiry measures averaged, since
 the same delta on two expiries carries different IVs. Points that cannot be computed are
@@ -583,7 +642,7 @@ omitted rather than extrapolated.
 
 ### IV rank and IV percentile
 
-The measures above give the *level* of vol but no sense of whether that level is high. Rank and
+The measures above give the _level_ of vol but no sense of whether that level is high. Rank and
 percentile supply the context, shown in the IV popup for the `atm` measure only — `rr25` and
 `fly25` are skew and smile, so placing either inside a range built from ATM levels would be a
 category error.
@@ -660,18 +719,18 @@ fields NSE rows lack — `prev_close`, `freeze_qty_limit`, `asset_code`, `zanska
 #### The forward is observable, so none of the NIFTY parity machinery applies
 
 Commodity options are options **on futures**, and the option expiry is not the futures expiry.
-The rule is: option expiry → the *next* futures expiry. Verified exactly across 12 chains and
+The rule is: option expiry → the _next_ futures expiry. Verified exactly across 12 chains and
 four commodities, where each chain's `cp` equalled its future's LTP **to the paisa**:
 
-| option expiry              | underlying future       | note                        |
-| -------------------------- | ----------------------- | --------------------------- |
-| CRUDEOIL 20260817          | `FUT_CRUDEOIL_20260819` |                             |
-| GOLD 20260831 and 20260925 | `FUT_GOLD_20261005`     | two options, one future     |
-| SILVERM 20260924 / 20261027| `FUT_SILVERM_20261130`  | same                        |
+| option expiry               | underlying future       | note                    |
+| --------------------------- | ----------------------- | ----------------------- |
+| CRUDEOIL 20260817           | `FUT_CRUDEOIL_20260819` |                         |
+| GOLD 20260831 and 20260925  | `FUT_GOLD_20261005`     | two options, one future |
+| SILVERM 20260924 / 20261027 | `FUT_SILVERM_20261130`  | same                    |
 
 So Black-76 with `F` = the futures price is exact, and `buildParityForwards` is bypassed
 entirely on MCX. `mcxUnderlyingFutureExpiry` and `mcxFutureSymbol` in `src/lib/GexService.ts`
-do the mapping. This makes commodity Greeks *simpler* than NIFTY's, where the forward must be
+do the mapping. This makes commodity Greeks _simpler_ than NIFTY's, where the forward must be
 implied — see the forward section above, none of which is relevant here.
 
 **Session is 09:00–23:30 IST, 870 one-minute bars a day** against NSE's 375.
@@ -698,7 +757,7 @@ orders only ever carry a name, so `exchangeFromName()` (client) and `parseDispla
 historical `delta` scores **0.00137** mean error on crude (15,638 points) versus **0.00125** on
 NIFTY measured identically — one control that validates `F`, `T` and the model together. Our
 close-inverted IV sits 0.256 vol points from the vendor's `iv_mid` on crude against 0.043 on
-NIFTY, which is the same *relative* accuracy given crude runs ~65 % IV and NIFTY ~11 %.
+NIFTY, which is the same _relative_ accuracy given crude runs ~65 % IV and NIFTY ~11 %.
 
 **Two caveats, both deliberate:**
 

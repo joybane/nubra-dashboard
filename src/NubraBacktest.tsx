@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { createChart, LineSeries, CandlestickSeries, CrosshairMode } from 'lightweight-charts';
-import type { IChartApi, ISeriesApi } from 'lightweight-charts';
+import type { IChartApi, ISeriesApi, MouseEventParams } from 'lightweight-charts';
 import SvgChart from './components/SvgChart';
 import type { Instrument } from './types';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
@@ -20,6 +20,7 @@ import {
 } from './components/ChartTooltips';
 import PinnedCrosshairLayer from './components/PinnedCrosshairLayer';
 import PinCompareStrip, { type CompareRow } from './components/PinCompareStrip';
+import GreekIndicatorPane from './components/GreekIndicatorPane';
 import { usePinnedTimes, bindPinTrigger, PIN_COLORS } from './lib/chartPins';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -50,6 +51,16 @@ interface ChainResponse {
   expiry: string;
   expiryFlag: string;
   availableExpiries: AvailableExpiry[];
+  /**
+   * The expiry list may be short of far-dated entries.
+   *
+   * Set when the server answered from a nearby date's instrument master rather than downloading
+   * this date's — which is what makes the chain appear at once instead of after a minute. The chain
+   * and the selected expiry are exact regardless; only expiries listed after that master was taken,
+   * typically a month or more out, can be absent. The server fetches the exact master behind the
+   * response, so re-requesting this date fills the list in.
+   */
+  expiriesPartial?: boolean;
   chain: ChainRow[];
   error?: string;
 }
@@ -296,6 +307,8 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   // Chain state
   const [chain, setChain] = useState<ChainRow[]>([]);
   const [availableExpiries, setAvailableExpiries] = useState<AvailableExpiry[]>([]);
+  /** See ChainResponse.expiriesPartial — the list is complete near-dated, possibly short far out. */
+  const [expiriesPartial, setExpiriesPartial] = useState(false);
   const [spot, setSpot] = useState(0);
   const [chainLoading, setChainLoading] = useState(false);
   const [chainError, setChainError] = useState<string | null>(null);
@@ -358,6 +371,19 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
   // Greeks visible state
   const [greeksVisible, setGreeksVisible] = useState(false);
+
+  // ── Indicators pane: aggregate Vega / Theta / IV ──
+  // Distinct from the Greeks pane above, which plots THIS basket's own greeks. These are the
+  // market's near-the-money basket, and they come from GreekIndicatorPane — the same component,
+  // hook and maths the Chart and Tracker views use, so the formulas cannot drift between views.
+  const [indicatorsVisible, setIndicatorsVisible] = useState(false);
+  const [indicatorsHeight, setIndicatorsHeight] = useState(200);
+  const indicatorsChartRef = useRef<IChartApi | null>(null);
+  const indicatorsSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const indicatorsPaneRef = useRef<HTMLDivElement>(null);
+  // The price chart's underlying series, mirrored out of the chart-building effect so the
+  // Indicators sync effect can name a series for setCrosshairPosition without re-entering it.
+  const indexSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
 
   // Greeks series data state: split into Net, CE, and PE series arrays
   const [greeksData, setGreeksData] = useState<{
@@ -754,6 +780,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         setChain(data.chain);
         setSpot(data.spot);
         setAvailableExpiries(data.availableExpiries);
+        setExpiriesPartial(Boolean(data.expiriesPartial));
         setActiveExpiry(data.expiry);
         setActiveFlag(data.expiryFlag);
         if (!exp) setExpiry(data.expiry);
@@ -1148,6 +1175,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         title: underlying,
         priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
       });
+      indexSeriesRef.current = indexSeries as ISeriesApi<'Candlestick'>;
       const indexBars = evalResult.underlyingBars || [];
       const grid = indexBars.map((b) => b.time);
 
@@ -1503,6 +1531,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       priceChartRef.current = null;
       pnlChartRef.current = null;
       greeksChartRef.current = null;
+      indexSeriesRef.current = null;
       if (priceChart)
         try {
           priceChart.remove();
@@ -1642,6 +1671,157 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     },
     [greeksHeight, pnlHeight, greeksVisible],
   );
+
+  const onIndicatorsDividerDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = indicatorsHeight;
+      let newH = startH;
+      const onMove = (ev: MouseEvent) => {
+        newH = Math.max(80, startH - (ev.clientY - startY));
+        if (indicatorsPaneRef.current) indicatorsPaneRef.current.style.height = `${newH}px`;
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        setIndicatorsHeight(newH);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [indicatorsHeight],
+  );
+
+  /** The pane owns its chart, so it hands the handle up. See the sync effect below. */
+  const handleIndicatorsChart = useCallback(
+    (chart: IChartApi | null, baseSeries: ISeriesApi<'Line'> | null) => {
+      indicatorsChartRef.current = chart;
+      indicatorsSeriesRef.current = baseSeries;
+      setChartEpoch((e) => e + 1);
+    },
+    [],
+  );
+
+  /** The backtest's underlying, shaped the way the overlay hook reads it (getSymbol/getChainAsset). */
+  const indicatorInstrument = useMemo<Instrument | null>(
+    () =>
+      underlying
+        ? {
+            asset: underlying,
+            nubra_name: underlying,
+            exchange: activeExchange,
+            derivative_type: activeExchange === 'MCX' ? 'FUT' : 'INDEX',
+          }
+        : null,
+    [underlying, activeExchange],
+  );
+
+  /**
+   * Keep the Indicators pane scrolling AND crosshair-locked with the price chart.
+   *
+   * A standalone effect rather than another entry in the big chart block: that block creates and
+   * destroys the three charts it syncs, while this chart belongs to a child component with its
+   * own lifecycle. Re-runs when handleIndicatorsChart bumps chartEpoch.
+   *
+   * Pushing a crosshair onto the price chart is safe from out here because that block's own
+   * handlers explicitly ignore programmatic echoes — the `param.point === undefined &&
+   * param.time !== undefined` branch — so this cannot start a feedback loop with them.
+   */
+  useEffect(() => {
+    const ic = indicatorsChartRef.current;
+    const pc = priceChartRef.current;
+    if (!ic || !pc) return;
+    const cleanups: Array<() => void> = [];
+
+    // ── Range ──
+    let syncingRange = false;
+    const bindRange = (from: IChartApi, to: IChartApi) => {
+      const onRange = (range: unknown) => {
+        if (syncingRange || !range) return;
+        syncingRange = true;
+        try {
+          to.timeScale().setVisibleLogicalRange(range as never);
+        } catch {
+          /* target chart gone */
+        }
+        syncingRange = false;
+      };
+      from.timeScale().subscribeVisibleLogicalRangeChange(onRange);
+      return () => {
+        try {
+          from.timeScale().unsubscribeVisibleLogicalRangeChange(onRange);
+        } catch {
+          /* chart disposed */
+        }
+      };
+    };
+    try {
+      const r = pc.timeScale().getVisibleLogicalRange();
+      if (r) ic.timeScale().setVisibleLogicalRange(r);
+    } catch {
+      /* not laid out yet */
+    }
+    cleanups.push(bindRange(pc, ic), bindRange(ic, pc));
+
+    // ── Crosshair ──
+    // Both charts plot the same underlying, so one close serves as the y for either. Without a
+    // value the crosshair would land at 0 and be dragged off-scale.
+    const bars = evalResult?.underlyingBars ?? [];
+    const closeAt = (t: number): number => {
+      let lo = 0,
+        hi = bars.length - 1,
+        best = 0;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (bars[mid].time <= t) {
+          best = bars[mid].close;
+          lo = mid + 1;
+        } else hi = mid - 1;
+      }
+      return best;
+    };
+
+    // The two ends hold different series kinds — the price pane is candles, the Indicators pane a
+    // line — and setCrosshairPosition only needs *a* series to anchor against, so the union is
+    // the honest type here rather than `any`.
+    type AnchorSeries = ISeriesApi<'Line'> | ISeriesApi<'Candlestick'>;
+    const bindCrosshair = (from: IChartApi, to: IChartApi, series: () => AnchorSeries | null) => {
+      const onMove = (param: MouseEventParams) => {
+        const target = series();
+        if (!target) return;
+        if (param.point && param.time != null) {
+          try {
+            to.setCrosshairPosition(closeAt(param.time as number), param.time, target);
+          } catch {
+            /* target gone */
+          }
+        } else if (param.point === undefined && param.time !== undefined) {
+          // Programmatic echo — ignore, exactly as the main block does.
+        } else {
+          try {
+            to.clearCrosshairPosition();
+          } catch {
+            /* target gone */
+          }
+        }
+      };
+      from.subscribeCrosshairMove(onMove);
+      return () => {
+        try {
+          from.unsubscribeCrosshairMove(onMove);
+        } catch {
+          /* chart disposed */
+        }
+      };
+    };
+    cleanups.push(
+      bindCrosshair(pc, ic, () => indicatorsSeriesRef.current),
+      bindCrosshair(ic, pc, () => indexSeriesRef.current),
+    );
+
+    return () => cleanups.forEach((fn) => fn());
+  }, [chartEpoch, indicatorsVisible, evalResult]);
 
   const onPositionsDividerDown = useCallback(
     (e: React.MouseEvent) => {
@@ -2034,6 +2214,18 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                 </option>
               ))}
             </select>
+            {expiriesPartial && (
+              <span
+                title={
+                  'Served from a nearby date to avoid a minute-long download. The chain and this ' +
+                  'expiry are exact; expiries a month or more out may still be missing. Reloading ' +
+                  'this date once the full list has downloaded fills them in.'
+                }
+                style={{ fontSize: 10, color: 'var(--text-muted)', cursor: 'help' }}
+              >
+                far expiries loading
+              </span>
+            )}
           </label>
         )}
 
@@ -2301,6 +2493,29 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                 </div>
               )}
             </div>
+
+            {/* Indicators toggle — aggregate Vega / Theta / IV. No dropdown of its own: each
+                overlay carries its own settings tray inside the pane. */}
+            <button
+              onClick={() => setIndicatorsVisible((s) => !s)}
+              title="Aggregate Vega / Theta / IV for the near-the-money basket"
+              style={{
+                height: 24,
+                padding: '0 8px',
+                borderRadius: 4,
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: 'pointer',
+                border: '1px solid ' + (indicatorsVisible ? '#38bdf8' : 'var(--border)'),
+                background: indicatorsVisible ? 'rgba(56,189,248,0.15)' : 'transparent',
+                color: indicatorsVisible ? '#38bdf8' : 'var(--text-secondary)',
+                transition: 'all 0.15s',
+                display: 'flex',
+                alignItems: 'center',
+              }}
+            >
+              Indicators
+            </button>
 
             {/* Greeks Split Dropdown */}
             <div
@@ -2928,7 +3143,9 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                   Loading historical chain{chainElapsed >= 2 ? ` — ${chainElapsed}s` : '…'}
                   {chainElapsed >= 5 && (
                     <div style={{ marginTop: 8, fontSize: 11, opacity: 0.7 }}>
-                      Downloading the instrument master for {date}. This happens once per date.
+                      Waiting on the broker's instrument list for {date}. A date near one you have
+                      already opened is served from what is here; a new stretch of the calendar
+                      takes up to a minute, once.
                     </div>
                   )}
                 </div>
@@ -3395,6 +3612,44 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                     }
                   />
                 </div>
+
+                {/* Divider 2b: Indicators */}
+                {indicatorsVisible && (
+                  <div
+                    onMouseDown={onIndicatorsDividerDown}
+                    style={{
+                      height: 6,
+                      cursor: 'row-resize',
+                      background: 'var(--border)',
+                      flexShrink: 0,
+                      zIndex: 10,
+                    }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = '#38bdf8')}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = 'var(--border)')}
+                  />
+                )}
+
+                {/* Indicators Pane — aggregate Vega / Theta / IV */}
+                {indicatorsVisible && (
+                  <div
+                    ref={indicatorsPaneRef}
+                    style={{ height: indicatorsHeight, minHeight: 80, flexShrink: 0 }}
+                  >
+                    <GreekIndicatorPane
+                      instrument={indicatorInstrument}
+                      bars={evalResult?.underlyingBars ?? []}
+                      theme={theme}
+                      // A backtest is read one session at a time, and the run already names its
+                      // day — reconstructing a wider trailing window would be work nobody reads.
+                      histDays={1}
+                      initialDay={date}
+                      onChartReady={handleIndicatorsChart}
+                      pins={pins}
+                      onTogglePin={togglePinAt}
+                      onRemovePin={removePin}
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Divider 3: Charts / Positions */}

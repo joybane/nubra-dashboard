@@ -1,4 +1,5 @@
 import { promises as fs } from 'fs';
+import { gzipSync } from 'zlib';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
@@ -242,12 +243,101 @@ test('prefetch single-flights against a concurrent request rather than downloadi
   expect(nubraGet).toHaveBeenCalledTimes(1);
 });
 
+test('offers the newest already-cached date at or before the one asked for', async () => {
+  const store = createBacktestRefdataStore({ nubraGet, sharedDay: () => '2026-08-20', cacheDir });
+  await store.prefetchForDate('NSE', '2026-08-05');
+  await store.prefetchForDate('NSE', '2026-08-11');
+  await store.prefetchForDate('NSE', '2026-08-17');
+  nubraGet.mockClear();
+
+  // 11th over the 5th because it is nearer, and over the 17th because that is the future as far as
+  // the 12th is concerned — it can hold contracts that were not listed yet.
+  await expect(store.peekRefdataNear('NSE', '2026-08-12', 14)).resolves.toMatchObject({
+    snapshotDate: '2026-08-11',
+  });
+  expect(nubraGet).not.toHaveBeenCalled();
+});
+
+test('will not reach further back than the caller allows', async () => {
+  const store = createBacktestRefdataStore({ nubraGet, sharedDay: () => '2026-08-20', cacheDir });
+  await store.prefetchForDate('NSE', '2026-08-01');
+
+  await expect(store.peekRefdataNear('NSE', '2026-08-11', 14)).resolves.toMatchObject({
+    snapshotDate: '2026-08-01',
+  });
+  await expect(store.peekRefdataNear('NSE', '2026-08-20', 14)).resolves.toBeNull();
+});
+
+test('never offers a substitute for today, which is still being added to', async () => {
+  const store = createBacktestRefdataStore({ nubraGet, sharedDay: () => '2026-08-13', cacheDir });
+  await store.prefetchForDate('NSE', '2026-08-12');
+
+  await expect(store.peekRefdataNear('NSE', '2026-08-13', 14)).resolves.toBeNull();
+});
+
+test('keeps exchanges apart when offering a substitute', async () => {
+  const store = createBacktestRefdataStore({ nubraGet, sharedDay: () => '2026-08-20', cacheDir });
+  await store.prefetchForDate('NSE', '2026-08-11');
+
+  await expect(store.peekRefdataNear('MCX', '2026-08-12', 14)).resolves.toBeNull();
+});
+
 test('prefetch swallows an upstream failure instead of crashing the warm loop', async () => {
   nubraGet.mockRejectedValueOnce(new Error('fetch failed'));
   const store = createBacktestRefdataStore({ nubraGet, sharedDay: () => '2026-08-13', cacheDir });
 
   await expect(store.prefetchForDate('NSE', '2026-08-12')).resolves.toBeUndefined();
   await expect(fs.readdir(cacheDir)).resolves.toEqual([]);
+});
+
+test('keeps only the fields anything reads, and leaves absent ones absent', async () => {
+  nubraGet.mockResolvedValue({
+    refdata: [
+      {
+        asset: 'NIFTY',
+        derivative_type: 'OPT',
+        expiry: 20260806,
+        strike_price: 2400000,
+        option_type: 'CE',
+        stock_name: 'NIFTY2680624000CE',
+        ref_id: 42,
+        // Everything below is real master payload that no consumer touches. Carrying it is what
+        // made one resident date cost tens of megabytes.
+        tick_size: 5,
+        isin: 'INE000000000',
+        freeze_qty_limit: 1800,
+      },
+    ],
+  });
+  const store = createBacktestRefdataStore({ nubraGet });
+
+  const [row] = await store.getRefdataForDate('NSE', '2026-08-10');
+
+  expect(row).toEqual({
+    asset: 'NIFTY',
+    derivative_type: 'OPT',
+    expiry: 20260806,
+    strike_price: 2400000,
+    option_type: 'CE',
+    stock_name: 'NIFTY2680624000CE',
+    ref_id: 42,
+  });
+  // Absent, not present-and-undefined, so a distilled record serialises like an upstream one.
+  expect(Object.keys(row)).not.toContain('zanskar_name');
+});
+
+test('still reads a file written before distillation, without re-downloading it', async () => {
+  // The 60-odd masters already on disk are full records. Re-fetching them would cost 40s each.
+  const file = path.join(cacheDir, 'NSE_2026-08-10.json.gz');
+  const legacy = [{ asset: 'NIFTY', derivative_type: 'OPT', expiry: 20260806, tick_size: 5 }];
+  await fs.writeFile(file, gzipSync(Buffer.from(JSON.stringify(legacy), 'utf8')));
+
+  const store = createBacktestRefdataStore({ nubraGet, sharedDay: () => '2026-08-13', cacheDir });
+
+  await expect(store.getRefdataForDate('NSE', '2026-08-10')).resolves.toEqual([
+    { asset: 'NIFTY', derivative_type: 'OPT', expiry: 20260806 },
+  ]);
+  expect(nubraGet).not.toHaveBeenCalled();
 });
 
 test('prunes the least recently used files past the cap', async () => {

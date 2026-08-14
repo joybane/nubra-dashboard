@@ -313,7 +313,6 @@ export default function OptionChain({
       if (scrollToAtm()) scrollDoneRef.current = true;
     });
     return () => cancelAnimationFrame(raf);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chain, loading, spot]);
 
   // Track ATM visibility to show/hide "Go to ATM" button

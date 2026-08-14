@@ -24,6 +24,13 @@
  *
  * Failures return `[]` rather than throwing, which is the contract the routes were already built
  * around — they turn an empty array into "Could not fetch option refdata for <date>."
+ *
+ * **The 40 s is not a compression problem, so do not go looking there.** Node's `fetch` already
+ * sends `accept-encoding: gzip, deflate` without being asked and decodes the response itself
+ * (verified against a local server), and `/refdata/refdata/<date>` takes no filter parameter — the
+ * whole master is the only thing on offer. The wait is upstream and there is nothing on this side
+ * left to shave off it; the only lever is asking for it less often, which is what everything below
+ * is for.
  */
 
 import { promises as fs } from 'fs';
@@ -31,6 +38,7 @@ import path from 'path';
 import { gzip, gunzip } from 'zlib';
 import { promisify } from 'util';
 import { isPastDate } from './tradingDay.ts';
+import { runImmediately, type RefdataPriority, type RefdataSchedule } from './refdataQueue.ts';
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -50,14 +58,92 @@ export interface BacktestRefdataStoreDeps {
   cacheDir?: string;
   /** Injectable clock, for testing. */
   now?: () => number;
-  /** Dates held in memory at once. Each is ~34 MB, so this is a memory ceiling, not a tuning knob. */
+  /** Dates held in memory at once. See `distil` for why this is no longer a tight memory ceiling. */
   maxResident?: number;
   /** Files kept on disk before the least recently used are dropped. */
   maxFiles?: number;
+  /** Serialises downloads against the live cache's. Defaults to running them straight away. */
+  schedule?: RefdataSchedule;
+}
+
+/**
+ * The only fields anything downstream reads out of an instrument record.
+ *
+ * The first eight are every property the backtest routes actually touch (verified by scanning each
+ * access in nubraBacktestRoutes.ts); `ref_id` and `lot_size` are the two identifiers an order needs,
+ * kept so placing a trade from a backtest never has to re-download a date.
+ *
+ * Measured on a real NSE master (80 389 records): 33.9 MB of JSON becomes 17.3 MB, the stored file
+ * 1.86 MB becomes 1.06 MB, and one resident date costs ~10 MB of heap. So this is roughly a halving,
+ * not the order of magnitude the field count suggests — the fields that survive are the long string
+ * ones. It is still what lets the caps below hold a couple of weeks of browsing instead of six days.
+ */
+export const KEPT_FIELDS = [
+  'asset',
+  'derivative_type',
+  'expiry',
+  'strike_price',
+  'option_type',
+  'stock_name',
+  'zanskar_name',
+  'symbol',
+  'ref_id',
+  'lot_size',
+] as const;
+
+/**
+ * Project a master down to KEPT_FIELDS.
+ *
+ * Absent fields are left absent rather than set to `undefined`, so a distilled record serialises to
+ * the same JSON it would have had if the upstream had only ever sent these keys.
+ *
+ * Applied on the way in AND on the way out of disk, which is what makes the change backward
+ * compatible: a file written before this existed is a full-record array, and projecting it on read
+ * yields exactly what a freshly distilled one would. No cached date has to be re-downloaded.
+ */
+function distil(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  return rows.map((row) => {
+    const out: Record<string, unknown> = {};
+    for (const field of KEPT_FIELDS) {
+      if (row[field] !== undefined) out[field] = row[field];
+    }
+    return out;
+  });
+}
+
+/** A master that was downloaded for `snapshotDate`, being offered as an answer for another date. */
+export interface RefdataSnapshot {
+  rows: Record<string, unknown>[];
+  /** The date this master was actually downloaded for. Equal to the requested date on an exact hit. */
+  snapshotDate: string;
 }
 
 export interface BacktestRefdataStore {
   getRefdataForDate(exchange: string, date: string): Promise<Record<string, unknown>[]>;
+  /**
+   * The newest already-cached master for a date at or before `date`, without ever downloading.
+   *
+   * Exists because the 40 s download is per *date*, and a user browsing a week of dates was paying
+   * it once per date for masters that answer each other almost entirely. Measured across the real
+   * cached files (7 NSE dates, 03-08 to 13-08): contract names never disagree, and a master from an
+   * earlier date is a strict subset of a later one — it can only ever be missing rows, never carry
+   * a wrong one.
+   *
+   * That subset direction is what makes this safe rather than merely convenient. Every row in a
+   * master for `snapshotDate` was listed on `snapshotDate`; any of those rows whose expiry is still
+   * >= the requested date had therefore not expired yet, so it was listed on the requested date too.
+   * Nothing that post-dates the request can leak in. What CAN be missing is a contract listed
+   * between the two dates, which is why the caller — not this method — decides whether the answer
+   * it derived is trustworthy. See `nbResolveRefdata` in nubraBacktestRoutes.ts.
+   *
+   * Returns null rather than fetching, so a caller that cannot verify the answer falls through to
+   * the ordinary exact path.
+   */
+  peekRefdataNear(
+    exchange: string,
+    date: string,
+    maxAgeDays: number,
+  ): Promise<RefdataSnapshot | null>;
   /**
    * Download a past date to disk ahead of anyone asking for it, without holding it in memory.
    *
@@ -84,8 +170,13 @@ export function createBacktestRefdataStore({
   sharedDay,
   cacheDir,
   now = Date.now,
-  maxResident = 6,
-  maxFiles = 60,
+  // Sized from measured figures (see KEPT_FIELDS): a distilled date is ~10 MB resident and ~1 MB on
+  // disk. Sixteen resident is therefore about what six undistilled ones used to cost, and 300 files
+  // is ~100 dates across all three exchanges for roughly 200-300 MB — the point being that a date
+  // you have already opened once never costs the 40 s again, however long ago you opened it.
+  maxResident = 16,
+  maxFiles = 300,
+  schedule = runImmediately,
 }: BacktestRefdataStoreDeps): BacktestRefdataStore {
   /** Insertion-ordered, so the first key is the least recently used. */
   const resident = new Map<string, Record<string, unknown>[]>();
@@ -111,9 +202,12 @@ export function createBacktestRefdataStore({
     const file = fileFor(key);
     if (!file) return null;
     try {
-      const arr = JSON.parse((await gunzipAsync(await fs.readFile(file))).toString('utf8')) as
+      const raw = JSON.parse((await gunzipAsync(await fs.readFile(file))).toString('utf8')) as
         Record<string, unknown>[] | unknown;
-      if (!Array.isArray(arr) || arr.length === 0) return null;
+      if (!Array.isArray(raw) || raw.length === 0) return null;
+      // Files written before distillation existed are full records; projecting on read makes them
+      // indistinguishable from new ones, so nothing already cached has to be fetched again.
+      const arr = distil(raw as Record<string, unknown>[]);
       // Refresh mtime so pruning treats this as recently used rather than merely recently written.
       await fs.utimes(file, new Date(), new Date()).catch(() => {});
       return arr as Record<string, unknown>[];
@@ -184,15 +278,19 @@ export function createBacktestRefdataStore({
    * prefetchForDate wants the disk copy without the memory cost. Callers that do want it resident
    * call `remember` on the result.
    */
-  async function load(exchange: string, date: string, key: string) {
+  async function load(exchange: string, date: string, key: string, priority: RefdataPriority) {
     const cached = await readDisk(key);
     if (cached) {
       return cached;
     }
     try {
       const startedAt = now();
-      const raw = await nubraGet(`/refdata/refdata/${date}`, { exchange });
-      const arr = Array.isArray(raw.refdata) ? (raw.refdata as Record<string, unknown>[]) : [];
+      const raw = await schedule(priority, () =>
+        nubraGet(`/refdata/refdata/${date}`, { exchange }),
+      );
+      const arr = Array.isArray(raw.refdata)
+        ? distil(raw.refdata as Record<string, unknown>[])
+        : [];
       // An empty result is not cached: it is either a non-trading date or a shape we failed to
       // recognise, and memoising it would pin that answer for the life of the process.
       if (arr.length === 0) return [];
@@ -228,7 +326,7 @@ export function createBacktestRefdataStore({
     }
     // A request that joins a prefetch's in-flight download still wants the result resident, so
     // `remember` lives here rather than in `load`.
-    return singleFlight(exchange, date, key).then((arr) => {
+    return singleFlight(exchange, date, key, 'user').then((arr) => {
       if (arr.length) remember(key, arr);
       return arr;
     });
@@ -239,16 +337,72 @@ export function createBacktestRefdataStore({
     exchange: string,
     date: string,
     key: string,
+    priority: RefdataPriority,
   ): Promise<Record<string, unknown>[]> {
     const pending = inFlight.get(key);
     if (pending) return pending;
 
-    const started = load(exchange, date, key);
+    const started = load(exchange, date, key, priority);
     inFlight.set(key, started);
     void started.finally(() => {
       if (inFlight.get(key) === started) inFlight.delete(key);
     });
     return started;
+  }
+
+  const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+  /** Every date we already hold for an exchange, from memory and from disk. Never downloads. */
+  async function cachedDates(exchange: string): Promise<string[]> {
+    const prefix = `${exchange}_`;
+    const found = new Set<string>();
+    for (const key of resident.keys()) {
+      if (key.startsWith(prefix)) found.add(key.slice(prefix.length));
+    }
+    if (cacheDir) {
+      const names = await fs.readdir(cacheDir).catch(() => [] as string[]);
+      for (const name of names) {
+        if (!name.startsWith(prefix) || !name.endsWith('.json.gz')) continue;
+        found.add(name.slice(prefix.length, name.length - '.json.gz'.length));
+      }
+    }
+    return [...found].filter((d) => DATE_ONLY.test(d));
+  }
+
+  function shiftDays(date: string, days: number): string {
+    return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10);
+  }
+
+  async function peekRefdataNear(
+    exchange: string,
+    date: string,
+    maxAgeDays: number,
+  ): Promise<RefdataSnapshot | null> {
+    if (!DATE_ONLY.test(date)) return null;
+    // Today is already free through the shared day cache, and it is the one master that is still
+    // being added to — so it is never a stand-in for anything, including itself.
+    if (sharedDay?.() === date) return null;
+
+    const earliest = shiftDays(date, -maxAgeDays);
+    const candidates = (await cachedDates(exchange))
+      .filter((d) => d <= date && d >= earliest)
+      // Newest first: the closest snapshot is the one missing the fewest later listings.
+      .sort((a, b) => b.localeCompare(a));
+
+    for (const candidate of candidates) {
+      const key = `${exchange}_${candidate}`;
+      const hit = resident.get(key);
+      if (hit) {
+        remember(key, hit);
+        return { rows: hit, snapshotDate: candidate };
+      }
+      const fromDisk = await readDisk(key);
+      if (fromDisk?.length) {
+        remember(key, fromDisk);
+        return { rows: fromDisk, snapshotDate: candidate };
+      }
+    }
+    return null;
   }
 
   async function prefetchForDate(exchange: string, date: string): Promise<void> {
@@ -269,9 +423,9 @@ export function createBacktestRefdataStore({
     )
       return;
 
-    await singleFlight(exchange, date, key);
+    await singleFlight(exchange, date, key, 'warm');
     await pendingWrites.get(key);
   }
 
-  return { getRefdataForDate, prefetchForDate };
+  return { getRefdataForDate, peekRefdataNear, prefetchForDate };
 }

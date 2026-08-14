@@ -17,6 +17,7 @@ import {
   type IChartApi,
   type ISeriesApi,
   type CandlestickSeriesOptions,
+  type Time,
 } from 'lightweight-charts';
 import type {
   Instrument,
@@ -37,6 +38,7 @@ import {
   strategyPositionExchange,
   strategyPositionExpiry,
 } from '../lib/strategyPositionMeta';
+import GreekIndicatorPane from './GreekIndicatorPane';
 
 interface StrategyAnalysisViewProps {
   basketGroupId: string;
@@ -682,6 +684,17 @@ export default function StrategyAnalysisView({
   const positionsPaneRef = useRef<HTMLDivElement>(null);
   const [priceVisible, setPriceVisible] = useState(true);
   const [pnlVisible, setPnlVisible] = useState(true);
+
+  // ── Indicators pane: aggregate Vega / Theta / IV ──
+  // Its own pane rather than lines on the price chart, because these are market-wide basket
+  // figures and the Greeks pane above already shows THIS strategy's greeks — overlaying the two
+  // would invite reading one as the other. Everything inside comes from GreekIndicatorPane, the
+  // same component (and hook, and maths) the Chart and Tracker views use.
+  const [indicatorsVisible, setIndicatorsVisible] = useState(false);
+  const [indicatorsHeight, setIndicatorsHeight] = useState(200);
+  const indicatorsChartRef = useRef<IChartApi | null>(null);
+  const indicatorsSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const indicatorsPaneRef = useRef<HTMLDivElement>(null);
   const [orderBookCollapsed, setOrderBookCollapsed] = useState(false);
   const [chartsPopupOpen, setChartsPopupOpen] = useState(false);
   const [pnlPopupOpen, setPnlPopupOpen] = useState(false);
@@ -1644,18 +1657,27 @@ export default function StrategyAnalysisView({
     const pc = priceChartRef.current;
     const nc = pnlChartRef.current;
     const gc = greeksChartRef.current;
-    const charts = [pc, nc, gc].filter(Boolean) as IChartApi[];
+    const ic = indicatorsChartRef.current;
+    const charts = [pc, nc, gc, ic].filter(Boolean) as IChartApi[];
     if (charts.length === 0) return;
 
     // Native hover tracking (see hoveredChartRef declaration) — independent of the
     // library's own event stream, which can misreport the active pane during live updates.
-    const hoverTargets: Array<[HTMLDivElement | null, IChartApi]> = [
-      [priceChartContainerRef.current, pc as IChartApi],
-      [pnlChartContainerRef.current, nc as IChartApi],
-      [greeksChartContainerRef.current, gc as IChartApi],
+    // The third field is whether THIS effect binds the pane's pin trigger. The Indicators pane
+    // is false because it binds its own, on its inner container: its pinned card is built from
+    // its own overlay series, since buildPaneSnapshots below knows the price / P&L / Greeks
+    // shapes and nothing about the aggregate overlay.
+    //
+    // It must stay false. This wrapper CONTAINS that container, so binding here too would fire
+    // both capture-phase handlers on one middle-click — toggling the pin on and straight back off.
+    const hoverTargets: Array<[HTMLDivElement | null, IChartApi, boolean]> = [
+      [priceChartContainerRef.current, pc as IChartApi, true],
+      [pnlChartContainerRef.current, nc as IChartApi, true],
+      [greeksChartContainerRef.current, gc as IChartApi, true],
+      [indicatorsPaneRef.current, ic as IChartApi, false],
     ];
     const hoverCleanups: Array<() => void> = [];
-    for (const [el, chart] of hoverTargets) {
+    for (const [el, chart, pinnable] of hoverTargets) {
       if (!el || !chart) continue;
       const onEnter = () => {
         hoveredChartRef.current = chart;
@@ -1668,21 +1690,23 @@ export default function StrategyAnalysisView({
       // Middle-click (or Alt+click) pins the bar under the cursor across every pane at once.
       // Prefer the crosshair's own time; fall back to the click x so a pin still lands if the
       // crosshair happened not to be live at that instant.
-      const unbindPin = bindPinTrigger(
-        el,
-        (ev) => {
-          if (lastHoverTimeRef.current != null) return lastHoverTimeRef.current;
-          try {
-            const rect = el.getBoundingClientRect();
-            const leftScale = chart.priceScale('left').width() ?? 0;
-            const t = chart.timeScale().coordinateToTime(ev.clientX - rect.left - leftScale);
-            return typeof t === 'number' ? t : null;
-          } catch {
-            return null;
-          }
-        },
-        (t) => togglePinRef.current(t),
-      );
+      const unbindPin = pinnable
+        ? bindPinTrigger(
+            el,
+            (ev) => {
+              if (lastHoverTimeRef.current != null) return lastHoverTimeRef.current;
+              try {
+                const rect = el.getBoundingClientRect();
+                const leftScale = chart.priceScale('left').width() ?? 0;
+                const t = chart.timeScale().coordinateToTime(ev.clientX - rect.left - leftScale);
+                return typeof t === 'number' ? t : null;
+              } catch {
+                return null;
+              }
+            },
+            (t) => togglePinRef.current(t),
+          )
+        : () => {};
       hoverCleanups.push(() => {
         el.removeEventListener('mouseenter', onEnter);
         el.removeEventListener('mouseleave', onLeave);
@@ -1856,6 +1880,13 @@ export default function StrategyAnalysisView({
                 else if (c === gc) {
                   const gs = activeGreekSeries();
                   if (gs) c.setCrosshairPosition(res.greekNorm, t as any, gs);
+                } else if (c === ic && indicatorsSeriesRef.current) {
+                  // Placed against the pane's underlying reference line, so the crosshair lands
+                  // on the same spot the price pane shows. The overlays sit on their own scales;
+                  // the pane's own tooltip reads their values off the synced crosshair.
+                  // `as Time`, not the `as any` above: chart time is a branded UTCTimestamp and
+                  // the brand is phantom, so the real type asserts just as cleanly.
+                  c.setCrosshairPosition(res.spot, t as Time, indicatorsSeriesRef.current);
                 }
               } catch {}
             }
@@ -1890,7 +1921,7 @@ export default function StrategyAnalysisView({
       hoverCleanups.forEach((u) => u());
       hoveredChartRef.current = null;
     };
-  }, [priceVisible, pnlVisible, greeksVisible, chartEpoch]);
+  }, [priceVisible, pnlVisible, greeksVisible, indicatorsVisible, chartEpoch]);
 
   // ── 5. Resize observer & persistent layout range sync ──
   useEffect(() => {
@@ -2668,6 +2699,66 @@ export default function StrategyAnalysisView({
     [greeksChartHeight, pnlHeight, greeksVisible],
   );
 
+  const onIndicatorsDividerDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startY = e.clientY;
+      const startH = indicatorsHeight;
+      // Track the height in a closure and commit that on mouseup, matching the other dividers.
+      // Recomputing from the mouseup event instead would snap to a stale/odd clientY when the
+      // release lands outside the window.
+      let newH = startH;
+      const onMove = (ev: MouseEvent) => {
+        newH = Math.max(80, startH - (ev.clientY - startY));
+        if (indicatorsPaneRef.current) indicatorsPaneRef.current.style.height = `${newH}px`;
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        setIndicatorsHeight(newH);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [indicatorsHeight],
+  );
+
+  /**
+   * The pane owns its chart's lifecycle, so it hands the handle up here rather than the other
+   * way round. Bumping chartEpoch re-runs the sync effect, which is how the other panes announce
+   * a rebuilt chart too — without it the new chart would never join the scroll lockstep.
+   */
+  const handleIndicatorsChart = useCallback(
+    (chart: IChartApi | null, baseSeries: ISeriesApi<'Line'> | null) => {
+      indicatorsChartRef.current = chart;
+      indicatorsSeriesRef.current = baseSeries;
+      setChartEpoch((e) => e + 1);
+    },
+    [],
+  );
+
+  /** The underlying, in the shape the overlay hook expects (see getSymbol / getChainAsset). */
+  const indicatorInstrument = useMemo<Instrument | null>(
+    () =>
+      underlying
+        ? {
+            asset: underlying,
+            nubra_name: chartUnderlying || underlying,
+            exchange: underlyingExchange,
+            derivative_type: underlyingExchange === 'MCX' ? 'FUT' : 'INDEX',
+          }
+        : null,
+    [underlying, chartUnderlying, underlyingExchange],
+  );
+
+  /** Open the overlay on the session the strategy actually traded in, not the last loaded bar. */
+  const indicatorInitialDay = useMemo(() => {
+    const entryTimes = [...positions, ...closedPositions]
+      .map((p) => p.entry_time || 0)
+      .filter((t) => t > 0);
+    return entryTimes.length ? istDateFromNs(Math.min(...entryTimes)) : undefined;
+  }, [positions, closedPositions]);
+
   const onObDividerDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
@@ -3265,6 +3356,20 @@ export default function StrategyAnalysisView({
             })()}
         </div>
 
+        {/* ── Rectangle 4: Indicators (aggregate Vega / Theta / IV) ── */}
+        {/* No dropdown of its own — each overlay carries its own settings tray inside the pane. */}
+        <button
+          onClick={() => setIndicatorsVisible((v) => !v)}
+          title="Aggregate Vega / Theta / IV for the near-the-money basket"
+          className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-semibold border transition-colors ${
+            indicatorsVisible
+              ? 'bg-[#38bdf8]/15 border-[#38bdf8]/40 text-[#38bdf8]'
+              : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+          }`}
+        >
+          Indicators
+        </button>
+
         <div className="ml-auto flex items-center gap-3">
           {isSnapshot ? (
             <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-[#3b82f6]/15 text-[#3b82f6] border border-[#3b82f6]/40">
@@ -3452,6 +3557,39 @@ export default function StrategyAnalysisView({
                     />
                   )
                 }
+              />
+            </div>
+          </>
+        )}
+
+        {indicatorsVisible && (
+          <>
+            {(priceVisible || pnlVisible || greeksVisible) && (
+              <div
+                onMouseDown={onIndicatorsDividerDown}
+                className="group h-2 shrink-0 flex items-center justify-center bg-[var(--bg-secondary)] hover:bg-[#38bdf8]/20 cursor-row-resize transition-colors z-20 relative"
+              >
+                <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[#38bdf8]" />
+              </div>
+            )}
+            <div
+              ref={indicatorsPaneRef}
+              style={{ height: indicatorsHeight, minHeight: 80, flexShrink: 0 }}
+              className="bg-[var(--bg-primary)]"
+            >
+              <GreekIndicatorPane
+                instrument={indicatorInstrument}
+                bars={chartData?.underlyingBars ?? []}
+                theme={theme}
+                // One session at a time: the strategy ran on a day, and reconstructing a wider
+                // trailing window would be work nobody reads. The tray's HISTORIC DAY picker
+                // moves to another session when needed.
+                histDays={1}
+                initialDay={indicatorInitialDay}
+                onChartReady={handleIndicatorsChart}
+                pins={pins}
+                onTogglePin={togglePinAt}
+                onRemovePin={removePin}
               />
             </div>
           </>

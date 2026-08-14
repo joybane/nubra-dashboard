@@ -16,7 +16,7 @@ import {
   PRUNE_DELTA_MIN,
   PRUNE_DELTA_MAX,
   CARRY_STALE_MS,
-  MEMBERSHIP_DWELL,
+  MEMBERSHIP_DWELL_MS,
   type ChainSnapshot,
 } from './greekAggregator.ts';
 
@@ -568,7 +568,51 @@ test('dwell: a one-snapshot excursion across the edge does not flip membership',
   ];
   expect(totals(blip)).toEqual([17, 10, 17]); // raw shows the hole
   expect(totals(blip, 'chained')).toEqual([17, 17, 17]); // dwell absorbs it, no splice at all
-  expect(MEMBERSHIP_DWELL).toBeGreaterThan(1); // the above is only true for a real dwell
+});
+
+/**
+ * The dwell is denominated in time, not in snapshots, and this is the case that forces it.
+ *
+ * buildSeries is fed by two feeds ~30x apart in cadence — 1m reconstructed history and the
+ * ~2s live tail. Under the old snapshot count of 2 the debounce was 2 minutes on history but
+ * 4 seconds live, so a strike breathing across Δ=0.609 spliced the chain repeatedly on exactly
+ * the segment of chart with the most points. Six seconds of excursion is noise at any cadence
+ * and must be absorbed at both.
+ */
+const SEC = 1_000;
+test('dwell: it is a duration, so a brief excursion is absorbed at the live cadence too', () => {
+  // Same shape as `blip` but sampled every 2s: 110 steps out of band for three snapshots
+  // (6 seconds of wall clock) and comes back, while its own vega walks 7 → 9.
+  //
+  // The level cannot expose the difference — the splice is computed exactly, so an early flip
+  // still lands on the right number. What an early flip destroys is the movement of a leg
+  // while it is out: a snapshot count flips at the second excursion snapshot and then discards
+  // 110's 8 → 9, printing a flat 18. Holding it for the full 60 s keeps the 19.
+  const fast: ChainSnapshot[] = [
+    { ts: D1_OPEN, ce: [ce(10, 0.5, 100), ce(7, 0.2, 110)], pe: [] },
+    { ts: D1_OPEN + 2 * SEC, ce: [ce(10, 0.5, 100), ce(7, 0.04, 110)], pe: [] },
+    { ts: D1_OPEN + 4 * SEC, ce: [ce(10, 0.5, 100), ce(8, 0.04, 110)], pe: [] },
+    { ts: D1_OPEN + 6 * SEC, ce: [ce(10, 0.5, 100), ce(9, 0.04, 110)], pe: [] },
+    { ts: D1_OPEN + 8 * SEC, ce: [ce(10, 0.5, 100), ce(9, 0.2, 110)], pe: [] },
+  ];
+  expect(totals(fast)).toEqual([17, 10, 10, 10, 19]); // raw shows the hole, as it should
+  expect(totals(fast, 'chained')).toEqual([17, 17, 18, 19, 19]);
+  // The protection is only real if the dwell outlasts several live snapshots.
+  expect(MEMBERSHIP_DWELL_MS).toBeGreaterThan(6 * SEC);
+});
+
+test('dwell: a sustained crossing still flips — the debounce is not an indefinite hold', () => {
+  // 110 leaves the band at t1 and stays out well past MEMBERSHIP_DWELL_MS. Once it flips, the
+  // splice absorbs its 7, so the chained level keeps walking strike 100's vega (10 → 14).
+  const sustained: ChainSnapshot[] = [
+    { ts: D1_OPEN, ce: [ce(10, 0.5, 100), ce(7, 0.2, 110)], pe: [] },
+  ];
+  for (let i = 1; i <= 4; i++) {
+    const ts = D1_OPEN + i * (MEMBERSHIP_DWELL_MS / 2);
+    sustained.push({ ts, ce: [ce(10 + i, 0.5, 100), ce(7, 0.04, 110)], pe: [] });
+  }
+  // Membership flips at the snapshot where the disagreement first spans the full dwell.
+  expect(totals(sustained, 'chained')).toEqual([17, 18, 19, 20, 21]);
 });
 
 test('chained: session re-anchor zeroes the offset so drift cannot cross days', () => {

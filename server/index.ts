@@ -39,6 +39,7 @@ import {
 } from './ocFeedGuard.ts';
 import { loadPositionRules, evaluateAndFire } from './positionRules.ts';
 import { createRefdataCache } from './refdataCache.ts';
+import { createRefdataQueue } from './refdataQueue.ts';
 import { previousTradingDay } from './tradingDay.ts';
 import {
   describeUpstreamError,
@@ -61,9 +62,17 @@ const PORT = Number(process.env.SERVER_PORT || 3000);
 
 // ─── Server-side refdata cache ────────────────────────────────────────────────
 // Avoids fetching 100k+ instrument records from Nubra on every search keystroke.
-// See refdataCache.ts for why this single-flights and evicts empty/failed results.
+// See refdataCache.ts for why this single-flights, persists the day's copy, and evicts
+// empty/failed results.
+//
+// The queue is shared with the per-date backtest store below, because the thing being rationed is
+// one link carrying 34 MB per call — it does not matter which cache asked for it. See
+// refdataQueue.ts.
+const refdataQueue = createRefdataQueue();
 const { getRefdata, peekRefdata, cacheDay } = createRefdataCache({
   nubraGet: (e, p) => nubraGet(e, p),
+  cacheDir: path.join(__dirname, '..', '.refdata-live'),
+  schedule: refdataQueue.run,
 });
 
 import crypto from 'crypto';
@@ -238,6 +247,8 @@ function baseHeaders(extra: Record<string, string> = {}): Record<string, string>
     'x-device-id': authState.deviceId,
     'x-app-version': '0.4.2',
     'x-device-os': 'web',
+    // No Accept-Encoding here on purpose — Node's fetch already sends `gzip, deflate` and decodes
+    // the response itself. See the note in backtestRefdataStore.ts before trying to add one.
     ...extra,
   };
 }
@@ -1328,6 +1339,7 @@ const backtestRefdata = createBacktestRefdataStore({
   getSharedRefdata: getRefdata,
   sharedDay: cacheDay,
   cacheDir: path.join(__dirname, '..', '.refdata-cache'),
+  schedule: refdataQueue.run,
 });
 
 /** Past dates' intraday bars, which can never change. See backtestBarStore.ts. */
@@ -1344,10 +1356,14 @@ const BACKTEST_WARM_EXCHANGES = ['NSE', 'BSE', 'MCX'];
  * Only NSE was ever warmed, so the first MCX or BSE option chain of the day paid a
  * multi-megabyte download inside the request. Fire-and-forget: the single-flight cache
  * de-duplicates against any request that races us, and a failure just leaves the cache cold.
+ *
+ * Warm priority, so that if all three are still downloading when someone opens a pane, their
+ * request takes the link first. On a day whose copies are already on disk none of this queues at
+ * all — the reads come straight off the filesystem.
  */
 function warmRefdata(): void {
   for (const exchange of ['NSE', 'BSE', 'MCX']) {
-    void getRefdata(exchange).catch((e: unknown) => {
+    void getRefdata(exchange, 'warm').catch((e: unknown) => {
       console.warn(`[Refdata] warm failed for ${exchange}:`, describeUpstreamError(e).detail);
     });
   }
@@ -1394,25 +1410,43 @@ function warmBacktestRefdata(): void {
 setInterval(warmBacktestRefdata, 10 * 60_000).unref();
 
 // ─── Startup session restore ──────────────────────────────────────────────────
+
+/** Everything that follows deciding we hold a usable session. */
+function resumeAuthenticated(message: string): void {
+  authState.status = 'authenticated';
+  console.log(`[auth] ${message}`);
+  warmRefdata();
+  warmBacktestRefdata();
+  connectNubraWs();
+  try {
+    broadcast({ type: 'auth_status', status: 'authenticated' });
+  } catch {
+    /* ws not ready */
+  }
+}
+
 async function tryRestoreSession(): Promise<void> {
   if (authState.sessionToken) {
     try {
       console.log('Testing saved session token...');
-      // Doubles as the session-token probe: a 401 here rejects and drops us to the PIN path.
-      await getRefdata('NSE');
-
-      authState.status = 'authenticated';
-      console.log('[auth] Saved session token is valid. Zero-prompt bypass successful!');
-      warmRefdata();
-      warmBacktestRefdata();
-      connectNubraWs();
-      try {
-        broadcast({ type: 'auth_status', status: 'authenticated' });
-      } catch {
-        /* ws not ready */
-      }
+      // This used to be `getRefdata('NSE')`, which stopped being a probe the moment that cache
+      // learned to answer from disk: a same-day copy makes no request at all, so a dead token would
+      // have sailed straight through as authenticated. A price snapshot is a few hundred bytes and
+      // still rejects on a dead session.
+      await nubraGet('/optionchains/NIFTY/price');
+      resumeAuthenticated('Saved session token is valid. Zero-prompt bypass successful!');
       return;
     } catch (e: any) {
+      const failure = describeUpstreamError(e);
+      // Only the broker's own verdict retires a token. The probe above is on an 8s budget, so a
+      // dropped socket or a slow morning would otherwise cost a working session — and an OTP — over
+      // a blip that said nothing about it. If the token really is dead, the first real request 401s
+      // and fires onBrokerAuthFailure, which is the same path this would have taken.
+      if (failure.kind !== 'http') {
+        console.warn(`[auth] Could not reach the broker to check the token: ${failure.detail}`);
+        resumeAuthenticated('Proceeding on the saved session token, unverified.');
+        return;
+      }
       console.log(
         '[auth] Saved session token is invalid or expired. Falling back to PIN/OTP.',
         e.message,

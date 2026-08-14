@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { sendUpstreamError } from './routeErrors.ts';
+import { refIdIndexFor, searchEntries, searchIndexFor } from './instrumentSearch.ts';
 
 /**
  * How long an option-chain request will wait for a cold refdata download before replying without
@@ -78,66 +79,15 @@ export function registerMarketDataRoutes({
       if (!requireAuth(reply)) return;
       try {
         const { q = '', exchange = 'NSE', type = '', limit = '20' } = req.query;
-        const arr = await getRefdata(exchange);
+        // peek first: a warm exchange answers without ever entering an await, which is what makes
+        // typing feel immediate. Only a not-yet-downloaded exchange waits on the master.
+        const arr = peekRefdata(exchange) ?? (await getRefdata(exchange));
 
-        const q2 = q.toLowerCase();
+        // The ranking rules moved to instrumentSearch.ts unchanged; what changed is that they now
+        // run once per record against a per-day index instead of once per sort comparison.
+        const results = searchEntries(searchIndexFor(arr), q, type, Number(limit) || 20);
 
-        function typePriority(item: Record<string, unknown>): number {
-          const dt = ((item.derivative_type || item.asset_type || '') as string).toUpperCase();
-          if (dt === 'STOCK' || dt === 'INDEX' || dt === '') return 0;
-          if (dt === 'FUT') return 1;
-          return 2;
-        }
-
-        function matchScore(item: Record<string, unknown>): number {
-          const terms = searchTerms(item);
-          if (terms.some((term) => term === q2)) return 0;
-          if (terms.some((term) => term.startsWith(q2))) return 1;
-          return 2;
-        }
-
-        function searchTerms(item: Record<string, unknown>): string[] {
-          return [
-            item.asset,
-            item.stock_name,
-            item.display_name,
-            item.zanskar_name,
-            item.nubra_name,
-            item.symbol,
-            item.trading_symbol,
-          ]
-            .filter(Boolean)
-            .map((value) => String(value).toLowerCase());
-        }
-
-        function expiryValue(item: Record<string, unknown>): number {
-          const symbolExpiry = /(?:^|_)(\d{8})(?:_|$)/.exec(
-            String(item.zanskar_name || item.nubra_name || item.symbol || item.stock_name || ''),
-          )?.[1];
-          const raw = String(item.expiry ?? symbolExpiry ?? '');
-          if (/^\d{8}$/.test(raw)) return Number(raw);
-          const time = new Date(raw).getTime();
-          return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER;
-        }
-
-        const filtered = arr
-          .filter((item) => {
-            const tm =
-              !type ||
-              ((item.derivative_type || item.asset_type || '') as string).toUpperCase() ===
-                type.toUpperCase();
-            return tm && searchTerms(item).some((term) => term.includes(q2));
-          })
-          .sort((a, b) => {
-            const ms = matchScore(a) - matchScore(b);
-            if (ms !== 0) return ms;
-            const tp = typePriority(a) - typePriority(b);
-            if (tp !== 0) return tp;
-            return expiryValue(a) - expiryValue(b);
-          })
-          .slice(0, Number(limit));
-
-        return reply.send({ results: filtered });
+        return reply.send({ results });
       } catch (err: unknown) {
         return sendUpstreamError(reply, err, `GET /api/instruments/search?q=${req.query.q || ''}`);
       }
@@ -152,8 +102,12 @@ export function registerMarketDataRoutes({
       try {
         const refId = Number(req.query.ref_id);
         if (!refId) return reply.status(400).send({ error: 'ref_id required' });
-        const arr = await getRefdata(req.query.exchange || 'NSE');
-        const match = arr.find((item) => (item as Record<string, unknown>).ref_id === refId);
+        const exchange = req.query.exchange || 'NSE';
+        const arr = peekRefdata(exchange) ?? (await getRefdata(exchange));
+        // Was `arr.find(...)` — a full scan of ~100k records on every strike click in the option
+        // chain. The map also coerces `ref_id`, matching how the chain enrichment below already
+        // reads it; the old strict `===` silently missed any record storing it as a string.
+        const match = refIdIndexFor(arr).get(refId);
         return reply.send({ instrument: match || null });
       } catch (err: unknown) {
         return sendUpstreamError(
@@ -204,23 +158,19 @@ export function registerMarketDataRoutes({
       try {
         const refdata = peekRefdata(exchange) ?? (await refdataWithinBudget(exchange));
         if (!refdata) throw new Error(`refdata for ${exchange} not ready`);
-        const refById = new Map<number, string>();
-        for (const r of refdata) {
-          if (r.ref_id != null && r.stock_name) refById.set(Number(r.ref_id), String(r.stock_name));
-        }
+        // Shared with /api/instruments/lookup and built at most once per day's master. This loop
+        // used to rebuild a ~100k-entry map on every request, and the chain is polled every 5s per
+        // open pane.
+        const refById = refIdIndexFor(refdata);
+        let enriched = 0;
         for (const side of ['ce', 'pe'] as const) {
           const legs = chain[side];
           if (!Array.isArray(legs)) continue;
           for (const leg of legs as Record<string, unknown>[]) {
-            const rid = Number(leg.ref_id);
-            if (rid && refById.has(rid)) leg.symbol = refById.get(rid);
+            const stockName = refById.get(Number(leg.ref_id))?.stock_name;
+            if (stockName) leg.symbol = String(stockName);
+            if (leg.symbol) enriched++;
           }
-        }
-        let enriched = 0;
-        for (const side of ['ce', 'pe'] as const) {
-          const legs = chain[side];
-          if (Array.isArray(legs))
-            enriched += (legs as Record<string, unknown>[]).filter((l) => l.symbol).length;
         }
         console.log(
           `[OC] Enriched ${enriched} legs with symbol from refdata (${refById.size} ref entries)`,

@@ -3,22 +3,21 @@ import {
   createChart,
   LineSeries,
   CrosshairMode,
-  MismatchDirection,
   type IChartApi,
   type ISeriesApi,
   type LineSeriesOptions,
-  type MouseEventParams,
 } from 'lightweight-charts';
 import { useWs } from './hooks/useWsContext';
 import { useGreekOverlay } from './hooks/useGreekOverlay';
 import { GreekButton } from './components/GreekControls';
+import { bindGreekCrosshair } from './lib/greekTooltip';
 import { fetchRange, nubraType } from './CandleChart';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
 import type { Instrument, OhlcBar, OhlcvData, WsMessage } from './types';
 import { getSymbol } from './types';
 import {
   IST_OFFSET,
-  chartTimeDayKey,
+  barsToSessionLine,
   fmtPrice,
   isMarketSessionChartTime,
   sortKey,
@@ -123,36 +122,6 @@ async function fetchTodayTick(instrument: Instrument): Promise<OhlcBar[]> {
   }
   bars.sort((a, b) => sortKey(a.time) - sortKey(b.time));
   return bars.filter((b) => isMarketSessionChartTime(b.time, instrument.exchange));
-}
-
-// ── Crosshair-tooltip helpers (module-level: pure, no per-render churn) ─────────
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-/** Chart time is IST-baked seconds, so read UTC parts to get the IST wall clock. */
-function fmtCrosshairTime(t: number): string {
-  const d = new Date(t * 1000);
-  const hh = String(d.getUTCHours()).padStart(2, '0');
-  const mm = String(d.getUTCMinutes()).padStart(2, '0');
-  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${hh}:${mm}`;
-}
-
-/** Greek totals can be ~1e9 (industry); render them compactly in the tooltip. */
-function fmtCompact(v: number): string {
-  const a = Math.abs(v);
-  if (a >= 1e9) return (v / 1e9).toFixed(2) + 'B';
-  if (a >= 1e6) return (v / 1e6).toFixed(2) + 'M';
-  if (a >= 1e3) return (v / 1e3).toFixed(2) + 'K';
-  return v.toFixed(2);
-}
-
-function tipRow(color: string, label: string, val: string): string {
-  return (
-    `<div style="display:flex;align-items:center;gap:6px;line-height:1.6;white-space:nowrap">` +
-    `<span style="width:8px;height:8px;border-radius:2px;background:${color};flex:none"></span>` +
-    `<span style="color:var(--text-secondary);font-size:11px">${label}</span>` +
-    `<span style="margin-left:auto;padding-left:14px;color:var(--text-primary);font-weight:600;font-size:11px">${val}</span>` +
-    `</div>`
-  );
 }
 
 /**
@@ -291,78 +260,22 @@ export default function Tracker({ instrument, theme }: Props) {
     containerRef.current.addEventListener('dblclick', onDblClick);
 
     // ── Crosshair tooltip: NIFTY price + every visible greek series at the cursor ─
-    const onCrosshair = (param: MouseEventParams) => {
-      const tip = tooltipRef.current;
-      const cont = containerRef.current;
-      if (!tip || !cont) return;
-      const pt = param.point;
-      if (
-        param.time == null ||
-        !pt ||
-        pt.x < 0 ||
-        pt.y < 0 ||
-        pt.x > cont.clientWidth ||
-        pt.y > cont.clientHeight
-      ) {
-        tip.style.display = 'none';
-        return;
-      }
-      const rows: string[] = [];
-      const ln = lineRef.current;
-      if (ln) {
-        const d = param.seriesData.get(ln) as { value?: number } | undefined;
-        if (d && typeof d.value === 'number')
-          rows.push(tipRow('#2962ff', symRef.current, '₹' + fmtPrice(d.value)));
-      }
-      // Greek/IV history is 1-minute while today's price line is 1-second, so `seriesData` is
-      // empty for a greek series at ~59 of every 60 crosshair positions — the rows blink out and
-      // the tooltip collapses to just NIFTY. Enumerate the pane's series and carry the last
-      // known value forward (NearestLeft) rather than relying on an exact time hit.
-      let overlaySeries: ISeriesApi<'Line'>[] = [];
-      try {
-        overlaySeries = (chart.panes()[0]?.getSeries() ?? []).filter(
-          (s) => s !== ln,
-        ) as ISeriesApi<'Line'>[];
-      } catch {
-        /* pane gone */
-      }
-
-      for (const series of overlaySeries) {
-        const o = series.options() as { color?: string; title?: string; visible?: boolean };
-        if (o.visible === false) continue;
-        let v = (param.seriesData.get(series) as { value?: number } | undefined)?.value;
-        if ((v == null || !Number.isFinite(v)) && param.logical != null) {
-          const prev = series.dataByIndex(param.logical, MismatchDirection.NearestLeft) as {
-            value?: number;
-          } | null;
-          v = prev?.value;
-        }
-        if (v == null || !Number.isFinite(v)) continue;
-        rows.push(tipRow(o.color || '#888', o.title || '', fmtCompact(v)));
-      }
-      if (!rows.length) {
-        tip.style.display = 'none';
-        return;
-      }
-      tip.innerHTML =
-        `<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">${fmtCrosshairTime(param.time as number)}</div>` +
-        rows.join('');
-      tip.style.display = 'block';
-
-      const tw = tip.offsetWidth,
-        th = tip.offsetHeight;
-      let x = pt.x + 16,
-        y = pt.y + 16;
-      if (x + tw > cont.clientWidth) x = pt.x - tw - 16;
-      if (y + th > cont.clientHeight) y = cont.clientHeight - th - 8;
-      tip.style.left = `${Math.max(4, x)}px`;
-      tip.style.top = `${Math.max(4, y)}px`;
-    };
-    chart.subscribeCrosshairMove(onCrosshair);
+    const unbindCrosshair =
+      tooltipRef.current && containerRef.current
+        ? bindGreekCrosshair({
+            chart,
+            container: containerRef.current,
+            tooltip: tooltipRef.current,
+            baseSeries: () => lineRef.current,
+            baseLabel: () => symRef.current,
+            formatBase: (v) => '₹' + fmtPrice(v),
+          })
+        : () => {};
 
     return () => {
       containerRef.current?.removeEventListener('dblclick', onDblClick);
       observer.disconnect();
+      unbindCrosshair();
       removeChart(chart);
       chartRef.current = null;
       lineRef.current = null;
@@ -415,21 +328,9 @@ export default function Tracker({ instrument, theme }: Props) {
   }
 
   function toLine(bars: OhlcBar[]) {
-    const points: Array<{ time: OhlcBar['time']; value?: number }> = [];
-    let lastDay: string | null = null;
-    let lastNumericTime: number | null = null;
-
-    for (const b of marketBars(bars)) {
-      const day = chartTimeDayKey(b.time);
-      if (lastDay && day && day !== lastDay && lastNumericTime != null) {
-        points.push({ time: (lastNumericTime + 1) as OhlcBar['time'] });
-      }
-      points.push({ time: b.time, value: b.close });
-      lastDay = day;
-      if (typeof b.time === 'number') lastNumericTime = b.time;
-    }
-
-    return points as Parameters<NonNullable<typeof lineRef.current>['setData']>[0];
+    return barsToSessionLine(bars, trackedExchange) as Parameters<
+      NonNullable<typeof lineRef.current>['setData']
+    >[0];
   }
 
   function rangeTouchesToday(from: number, to: number): boolean {

@@ -178,12 +178,18 @@ export function registerNubraBacktestRoutes({
   /**
    * How many timeseries POSTs may be in flight at once for a single fan-out.
    *
-   * A 29-strike chain is 58 symbols, which at 10 per request was six simultaneous downloads for
-   * one user click. That burst is what makes a stale keep-alive socket likely, and a single
-   * rejection takes the whole batch with it. Four keeps a cold load about two round-trips deep
-   * while roughly halving the concurrent socket count.
+   * A 29-strike chain is 58 symbols, which at 10 per request is six requests for one user click.
+   * This was briefly held at 4 — two round trips — because a stale keep-alive socket among a burst
+   * of six rejected the whole batch. Both halves of that reasoning have since been fixed
+   * independently: `upstreamPostRetries('/charts/timeseries')` re-sends a transport failure
+   * (upstreamError.ts), and the per-batch caching below means a retried batch no longer discards
+   * what its siblings already fetched. Throttling on top of those only made switching expiry take
+   * two round trips instead of one, which is exactly what a user feels.
+   *
+   * Eight rather than unbounded: it covers the six a full chain needs in a single wave, without
+   * letting some future wider strike range open an unbounded number of sockets.
    */
-  const TS_CONCURRENCY = 4;
+  const TS_CONCURRENCY = 8;
 
   /** Bounded `Promise.all(items.map(fn))`. Results stay in input order. */
   async function mapPool<T, R>(
@@ -353,6 +359,183 @@ export function registerNubraBacktestRoutes({
     return { symbol: underlying, type: isIndex ? 'INDEX' : 'STOCK' };
   }
 
+  /**
+   * How far before the requested date a cached master may have been taken and still be reused.
+   *
+   * The bound that matters is the listing horizon. A snapshot knows the weeklies that were on the
+   * books when it was taken and no others, so serving a date `gap` days later leaves the expiry
+   * list complete only out to `horizon - gap`. Measured on the real cached masters, 2026-08-03
+   * listed every NIFTY expiry out to 2026-09-01 — a horizon of about 29 days — and at a nine-day
+   * gap the fourth-nearest weekly was already missing from what it could offer.
+   *
+   * A week keeps roughly three weeks of weeklies complete, which covers the near expiries a
+   * backtest actually reaches for, and in practice the gap stays smaller still: every substituted
+   * answer sends the date's own master to be fetched behind it, so browsing fills the cache in.
+   * `nbTrustSnapshot` and the strike-window guard reject the cases where even this does not hold.
+   */
+  const REUSE_MAX_AGE_DAYS = 7;
+
+  /**
+   * How near the trade date the default expiry must be for a reused snapshot to pick it.
+   *
+   * Weeklies are seven days apart, so an expiry falling within eight days of the trade date is the
+   * nearest one by construction — there is no room for another between them. That makes the default
+   * safe to take from an older snapshot. Anything further out means the genuinely nearest expiry may
+   * be one this snapshot was taken too early to know about, so we pay for the exact master instead.
+   */
+  const NEAREST_EXPIRY_TRUST_DAYS = 8;
+
+  function nbDaysBetween(from: string, to: string): number {
+    return (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000;
+  }
+
+  function nbAssetOptions(
+    refdata: Record<string, unknown>[],
+    underlying: string,
+  ): Record<string, unknown>[] {
+    return refdata.filter((item) => item.asset === underlying && item.derivative_type === 'OPT');
+  }
+
+  /**
+   * The asset's expiries as YYYY-MM-DD, ascending, restricted to those still live on `date`.
+   *
+   * A master downloaded for the date itself cannot contain an already-expired contract, so the
+   * filter is a no-op there. It only removes anything when the master came from an earlier date —
+   * which is precisely what makes reusing one sound.
+   */
+  function nbExpiriesFor(assetRef: Record<string, unknown>[], date: string): string[] {
+    return Array.from(new Set(assetRef.map((item) => Number(item.expiry))))
+      .sort((a, b) => a - b)
+      .map((num) => {
+        const value = String(num);
+        return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+      })
+      .filter((iso) => iso >= date);
+  }
+
+  /** Whether a master taken on another date can answer for `date` without being checked upstream. */
+  function nbTrustSnapshot(
+    rows: Record<string, unknown>[],
+    date: string,
+    underlying: string,
+    requestedExpiry?: string,
+  ): boolean {
+    const expiries = nbExpiriesFor(nbAssetOptions(rows, underlying), date);
+    if (!expiries.length) return false;
+    // The caller named an expiry, so the snapshot is not being asked to choose one — only to supply
+    // that expiry's strikes, which it lists in full unless they were added after it was taken. The
+    // strike-window guard in the route is what catches that remaining case.
+    if (requestedExpiry) return expiries.includes(requestedExpiry);
+    return nbDaysBetween(date, expiries[0]) <= NEAREST_EXPIRY_TRUST_DAYS;
+  }
+
+  /**
+   * The instrument master to answer a chain request with, avoiding the download where it is provably
+   * unnecessary.
+   *
+   * A cold `/refdata/refdata/<date>` is 40-45s of a ~34 MB dump, and it is charged per date — so
+   * browsing a week of dates used to mean paying it a week of times over, for masters that differ
+   * from each other by a handful of newly listed contracts. Reusing a nearby cached one is sound in
+   * exactly one direction: every row in an older master was listed then, so any of them not yet
+   * expired on the requested date was listed on the requested date too. It can be short of rows,
+   * never wrong about one. Everything above decides whether "short" could matter here; when it
+   * could, this falls through to the exact master and pays the download.
+   */
+  async function nbResolveRefdata(
+    exchange: string,
+    date: string,
+    underlying: string,
+    requestedExpiry?: string,
+  ): Promise<{ rows: Record<string, unknown>[]; exact: boolean }> {
+    const near = await nbRefdata.peekRefdataNear(exchange, date, REUSE_MAX_AGE_DAYS);
+    if (near) {
+      if (near.snapshotDate === date) return { rows: near.rows, exact: true };
+      if (nbTrustSnapshot(near.rows, date, underlying, requestedExpiry)) {
+        console.log(
+          `[backtest refdata] ${exchange} ${date}: answered from the ${near.snapshotDate} snapshot`,
+        );
+        return { rows: near.rows, exact: false };
+      }
+    }
+    return { rows: await nbGetRefdataForDate(exchange, date), exact: true };
+  }
+
+  /** Strikes either side of ATM the chain shows. */
+  const STRIKE_SPAN = 14;
+
+  /**
+   * The ATM ±STRIKE_SPAN window over an expiry's listed strikes.
+   *
+   * `truncated` reports that the window ran into the end of the list on at least one side, so the
+   * chain is narrower than it asked for. That is ordinary for a thinly listed contract, but for a
+   * reused snapshot it is also the one symptom of strikes listed after the snapshot was taken —
+   * which is why the caller treats it as a reason to go and get the exact master.
+   */
+  function nbStrikeWindow(
+    expiryOptions: Record<string, unknown>[],
+    spot: number,
+  ): { strikes: number[]; truncated: boolean } {
+    const availableStrikes = Array.from(
+      new Set(expiryOptions.map((x) => (x.strike_price as number) / 100)),
+    ).sort((a, b) => a - b);
+    let closestIdx = 0;
+    let minDiff = Infinity;
+    for (let i = 0; i < availableStrikes.length; i++) {
+      const diff = Math.abs(availableStrikes[i] - spot);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closestIdx = i;
+      }
+    }
+    const startIdx = Math.max(0, closestIdx - STRIKE_SPAN);
+    const endIdx = Math.min(availableStrikes.length - 1, closestIdx + STRIKE_SPAN);
+    const strikes: number[] = [];
+    for (let i = startIdx; i <= endIdx; i++) strikes.push(availableStrikes[i]);
+    return {
+      strikes,
+      truncated: startIdx !== closestIdx - STRIKE_SPAN || endIdx !== closestIdx + STRIKE_SPAN,
+    };
+  }
+
+  /** The underlying's price at `time` on `date`, falling back to the daily bar. 0 when unknown. */
+  async function nbResolveSpot(
+    exchange: string,
+    spotType: 'INDEX' | 'STOCK' | 'FUT',
+    indexName: string,
+    date: string,
+    time: string,
+  ): Promise<number> {
+    const spotRes = await nbFetchTs(exchange, spotType, [indexName], ['close'], date, '1m', false);
+    const spotChart = nbCollect(spotRes)[indexName];
+    if (spotChart) {
+      const bar = nbFindBar(nbParseBars(spotChart), time);
+      if (bar?.close) return bar.close;
+    }
+    // Fallback to the daily bar if 1m is not found (e.g. out of market hours or database lag).
+    const dailyRes = await nubraPost(
+      '/charts/timeseries',
+      {
+        query: [
+          {
+            exchange,
+            type: spotType,
+            values: [indexName],
+            fields: ['close'],
+            startDate: `${date}T00:00:00.000Z`,
+            endDate: `${date}T23:59:59.000Z`,
+            interval: '1d',
+            intraDay: false,
+            realTime: false,
+          },
+        ],
+      },
+      { Authorization: `Bearer ${getSessionToken()!}` },
+    );
+    const dailyChart = nbCollect(dailyRes)[indexName];
+    const closes = (dailyChart?.close || []) as Array<{ ts?: string; v: number }>;
+    return closes.length ? closes[0].v / 100 : 0;
+  }
+
   // ─── Debug timeseries endpoint ───
   fastify.get('/api/debug-chart', async (req, reply) => {
     try {
@@ -393,7 +576,9 @@ export function registerNubraBacktestRoutes({
       // Resolve the option expiry first. MCX has no cash/index ticker named
       // CRUDEOIL; its historical underlying is the futures contract backing the
       // selected option expiry (for example FUT_CRUDEOIL_20260819).
-      const refdata = await nbGetRefdataForDate(exchange, date);
+      const resolved = await nbResolveRefdata(exchange, date, underlying, expiry);
+      let refdata = resolved.rows;
+      let exact = resolved.exact;
       if (!refdata.length) {
         return {
           ok: false,
@@ -408,10 +593,9 @@ export function registerNubraBacktestRoutes({
           chain: [],
         };
       }
-      const assetRef = refdata.filter(
-        (item) => item.asset === underlying && item.derivative_type === 'OPT',
-      );
-      if (!assetRef.length) {
+      let assetRef = nbAssetOptions(refdata, underlying);
+      let expiries = nbExpiriesFor(assetRef, date);
+      if (!assetRef.length || !expiries.length) {
         return {
           ok: false,
           error: `No options found for ${underlying} on ${date}.`,
@@ -425,16 +609,9 @@ export function registerNubraBacktestRoutes({
           chain: [],
         };
       }
-      const expiryNumbers = Array.from(new Set(assetRef.map((item) => Number(item.expiry)))).sort(
-        (a, b) => a - b,
-      );
-      const expiries = expiryNumbers.map((num) => {
-        const value = String(num);
-        return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
-      });
-      const selectedExpiry = expiry && expiries.includes(expiry) ? expiry : expiries[0];
-      const targetExpiryNum = Number(selectedExpiry.replace(/-/g, ''));
-      const expiryOptions = assetRef.filter((item) => Number(item.expiry) === targetExpiryNum);
+      let selectedExpiry = expiry && expiries.includes(expiry) ? expiry : expiries[0];
+      let targetExpiryNum = Number(selectedExpiry.replace(/-/g, ''));
+      let expiryOptions = assetRef.filter((item) => Number(item.expiry) === targetExpiryNum);
       const underlyingSeries = nbResolveUnderlyingSeries(
         underlying,
         exchange,
@@ -459,51 +636,7 @@ export function registerNubraBacktestRoutes({
       const spotType = underlyingSeries.type;
 
       // 1. Fetch spot on trade date (1m interval to get precise spot at selected entryTime)
-      const spotRes = await nbFetchTs(
-        exchange,
-        spotType,
-        [indexName],
-        ['close'],
-        date,
-        '1m',
-        false,
-      );
-      const spotAll = nbCollect(spotRes);
-      const spotChart = spotAll[indexName];
-      let spot = 0;
-      if (spotChart) {
-        const bars = nbParseBars(spotChart);
-        const bar = nbFindBar(bars, time);
-        if (bar) spot = bar.close;
-      }
-      if (!spot) {
-        // Fallback to daily bar if 1m is not found (e.g. out of market hours or database lag)
-        const dailyRes = await nubraPost(
-          '/charts/timeseries',
-          {
-            query: [
-              {
-                exchange,
-                type: spotType,
-                values: [indexName],
-                fields: ['close'],
-                startDate: `${date}T00:00:00.000Z`,
-                endDate: `${date}T23:59:59.000Z`,
-                interval: '1d',
-                intraDay: false,
-                realTime: false,
-              },
-            ],
-          },
-          { Authorization: `Bearer ${getSessionToken()!}` },
-        );
-        const dailyAll = nbCollect(dailyRes);
-        const dailyChart = dailyAll[indexName];
-        if (dailyChart) {
-          const closes = (dailyChart.close || []) as Array<{ ts?: string; v: number }>;
-          if (closes.length) spot = closes[0].v / 100;
-        }
-      }
+      let spot = await nbResolveSpot(exchange, spotType, indexName, date, time);
       if (!spot) {
         return {
           ok: false,
@@ -520,22 +653,43 @@ export function registerNubraBacktestRoutes({
       }
 
       // 3. Generate ATM ± 14 strikes
-      const availableStrikes = Array.from(
-        new Set(expiryOptions.map((x) => (x.strike_price as number) / 100)),
-      ).sort((a, b) => a - b);
-      let closestIdx = 0;
-      let minDiff = Infinity;
-      for (let i = 0; i < availableStrikes.length; i++) {
-        const diff = Math.abs(availableStrikes[i] - spot);
-        if (diff < minDiff) {
-          minDiff = diff;
-          closestIdx = i;
+      let window = nbStrikeWindow(expiryOptions, spot);
+      // A snapshot from an earlier date can only ever be missing strikes that were listed after it
+      // was taken, and the only way that can shrink this chain is the ATM window running off the
+      // end of what it knows. Rather than quietly hand back a narrower chain than the date really
+      // had, pay for the exact master and redo everything that depended on the substitute.
+      if (!exact && window.truncated) {
+        console.log(
+          `[backtest refdata] ${exchange} ${date}: snapshot ran short at ATM ${spot}, fetching exact`,
+        );
+        refdata = await nbGetRefdataForDate(exchange, date);
+        exact = true;
+        assetRef = nbAssetOptions(refdata, underlying);
+        expiries = nbExpiriesFor(assetRef, date);
+        if (expiries.length) {
+          const previousExpiry = selectedExpiry;
+          selectedExpiry = expiry && expiries.includes(expiry) ? expiry : expiries[0];
+          targetExpiryNum = Number(selectedExpiry.replace(/-/g, ''));
+          expiryOptions = assetRef.filter((item) => Number(item.expiry) === targetExpiryNum);
+          // On MCX the underlying is the futures contract backing the chosen expiry, so a different
+          // expiry means the spot above was read off a different series. Indices are unaffected,
+          // which is why this re-reads only when the series name actually changes.
+          if (selectedExpiry !== previousExpiry) {
+            const series = nbResolveUnderlyingSeries(
+              underlying,
+              exchange,
+              refdata,
+              targetExpiryNum,
+            );
+            if (series && series.symbol !== indexName) {
+              spot =
+                (await nbResolveSpot(exchange, series.type, series.symbol, date, time)) || spot;
+            }
+          }
+          window = nbStrikeWindow(expiryOptions, spot);
         }
       }
-      const strikes: number[] = [];
-      const startIdx = Math.max(0, closestIdx - 14);
-      const endIdx = Math.min(availableStrikes.length - 1, closestIdx + 14);
-      for (let i = startIdx; i <= endIdx; i++) strikes.push(availableStrikes[i]);
+      const strikes = window.strikes;
 
       // 4. Map strikes to option symbols (stock_names) in the refdata
       const symbolsMap = new Map<string, { strike: number; type: 'CE' | 'PE' }>();
@@ -631,6 +785,13 @@ export function registerNubraBacktestRoutes({
       console.log(
         `NubraBacktest chain ${underlying} ${date} ${time} exp=${selectedExpiry}: ${chain.length} strikes, spot=${spot} in ${Date.now() - t0}ms`,
       );
+      // The chain itself is exact either way — a substitute snapshot is checked for the expiry it
+      // picked and for the strikes around ATM before it is used at all. What it can be short of is
+      // the far end of the expiry LIST: a weekly listed between the snapshot and this date is one no
+      // earlier master could have known about. Measured on the real cached files, that is a handful
+      // of expiries a month or more out. So say the list is still filling, and go and fetch the
+      // date's own master at warm priority — nobody waits on it, and the next visit is exact.
+      if (!exact) void nbRefdata.prefetchForDate(exchange, date);
       return {
         ok: true,
         underlying,
@@ -640,6 +801,7 @@ export function registerNubraBacktestRoutes({
         expiry: selectedExpiry,
         expiryFlag,
         availableExpiries: expiries.map((e) => ({ expiry: e, flag: expiryFlag })),
+        expiriesPartial: !exact,
         chain,
       };
     } catch (e) {

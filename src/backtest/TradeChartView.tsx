@@ -5,12 +5,12 @@ import {
   CandlestickSeries,
   CrosshairMode,
   type IChartApi,
-  type ISeriesApi,
   type Time,
 } from 'lightweight-charts';
 import type { DayTrade, IntradayPoint, Underlying } from './types';
 import { blackScholes, impliedVolatility, RISK_FREE } from '../lib/GexService';
 import { IST_OFFSET } from '../lib/utils';
+import GreekIndicatorPane from '../components/GreekIndicatorPane';
 
 // TradingView-style multi-pane view for a single backtested day, mirroring the
 // live Positions P&L tracker (StrategyAnalysisView): underlying candles + each
@@ -257,6 +257,17 @@ export default function TradeChartView({
   const pnlRef = useRef<HTMLDivElement>(null);
   const greeksRef = useRef<HTMLDivElement>(null);
 
+  // ── Indicators pane: aggregate Vega / Theta / IV ──
+  // The Net Greeks pane below is this trade's own position greeks; these are the market's
+  // near-the-money basket. Same GreekIndicatorPane the Chart, Tracker, Nubra BT and position
+  // views mount, so the maths cannot drift between them.
+  const [indicatorsVisible, setIndicatorsVisible] = useState(false);
+  const indicatorsChartRef = useRef<IChartApi | null>(null);
+  // Mirrored out of the chart-building effect so the sync effect can reach the price pane
+  // without re-entering (and re-running) the effect that owns its lifecycle.
+  const priceChartRef = useRef<IChartApi | null>(null);
+  const [indicatorsEpoch, setIndicatorsEpoch] = useState(0);
+
   // distinct legs (first episode per legId)
   const legs: LegMeta[] = useMemo(() => {
     const out: LegMeta[] = [];
@@ -389,6 +400,8 @@ export default function TradeChartView({
     const pc = createChart(priceRef.current, chartOpts());
     const nc = createChart(pnlRef.current, chartOpts(false, false, true));
     const gc = createChart(greeksRef.current, chartOpts());
+    priceChartRef.current = pc;
+    setIndicatorsEpoch((e) => e + 1);
 
     // price pane — candles (right) + each leg premium on its own overlay scale
     const candle = pc.addSeries(CandlestickSeries, {
@@ -582,11 +595,57 @@ export default function TradeChartView({
 
     return () => {
       unsubs.forEach((u) => u());
+      priceChartRef.current = null;
       pc.remove();
       nc.remove();
       gc.remove();
     };
   }, [bars, series, legs, frames, trade.date, underlying]);
+
+  /**
+   * Keep the Indicators pane on the same time window as the price pane. Standalone, because the
+   * effect above creates and destroys the three charts it syncs while this one belongs to a
+   * child component. Uses the visible TIME range rather than the logical one, matching the
+   * convention that block already follows.
+   */
+  useEffect(() => {
+    const ic = indicatorsChartRef.current;
+    const pc = priceChartRef.current;
+    if (!ic || !pc) return;
+    let syncing = false;
+    const bind = (from: IChartApi, to: IChartApi) => {
+      const onRange = (range: unknown) => {
+        if (syncing || !range) return;
+        syncing = true;
+        try {
+          to.timeScale().setVisibleRange(range as never);
+        } catch {
+          /* target gone */
+        }
+        syncing = false;
+      };
+      from.timeScale().subscribeVisibleTimeRangeChange(onRange);
+      return () => {
+        try {
+          from.timeScale().unsubscribeVisibleTimeRangeChange(onRange);
+        } catch {
+          /* chart disposed */
+        }
+      };
+    };
+    try {
+      const r = pc.timeScale().getVisibleRange();
+      if (r) ic.timeScale().setVisibleRange(r);
+    } catch {
+      /* not laid out yet */
+    }
+    const a = bind(pc, ic);
+    const b = bind(ic, pc);
+    return () => {
+      a();
+      b();
+    };
+  }, [indicatorsEpoch, indicatorsVisible]);
 
   if (status === 'loading')
     return (
@@ -675,6 +734,40 @@ export default function TradeChartView({
           ref={greeksRef}
           className="h-[150px] w-full border border-[var(--border)] rounded bg-[#0d0f11]"
         />
+      </div>
+
+      {/* Indicators pane — aggregate Vega / Theta / IV for the market's NTM basket */}
+      <div>
+        <div className="flex items-center gap-3 text-[10px] mb-1">
+          <button
+            onClick={() => setIndicatorsVisible((v) => !v)}
+            title="Aggregate Vega / Theta / IV for the near-the-money basket"
+            className={`px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+              indicatorsVisible
+                ? 'bg-[#38bdf8]/15 border-[#38bdf8]/40 text-[#38bdf8]'
+                : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+            }`}
+          >
+            {indicatorsVisible ? '▾' : '▸'} Indicators
+          </button>
+        </div>
+        {indicatorsVisible && (
+          <div className="h-[220px] w-full border border-[var(--border)] rounded overflow-hidden">
+            <GreekIndicatorPane
+              instrument={{ asset: underlying, nubra_name: underlying, exchange: 'NSE' }}
+              bars={bars?.under ?? []}
+              // This view is dark-only — every pane above hardcodes #0d0f11.
+              theme="dark"
+              // One session: the trade has a date, and that is the only day worth rebuilding.
+              histDays={1}
+              initialDay={trade.date}
+              onChartReady={(chart) => {
+                indicatorsChartRef.current = chart;
+                setIndicatorsEpoch((e) => e + 1);
+              }}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

@@ -247,6 +247,22 @@ interface Deps {
   allBarsRef: React.RefObject<OhlcBar[]>;
   /** Render greeks inline on the price pane (Tracker) instead of a sub-pane below (Chart). */
   inline?: boolean;
+  /**
+   * Trailing days of history to reconstruct, ending at the selected day. Defaults to
+   * GREEK_HIST_DAYS (7), which matches the Chart and Tracker candle loads.
+   *
+   * Hosts whose window is a single trade — a Nubra BT run, a position being reviewed — pass 1.
+   * Reconstruction cost is linear in this: every day is another `/api/historical` span across
+   * the whole basket, so asking for a backtest's full multi-month range would be dozens of
+   * batched calls for a line the user reads one session at a time.
+   */
+  histDays?: number;
+  /**
+   * Trading day ('YYYY-MM-DD') to reconstruct first, instead of the last loaded bar's day.
+   * Lets a host open straight on the day its trade happened. Ignored if it is later than the
+   * last loaded bar, which is both the date picker's max and the newest day with data.
+   */
+  initialDay?: string;
 }
 
 // Distinct CE/PE palette per greek so overlapping Vega + Theta lines stay tellable apart.
@@ -279,6 +295,8 @@ export function useGreekOverlay({
   currentInstRef,
   allBarsRef,
   inline,
+  histDays,
+  initialDay,
 }: Deps): GreekOverlayApi {
   const { subscribe, subscribeOC, unsubscribeOC } = useWs();
   const isIv = greek === 'iv';
@@ -329,7 +347,9 @@ export function useGreekOverlay({
   const liveLegsRef = useRef<Map<string, { ce: AggLeg[]; pe: AggLeg[] }>>(new Map());
   const anchorExpiryRef = useRef('');
   const greekDateRef = useRef(''); // selected reconstruction day (mirrors greekDate)
-  const defaultDayRef = useRef(''); // latest trading day loaded (today / last bar)
+  // There is deliberately no "default day" ref here. The live guards below ask `istTodayKey()`
+  // whether the chart is showing today; the last LOADED day is a different question, answered by
+  // defaultGreekDay() and surfaced as `latestDay` for the date picker's max.
   // Generation token for historical loads. A boolean "is loading" flag made rapid day
   // switches drop the newer request entirely; instead every call takes a ticket and stale
   // results are discarded on arrival, so the last day requested always wins.
@@ -650,8 +670,8 @@ export function useGreekOverlay({
       if ((data.asset || '').toUpperCase() !== wsAssetRef.current) return;
       const exp = data.expiry || '';
       if (!wsExpiriesRef.current.has(exp)) return;
-      // Live ticks only belong on the latest day; skip while inspecting a past day.
-      if (greekDateRef.current && greekDateRef.current !== defaultDayRef.current) return;
+      // Live ticks only belong on today's chart; skip while inspecting any past day.
+      if (greekDateRef.current && greekDateRef.current !== istTodayKey()) return;
       if (!isMarketOpenNow(currentInstRef.current?.exchange)) return;
       lastWsTickRef.current = Date.now(); // WS is alive → fallback poll stays idle
       mergeLiveLegs(exp, legsFromChain(data, exp));
@@ -703,7 +723,7 @@ export function useGreekOverlay({
     stopLivePoll();
     pollTimerRef.current = window.setInterval(() => {
       if (!enabledRef.current) return;
-      if (greekDateRef.current !== defaultDayRef.current) return; // inspecting a past day
+      if (greekDateRef.current !== istTodayKey()) return; // inspecting a past day
       if (!isMarketOpenNow(currentInstRef.current?.exchange)) return;
       if (Date.now() - lastWsTickRef.current < WS_QUIET_MS) return; // WS feed is live — leave it
       void pollLiveOnce();
@@ -802,12 +822,15 @@ export function useGreekOverlay({
 
       // Default to the latest trading day; preserve a past day the user already picked.
       const today = defaultGreekDay();
-      defaultDayRef.current = today;
       setLatestDay(today);
-      const day = greekDateRef.current || today;
+      // A host may seed the day it actually cares about (the session a trade ran in) rather than
+      // the last loaded bar. Clamped to `today` so a bad seed can never exceed the picker's max.
+      const seeded = initialDay && initialDay <= today ? initialDay : '';
+      const day = greekDateRef.current || seeded || today;
       greekDateRef.current = day;
       setGreekDateState(day);
-      if (liveLegs.size && day === today) storeCombinedLive(true);
+      // Seed a "now" point only when the chart is actually showing today.
+      if (liveLegs.size && day === istTodayKey()) storeCombinedLive(true);
 
       enabledRef.current = true;
       setOn(true);
@@ -826,6 +849,21 @@ export function useGreekOverlay({
   }
 
   // ── Historical backfill, reconstructed per trading day ─────────────────────
+  /**
+   * Today's IST calendar day — the only day a live tick can legitimately land on.
+   *
+   * Distinct from `defaultGreekDay()`, which is the last LOADED bar's day. The two coincide on
+   * the Chart and Tracker, whose charts end at now, and that is why the live guards used to be
+   * written against the loaded day. They diverge the moment a host charts a past window: a Nubra
+   * BT run or a position review from yesterday has `defaultGreekDay() === greekDate`, so a
+   * loaded-day guard would wave live chain data through and `buildTimeMapper` would clamp that
+   * `Date.now()` snapshot onto the last bar of a historical session — today's greeks printed as
+   * yesterday's close.
+   */
+  function istTodayKey(): string {
+    return new Date(Date.now() + IST_OFFSET * 1000).toISOString().slice(0, 10);
+  }
+
   /** Latest loaded trading day as an IST 'YYYY-MM-DD' (bar.time has IST baked in). */
   function defaultGreekDay(): string {
     const bars = allBarsRef.current;
@@ -850,9 +888,10 @@ export function useGreekOverlay({
     greekDateRef.current = dateStr;
     snapshotsRef.current = new Map();
     lastSnapMsRef.current = 0;
-    // Re-seed the live point only when returning to the latest day during market hours.
+    // Re-seed the live point only when returning to TODAY during market hours — not merely to
+    // the last loaded bar's day, which on a historical host is a past session.
     if (
-      dateStr === defaultDayRef.current &&
+      dateStr === istTodayKey() &&
       liveLegsRef.current.size &&
       isMarketOpenNow(currentInstRef.current?.exchange)
     )
@@ -1043,7 +1082,10 @@ export function useGreekOverlay({
     // End the window at the exchange's own close, or an MCX day would be cut off at
     // 15:30 and lose its evening session.
     const endDate = new Date(expiryInstantMs(dateStr, exchange));
-    const startDate = new Date(endDate.getTime() - GREEK_HIST_DAYS * 86_400_000); // trailing window
+    // Trailing window. At the default 7 this spans the Chart/Tracker candle load; at 1 it is the
+    // previous close → this close, i.e. exactly `dateStr`'s own session.
+    const windowDays = histDays && histDays > 0 ? histDays : GREEK_HIST_DAYS;
+    const startDate = new Date(endDate.getTime() - windowDays * 86_400_000);
     const isMcx = exchange.toUpperCase() === 'MCX';
 
     try {
@@ -1398,7 +1440,6 @@ export function useGreekOverlay({
     snapshotsRef.current = new Map();
     metaRef.current = new Map();
     greekDateRef.current = '';
-    defaultDayRef.current = '';
     lastSnapMsRef.current = 0;
     histGenRef.current++; // invalidate any in-flight history load
     setIvLegend(null);

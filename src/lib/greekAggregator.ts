@@ -88,12 +88,22 @@ export function withinPruneBand(delta: number | undefined): boolean {
 // evicting it is a real membership change rather than a data gap.
 export const CARRY_STALE_MS = 15 * 60_000;
 
-// Consecutive snapshots a leg must disagree with its current membership before the membership
-// actually flips, under `composition: 'chained'`. This is a dwell timer, NOT an MSCI-style
-// retention band: the CE/PE delta thresholds are untouched, a leg simply cannot enter and
-// leave on single snapshots. See the chaining note on buildSeries for why splice COUNT is the
+// How long a leg must disagree with its current membership before the membership actually
+// flips, under `composition: 'chained'`. This is a dwell timer, NOT an MSCI-style retention
+// band: the CE/PE delta thresholds are untouched, a leg simply cannot enter and leave on a
+// momentary excursion. See the chaining note on buildSeries for why splice COUNT is the
 // quantity that has to be bounded.
-export const MEMBERSHIP_DWELL = 2;
+//
+// Denominated in TIME, not in snapshots, because the two feeds that reach buildSeries sample
+// ~30x apart: reconstructed history is 1m (HIST_INTERVAL) while the live tail is ~2s
+// (SNAP_MIN_GAP_MS), both in useGreekOverlay. A snapshot count would mean a 2-minute debounce
+// on history and a 4-second one live — i.e. essentially no protection exactly where the chart
+// is densest, and a splice every time a strike breathed across Δ=0.609. The series has to have
+// the same shape regardless of how often it is sampled.
+//
+// 60s reproduces the old count of 2 exactly on the 1m path: back then a leg flipped on its
+// second consecutive disagreeing snapshot, which at 1m spacing is 60_000 ms elapsed.
+export const MEMBERSHIP_DWELL_MS = 60_000;
 
 /** One leg of an option-chain snapshot, reduced to the fields aggregation needs. */
 export interface AggLeg {
@@ -312,6 +322,7 @@ export function buildSeries(
   // Effective membership, its dwell counters, and the accumulated chain offset.
   let members = new Set<string>();
   let prevMembers: Set<string> | null = null;
+  // key → ts at which this leg first disagreed with its current membership (not a count).
   const dwell = new Map<string, number>();
   let offset: SideTotals = { ce: 0, pe: 0 };
 
@@ -376,12 +387,12 @@ export function buildSeries(
           dwell.delete(k);
           continue;
         }
-        const n = (dwell.get(k) ?? 0) + 1;
-        if (n >= MEMBERSHIP_DWELL) {
+        const since = dwell.get(k) ?? snap.ts;
+        if (snap.ts - since >= MEMBERSHIP_DWELL_MS) {
           if (want) members.add(k);
           else members.delete(k);
           dwell.delete(k);
-        } else dwell.set(k, n);
+        } else dwell.set(k, since);
       }
       // Ageing out is not chatter — CARRY_STALE_MS of silence leaves immediately.
       for (const k of members) if (!carry.has(k)) members.delete(k);
