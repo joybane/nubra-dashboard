@@ -16,7 +16,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await fs.rm(cacheDir, { recursive: true, force: true });
+  // Disk writes are deliberately not awaited by the request path, so on Windows a `.tmp` file can
+  // still be open here and rmdir fails with ENOTEMPTY. Retry rather than fail an unrelated test.
+  await fs.rm(cacheDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
 });
 
 /** Lets a test hold the upstream call open so concurrency is observable. */
@@ -160,6 +162,92 @@ test('bounds how many dates stay resident in memory', async () => {
 
   await store.getRefdataForDate('NSE', '2026-08-10');
   expect(nubraGet).toHaveBeenCalledTimes(4);
+});
+
+test('prefetch lands the file on disk without occupying a memory slot', async () => {
+  const store = createBacktestRefdataStore({
+    nubraGet,
+    sharedDay: () => '2026-08-13',
+    cacheDir,
+    maxResident: 1,
+  });
+
+  await store.prefetchForDate('NSE', '2026-08-12');
+  await expect(fs.readdir(cacheDir)).resolves.toEqual(['NSE_2026-08-12.json.gz']);
+
+  // The warmed date must not have evicted anything, so a later browse still gets its full LRU.
+  await store.getRefdataForDate('NSE', '2026-08-11');
+  expect(nubraGet).toHaveBeenCalledTimes(2);
+  await store.getRefdataForDate('NSE', '2026-08-11');
+  expect(nubraGet).toHaveBeenCalledTimes(2);
+
+  // That browse fires its own unawaited write; let it land before the fixture is torn down.
+  await vi.waitFor(async () => {
+    expect(await fs.readdir(cacheDir)).toContain('NSE_2026-08-11.json.gz');
+  });
+});
+
+test('prefetch removes the cold download from the request path', async () => {
+  const deps = { nubraGet, sharedDay: () => '2026-08-13', cacheDir };
+  const store = createBacktestRefdataStore(deps);
+
+  await store.prefetchForDate('NSE', '2026-08-12');
+  expect(nubraGet).toHaveBeenCalledTimes(1);
+
+  // This is the whole point: the user's request is served from disk, not from a 40s download.
+  nubraGet.mockReset();
+  await expect(
+    createBacktestRefdataStore(deps).getRefdataForDate('NSE', '2026-08-12'),
+  ).resolves.toEqual(INSTRUMENTS);
+  expect(nubraGet).not.toHaveBeenCalled();
+});
+
+test('prefetch is a cheap no-op once the file is already there', async () => {
+  const deps = { nubraGet, sharedDay: () => '2026-08-13', cacheDir };
+  await createBacktestRefdataStore(deps).prefetchForDate('NSE', '2026-08-12');
+
+  nubraGet.mockReset();
+  await createBacktestRefdataStore(deps).prefetchForDate('NSE', '2026-08-12');
+  expect(nubraGet).not.toHaveBeenCalled();
+});
+
+test('prefetch never downloads today, which is the shared day cache’s job', async () => {
+  const store = createBacktestRefdataStore({
+    nubraGet,
+    sharedDay: () => '2026-08-13',
+    cacheDir,
+  });
+
+  await store.prefetchForDate('NSE', '2026-08-13');
+
+  expect(nubraGet).not.toHaveBeenCalled();
+  await expect(fs.readdir(cacheDir)).resolves.toEqual([]);
+});
+
+test('prefetch single-flights against a concurrent request rather than downloading twice', async () => {
+  const held = gate();
+  nubraGet.mockReturnValue(held.promise);
+  const store = createBacktestRefdataStore({ nubraGet, sharedDay: () => '2026-08-13', cacheDir });
+
+  const warm = store.prefetchForDate('NSE', '2026-08-12');
+  const request = store.getRefdataForDate('NSE', '2026-08-12');
+  held.release({ refdata: INSTRUMENTS });
+
+  await expect(request).resolves.toEqual(INSTRUMENTS);
+  await warm;
+  expect(nubraGet).toHaveBeenCalledTimes(1);
+
+  // The joining request still wants its result resident, even though the prefetch did not.
+  await store.getRefdataForDate('NSE', '2026-08-12');
+  expect(nubraGet).toHaveBeenCalledTimes(1);
+});
+
+test('prefetch swallows an upstream failure instead of crashing the warm loop', async () => {
+  nubraGet.mockRejectedValueOnce(new Error('fetch failed'));
+  const store = createBacktestRefdataStore({ nubraGet, sharedDay: () => '2026-08-13', cacheDir });
+
+  await expect(store.prefetchForDate('NSE', '2026-08-12')).resolves.toBeUndefined();
+  await expect(fs.readdir(cacheDir)).resolves.toEqual([]);
 });
 
 test('prunes the least recently used files past the cap', async () => {

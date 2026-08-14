@@ -6,6 +6,7 @@ import type { Instrument } from './types';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
 import { payoffAtExpiry, blackScholes, impliedVolatility, RISK_FREE } from './lib/GexService';
 import { fmtPrice } from './lib/utils';
+import { defaultBacktestDate } from './lib/tradingDay';
 import {
   PriceTooltip,
   PnlTooltip,
@@ -273,20 +274,21 @@ function formatExpiry(exp: string): string {
 
 const DEFAULT_LOT: Record<string, number> = { NIFTY: 65, SENSEX: 20 };
 
+/**
+ * How long the chain reload waits for the ENTRY-time steppers to settle.
+ *
+ * Below the ~400ms where a UI starts to feel laggy, and above a fast double-click interval — the
+ * first click after a pause should still feel close to instant.
+ */
+const CHAIN_RELOAD_DEBOUNCE_MS = 350;
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const { loadInstrumentInActivePane } = useWorkspaceState();
   // Config state
   const [underlying, setUnderlying] = useState<string>('NIFTY');
-  const [date, setDate] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 1);
-    const day = d.getDay();
-    if (day === 0) d.setDate(d.getDate() - 2); // Sun → Fri
-    if (day === 6) d.setDate(d.getDate() - 1); // Sat → Fri
-    return d.toISOString().slice(0, 10);
-  });
+  const [date, setDate] = useState(defaultBacktestDate);
   const [entryTime, setEntryTime] = useState('09:20');
   const [exitTime, setExitTime] = useState('15:15');
   const [expiry, setExpiry] = useState('');
@@ -298,6 +300,23 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const [chainLoading, setChainLoading] = useState(false);
   const [chainError, setChainError] = useState<string | null>(null);
   const chainRequestRef = useRef(0);
+  const reloadTimerRef = useRef<number | null>(null);
+  /** Seconds the visible spinner has been up, so a long wait can explain itself. */
+  const [chainElapsed, setChainElapsed] = useState(0);
+
+  /**
+   * Drop a debounced reload that has not fired yet, so it cannot land on top of a newer request.
+   *
+   * Declared here rather than beside its callers because the instrument-reset effect below lists it
+   * as a dependency, and a dependency array is evaluated during render — a later `const` would be
+   * in the temporal dead zone at that point.
+   */
+  const cancelPendingReload = useCallback(() => {
+    if (reloadTimerRef.current !== null) {
+      window.clearTimeout(reloadTimerRef.current);
+      reloadTimerRef.current = null;
+    }
+  }, []);
 
   const [activeExpiry, setActiveExpiry] = useState('');
   const [activeFlag, setActiveFlag] = useState('');
@@ -470,6 +489,12 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       // Invalidate any NIFTY/SENSEX request that was already in flight when the
       // global search changed this pane to a commodity.
       chainRequestRef.current += 1;
+      // Bumping the ref above means loadChain's `finally` will no longer clear the spinner for
+      // that abandoned request, and this effect does not start a replacement — so without the two
+      // lines below the pane can sit on "Loading historical chain…" forever, with no error and no
+      // network activity. Whoever abandons a request owns clearing its indicator.
+      cancelPendingReload();
+      setChainLoading(false);
       setUnderlying(sym);
       setChain([]);
       setSpot(0);
@@ -480,7 +505,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       setLegs([]);
       setEvalResult(null);
     }
-  }, [selectedInstrumentAsset]);
+  }, [selectedInstrumentAsset, cancelPendingReload]);
 
   // Dynamic Greeks Calculation
   const spotMap = useMemo(() => {
@@ -743,20 +768,60 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     [activeExchange],
   );
 
-  // Load on date / underlying / entry time change
+  // Load on date / underlying / entry time change.
+  //
+  // Debounced, because entryTime is in the dependency list and the ±1-minute steppers fire it on
+  // every click — each one previously costing a full 58-symbol chain download. The cleanup cancels
+  // the pending timer, so a run of clicks issues exactly one request. Note that loadChain still
+  // increments chainRequestRef at the moment the request *starts*, so the stale-response guard is
+  // untouched by this: the debounce sits entirely outside it.
   useEffect(() => {
     // instrument.exchange updates one render before the mirrored underlying state.
     // Do not issue the transient, invalid combination (for example NIFTY + MCX).
-    if (date && (!selectedInstrumentAsset || selectedInstrumentAsset === underlying)) {
-      loadChain(underlying, date, entryTime);
-    }
+    if (!(date && (!selectedInstrumentAsset || selectedInstrumentAsset === underlying))) return;
+    const timer = window.setTimeout(
+      () => loadChain(underlying, date, entryTime),
+      CHAIN_RELOAD_DEBOUNCE_MS,
+    );
+    reloadTimerRef.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (reloadTimerRef.current === timer) reloadTimerRef.current = null;
+    };
   }, [underlying, date, entryTime, loadChain, selectedInstrumentAsset]);
 
-  // Load on expiry change
+  // Load on expiry change. Deliberately NOT debounced — this is one deliberate click and should
+  // feel immediate. Cancels any pending stepper reload first: that one carries no expiry and would
+  // otherwise fire moments later and quietly revert the chain to the default expiry.
   function switchExpiry(exp: string) {
+    cancelPendingReload();
     setExpiry(exp);
     loadChain(underlying, date, entryTime, exp);
   }
+
+  /**
+   * Re-issue the current chain request after a failure.
+   *
+   * `expiry || undefined` matters: passing an empty string as an explicit expiry would suppress the
+   * `if (!exp) setExpiry(...)` branch in loadChain and leave the dropdown unsynced with what the
+   * server actually chose.
+   */
+  const retryChain = useCallback(() => {
+    cancelPendingReload();
+    loadChain(underlying, date, entryTime, expiry || undefined);
+  }, [cancelPendingReload, loadChain, underlying, date, entryTime, expiry]);
+
+  // Count the spinner up, so a slow load reads as "working" rather than "broken".
+  useEffect(() => {
+    setChainElapsed(0);
+    if (!chainLoading) return;
+    const startedAt = Date.now();
+    const id = window.setInterval(
+      () => setChainElapsed(Math.floor((Date.now() - startedAt) / 1000)),
+      500,
+    );
+    return () => window.clearInterval(id);
+  }, [chainLoading]);
 
   // ── Leg CRUD ──────────────────────────────────────────────────────────────
 
@@ -2860,7 +2925,12 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                     fontSize: 12,
                   }}
                 >
-                  Loading historical chain…
+                  Loading historical chain{chainElapsed >= 2 ? ` — ${chainElapsed}s` : '…'}
+                  {chainElapsed >= 5 && (
+                    <div style={{ marginTop: 8, fontSize: 11, opacity: 0.7 }}>
+                      Downloading the instrument master for {date}. This happens once per date.
+                    </div>
+                  )}
                 </div>
               )}
               {chainError && (
@@ -2868,6 +2938,22 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                   style={{ padding: 16, textAlign: 'center', color: 'var(--red)', fontSize: 12 }}
                 >
                   {chainError}
+                  <div style={{ marginTop: 10 }}>
+                    <button
+                      onClick={retryChain}
+                      style={{
+                        padding: '4px 14px',
+                        fontSize: 11,
+                        cursor: 'pointer',
+                        color: 'var(--text-primary)',
+                        background: 'var(--bg-secondary)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 4,
+                      }}
+                    >
+                      Retry
+                    </button>
+                  </div>
                 </div>
               )}
               {!chainLoading && !chainError && chain.length > 0 && (

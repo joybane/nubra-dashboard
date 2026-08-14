@@ -21,6 +21,7 @@ import { buildBasketSnapshot, istDateString, type SnapPosition } from './snapsho
 import { registerBacktestRoutes } from './backtest/routes.ts';
 import { registerNubraBacktestRoutes } from './nubraBacktestRoutes.ts';
 import { createBacktestRefdataStore } from './backtestRefdataStore.ts';
+import { createBacktestBarStore } from './backtestBarStore.ts';
 import { registerMarketDataRoutes } from './marketDataRoutes.ts';
 import { registerAuthRoutes } from './authRoutes.ts';
 import { registerPaperRoutes } from './paperRoutes.ts';
@@ -38,7 +39,13 @@ import {
 } from './ocFeedGuard.ts';
 import { loadPositionRules, evaluateAndFire } from './positionRules.ts';
 import { createRefdataCache } from './refdataCache.ts';
-import { describeUpstreamError, isTransportError, upstreamTimeoutMs } from './upstreamError.ts';
+import { previousTradingDay } from './tradingDay.ts';
+import {
+  describeUpstreamError,
+  isTransportError,
+  upstreamPostRetries,
+  upstreamTimeoutMs,
+} from './upstreamError.ts';
 import { chartSubscriptionKey, type ChartSubscription } from '../src/lib/chartSubRegistry.ts';
 import protobuf from 'protobufjs';
 
@@ -299,29 +306,34 @@ async function nubraPostAt(
   extraHeaders: Record<string, string> = {},
 ): Promise<Record<string, unknown>> {
   const timeoutMs = upstreamTimeoutMs(endpoint);
-  const startedAt = Date.now();
-  try {
-    const res = await fetch(`${baseUrl}${endpoint}`, {
-      method: 'POST',
-      headers: baseHeaders(extraHeaders),
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    // The same signal bounds the body read, which was previously unbounded on its own.
-    const text = await res.text();
-    const data = parseUpstream(res, text);
-    logUpstream('POST', endpoint, Date.now() - startedAt, `ok ${text.length}B`);
-    return data;
-  } catch (err: unknown) {
-    const wrapped = asTimeoutError(err, 'POST', endpoint, timeoutMs);
-    logUpstream(
-      'POST',
-      endpoint,
-      Date.now() - startedAt,
-      `FAIL ${describeUpstreamError(wrapped).detail}`,
-    );
-    // Deliberately never retried: a re-sent /sendphoneotp means a second SMS to the user.
-    throw wrapped;
+
+  // Retried only for the endpoints upstreamPostRetries opts in, and only for transport-level
+  // failures — the same stale-keep-alive-socket recovery nubraGet performs below. The default is
+  // zero, because a re-sent /sendphoneotp means a second SMS to the user; that reasoning now lives
+  // in upstreamPostRetries' docblock, which is where the opt-in list is.
+  const maxRetries = upstreamPostRetries(endpoint);
+
+  for (let attempt = 0; ; attempt++) {
+    const startedAt = Date.now();
+    try {
+      const res = await fetch(`${baseUrl}${endpoint}`, {
+        method: 'POST',
+        headers: baseHeaders(extraHeaders),
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      // The same signal bounds the body read, which was previously unbounded on its own.
+      const text = await res.text();
+      const data = parseUpstream(res, text);
+      logUpstream('POST', endpoint, Date.now() - startedAt, `ok ${text.length}B`);
+      return data;
+    } catch (err: unknown) {
+      const wrapped = asTimeoutError(err, 'POST', endpoint, timeoutMs);
+      const failure = describeUpstreamError(wrapped);
+      logUpstream('POST', endpoint, Date.now() - startedAt, `FAIL ${failure.detail}`);
+      if (attempt >= maxRetries || !isTransportError(wrapped)) throw wrapped;
+      console.warn(`[upstream] retrying POST ${endpoint} after ${failure.detail}`);
+    }
   }
 }
 
@@ -1309,6 +1321,23 @@ registerPaperRoutes({
   marginBaseUrl: MARGIN_BASE_URL,
 });
 
+/** Per-date instrument master for the historical backtest routes. Hoisted out of the route
+ *  registration below so the daily warm can reach it. */
+const backtestRefdata = createBacktestRefdataStore({
+  nubraGet: (e, p) => nubraGet(e, p),
+  getSharedRefdata: getRefdata,
+  sharedDay: cacheDay,
+  cacheDir: path.join(__dirname, '..', '.refdata-cache'),
+});
+
+/** Past dates' intraday bars, which can never change. See backtestBarStore.ts. */
+const backtestBars = createBacktestBarStore({
+  sharedDay: cacheDay,
+  cacheDir: path.join(__dirname, '..', '.bars-cache'),
+});
+
+const BACKTEST_WARM_EXCHANGES = ['NSE', 'BSE', 'MCX'];
+
 /**
  * Pre-download the instrument master for the exchanges the UI actually uses.
  *
@@ -1324,6 +1353,46 @@ function warmRefdata(): void {
   }
 }
 
+/**
+ * Pre-download the instrument master for the date the Nubra BT pane opens on.
+ *
+ * That pane defaults to the *previous* trading day, which is exactly the date the store refuses to
+ * persist while it is still today — so before this existed, the first open of every day paid a cold
+ * 40-45s /refdata/refdata/<date> while the user watched a spinner. Warming it to disk turns that
+ * into a ~1-2s read.
+ *
+ * Deliberately serial: three concurrent 34 MB downloads and parses are a large heap spike on a
+ * process that is also serving the live feed, and nothing here is latency-sensitive.
+ */
+let warmedBacktestDay = '';
+function warmBacktestRefdata(): void {
+  const target = previousTradingDay(cacheDay());
+  if (!target || target === warmedBacktestDay) return;
+  warmedBacktestDay = target;
+  void (async () => {
+    const startedAt = Date.now();
+    for (const exchange of BACKTEST_WARM_EXCHANGES) {
+      await backtestRefdata.prefetchForDate(exchange, target).catch((e: unknown) => {
+        console.warn(
+          `[backtest refdata] warm failed for ${exchange} ${target}:`,
+          describeUpstreamError(e).detail,
+        );
+      });
+    }
+    // Logged unconditionally: this is how you tell, from the log alone, whether the pane's first
+    // open of the day will be instant or will pay the cold download.
+    console.log(
+      `[backtest refdata] warm for ${target} ready in ${Date.now() - startedAt}ms ` +
+        `(${BACKTEST_WARM_EXCHANGES.join(', ')})`,
+    );
+  })();
+}
+
+// The rollover is UTC (05:30 IST), so a boot-only warm would miss it on any server that stays up
+// overnight — which is the case that produced the original complaint. The warmedBacktestDay guard
+// makes all but one tick per day a string comparison. unref() keeps it from holding the process up.
+setInterval(warmBacktestRefdata, 10 * 60_000).unref();
+
 // ─── Startup session restore ──────────────────────────────────────────────────
 async function tryRestoreSession(): Promise<void> {
   if (authState.sessionToken) {
@@ -1335,6 +1404,7 @@ async function tryRestoreSession(): Promise<void> {
       authState.status = 'authenticated';
       console.log('[auth] Saved session token is valid. Zero-prompt bypass successful!');
       warmRefdata();
+      warmBacktestRefdata();
       connectNubraWs();
       try {
         broadcast({ type: 'auth_status', status: 'authenticated' });
@@ -1368,6 +1438,7 @@ async function tryRestoreSession(): Promise<void> {
       console.log('Session restored — OTP not needed.');
       saveSession();
       warmRefdata();
+      warmBacktestRefdata();
       connectNubraWs();
       try {
         broadcast({ type: 'auth_status', status: 'authenticated' });
@@ -1396,12 +1467,8 @@ registerNubraBacktestRoutes({
   nubraPost,
   requireAuth,
   getSessionToken: () => authState.sessionToken,
-  refdataStore: createBacktestRefdataStore({
-    nubraGet: (e, p) => nubraGet(e, p),
-    getSharedRefdata: getRefdata,
-    sharedDay: cacheDay,
-    cacheDir: path.join(__dirname, '..', '.refdata-cache'),
-  }),
+  refdataStore: backtestRefdata,
+  barStore: backtestBars,
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────

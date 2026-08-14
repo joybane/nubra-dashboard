@@ -30,6 +30,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { gzip, gunzip } from 'zlib';
 import { promisify } from 'util';
+import { isPastDate } from './tradingDay.ts';
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -57,6 +58,17 @@ export interface BacktestRefdataStoreDeps {
 
 export interface BacktestRefdataStore {
   getRefdataForDate(exchange: string, date: string): Promise<Record<string, unknown>[]>;
+  /**
+   * Download a past date to disk ahead of anyone asking for it, without holding it in memory.
+   *
+   * The Nubra BT pane defaults to the previous trading day, which by definition was never
+   * persisted while it was still today — so the first open of each day used to pay the full cold
+   * 40-45s download inside the request. Warming to disk turns that into a ~1-2s gunzip on first
+   * use while keeping the resident LRU free for the dates a user is actually browsing.
+   *
+   * Resolves when the copy is on disk (or immediately if it already was). Never rejects.
+   */
+  prefetchForDate(exchange: string, date: string): Promise<void>;
 }
 
 /**
@@ -78,6 +90,8 @@ export function createBacktestRefdataStore({
   /** Insertion-ordered, so the first key is the least recently used. */
   const resident = new Map<string, Record<string, unknown>[]>();
   const inFlight = new Map<string, Promise<Record<string, unknown>[]>>();
+  /** Disk writes still in progress, so a prefetch can resolve only once the file exists. */
+  const pendingWrites = new Map<string, Promise<void>>();
 
   function remember(key: string, arr: Record<string, unknown>[]): void {
     resident.delete(key);
@@ -150,16 +164,29 @@ export function createBacktestRefdataStore({
     }
   }
 
-  /** Past dates only. Instruments can be listed intraday, so today's snapshot is not durable. */
-  function isImmutable(date: string): boolean {
-    const today = sharedDay?.() ?? new Date(now()).toISOString().slice(0, 10);
-    return date < today; // YYYY-MM-DD compares correctly as a string
+  /** Fire a disk write and keep a handle on it, so prefetchForDate can wait for the file. */
+  function scheduleWrite(key: string, arr: Record<string, unknown>[]): void {
+    const pending = writeDisk(key, arr).finally(() => {
+      if (pendingWrites.get(key) === pending) pendingWrites.delete(key);
+    });
+    pendingWrites.set(key, pending);
   }
 
+  /** Past dates only. Instruments can be listed intraday, so today's snapshot is not durable. */
+  function isImmutable(date: string): boolean {
+    return isPastDate(date, sharedDay?.() ?? new Date(now()).toISOString().slice(0, 10));
+  }
+
+  /**
+   * Fetch a date, from disk if it is there and upstream otherwise.
+   *
+   * Deliberately does NOT populate the resident LRU — that is the caller's decision, because
+   * prefetchForDate wants the disk copy without the memory cost. Callers that do want it resident
+   * call `remember` on the result.
+   */
   async function load(exchange: string, date: string, key: string) {
     const cached = await readDisk(key);
     if (cached) {
-      remember(key, cached);
       return cached;
     }
     try {
@@ -172,9 +199,9 @@ export function createBacktestRefdataStore({
       console.log(
         `[backtest refdata] ${exchange} ${date}: ${arr.length} instruments in ${now() - startedAt}ms`,
       );
-      remember(key, arr);
       // Not awaited — the caller has what it needs, and the response should not wait on gzip.
-      if (isImmutable(date)) void writeDisk(key, arr);
+      // Tracked, though, so prefetchForDate can await the file actually landing.
+      if (isImmutable(date)) scheduleWrite(key, arr);
       return arr;
     } catch (e) {
       console.error(`Failed to fetch refdata for date ${date}:`, e);
@@ -199,6 +226,20 @@ export function createBacktestRefdataStore({
       remember(key, hit);
       return Promise.resolve(hit);
     }
+    // A request that joins a prefetch's in-flight download still wants the result resident, so
+    // `remember` lives here rather than in `load`.
+    return singleFlight(exchange, date, key).then((arr) => {
+      if (arr.length) remember(key, arr);
+      return arr;
+    });
+  }
+
+  /** One download per key, however many callers ask for it concurrently. */
+  function singleFlight(
+    exchange: string,
+    date: string,
+    key: string,
+  ): Promise<Record<string, unknown>[]> {
     const pending = inFlight.get(key);
     if (pending) return pending;
 
@@ -210,5 +251,27 @@ export function createBacktestRefdataStore({
     return started;
   }
 
-  return { getRefdataForDate };
+  async function prefetchForDate(exchange: string, date: string): Promise<void> {
+    // Today is the shared day cache's job, and it is never durable anyway.
+    if (sharedDay?.() === date) return;
+    const key = `${exchange}_${date}`;
+    if (resident.has(key)) return;
+
+    const file = fileFor(key);
+    // An existing file is the whole point of the prefetch, so stop at the cheap stat rather than
+    // gunzipping and parsing 34 MB only to throw the result away.
+    if (
+      file &&
+      (await fs
+        .access(file)
+        .then(() => true)
+        .catch(() => false))
+    )
+      return;
+
+    await singleFlight(exchange, date, key);
+    await pendingWrites.get(key);
+  }
+
+  return { getRefdataForDate, prefetchForDate };
 }

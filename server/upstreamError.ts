@@ -130,3 +130,27 @@ export function upstreamTimeoutMs(endpoint: string): number {
   if (endpoint.startsWith('/optionchains/')) return endpoint.endsWith('/price') ? 8_000 : 12_000;
   return 20_000;
 }
+
+/**
+ * How many times a POST may be re-sent after a *transport* failure.
+ *
+ * Zero by default, and that default is load-bearing: a re-sent `/sendphoneotp` means a second SMS
+ * to the user. Only endpoints that are POSTs purely because the query does not fit in a URL — i.e.
+ * pure reads with no side effect — are opted in here.
+ *
+ * `/charts/timeseries` is opted in because the backtest chain fans out to six concurrent POSTs and
+ * a single stale keep-alive socket among them rejects the whole batch, surfacing in the UI as the
+ * bare words "fetch failed". That is the same failure nubraGet's retry already exists to recover
+ * from; see the comment there.
+ *
+ * NOT opted in: `/sentinel/orders/funds_required`, which is also a pure read but already degrades
+ * gracefully to the local margin fallback — a retry would just double the order ticket's worst case.
+ *
+ * Only transport failures are ever retried (see isTransportError): our own timeouts are excluded so
+ * a retry can never double the wall-clock budget, and HTTP statuses are excluded so a 401 cannot
+ * re-fire onBrokerAuthFailure.
+ */
+export function upstreamPostRetries(endpoint: string): number {
+  if (endpoint.startsWith('/charts/timeseries')) return 1;
+  return 0;
+}

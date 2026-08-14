@@ -253,6 +253,189 @@ test('reports zero for a field whose first entry is later than the bar', async (
   );
 });
 
+// The upstream caps a timeseries request at 10 symbols, so nbFetchTs chunks and merges. Every
+// other test here uses one or two symbols and never crosses that boundary, which left both the
+// chunking and the merge unexercised — and both are on the path of every real chain load.
+test('chunks past the 10-symbol upstream cap and merges every batch back together', async () => {
+  const timestamp = nsAtIst(9, 20);
+  const strikes = Array.from({ length: 12 }, (_, i) => 24000 + i * 100);
+
+  nubraGet.mockResolvedValue({
+    refdata: strikes.flatMap((strike) =>
+      (['CE', 'PE'] as const).map((optionType) => ({
+        asset: 'NIFTY',
+        derivative_type: 'OPT',
+        expiry: 20260806,
+        strike_price: strike * 100,
+        option_type: optionType,
+        stock_name: `NIFTY_${optionType}_${strike}`,
+      })),
+    ),
+  });
+
+  const batchSizes: number[] = [];
+  nubraPost.mockImplementation(async (_endpoint, body) => {
+    const query = (body as any).query as Array<{ type: string; values: string[] }>;
+    batchSizes.push(query.length);
+    const values: Record<string, unknown> = {};
+    for (const item of query) {
+      for (const symbol of item.values) {
+        values[symbol] =
+          item.type === 'INDEX'
+            ? { close: [{ ts: timestamp, v: 2450000 }] }
+            : { close: [{ ts: timestamp, v: 12345 }] };
+      }
+    }
+    return { result: [{ values: [values] }] };
+  });
+
+  const response = await app.inject({
+    method: 'GET',
+    url: `/api/nubra-backtest/chain?underlying=NIFTY&date=${RAGGED_DATE}&time=09:20`,
+  });
+
+  expect(response.statusCode).toBe(200);
+  // 24 option symbols → three batches of 10/10/4, plus the single-symbol spot request.
+  expect(batchSizes.filter((n) => n > 1)).toEqual([10, 10, 4]);
+  // Nothing may be dropped by the merge: every strike carries a price from its own batch.
+  const chain = response.json().chain as Array<{ strike: number; ceLtp: number; peLtp: number }>;
+  expect(chain).toHaveLength(strikes.length);
+  for (const strike of strikes) {
+    expect(chain).toContainEqual(expect.objectContaining({ strike, ceLtp: 123.45, peLtp: 123.45 }));
+  }
+});
+
+test('bounds how many timeseries requests are in flight at once', async () => {
+  const timestamp = nsAtIst(9, 20);
+  // 20 strikes → 40 option symbols → 4 batches, enough to exceed the pool if it were unbounded.
+  const strikes = Array.from({ length: 20 }, (_, i) => 24000 + i * 100);
+  nubraGet.mockResolvedValue({
+    refdata: strikes.flatMap((strike) =>
+      (['CE', 'PE'] as const).map((optionType) => ({
+        asset: 'NIFTY',
+        derivative_type: 'OPT',
+        expiry: 20260806,
+        strike_price: strike * 100,
+        option_type: optionType,
+        stock_name: `NIFTY_${optionType}_${strike}`,
+      })),
+    ),
+  });
+
+  let inFlight = 0;
+  let peak = 0;
+  nubraPost.mockImplementation(async (_endpoint, body) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight--;
+    const query = (body as any).query as Array<{ type: string; values: string[] }>;
+    const values: Record<string, unknown> = {};
+    for (const item of query) {
+      for (const symbol of item.values) {
+        values[symbol] =
+          item.type === 'INDEX'
+            ? { close: [{ ts: timestamp, v: 2450000 }] }
+            : { close: [{ ts: timestamp, v: 12345 }] };
+      }
+    }
+    return { result: [{ values: [values] }] };
+  });
+
+  const response = await app.inject({
+    method: 'GET',
+    url: `/api/nubra-backtest/chain?underlying=NIFTY&date=${RAGGED_DATE}&time=09:20`,
+  });
+
+  expect(response.statusCode).toBe(200);
+  // Six simultaneous downloads for one click is the socket pressure behind the intermittent
+  // "fetch failed"; the pool is what holds it down.
+  expect(peak).toBeLessThanOrEqual(4);
+  expect(peak).toBeGreaterThan(1); // still parallel — a serial fan-out would be far slower
+});
+
+// Past dates' bars are immutable, so the pane should pay for them exactly once. These two tests
+// are what stop that guarantee from silently regressing — in particular the second one pins the
+// canonical-field widening, without which the chain and evaluate would never share a cache entry.
+test('serves a repeated chain request entirely from cache', async () => {
+  raggedChainMocks();
+  const url = `/api/nubra-backtest/chain?underlying=NIFTY&date=${RAGGED_DATE}&time=09:22`;
+
+  const first = await app.inject({ method: 'GET', url });
+  expect(first.statusCode).toBe(200);
+  expect(nubraPost).toHaveBeenCalled();
+
+  nubraPost.mockClear();
+  const second = await app.inject({ method: 'GET', url });
+
+  expect(second.statusCode).toBe(200);
+  expect(second.json().chain).toEqual(first.json().chain);
+  expect(nubraPost).not.toHaveBeenCalled();
+});
+
+test('serves evaluate from the bars the chain already downloaded', async () => {
+  raggedChainMocks();
+
+  await app.inject({
+    method: 'GET',
+    url: `/api/nubra-backtest/chain?underlying=NIFTY&date=${RAGGED_DATE}&time=09:20`,
+  });
+  expect(nubraPost).toHaveBeenCalled();
+
+  nubraPost.mockClear();
+  const response = await app.inject({
+    method: 'POST',
+    url: '/api/nubra-backtest/evaluate',
+    payload: {
+      underlying: 'NIFTY',
+      date: RAGGED_DATE,
+      expiry: '2026-08-06',
+      entryTime: '09:20',
+      exitTime: '09:22',
+      lotSize: 65,
+      legs: [{ strike: 24000, optionType: 'CALL', side: 'BUY', lots: 1 }],
+    },
+  });
+
+  expect(response.statusCode).toBe(200);
+  expect(response.json().ok).toBe(true);
+  // The legs are a subset of the strikes the chain fetched, and the spot series is the same one.
+  expect(nubraPost).not.toHaveBeenCalled();
+});
+
+test('does not cache today, whose bars are still being written', async () => {
+  const today = new Date().toISOString().slice(0, 10);
+  nubraGet.mockResolvedValue({
+    refdata: [
+      {
+        asset: 'NIFTY',
+        derivative_type: 'OPT',
+        expiry: 20260806,
+        strike_price: 2400000,
+        option_type: 'CE',
+        stock_name: 'NIFTY_CE_24000',
+      },
+    ],
+  });
+  nubraPost.mockImplementation(async (_endpoint, body) => {
+    const query = (body as any).query as Array<{ type: string; values: string[] }>;
+    const values: Record<string, unknown> = {};
+    for (const item of query) {
+      for (const symbol of item.values) {
+        values[symbol] = { close: [{ ts: '1785450000000000000', v: 10000 }] };
+      }
+    }
+    return { result: [{ values: [values] }] };
+  });
+
+  const url = `/api/nubra-backtest/chain?underlying=NIFTY&date=${today}&time=09:20`;
+  await app.inject({ method: 'GET', url });
+  nubraPost.mockClear();
+  await app.inject({ method: 'GET', url });
+
+  expect(nubraPost).toHaveBeenCalled();
+});
+
 test('returns true MCX futures OHLC candles for backtest evaluation', async () => {
   const timestamp = '1785450000000000000';
   nubraGet.mockResolvedValue({

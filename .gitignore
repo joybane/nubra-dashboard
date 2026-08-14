@@ -27,6 +27,9 @@ _archive/
 # Per-date instrument masters, re-downloadable from the broker (see backtestRefdataStore.ts)
 .refdata-cache/
 
+# Per-date historical bars, re-downloadable from the broker (see backtestBarStore.ts)
+.bars-cache/
+
 # Runtime logs & editor scratch files
 *.log
 *.bak

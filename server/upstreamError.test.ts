@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'vitest';
-import { describeUpstreamError, isTransportError, upstreamTimeoutMs } from './upstreamError.ts';
+import {
+  describeUpstreamError,
+  isTransportError,
+  upstreamPostRetries,
+  upstreamTimeoutMs,
+} from './upstreamError.ts';
 
 describe('describeUpstreamError', () => {
   test('unwraps the cause chain that Node hides behind "fetch failed"', () => {
@@ -105,5 +110,27 @@ describe('upstreamTimeoutMs', () => {
     const fallback = upstreamTimeoutMs('/some/new/endpoint');
     expect(fallback).toBeGreaterThan(0);
     expect(fallback).toBeLessThanOrEqual(20_000);
+  });
+});
+
+describe('upstreamPostRetries', () => {
+  test('never retries an OTP or PIN POST — a retry is a second SMS to the user', () => {
+    expect(upstreamPostRetries('/sendphoneotp')).toBe(0);
+    expect(upstreamPostRetries('/verifyphoneotp')).toBe(0);
+    expect(upstreamPostRetries('/verifypin')).toBe(0);
+  });
+
+  test('fails closed for anything unrecognised', () => {
+    // A new endpoint must not silently inherit retries; opting in is a deliberate act.
+    expect(upstreamPostRetries('/some/new/endpoint')).toBe(0);
+    expect(upstreamPostRetries('/sentinel/orders/funds_required')).toBe(0);
+  });
+
+  test('retries the backtest chart fan-out, whose batch dies on one stale socket', () => {
+    expect(upstreamPostRetries('/charts/timeseries')).toBeGreaterThanOrEqual(1);
+  });
+
+  test('bounds the retry count so a failure cannot become a hang', () => {
+    expect(upstreamPostRetries('/charts/timeseries')).toBeLessThanOrEqual(2);
   });
 });

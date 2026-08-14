@@ -1,5 +1,10 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { createBacktestRefdataStore, type BacktestRefdataStore } from './backtestRefdataStore.ts';
+import {
+  createBacktestBarStore,
+  type BacktestBarStore,
+  type BarPayload,
+} from './backtestBarStore.ts';
 
 type NubraGet = (
   endpoint: string,
@@ -24,6 +29,12 @@ interface NubraBacktestRouteDeps {
    * shared day cache and to disk — see backtestRefdataStore.ts.
    */
   refdataStore?: BacktestRefdataStore;
+  /**
+   * Cache for past dates' intraday bars. Optional, and the default has no `cacheDir` — so the route
+   * tests exercise the same code path without ever touching the filesystem. The server passes a
+   * disk-backed store; see backtestBarStore.ts.
+   */
+  barStore?: BacktestBarStore;
 }
 
 export function registerNubraBacktestRoutes({
@@ -33,10 +44,12 @@ export function registerNubraBacktestRoutes({
   requireAuth,
   getSessionToken,
   refdataStore,
+  barStore,
 }: NubraBacktestRouteDeps): void {
   // ─── Nubra Backtest — Utilities ───────────────────────────────────────────────
 
   const nbRefdata = refdataStore ?? createBacktestRefdataStore({ nubraGet });
+  const nbBars = barStore ?? createBacktestBarStore();
 
   function nbGetRefdataForDate(exchange: string, date: string): Promise<Record<string, unknown>[]> {
     return nbRefdata.getRefdataForDate(exchange, date);
@@ -162,6 +175,59 @@ export function registerNubraBacktestRoutes({
     return best;
   }
 
+  /**
+   * How many timeseries POSTs may be in flight at once for a single fan-out.
+   *
+   * A 29-strike chain is 58 symbols, which at 10 per request was six simultaneous downloads for
+   * one user click. That burst is what makes a stale keep-alive socket likely, and a single
+   * rejection takes the whole batch with it. Four keeps a cold load about two round-trips deep
+   * while roughly halving the concurrent socket count.
+   */
+  const TS_CONCURRENCY = 4;
+
+  /** Bounded `Promise.all(items.map(fn))`. Results stay in input order. */
+  async function mapPool<T, R>(
+    items: T[],
+    limit: number,
+    fn: (item: T) => Promise<R>,
+  ): Promise<R[]> {
+    const out = new Array<R>(items.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      for (let i = next++; i < items.length; i = next++) {
+        out[i] = await fn(items[i]);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+    return out;
+  }
+
+  /**
+   * The field set each `type` is always fetched with, regardless of what a caller asked for.
+   *
+   * Widening to a per-type superset is what lets one cache entry serve every call site: the chain
+   * asks options for five fields and evaluate asks for `close`, so without this the two would never
+   * share a hit and "open the chain, then Simulate" would download everything twice. Both widened
+   * queries are already issued verbatim elsewhere in this file, so neither is new to the broker.
+   */
+  const CANONICAL_OPT_FIELDS = ['close', 'iv_mid', 'cumulative_volume', 'open_interest', 'oi'];
+  const CANONICAL_SERIES_FIELDS = ['open', 'high', 'low', 'close'];
+
+  function nbCanonicalFields(type: string): string[] {
+    return type === 'OPT' ? CANONICAL_OPT_FIELDS : CANONICAL_SERIES_FIELDS;
+  }
+
+  /** Pull the per-symbol payloads out of one upstream response. */
+  function nbCollectInto(res: Record<string, unknown>, into: Map<string, BarPayload>): void {
+    for (const group of (res as any).result || []) {
+      for (const symbolMap of group.values || []) {
+        for (const [sym, data] of Object.entries(symbolMap as Record<string, unknown>)) {
+          into.set(sym, data as BarPayload);
+        }
+      }
+    }
+  }
+
   async function nbFetchTs(
     exchange: string,
     type: string,
@@ -171,45 +237,70 @@ export function registerNubraBacktestRoutes({
     interval: string,
     intraDay: boolean,
   ): Promise<Record<string, unknown>> {
+    const canonical = nbCanonicalFields(type);
+    // A caller asking for something outside the canonical set would be served a cache entry that
+    // never contained it, so such a call bypasses the cache entirely rather than answering wrongly.
+    const cacheable = nbBars.isCacheable(date) && fields.every((f) => canonical.includes(f));
+    const collected = new Map<string, BarPayload>();
+
+    let toFetch = symbols;
+    if (cacheable) {
+      const hits = await nbBars.get(exchange, date, interval, symbols);
+      for (const [sym, payload] of hits) collected.set(sym, payload);
+      toFetch = symbols.filter((sym) => !hits.has(sym));
+    }
+
     // Nubra API limits 10 values/queries per request — chunk and merge
     const BATCH = 10;
     const chunks: string[][] = [];
-    for (let i = 0; i < symbols.length; i += BATCH) chunks.push(symbols.slice(i, i + BATCH));
+    for (let i = 0; i < toFetch.length; i += BATCH) chunks.push(toFetch.slice(i, i + BATCH));
 
-    const results = await Promise.all(
-      chunks.map((batch) =>
-        nubraPost(
-          '/charts/timeseries',
-          {
-            query: batch.map((sym) => ({
-              exchange,
-              type,
-              values: [sym],
-              fields,
-              startDate: `${date}T00:00:00.000Z`,
-              endDate: `${date}T23:59:59.000Z`,
-              interval,
-              intraDay,
-              realTime: false,
-            })),
-          },
-          { Authorization: `Bearer ${getSessionToken()!}` },
-        ),
-      ),
-    );
+    const results = await mapPool(chunks, TS_CONCURRENCY, async (batch) => {
+      const res = await nubraPost(
+        '/charts/timeseries',
+        {
+          query: batch.map((sym) => ({
+            exchange,
+            type,
+            values: [sym],
+            fields: cacheable ? canonical : fields,
+            startDate: `${date}T00:00:00.000Z`,
+            endDate: `${date}T23:59:59.000Z`,
+            interval,
+            intraDay,
+            realTime: false,
+          })),
+        },
+        { Authorization: `Bearer ${getSessionToken()!}` },
+      );
 
-    // Merge all batch results into a single response shape
+      // Cache per batch, on the batch's own success — not on the whole fan-out's. A sibling POST
+      // failing must not throw away the batches that did land, which is what makes the retry after
+      // an intermittent "fetch failed" nearly free.
+      if (cacheable && Array.isArray((res as any).result)) {
+        const fetched = new Map<string, BarPayload>();
+        nbCollectInto(res, fetched);
+        const toCache = new Map<string, BarPayload>();
+        // Every symbol in the batch, including ones the response omitted. An illiquid strike that
+        // never traded has no bars, and that absence is a real, cacheable answer — unlike the
+        // refdata store, where an empty result means "we failed to recognise the shape".
+        for (const sym of batch) toCache.set(sym, fetched.get(sym) ?? {});
+        // Not awaited — the response should not wait on the disk write. The store fills its memory
+        // tier synchronously, so the very next request still hits. The catch is belt-and-braces:
+        // put() swallows its own errors, and an unhandled rejection here would take down the process.
+        void nbBars
+          .put(exchange, date, interval, toCache)
+          .catch((err: unknown) => console.warn('[backtest bars] put failed:', err));
+      }
+      return res;
+    });
+
+    for (const res of results) nbCollectInto(res, collected);
+
+    // Merge everything back into the single response shape every caller already expects.
     const merged: Record<string, unknown> = { result: [{ values: [{}] }] };
     const mergedMap = (merged as any).result[0].values[0] as Record<string, unknown>;
-    for (const res of results) {
-      for (const group of (res as any).result || []) {
-        for (const symbolMap of group.values || []) {
-          for (const [sym, data] of Object.entries(symbolMap as Record<string, unknown>)) {
-            mergedMap[sym] = data;
-          }
-        }
-      }
-    }
+    for (const [sym, data] of collected) mergedMap[sym] = data;
     return merged;
   }
 
