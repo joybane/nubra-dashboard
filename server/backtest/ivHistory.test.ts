@@ -63,6 +63,37 @@ test.skipIf(!haveData)(
 );
 
 /**
+ * The window has to end where the DATA ends, not at wall-clock today.
+ *
+ * This tree is a static drop. Anchoring the trailing window to `now` walks it off the end of
+ * the data, so the baseline shrinks by a day every day while still calling itself 365 days.
+ * Measured 2026-08-14 against a tree stopping 2026-06-01: nominal 365 days, actual 292, and
+ * the 1-2 DTE band down to 40 observations from 62 — heading for MIN_SAMPLE, past which
+ * src/lib/ivRank.ts stops quoting a rank for expiry week at all.
+ *
+ * The distribution test below does eventually catch this, but only years after it starts,
+ * which is no use. These two assertions fail immediately.
+ */
+test.skipIf(!haveData)('the window ends where the data ends, not at wall-clock today', async () => {
+  const days = 365;
+  const res = await buildIvHistory('NIFTY', days);
+  const DAY = 86_400_000;
+
+  // `to` may lead the newest observation slightly — a bucket's file stops at its own expiry and
+  // 0 DTE is excluded — and on a live tree a weekend or holiday run puts a few days in. Months
+  // of gap means the anchor is tracking the calendar instead of the data.
+  const newest = res.observations[res.observations.length - 1].date;
+  const lead = (Date.parse(res.to) - Date.parse(newest)) / DAY;
+  expect(lead, `to=${res.to} but newest observation is ${newest}`).toBeLessThanOrEqual(10);
+
+  // And the observations must actually span the window that was asked for, rather than the
+  // leftover slice of it that still overlaps the data.
+  const oldest = res.observations[0].date;
+  const span = (Date.parse(newest) - Date.parse(oldest)) / DAY;
+  expect(span, `${oldest}..${newest} is not ~${days} days of data`).toBeGreaterThan(days - 30);
+});
+
+/**
  * The distribution guard. If a future change let 0-DTE readings or vendor bad-days back in, the
  * low tail would sag long before any other test noticed — and a sagging low tail silently
  * inflates every IV rank, because rank is measured off the minimum.

@@ -14,6 +14,7 @@ import type {
 import { exchangeFromName } from '../types';
 import { fmtPrice } from '../lib/utils';
 import { liveLevels } from '../lib/positionRuleLevels';
+import { isOnLocalDay, openPositionPnlPaise, summarizeTodayPositions } from '../lib/paperPnl';
 import { usePaperTrading } from '../hooks/usePaperTrading';
 import { useWorkspaceState } from '../workspace/useWorkspaceState';
 import { useWs } from '../hooks/useWsContext';
@@ -35,17 +36,6 @@ function fmtTime(ns: number | undefined | null): string {
     second: '2-digit',
     hour12: false,
   });
-}
-
-function isToday(ns: number | undefined | null): boolean {
-  if (!ns) return true;
-  const d = new Date(ns / 1_000_000);
-  const now = new Date();
-  return (
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate()
-  );
 }
 
 function fmtDateStr(d: Date): string {
@@ -232,8 +222,8 @@ function OrdersTab({
     }
   }
 
-  const filteredOpen = openOrders.filter((o) => isToday(o.order_time));
-  const filteredClosed = closedOrders.filter((o) => isToday(o.order_time));
+  const filteredOpen = openOrders.filter((o) => isOnLocalDay(o.order_time));
+  const filteredClosed = closedOrders.filter((o) => isOnLocalDay(o.order_time));
   const historyOrders = showHistory
     ? [...openOrders, ...closedOrders]
         .filter((o) => matchesDateRange(o.order_time, histFrom, histTo))
@@ -918,19 +908,10 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     }
   }, [positions, exiting, exitDirect]);
 
-  const openPnl = positions.reduce((s, p) => {
-    const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-    return s + side * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0);
-  }, 0);
-  const closedPnl = closedPositions
-    .filter((p) => isToday(p.exit_time) || isToday(p.entry_time))
-    .reduce((s, p) => s + (p.realised_pnl || p.pnl || 0), 0);
-  const totalPnl = openPnl + closedPnl;
-
-  const filteredOpen = positions.filter((p) => isToday(p.entry_time));
-  const filteredClosed = closedPositions.filter(
-    (p) => isToday(p.exit_time) || isToday(p.entry_time),
-  );
+  const todaySummary = summarizeTodayPositions(positions, closedPositions);
+  const filteredOpen = todaySummary.open;
+  const filteredClosed = todaySummary.closed;
+  const totalPnl = todaySummary.totalPnlPaise;
   const historyPositions = showHistory
     ? closedPositions.filter((p) => matchesDateRange(p.exit_time || p.entry_time, histFrom, histTo))
     : [];
@@ -981,8 +962,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
   }, [positions, uatAuth]);
 
   function calcPnl(p: PaperPosition): number {
-    const side = (p.order_side || '').includes('BUY') ? 1 : -1;
-    return (side * ((p.last_traded_price || 0) - (p.avg_price || 0)) * (p.qty || 0)) / 100;
+    return openPositionPnlPaise(p) / 100;
   }
 
   // Spell the armed levels out on the ● marker. Uses qty's sign for the side and

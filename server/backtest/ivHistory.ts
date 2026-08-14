@@ -242,24 +242,43 @@ function observationsFor(
 }
 
 /**
- * Every ATM IV observation in the trailing `days` calendar days.
+ * Every ATM IV observation in the trailing `days` calendar days of AVAILABLE data.
  *
  * An expiry is scanned when its data window can overlap [from, to]: its own date
  * must be at or after `from` (everything it holds sits before its expiry) and no
  * more than LOOKAHEAD days past `to` (a monthly starts recording ~31 days out).
+ *
+ * The window ends where the data ends, not at wall-clock now. This tree is a static drop
+ * that can sit months behind today, and anchoring to `now` walks the window off the end of
+ * it: measured 2026-08-14, the tree stopped at 2026-06-01, so a nominal 365-day baseline
+ * covered 292 days and lost one more every day. That decay is silent and it lands hardest on
+ * the thinnest band — 1-2 DTE was down to 40 observations against MIN_SAMPLE 20, on its way
+ * to the point where src/lib/ivRank.ts stops quoting a rank for expiry week at all.
+ *
+ * An expiry's file never holds a date past its own expiry, so the newest expiry folder is a
+ * safe upper bound on the data. A tree that IS current has a future expiry on disk, which
+ * clamps to today and reproduces the original behaviour exactly.
  */
 export async function buildIvHistory(und: Underlying, days: number): Promise<IvHistoryResult> {
   const t0 = Date.now();
-  const to = new Date().toISOString().slice(0, 10);
-  const from = new Date(Date.now() - days * DAY_MS).toISOString().slice(0, 10);
   const LOOKAHEAD = 45;
-  const cutoff = new Date(Date.parse(to) + LOOKAHEAD * DAY_MS).toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
 
   const flags: ExpiryFlag[] = ['WEEK', 'MONTH'];
+  const byFlag = await Promise.all(
+    flags.map(async (flag) => [flag, await listExpiries(und, flag)] as const),
+  );
+
+  let newest = '';
+  for (const [, list] of byFlag) for (const e of list) if (e > newest) newest = e;
+  const to = newest && newest < today ? newest : today;
+  const from = new Date(Date.parse(to) - days * DAY_MS).toISOString().slice(0, 10);
+  const cutoff = new Date(Date.parse(to) + LOOKAHEAD * DAY_MS).toISOString().slice(0, 10);
+
   const jobs: Promise<IvObservation[]>[] = [];
   let expiriesScanned = 0;
-  for (const flag of flags) {
-    for (const expiry of await listExpiries(und, flag)) {
+  for (const [flag, list] of byFlag) {
+    for (const expiry of list) {
       if (expiry < from || expiry > cutoff) continue;
       expiriesScanned++;
       jobs.push(observationsFor(und, expiry, flag));

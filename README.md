@@ -401,12 +401,13 @@ Aggregation lives in `src/lib/greekAggregator.ts` and plots a delta-filtered nea
 basket, CE and PE as separate lines. The delta band is CE `[0.05, 0.609]` and PE
 `[-0.609, -0.05]`.
 
-| Setting  | Options              | Meaning                                                        |
-| -------- | -------------------- | -------------------------------------------------------------- |
-| Method   | `mine` / `industry`  | Raw per-contract Greek sum, vs. notional `greek × OI × lotSize` |
-| Basket   | `fixed` / `floating` | Membership locked at t₀, vs. re-filtered every snapshot         |
-| Baseline | `session` / `window` | Where t₀ sits (default `session`)                               |
-| Series   | totals / diff / both | Absolute sum (solid) vs. change-from-t₀ (dashed, overlay scale) |
+| Setting     | Options              | Meaning                                                         |
+| ----------- | -------------------- | --------------------------------------------------------------- |
+| Method      | `mine` / `industry`  | Raw per-contract Greek sum, vs. notional `greek × OI × lotSize`  |
+| Basket      | `fixed` / `floating` | Membership locked at t₀, vs. re-filtered every snapshot          |
+| Composition | `chained` / `raw`    | Splice out membership steps, vs. plain Σ (default `chained`)     |
+| Baseline    | `session` / `window` | Where t₀ sits (default `session`)                                |
+| Series      | totals / diff / both | Absolute sum (solid) vs. change-from-t₀ (dashed, overlay scale)  |
 
 **Baseline** matters because history loads a trailing 7-day window. `session` (default)
 re-anchors t₀ at every IST trading day, so the fixed basket re-locks and the diff series
@@ -414,6 +415,35 @@ returns to zero at that day's first snapshot — not at a fixed clock time, sinc
 day starts late and MCX opens at 09:00. Each session is self-contained while the whole
 window stays on screen. `window` uses one t₀ for the entire range. Totals under a floating
 basket are baseline-independent; only diff and fixed-basket membership respond.
+
+**Composition** exists because the delta band's upper edge sits almost exactly on the vega
+peak. Vega ∝ φ(d₁) is maximal at Δ≈0.5, and `CE_DELTA_MAX = 0.609` is d₁ = +0.276, where vega
+is still 96% of that maximum — so a strike crossing the top edge takes a near-maximal
+contribution with it and the total steps for a reason that is not Greek movement. On NIFTY at
+~6 DTE that is roughly 15% of the CE total per crossing, triggered by about 50 index points.
+
+`chained` (default) removes it the way every other field does: evaluate the outgoing and the
+incoming basket at the **same** snapshot and carry the difference forward as an offset.
+Continuous-futures back-adjustment, the S&P divisor and CPI chain-linking are all this
+algorithm; the continuous-time form is the Divisia index. The offset is additive, not
+multiplicative — vega sums approach zero near expiry and a ratio would blow up there.
+
+Two supporting details. Membership only flips after `MEMBERSHIP_DWELL` consecutive snapshots
+agree with the new state, because the accumulated offset grows with the *number* of splices
+(the well-known drift in back-adjusted futures); this is a dwell timer, not a retention band,
+so the 0.05 / 0.609 thresholds are untouched. And `baseline: 'session'` zeroes the offset every
+day, which caps drift for free.
+
+The trade is that a chained level is an artifact in the same sense as a back-adjusted futures
+price: it answers "what would this basket be worth had composition never changed", not "what is
+the current basket worth". `raw` gives the latter, and is what `buildSeries` returns by default
+when no `composition` is passed.
+
+Separately and always on, `buildSeries` carries each leg forward on its last known values. The
+broker's 1m timeseries is per-field, so a leg can print delta without vega; before this it
+still qualified for the basket (it has a delta) yet contributed zero, which read on the chart
+as a one-bar collapse of the whole total. A leg silent for longer than `CARRY_STALE_MS`
+(15 min) is dropped rather than carried indefinitely.
 
 ### Historical Greek reconstruction
 

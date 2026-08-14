@@ -38,6 +38,7 @@ import {
   type IvPoint,
   type Method,
   type Basket,
+  type Composition,
 } from '../lib/greekAggregator';
 import {
   createGreekPane,
@@ -195,6 +196,7 @@ export interface GreekOverlayApi {
   method: Method | 'both';
   basket: Basket;
   baseline: Baseline;
+  composition: Composition;
   seriesMode: SeriesMode;
   showCalls: boolean;
   showPuts: boolean;
@@ -225,6 +227,7 @@ export interface GreekOverlayApi {
   setMethod: (v: Method | 'both') => void;
   setBasket: (v: Basket) => void;
   setBaseline: (v: Baseline) => void;
+  setComposition: (v: Composition) => void;
   setSeriesMode: (v: SeriesMode) => void;
   setShowCalls: (v: boolean) => void;
   setShowPuts: (v: boolean) => void;
@@ -290,6 +293,10 @@ export function useGreekOverlay({
   const [method, setMethodState] = useState<Method | 'both'>('mine');
   const [basket, setBasketState] = useState<Basket>('fixed');
   const [baseline, setBaselineState] = useState<Baseline>('session');
+  // Chained by default: a strike crossing the delta band's top edge carries ~96% of peak vega
+  // with it, so a raw sum steps for reasons that are not Greek movement. 'raw' stays one click
+  // away for reading the live basket's actual level.
+  const [composition, setCompositionState] = useState<Composition>('chained');
   const [seriesMode, setSeriesModeState] = useState<SeriesMode>('both');
   const [showCalls, setShowCallsState] = useState(true);
   const [showPuts, setShowPutsState] = useState(true);
@@ -337,8 +344,26 @@ export function useGreekOverlay({
   const pollBusyRef = useRef(false);
 
   // Mirror settings into refs so the WS callback and redraw read fresh values.
-  const cfgRef = useRef({ method, basket, baseline, seriesMode, showCalls, showPuts, ivMeasure });
-  cfgRef.current = { method, basket, baseline, seriesMode, showCalls, showPuts, ivMeasure };
+  const cfgRef = useRef({
+    method,
+    basket,
+    baseline,
+    composition,
+    seriesMode,
+    showCalls,
+    showPuts,
+    ivMeasure,
+  });
+  cfgRef.current = {
+    method,
+    basket,
+    baseline,
+    composition,
+    seriesMode,
+    showCalls,
+    showPuts,
+    ivMeasure,
+  };
 
   const setMethod = (v: Method | 'both') => {
     setMethodState(v);
@@ -354,6 +379,11 @@ export function useGreekOverlay({
   const setBaseline = (v: Baseline) => {
     setBaselineState(v);
     cfgRef.current.baseline = v;
+    requestDraw();
+  };
+  const setComposition = (v: Composition) => {
+    setCompositionState(v);
+    cfgRef.current.composition = v;
     requestDraw();
   };
   const setSeriesMode = (v: SeriesMode) => {
@@ -517,6 +547,7 @@ export function useGreekOverlay({
       method: m,
       basket: b,
       baseline: bl,
+      composition: cmp,
       seriesMode: mode,
       showCalls: sc,
       showPuts: sp,
@@ -536,7 +567,14 @@ export function useGreekOverlay({
 
     const draw = (pane: GreekPane | null, mt: Method) => {
       if (!pane) return;
-      const pts = buildSeries(snaps, { greek, method: mt, basket: b, baseline: bl, lotSize });
+      const pts = buildSeries(snaps, {
+        greek,
+        method: mt,
+        basket: b,
+        baseline: bl,
+        composition: cmp,
+        lotSize,
+      });
       pane.setData(pts, mode, sc, sp, mapTime);
     };
 
@@ -1381,6 +1419,7 @@ export function useGreekOverlay({
     method,
     basket,
     baseline,
+    composition,
     seriesMode,
     showCalls,
     showPuts,
@@ -1403,6 +1442,7 @@ export function useGreekOverlay({
     setMethod,
     setBasket,
     setBaseline,
+    setComposition,
     setSeriesMode,
     setShowCalls,
     setShowPuts,

@@ -15,6 +15,8 @@ import {
   PE_DELTA_MAX,
   PRUNE_DELTA_MIN,
   PRUNE_DELTA_MAX,
+  CARRY_STALE_MS,
+  MEMBERSHIP_DWELL,
   type ChainSnapshot,
 } from './greekAggregator.ts';
 
@@ -459,4 +461,147 @@ test('buildIvSeries: averages each expiry separately rather than pooling strikes
   };
   // Mean of the two flat surfaces: (10 + 30) / 2 = 20 vol points.
   expect(buildIvSeries([multi], { measure: 'atm' })[0].value).toBeCloseTo(20, 6);
+});
+
+// ─── Carry-forward: a gap in the data is not a zero ──────────────────────────────
+const MIN = 60_000;
+const totals = (s: ChainSnapshot[], composition?: 'raw' | 'chained') =>
+  buildSeries(s, { greek: 'vega', method: 'mine', basket: 'floating', composition }).map(
+    (p) => p.ceTotal,
+  );
+
+test('carry: a leg missing its vega for one snapshot holds its last value', () => {
+  // The broker's 1m series is per-field, so delta can print without vega. Before carryLeg
+  // this leg still qualified (it has a delta) but contributed 0 — a one-bar hole in the total.
+  const s: ChainSnapshot[] = [
+    { ts: D1_OPEN, ce: [{ sp: 100, delta: 0.5, vega: 10, theta: -2, oi: 1 }], pe: [] },
+    { ts: D1_OPEN + MIN, ce: [{ sp: 100, delta: 0.5, oi: 1 }], pe: [] }, // vega absent
+    { ts: D1_OPEN + 2 * MIN, ce: [{ sp: 100, delta: 0.5, vega: 12, theta: -2, oi: 1 }], pe: [] },
+  ];
+  expect(totals(s)).toEqual([10, 10, 12]);
+});
+
+test('carry: a leg absent from a snapshot entirely still counts', () => {
+  const s: ChainSnapshot[] = [
+    { ts: D1_OPEN, ce: [ce(10, 0.5, 100), ce(7, 0.2, 110)], pe: [] },
+    { ts: D1_OPEN + MIN, ce: [ce(10, 0.5, 100)], pe: [] }, // strike 110 did not print
+  ];
+  expect(totals(s)).toEqual([17, 17]);
+});
+
+test('carry: a leg silent past CARRY_STALE_MS is dropped, not carried forever', () => {
+  const s: ChainSnapshot[] = [
+    { ts: D1_OPEN, ce: [ce(10, 0.5, 100), ce(7, 0.2, 110)], pe: [] },
+    { ts: D1_OPEN + CARRY_STALE_MS + MIN, ce: [ce(10, 0.5, 100)], pe: [] },
+  ];
+  expect(totals(s)).toEqual([17, 10]);
+});
+
+test('carry: theta and oi are carried per-field too, so industry survives a gap', () => {
+  const s: ChainSnapshot[] = [
+    { ts: D1_OPEN, ce: [{ sp: 100, delta: 0.5, vega: 10, theta: -2, oi: 300 }], pe: [] },
+    { ts: D1_OPEN + MIN, ce: [{ sp: 100, delta: 0.5 }], pe: [] }, // everything but delta gone
+  ];
+  const ind = buildSeries(s, {
+    greek: 'theta',
+    method: 'industry',
+    basket: 'floating',
+    lotSize: 50,
+  });
+  expect(ind.map((p) => p.ceTotal)).toEqual([-2 * 300 * 50, -2 * 300 * 50]);
+});
+
+// ─── Chaining: membership changes must not step the level ────────────────────────
+// Strike 100 is in band throughout and its vega walks 10 → 13. Strike 110 is in band from
+// t1 onward, so under `raw` the total jumps by 7 when it joins.
+const joiner: ChainSnapshot[] = [
+  { ts: D1_OPEN, ce: [ce(10, 0.5, 100)], pe: [] },
+  { ts: D1_OPEN + MIN, ce: [ce(11, 0.5, 100), ce(7, 0.2, 110)], pe: [] },
+  { ts: D1_OPEN + 2 * MIN, ce: [ce(12, 0.5, 100), ce(7, 0.2, 110)], pe: [] },
+  { ts: D1_OPEN + 3 * MIN, ce: [ce(13, 0.5, 100), ce(7, 0.2, 110)], pe: [] },
+];
+
+test('composition defaults to raw — buildSeries output is unchanged without opting in', () => {
+  const dflt = buildSeries(joiner, { greek: 'vega', method: 'mine', basket: 'floating' });
+  const raw = buildSeries(joiner, {
+    greek: 'vega',
+    method: 'mine',
+    basket: 'floating',
+    composition: 'raw',
+  });
+  expect(dflt).toEqual(raw);
+  expect(dflt.map((p) => p.ceTotal)).toEqual([10, 18, 19, 20]); // the step at t1 is real
+});
+
+test('chained: a leg joining the basket adds no step — only Greek movement survives', () => {
+  // 110 joins at t1 but the dwell timer holds it out until t2, where the splice absorbs it.
+  // What is left is exactly strike 100's own vega path.
+  expect(totals(joiner, 'chained')).toEqual([10, 11, 12, 13]);
+});
+
+test('chained: the diff series tracks Greek movement, not composition', () => {
+  const s = buildSeries(joiner, {
+    greek: 'vega',
+    method: 'mine',
+    basket: 'floating',
+    composition: 'chained',
+  });
+  expect(s.map((p) => p.ceDiff)).toEqual([0, 1, 2, 3]);
+});
+
+test('chained: a leg leaving the basket adds no step either', () => {
+  const leaver: ChainSnapshot[] = [
+    { ts: D1_OPEN, ce: [ce(10, 0.5, 100), ce(7, 0.2, 110)], pe: [] },
+    { ts: D1_OPEN + MIN, ce: [ce(11, 0.5, 100), ce(7, 0.04, 110)], pe: [] }, // 110 leaves band
+    { ts: D1_OPEN + 2 * MIN, ce: [ce(12, 0.5, 100), ce(7, 0.04, 110)], pe: [] },
+    { ts: D1_OPEN + 3 * MIN, ce: [ce(13, 0.5, 100), ce(7, 0.04, 110)], pe: [] },
+  ];
+  expect(totals(leaver)).toEqual([17, 11, 12, 13]); // raw drops 110 the instant it leaves
+  expect(totals(leaver, 'chained')).toEqual([17, 18, 19, 20]); // chained keeps walking
+});
+
+test('dwell: a one-snapshot excursion across the edge does not flip membership', () => {
+  const blip: ChainSnapshot[] = [
+    { ts: D1_OPEN, ce: [ce(10, 0.5, 100), ce(7, 0.2, 110)], pe: [] },
+    { ts: D1_OPEN + MIN, ce: [ce(10, 0.5, 100), ce(7, 0.04, 110)], pe: [] }, // one bar out
+    { ts: D1_OPEN + 2 * MIN, ce: [ce(10, 0.5, 100), ce(7, 0.2, 110)], pe: [] }, // back in
+  ];
+  expect(totals(blip)).toEqual([17, 10, 17]); // raw shows the hole
+  expect(totals(blip, 'chained')).toEqual([17, 17, 17]); // dwell absorbs it, no splice at all
+  expect(MEMBERSHIP_DWELL).toBeGreaterThan(1); // the above is only true for a real dwell
+});
+
+test('chained: session re-anchor zeroes the offset so drift cannot cross days', () => {
+  const twoSessions: ChainSnapshot[] = [
+    ...joiner, // day 1 accumulates an offset of -7
+    { ts: D2_OPEN, ce: [ce(30, 0.5, 100), ce(7, 0.2, 110)], pe: [] },
+  ];
+  const s = buildSeries(twoSessions, {
+    greek: 'vega',
+    method: 'mine',
+    basket: 'floating',
+    composition: 'chained',
+    baseline: 'session',
+  });
+  expect(s[4].ceTotal).toBe(37); // day 2 opens on its own raw sum, offset discarded
+  expect(s[4].ceDiff).toBe(0);
+});
+
+test('chained: a fixed basket has no membership churn, so it is a no-op', () => {
+  for (const baseline of ['session', 'window'] as const) {
+    const raw = buildSeries(driftAcrossDays, {
+      greek: 'vega',
+      method: 'mine',
+      basket: 'fixed',
+      baseline,
+    });
+    const chained = buildSeries(driftAcrossDays, {
+      greek: 'vega',
+      method: 'mine',
+      basket: 'fixed',
+      baseline,
+      composition: 'chained',
+    });
+    expect(chained, baseline).toEqual(raw);
+  }
 });

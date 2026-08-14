@@ -216,6 +216,27 @@ export function GreekButton({ api, label }: { api: GreekOverlayApi; label: strin
                 </div>
                 <div>
                   <div className="text-[10px] font-semibold tracking-wider text-[var(--text-muted)] mb-1.5">
+                    COMPOSITION{' '}
+                    <span className="font-normal normal-case text-[9px]">
+                      · when the basket changes
+                    </span>
+                  </div>
+                  <Segmented
+                    value={api.composition}
+                    onChange={api.setComposition}
+                    options={[
+                      { v: 'chained', label: 'Chained' },
+                      { v: 'raw', label: 'Raw' },
+                    ]}
+                  />
+                  <div className="text-[9px] text-[var(--text-muted)] mt-1.5 leading-relaxed">
+                    {api.composition === 'chained'
+                      ? 'Splices out the step a strike makes joining or leaving, so only Greek movement moves the line. The level is a chained figure, like a back-adjusted future.'
+                      : 'Plain sum of whatever is in the basket right now — the true level, but it steps whenever a strike joins or leaves.'}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] font-semibold tracking-wider text-[var(--text-muted)] mb-1.5">
                     BASELINE{' '}
                     <span className="font-normal normal-case text-[9px]">· where t₀ sits</span>
                   </div>

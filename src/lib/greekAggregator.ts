@@ -31,6 +31,16 @@
 //                  difference series runs cumulatively and the fixed basket stays locked
 //                  to the strikes that qualified on the window's first day.
 //
+// …and two composition rules, which decide what a membership CHANGE does to the level:
+//
+//   • "raw"      — nothing. The level is the current basket's plain Σ, so a strike joining or
+//                  leaving steps the series by that strike's whole Greek. This is the spec as
+//                  written and stays the default of buildSeries().
+//
+//   • "chained"  — splice it out. Both baskets are evaluated at the same snapshot and the
+//                  difference is carried forward as an offset, so only Greek movement reaches
+//                  the line. See the long note on buildSeries for why, and what it costs.
+//
 // Greek unit conventions match GexService.ts: theta is per calendar day, vega is
 // per 1% (one vol-point) change in IV.
 
@@ -41,6 +51,7 @@ export type GreekName = 'vega' | 'theta';
 export type Method = 'mine' | 'industry';
 export type Basket = 'fixed' | 'floating';
 export type Baseline = 'session' | 'window';
+export type Composition = 'raw' | 'chained';
 
 // ─── Delta filter boundaries (Spec §1) ───────────────────────────────────────────
 export const CE_DELTA_MIN = 0.05;
@@ -68,6 +79,21 @@ export function withinPruneBand(delta: number | undefined): boolean {
   const a = Math.abs(delta);
   return a >= PRUNE_DELTA_MIN && a <= PRUNE_DELTA_MAX;
 }
+
+// ─── Carry-forward and chaining constants ────────────────────────────────────────
+//
+// How long a leg survives on its last known values before buildSeries stops counting it.
+// A thin wing strike routinely skips minutes in the broker's 1m series; 15 minutes of total
+// silence is a leg that has genuinely gone (drifted past the prune band, or delisted), and
+// evicting it is a real membership change rather than a data gap.
+export const CARRY_STALE_MS = 15 * 60_000;
+
+// Consecutive snapshots a leg must disagree with its current membership before the membership
+// actually flips, under `composition: 'chained'`. This is a dwell timer, NOT an MSCI-style
+// retention band: the CE/PE delta thresholds are untouched, a leg simply cannot enter and
+// leave on single snapshots. See the chaining note on buildSeries for why splice COUNT is the
+// quantity that has to be bounded.
+export const MEMBERSHIP_DWELL = 2;
 
 /** One leg of an option-chain snapshot, reduced to the fields aggregation needs. */
 export interface AggLeg {
@@ -185,11 +211,46 @@ export function aggregateSnapshot(snapshot: ChainSnapshot, opts: AggregateOption
 export interface SeriesOptions extends Omit<AggregateOptions, 'fixedKeys'> {
   /** Where t_min sits. Defaults to 'session' — see the baseline note at the top. */
   baseline?: Baseline;
+  /**
+   * How basket composition changes are treated. Defaults to 'raw' — the spec's plain Σ, so
+   * this function's default output is unchanged from before chaining existed. The app passes
+   * 'chained'; see the chaining note on buildSeries.
+   */
+  composition?: Composition;
 }
 
 /** IST calendar day a snapshot's epoch-ms timestamp belongs to. */
 export function snapshotDayKey(ts: number): string | null {
   return chartTimeDayKey(Math.floor(ts / 1000) + IST_OFFSET);
+}
+
+/**
+ * Overlay `next` onto `prev`, keeping the last known value of every field `next` omits.
+ *
+ * The broker's 1m timeseries is per-field, so a leg can arrive carrying delta but no vega at
+ * a given minute. Without this the leg stays in the basket (it has a delta, so it qualifies)
+ * while contributing zero, which reads on the chart as a one-bar collapse of the whole total.
+ */
+function carryLeg(prev: AggLeg | undefined, next: AggLeg): AggLeg {
+  if (!prev) return next;
+  const keep = (a: number | undefined, b: number | undefined) =>
+    a != null && Number.isFinite(a) ? a : b;
+  return {
+    ...prev,
+    ...next,
+    delta: keep(next.delta, prev.delta),
+    vega: keep(next.vega, prev.vega),
+    theta: keep(next.theta, prev.theta),
+    oi: keep(next.oi, prev.oi),
+    iv: keep(next.iv, prev.iv),
+  };
+}
+
+/** Set equality by size + membership; both sides hold legKey strings. */
+function sameKeys(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const k of a) if (!b.has(k)) return false;
+  return true;
 }
 
 /**
@@ -205,6 +266,30 @@ export function snapshotDayKey(ts: number): string | null {
  *     (open→now) and live (now→running) ticks concatenated in any order.
  *   - `totals` under a floating basket are baseline-independent; only `diff` and fixed-basket
  *     membership respond to this setting.
+ *
+ * Legs are always carried forward on their last known values (see carryLeg) — a snapshot that
+ * omits a leg, or a field of one, reads as unchanged rather than as zero.
+ *
+ * `composition: 'chained'` additionally removes the step a membership change puts in the
+ * total. Vega peaks at Δ≈0.5 and CE_DELTA_MAX sits at 96% of that peak, so a strike crossing
+ * the top edge takes a near-maximal contribution with it and the level jumps for reasons that
+ * are not Greek movement. Chaining is the standard answer: evaluate the outgoing and incoming
+ * baskets at the SAME snapshot and carry the difference forward as an offset — continuous
+ * futures back-adjustment, the S&P divisor, and CPI chain-linking are all this algorithm, and
+ * the continuous-time form is the Divisia index.
+ *
+ * Additive, not multiplicative: vega sums approach zero near expiry and a ratio adjustment
+ * would blow up there.
+ *
+ * The offset is exact — both baskets are read off one snapshot, so unlike a futures roll there
+ * is no estimation error per splice. What does accumulate is real movement made by a leg while
+ * it was out of the basket, which the chain correctly declines to attribute to anyone; that
+ * grows with the NUMBER of splices, hence MEMBERSHIP_DWELL. `baseline: 'session'` zeroes the
+ * offset daily, capping drift.
+ *
+ * A chained level is an artifact in the same sense as a back-adjusted futures price: it
+ * answers "what would this basket be worth had composition never changed", not "what is the
+ * current basket worth". 'raw' remains available for the latter.
  */
 export function buildSeries(
   snapshots: ReadonlyArray<ChainSnapshot>,
@@ -214,30 +299,112 @@ export function buildSeries(
 
   const ordered = [...snapshots].sort((a, b) => a.ts - b.ts);
   const baseline = opts.baseline ?? 'session';
+  const chained = (opts.composition ?? 'raw') === 'chained';
 
   // Re-anchor whenever the IST day changes ('session'), or once up front ('window').
   let anchored = false;
   let anchorDay: string | null = null;
-  let full: AggregateOptions = { ...opts };
+  let fixedKeys: ReadonlySet<string> | undefined;
   let base: SideTotals = { ce: 0, pe: 0 };
 
-  return ordered.map((snap) => {
+  // Last known state per leg, so a gap in one leg's series is not read as a zero.
+  const carry = new Map<string, { leg: AggLeg; type: OptionType; ts: number }>();
+  // Effective membership, its dwell counters, and the accumulated chain offset.
+  let members = new Set<string>();
+  let prevMembers: Set<string> | null = null;
+  const dwell = new Map<string, number>();
+  let offset: SideTotals = { ce: 0, pe: 0 };
+
+  // One reusable snapshot for the carried chain — rebuilt per timestamp and never retained by
+  // aggregateSnapshot or lockBasket, both of which read it synchronously.
+  const filled: ChainSnapshot = { ts: 0, ce: [], pe: [] };
+  const aggOpts = (keys: ReadonlySet<string>): AggregateOptions => ({
+    greek: opts.greek,
+    method: opts.method,
+    basket: 'fixed', // membership is resolved below; aggregateSnapshot just applies the set
+    lotSize: opts.lotSize,
+    fixedKeys: keys,
+  });
+
+  const out: SeriesPoint[] = [];
+  for (const snap of ordered) {
     const day = baseline === 'session' ? snapshotDayKey(snap.ts) : null;
-    if (!anchored || (baseline === 'session' && day !== anchorDay)) {
+    const reanchor = !anchored || (baseline === 'session' && day !== anchorDay);
+    if (reanchor) {
+      carry.clear();
+      dwell.clear();
+      members = new Set();
+      prevMembers = null;
+      offset = { ce: 0, pe: 0 };
+    }
+
+    for (const leg of snap.ce) {
+      const k = legKey(leg.sp, 'CE', leg.exp);
+      carry.set(k, { leg: carryLeg(carry.get(k)?.leg, leg), type: 'CE', ts: snap.ts });
+    }
+    for (const leg of snap.pe) {
+      const k = legKey(leg.sp, 'PE', leg.exp);
+      carry.set(k, { leg: carryLeg(carry.get(k)?.leg, leg), type: 'PE', ts: snap.ts });
+    }
+    for (const [k, v] of carry) if (snap.ts - v.ts > CARRY_STALE_MS) carry.delete(k);
+
+    filled.ts = snap.ts;
+    filled.ce.length = 0;
+    filled.pe.length = 0;
+    for (const v of carry.values()) (v.type === 'CE' ? filled.ce : filled.pe).push(v.leg);
+
+    if (reanchor) {
       anchored = true;
       anchorDay = day;
-      full = { ...opts, fixedKeys: opts.basket === 'fixed' ? lockBasket(snap) : undefined };
-      base = aggregateSnapshot(snap, full);
+      fixedKeys = opts.basket === 'fixed' ? lockBasket(filled) : undefined;
     }
-    const { ce, pe } = aggregateSnapshot(snap, full);
-    return {
-      ts: snap.ts,
-      ceTotal: ce,
-      peTotal: pe,
-      ceDiff: ce - base.ce,
-      peDiff: pe - base.pe,
-    };
-  });
+
+    // ── Resolve membership for this snapshot ──
+    if (opts.basket === 'fixed') {
+      // Locked keys, minus any whose leg has aged out entirely.
+      members = new Set<string>();
+      for (const k of fixedKeys ?? []) if (carry.has(k)) members.add(k);
+    } else if (reanchor || !chained) {
+      // Spec §3: the live re-filter, applied every snapshot. Also used for the anchor snapshot
+      // under chaining — the dwell timer governs changes, never the opening membership.
+      members = new Set<string>();
+      for (const [k, v] of carry) if (qualifies(v.type, v.leg.delta)) members.add(k);
+    } else {
+      for (const [k, v] of carry) {
+        const want = qualifies(v.type, v.leg.delta);
+        if (want === members.has(k)) {
+          dwell.delete(k);
+          continue;
+        }
+        const n = (dwell.get(k) ?? 0) + 1;
+        if (n >= MEMBERSHIP_DWELL) {
+          if (want) members.add(k);
+          else members.delete(k);
+          dwell.delete(k);
+        } else dwell.set(k, n);
+      }
+      // Ageing out is not chatter — CARRY_STALE_MS of silence leaves immediately.
+      for (const k of members) if (!carry.has(k)) members.delete(k);
+    }
+
+    const raw = aggregateSnapshot(filled, aggOpts(members));
+    // Only clone on an actual change: membership holds steady for most of a session, and this
+    // runs once per snapshot per method against a 750 ms redraw throttle.
+    if (chained && (prevMembers === null || !sameKeys(prevMembers, members))) {
+      if (prevMembers) {
+        const before = aggregateSnapshot(filled, aggOpts(prevMembers));
+        offset = { ce: offset.ce + (before.ce - raw.ce), pe: offset.pe + (before.pe - raw.pe) };
+      }
+      prevMembers = new Set(members);
+    }
+
+    const ce = chained ? raw.ce + offset.ce : raw.ce;
+    const pe = chained ? raw.pe + offset.pe : raw.pe;
+    if (reanchor) base = { ce, pe };
+
+    out.push({ ts: snap.ts, ceTotal: ce, peTotal: pe, ceDiff: ce - base.ce, peDiff: pe - base.pe });
+  }
+  return out;
 }
 
 // ─── Constant-delta IV measures ──────────────────────────────────────────────────
