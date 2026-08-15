@@ -35,6 +35,7 @@ import {
   type GreekTooltipView,
 } from '../lib/greekTooltip';
 import { removeChart } from '../lib/chartLifecycle';
+import type { ScaleBand } from '../lib/greekRenderer';
 import { barsToSessionLine, fmtPrice } from '../lib/utils';
 import PinnedCrosshairLayer from './PinnedCrosshairLayer';
 import { bindPinTrigger, type ChartPin } from '../lib/chartPins';
@@ -79,6 +80,47 @@ function GreekPinCard({ time, rows }: { time: number; rows: GreekRow[] }) {
       )}
     </div>
   );
+}
+
+// ─── Stacking several measures in one pane ──────────────────────────────────────
+//
+// Vega sits near +70 and Theta near −75. Plot both against one price scale and each holds the axis
+// open for the other: neither can ever expand, both get pressed against the pane's edges, and
+// zooming does not help because every window is still spanned by both. So each enabled measure
+// gets a disjoint slice of the pane and auto-scales inside it — its own scale, its own range.
+//
+// The measures are sliced in tray order, which is also the order the buttons read left to right.
+type Measure = 'vega' | 'theta' | 'iv';
+const MEASURE_ORDER: Measure[] = ['vega', 'theta', 'iv'];
+
+/** The renderer's own inline margins. A lone measure keeps them, so one-measure panes are unchanged. */
+const FULL_BAND: ScaleBand = { top: 0.1, bottom: 0.08 };
+/** Empty height kept above and below each slice once the pane is shared, so bands read as separate. */
+const BAND_GUTTER = 0.05;
+
+interface Layout {
+  /**
+   * The measure whose totals get the visible LEFT axis — the first one enabled. Only one series
+   * can own an axis, and because that scale carries the owner's band too, its ticks and grid lines
+   * are drawn only inside the owner's slice, describing the band they sit beside. Every other
+   * measure keeps its last-value tags (right column, correct values), exactly as the Δ lines do.
+   *
+   * Never null: with nothing enabled it falls back to the first measure, so the pane is already
+   * holding the axis open for the switch the user is about to make.
+   */
+  axis: Measure;
+  bands: Record<Measure, ScaleBand>;
+}
+
+function layoutFor(enabled: Measure[]): Layout {
+  const bands: Record<Measure, ScaleBand> = { vega: FULL_BAND, theta: FULL_BAND, iv: FULL_BAND };
+  const n = enabled.length;
+  enabled.forEach((m, i) => {
+    if (n > 1) bands[m] = { top: i / n + BAND_GUTTER, bottom: (n - 1 - i) / n + BAND_GUTTER };
+  });
+  // Seeded with the first measure rather than null so the common path — open the pane, switch Vega
+  // on — builds its panes on the left axis outright instead of rebuilding onto it a render later.
+  return { axis: enabled[0] ?? MEASURE_ORDER[0], bands };
 }
 
 export interface GreekIndicatorPaneProps {
@@ -178,24 +220,45 @@ export default function GreekIndicatorPane({
     syncTooltipRef.current?.showAt(time);
   }, []);
 
-  // `axisScaleId: 'left'` is what keeps the overlays off the right scale. This pane belongs to
-  // the overlays, so their totals get the real left axis and the underlying reference line keeps
-  // the right one to itself — the same division the host's price pane makes between its legs and
-  // its candles. On an invisible overlay scale (the Tracker's arrangement) lightweight-charts
-  // hangs every greek's axis tag off the right scale instead, stacking readings in the hundreds
-  // against an axis ticked in thousands of rupees, describing neither.
+  // `axisScaleId: 'left'` is what keeps a measure's totals off the right scale. This pane belongs
+  // to the overlays, so the owning measure's totals get the real left axis and the underlying
+  // reference line keeps the right one to itself — the same division the host's price pane makes
+  // between its legs and its candles. On an invisible overlay scale (the Tracker's arrangement)
+  // lightweight-charts hangs every greek's axis tag off the right scale instead, stacking readings
+  // in the hundreds against an axis ticked in thousands of rupees, describing neither.
+  //
+  // The layout is state rather than something derived here because `on` belongs to the hooks, and
+  // a hook cannot be fed a value that its own return decides — so the enabled set reaches the next
+  // render through the effect below. One extra render per toggle, and none per tick.
+  const [layout, setLayout] = useState<Layout>(() => layoutFor([]));
   const overlayDeps = {
     chartRef,
     currentInstRef,
     allBarsRef,
     inline: true,
-    axisScaleId: 'left',
     histDays,
     initialDay,
   };
-  const vega = useGreekOverlay({ greek: 'vega', ...overlayDeps });
-  const theta = useGreekOverlay({ greek: 'theta', ...overlayDeps });
-  const iv = useGreekOverlay({ greek: 'iv', ...overlayDeps });
+  const bandFor = (m: Measure) => ({
+    axisScaleId: layout.axis === m ? 'left' : undefined,
+    bandTop: layout.bands[m].top,
+    bandBottom: layout.bands[m].bottom,
+  });
+  const vega = useGreekOverlay({ greek: 'vega', ...overlayDeps, ...bandFor('vega') });
+  const theta = useGreekOverlay({ greek: 'theta', ...overlayDeps, ...bandFor('theta') });
+  const iv = useGreekOverlay({ greek: 'iv', ...overlayDeps, ...bandFor('iv') });
+
+  // Re-slice whenever the enabled set changes. Nothing here touches a series: bands are scale
+  // margins, so this is a live option change on scales that already exist.
+  useEffect(() => {
+    const isOn: Record<Measure, boolean> = { vega: vega.on, theta: theta.on, iv: iv.on };
+    const enabled = MEASURE_ORDER.filter((m) => isOn[m]);
+    setLayout(layoutFor(enabled));
+    // With every measure off nobody owns the left scale, so put it back on the margins the chart
+    // opened with rather than leaving the last owner's slice on an empty axis.
+    if (!enabled.length)
+      chartRef.current?.priceScale('left').applyOptions({ scaleMargins: FULL_BAND });
+  }, [vega.on, theta.on, iv.on]);
 
   // ── Chart init ─────────────────────────────────────────────────────────────
   // Created ONCE and never rebuilt. The host views recreate their own charts on theme and
@@ -363,6 +426,32 @@ export default function GreekIndicatorPane({
       (t) => togglePinRef.current?.(t),
     );
   }, [chartTick, onTogglePin]);
+
+  // ── Double-click: hand the price axes back to autoscale ────────────────────
+  // Dragging a price axis scales it by hand, and lightweight-charts switches that scale's
+  // `autoScale` off for good when you do — from then on the lines drift out of the pane on every
+  // zoom and nothing brings them back. The Tracker has had this escape hatch since it hit the same
+  // wall; this pane needs it more, since it shows two visible axes.
+  //
+  // Price scales only. The Tracker also resets its time range here, but this chart is enrolled in
+  // the host's scroll sync, so touching the time scale would drag price and P&L along with it.
+  // Margins are left alone deliberately: an axis drag changes the range, never the band.
+  useEffect(() => {
+    const el = containerRef.current;
+    const chart = chartRef.current;
+    if (!el || !chart) return;
+    const onDblClick = () => {
+      for (const id of ['left', 'right']) {
+        try {
+          chart.priceScale(id).applyOptions({ autoScale: true });
+        } catch {
+          /* scale not on this chart */
+        }
+      }
+    };
+    el.addEventListener('dblclick', onDblClick);
+    return () => el.removeEventListener('dblclick', onDblClick);
+  }, [chartTick]);
 
   // ── Instrument switch: tear the basket down before it can be rebuilt ────────
   // Mirrors the Tracker's load path. Without this the panes keep the previous underlying's

@@ -103,7 +103,22 @@ export interface GreekPane {
     mapTime?: TimeMapper,
   ): void;
   setHeight(px: number): void;
+  setBand(m: ScaleBand): void;
   destroy(): void;
+}
+
+/**
+ * A horizontal slice of the host pane, as lightweight-charts `scaleMargins` — the fraction of the
+ * pane's height left empty above and below this measure's lines.
+ *
+ * A host stacking several measures in ONE pane hands each of them a disjoint band, so they stop
+ * sharing a price range: Vega near +70 and Theta near −75 on one scale each hold the axis open for
+ * the other, and neither can ever expand. Bands are per-scale, so this is the whole mechanism —
+ * there is no clipping and no data transform, each measure simply auto-scales inside its own slice.
+ */
+export interface ScaleBand {
+  top: number;
+  bottom: number;
 }
 
 export interface GreekPaneOpts {
@@ -255,6 +270,13 @@ export function createGreekPane(
     setHeight(px) {
       pane?.setHeight(px);
     },
+    setBand(m) {
+      // Both scales, so a measure's Δ lines follow its totals into the band instead of wandering
+      // across a slice they have nothing to do with. They stay SEPARATE scales — totals and diffs
+      // are different magnitudes by construction (see the header note) — just co-located.
+      ceTotal.priceScale().applyOptions({ scaleMargins: m });
+      ceDiff.priceScale().applyOptions({ scaleMargins: m });
+    },
     destroy() {
       for (const s of all) {
         try {
@@ -282,6 +304,7 @@ export function createGreekPane(
 export interface IvPane {
   setData(points: ReadonlyArray<IvPoint>, mapTime?: TimeMapper): void;
   setHeight(px: number): void;
+  setBand(m: ScaleBand): void;
   destroy(): void;
 }
 
@@ -324,6 +347,9 @@ export function createIvPane(chart: IChartApi, label: string, opts: GreekPaneOpt
     },
     setHeight(px) {
       pane?.setHeight(px);
+    },
+    setBand(m) {
+      line.priceScale().applyOptions({ scaleMargins: m });
     },
     destroy() {
       try {

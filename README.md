@@ -314,7 +314,7 @@ Option-chain flow is:
 - Amending an open order (`modifyOrder`) persists through `dbModifyOrder`, rejects non-numeric,
   negative or zero-quantity values without partially applying them, and re-evaluates the order
   against the last tick — the same immediate-fill attempt `placeOrder` makes, because fills are
-  otherwise only checked when a price *changes* and a limit moved onto the wrong side of a
+  otherwise only checked when a price _changes_ and a limit moved onto the wrong side of a
   standing market would sit there until it did.
 - Every live tick flows through `SimBroker.onLtp()`, fill checking, position updates, and
   `position_ltp` broadcasting.
@@ -359,7 +359,7 @@ are unique by `(basket_group_id, trade_date)`.
 `entry_qty` is the signed size the position was opened at, kept so a closed position reports
 its real quantity and side. Rows written before the column existed are `NULL`, and those fall
 back to deriving the size from `realized_pnl / |exit_price − avg_price|` — a lossy estimate that
-was the *only* path until the column was added, because `entry_qty` was computed at fill time
+was the _only_ path until the column was added, because `entry_qty` was computed at fill time
 and never persisted.
 
 The `positions` upsert deliberately re-writes `entry_time` and `entry_qty` on conflict. A closed
@@ -441,7 +441,7 @@ option chain, straddle, strategy, basket, backtest, watchlist, and tracker. Supp
 are single, horizontal split, vertical split, grid, left-heavy, and right-heavy.
 
 `src/lib/` contains Greek aggregation/rendering, open-interest rendering, GEX calculations,
-strategy templates, and shared utilities. `src/backtest/` contains frontend backtest types,
+strategy templates, chart lifecycle guards (`chartLifecycle.ts`), and shared utilities. `src/backtest/` contains frontend backtest types,
 leg configuration, intraday trade charts, and client analysis helpers. Shared frontend domain
 interfaces live in `src/types.ts`.
 
@@ -472,6 +472,76 @@ inside one big effect (Nubra BT, the backtest day view) the enrollment lives in 
 effect, because that effect owns the lifecycle of the charts it syncs while this one belongs to a
 child component. Pushing a crosshair in from outside is safe there because those handlers already
 ignore programmatic echoes — the `param.point === undefined && param.time !== undefined` branch.
+
+#### Price scales: one band per measure
+
+The pane shows two visible axes — the underlying reference line owns **right**, the greeks own
+**left** — plus a private overlay scale per measure. Putting every measure's totals on the one left
+axis does not work: Vega sits near +70 and Theta near −75, so each holds the axis open for the
+other, neither can ever expand, and zooming changes nothing because every window is still spanned
+by both. On CRUDEOIL, Theta at −246 flattened Vega into a straight line.
+
+So each enabled measure gets a disjoint horizontal **band** of the pane and auto-scales inside it.
+A band is nothing but `scaleMargins`: `GreekPane.setBand` / `IvPane.setBand` apply it to the
+measure's totals scale **and** its Δ scale, so a measure's dashed lines follow its solid ones
+instead of wandering across a slice they have nothing to do with. `GreekIndicatorPane` computes the
+slices in tray order (`vega, theta, iv`) from how many are switched on — one measure keeps the
+renderer's own margins and is pixel-identical to a single-scale pane; `n` measures get
+`{ top: i/n + 0.05, bottom: (n−1−i)/n + 0.05 }`.
+
+The **first** enabled measure additionally owns the visible left axis, passed down as
+`axisScaleId: 'left'`. Because that scale carries the owner's band too, its ticks and grid lines
+are drawn only inside the owner's slice, so the numbers describe the band beside them. Every other
+measure keeps its last-value tags — correct values, hung off the right-hand column, exactly where
+lightweight-charts already puts the Δ tags. Moving that axis is the one layout change that cannot
+be applied in place, since a series' `priceScaleId` is fixed at creation: `useGreekOverlay` watches
+`axisScaleId` and rebuilds its panes, the same destroy/recreate an IV-measure switch already does.
+The enabled set reaches the hooks through component state, because `on` is the hooks' own return
+value — one extra render per toggle, none per tick.
+
+Double-clicking the pane restores `autoScale` on both visible axes. Dragging a price axis scales
+it by hand and lightweight-charts turns that scale's `autoScale` off permanently, after which the
+lines drift out of the pane on every zoom with no way back. The handler deliberately leaves the
+**time** scale alone — this chart is enrolled in the host's scroll sync, so resetting it would drag
+price and P&L along with it.
+
+#### Enrolling the pane: three things that bite
+
+**A shared logical range only aligns charts that share a bar grid.** The pane's underlying line
+goes through `barsToSessionLine`, which drops out-of-session bars; a host charting raw bars is
+therefore offset by the count of leading pre-open ones — Nubra BT, whose `underlyingBars` start
+~08:50, sat ~25 bars off its Indicators pane. `StrategyAnalysisView` escapes it only because it
+clips to the session first, and `TradeChartView` because it syncs on **time** ranges. The fix in
+`NubraBacktest.tsx` is to shift the range by `logicalAtTime(to, t) − logicalAtTime(from, t)` for
+one instant both charts hold, `t` taken from `series.dataByIndex(centre, NearestLeft ?? NearestRight)`.
+It is grid-agnostic, collapses to a plain copy when the grids match, and is exact because
+`coordinateToLogical` returns integers — so the two-way binding still settles.
+
+**Crosshair sync is symmetric and eventless.** `setCrosshairPosition` draws the lines but
+suppresses the event (`skipEvent: true`), so whichever side pushes must also push the readout:
+the pane exposes `syncCrosshair` as the third `onChartReady` argument, and the host feeds its own
+tooltip updater the same instant. Nubra BT binds all three sibling panes → Indicators **and**
+Indicators → all three siblings, so hovering the Greeks pane raises the pane's card and hovering
+the pane raises the siblings' cards.
+
+**Guard the push with a re-entrancy flag, never a "cursor is in pane X" latch.** lightweight-charts
+re-fires a _pointed_ crosshair event whenever a chart's model updates — synthetic positions
+included — so a crosshair pushed onto a pane comes back looking exactly like the cursor arriving
+there. A latch set on that never releases and the pane freezes on one instant. The flag in
+`NubraBacktest.tsx` is set and cleared in a `finally` around the push itself, the same shape the
+range sync already used.
+
+#### Chart lifecycle: `src/lib/chartLifecycle.ts`
+
+Cross-chart sync makes disposal a hazard, because a removed chart does not fail where you touch
+it. `chart.remove()` disposes the pane canvases but the model still holds the widget's invalidate
+handler, so a later `setData` / `setVisibleLogicalRange` / `setCrosshairPosition` quietly schedules
+a repaint; the **next frame** paints disposed canvases and throws `Object is disposed` from inside
+the library, with no application frame on the stack and no try/catch at the call site able to reach
+it. `removeChart` records the disposal, `isChartLive` answers the question, and `chartFrame` covers
+the rAF case. Every chart teardown in `src/` goes through `removeChart` — the only literal
+`.remove()` call left is the one inside it. Sync bindings hold **getters** for their targets rather
+than captured handles, so each event re-reads liveness instead of trusting a handle from bind time.
 
 `src/lib/greekTooltip.ts` handles that echo from the other side, and is where every "what do the
 overlay lines read at instant X" question is answered:
@@ -508,18 +578,24 @@ Aggregation lives in `src/lib/greekAggregator.ts` and plots a delta-filtered nea
 basket, CE and PE as separate lines. The delta band is CE `[0.05, 0.609]` and PE
 `[-0.609, -0.05]`.
 
-| Setting     | Options              | Meaning                                                         |
-| ----------- | -------------------- | --------------------------------------------------------------- |
-| Method      | `mine` / `industry`  | Raw per-contract Greek sum, vs. notional `greek × OI × lotSize` |
-| Basket      | `fixed` / `floating` | Membership locked at t₀, vs. re-filtered every snapshot         |
-| Composition | `chained` / `raw`    | Splice out membership steps, vs. plain Σ (default `chained`)    |
-| Baseline    | `session` / `window` | Where t₀ sits (default `session`)                               |
-| Series      | totals / diff / both | Absolute sum (solid) vs. change-from-t₀ (dashed, overlay scale) |
+| Setting     | Options              | Meaning                                                                      |
+| ----------- | -------------------- | ---------------------------------------------------------------------------- |
+| Method      | `mine` / `industry`  | Raw per-contract Greek sum, vs. notional `greek × OI × lotSize`              |
+| Basket      | `fixed` / `floating` | Membership locked at t₀, vs. re-filtered every snapshot (default `floating`) |
+| Composition | `chained` / `raw`    | Splice out membership steps, vs. plain Σ (default `chained`)                 |
+| Baseline    | `session` / `window` | Where t₀ sits (default `session`)                                            |
+| Series      | totals / diff / both | Absolute sum (solid) vs. change-from-t₀ (dashed, overlay scale)              |
 
 History loads a trailing window ending at the selected day — 7 days by default, matching the
 Chart and Tracker candle loads. Hosts reviewing a single trade pass `histDays={1}`, so a Nubra BT
 run or a position reconstructs just its own session and the `HISTORIC DAY` picker moves to
 another. Cost is linear in this, which is why a backtest's full multi-month range is not fetched.
+
+**Basket** defaults to `floating`, so the line reads the near-the-money basket as it actually
+is, re-filtered on every snapshot. `fixed` locks membership at t₀ and keeps legs that have since
+drifted out of the delta band — the lens for following one day's cohort, and the one the diff
+series and the `session` baseline are built around. The toggle lives in `useGreekOverlay`'s state
+and is not persisted, so every fresh mount opens on `floating`.
 
 **Baseline** matters because of that trailing window. `session` (default)
 re-anchors t₀ at every IST trading day, so the fixed basket re-locks and the diff series
@@ -839,7 +915,7 @@ NIFTY, which is the same _relative_ accuracy given crude runs ~65 % IV and NIFTY
   each cell is coloured by the number it actually shows.
 - **Irreversible actions confirm through `ConfirmDialog`**, never `window.confirm`. That is the
   square-off buttons in the Positions tab (both the per-strategy one and Exit All) and logout. A
-  pending square-off holds position *keys* and re-reads the book when confirmed, so a leg that
+  pending square-off holds position _keys_ and re-reads the book when confirmed, so a leg that
   closed while the dialog was open cannot be ordered against.
 - `nubra_name` is the broker's exchange-prefixed instrument name.
 - `zanskar_name` is the legacy/alternate API name.

@@ -45,6 +45,7 @@ import {
   createIvPane,
   type GreekPane,
   type IvPane,
+  type ScaleBand,
   type SeriesMode,
   type TimeMapper,
 } from '../lib/greekRenderer';
@@ -251,8 +252,21 @@ interface Deps {
    * Visible axis ('left' / 'right') for the inline totals, instead of an invisible overlay
    * scale. Only meaningful with `inline`; see `GreekPaneOpts.axisScaleId` for why a host that
    * OWNS its pane wants this and the Tracker, which does not, leaves it unset.
+   *
+   * Only ONE measure can hold a given axis, so a host stacking several in one pane hands 'left' to
+   * whichever it wants labelled and leaves the rest on their private overlay scales. Changing this
+   * after the panes exist rebuilds them: a series' `priceScaleId` is fixed at creation.
    */
   axisScaleId?: string;
+  /**
+   * The horizontal slice of the host's pane this measure gets, as `scaleMargins` fractions — see
+   * `ScaleBand`. Two numbers rather than an object so a fresh literal each render cannot churn the
+   * effect that applies them.
+   *
+   * Leave unset (Tracker, Chart) and the renderer's own margins stand: the measure spans the pane.
+   */
+  bandTop?: number;
+  bandBottom?: number;
   /**
    * Trailing days of history to reconstruct, ending at the selected day. Defaults to
    * GREEK_HIST_DAYS (7), which matches the Chart and Tracker candle loads.
@@ -302,6 +316,8 @@ export function useGreekOverlay({
   allBarsRef,
   inline,
   axisScaleId,
+  bandTop,
+  bandBottom,
   histDays,
   initialDay,
 }: Deps): GreekOverlayApi {
@@ -350,6 +366,11 @@ export function useGreekOverlay({
   const minePaneRef = useRef<GreekPane | null>(null);
   const indPaneRef = useRef<GreekPane | null>(null);
   const ivPaneRef = useRef<IvPane | null>(null);
+  // Read during pane creation, which can happen from a WS callback rather than a render, so the
+  // band has to be a ref and not the prop closure.
+  const bandRef = useRef<ScaleBand | null>(null);
+  bandRef.current =
+    bandTop == null || bandBottom == null ? null : { top: bandTop, bottom: bandBottom };
   // Multi-expiry WS state + latest live legs per expiry (merged into each snapshot).
   const wsAssetRef = useRef<string | null>(null);
   const wsExpiriesRef = useRef<Set<string>>(new Set());
@@ -455,6 +476,20 @@ export function useGreekOverlay({
   }
 
   // ── Pane lifecycle ─────────────────────────────────────────────────────────
+  /**
+   * Confine whatever panes exist to this measure's slice of the host pane.
+   *
+   * A no-op for hosts that pass no band, which is what keeps the Tracker's and the Chart's
+   * overlays on the renderer's own margins.
+   */
+  function applyBand() {
+    const b = bandRef.current;
+    if (!b) return;
+    minePaneRef.current?.setBand(b);
+    indPaneRef.current?.setBand(b);
+    ivPaneRef.current?.setBand(b);
+  }
+
   function syncPanes(m: Method | 'both') {
     const chart = chartRef.current;
     if (!chart || !enabledRef.current) return;
@@ -477,6 +512,7 @@ export function useGreekOverlay({
         ivPaneRef.current = null;
       }
       ivPaneRef.current = createIvPane(chart, title, { ...paneOpts, scaleKey: measure });
+      applyBand();
       return;
     }
 
@@ -500,6 +536,9 @@ export function useGreekOverlay({
       indPaneRef.current.destroy();
       indPaneRef.current = null;
     }
+    // After creation, so a pane opens already inside its band rather than spanning the host pane
+    // for a frame and snapping into place.
+    applyBand();
   }
 
   function destroyPanes() {
@@ -702,6 +741,30 @@ export function useGreekOverlay({
     },
     [],
   );
+
+  // ── Layout: band, and the axis the totals hang off ─────────────────────────
+  // A host that stacks measures in one pane re-slices them whenever the enabled set changes.
+  // Margins are a live scale option, so this is just a re-apply — no series are touched.
+  useEffect(() => {
+    applyBand();
+  }, [bandTop, bandBottom]);
+
+  // Moving the visible axis to another measure is the one layout change that CANNOT be applied in
+  // place: `priceScaleId` is fixed when a series is created, so the panes have to be rebuilt onto
+  // the new scale and re-fed. Same destroy/recreate the IV-measure switch above already does, and
+  // it only runs when the user toggles a measure — never on a tick.
+  const firstAxisRef = useRef(true);
+  useEffect(() => {
+    if (firstAxisRef.current) {
+      firstAxisRef.current = false; // the initial panes are built with this axis already
+      return;
+    }
+    if (!enabledRef.current || !chartRef.current) return;
+    destroyPanes();
+    syncPanes(cfgRef.current.method);
+    requestDraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [axisScaleId]);
 
   function subscribeWsMulti(asset: string, expiriesSel: string[], exchange: string) {
     unsubscribeWsAll();
