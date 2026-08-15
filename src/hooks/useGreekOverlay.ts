@@ -316,7 +316,10 @@ export function useGreekOverlay({
   const [expiries, setExpiries] = useState<string[]>([]);
   const [selExpiries, setSelExpiries] = useState<string[]>([]);
   const [method, setMethodState] = useState<Method | 'both'>('mine');
-  const [basket, setBasketState] = useState<Basket>('fixed');
+  // Floating by default: the line should read the near-the-money basket as it actually is now,
+  // re-filtered every snapshot. 'fixed' — the basket locked at t_min, drift and all — stays one
+  // click away for reading a single day's cohort.
+  const [basket, setBasketState] = useState<Basket>('floating');
   const [baseline, setBaselineState] = useState<Baseline>('session');
   // Chained by default: a strike crossing the delta band's top edge carries ~96% of peak vega
   // with it, so a raw sum steps for reasons that are not Greek movement. 'raw' stays one click
