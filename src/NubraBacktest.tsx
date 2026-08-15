@@ -1,11 +1,19 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { createChart, LineSeries, CandlestickSeries, CrosshairMode } from 'lightweight-charts';
-import type { IChartApi, ISeriesApi, MouseEventParams } from 'lightweight-charts';
+import {
+  createChart,
+  LineSeries,
+  CandlestickSeries,
+  CrosshairMode,
+  MismatchDirection,
+} from 'lightweight-charts';
+import type { IChartApi, ISeriesApi, MouseEventParams, Time } from 'lightweight-charts';
 import SvgChart from './components/SvgChart';
 import type { Instrument } from './types';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
 import { payoffAtExpiry, blackScholes, impliedVolatility, RISK_FREE } from './lib/GexService';
 import { fmtPrice } from './lib/utils';
+import { logicalAtTime } from './lib/greekTooltip';
+import { isChartLive, removeChart } from './lib/chartLifecycle';
 import { defaultBacktestDate } from './lib/tradingDay';
 import {
   PriceTooltip,
@@ -128,6 +136,25 @@ interface Props {
   instrument: Instrument | null;
   theme?: 'light' | 'dark';
 }
+
+/**
+ * The chart block's own tooltip updater, as seen from outside it.
+ *
+ * The three panes it owns drive each other from inside that effect. The Indicators pane cannot:
+ * its chart belongs to a child component with its own lifecycle, so it is synced from a separate
+ * effect that needs this handle to raise the same three cards a sibling pane would.
+ *
+ * `source` names the pane the cursor is actually in, so that pane's card can trail the cursor
+ * while the others sit at the top of theirs; null — the Indicators pane's case — tops out all
+ * three. The return is the reading at that instant, which is what a caller anchors its own
+ * `setCrosshairPosition` calls to.
+ */
+type HostTooltipUpdate = (
+  time: number | null,
+  x: number | null,
+  activeChartY: number | null,
+  source: 'price' | 'pnl' | 'greeks' | null,
+) => { spot: number | null; totalPnl: number; delta: number } | null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -380,6 +407,10 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const [indicatorsHeight, setIndicatorsHeight] = useState(200);
   const indicatorsChartRef = useRef<IChartApi | null>(null);
   const indicatorsSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  // The pane's own readout, driven from here. `setCrosshairPosition` draws the crosshair but
+  // suppresses the event behind it, so a pane synced from outside shows the lines and no card
+  // unless the instant is handed to it separately.
+  const indicatorsSyncRef = useRef<((time: number | null) => void) | null>(null);
   const indicatorsPaneRef = useRef<HTMLDivElement>(null);
   // The price chart's underlying series, mirrored out of the chart-building effect so the
   // Indicators sync effect can name a series for setCrosshairPosition without re-entering it.
@@ -413,6 +444,14 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const pnlTooltipRef = useRef<PnlTooltipRef>(null);
   const greeksTooltipRef = useRef<GreeksTooltipRef>(null);
   const [activeChartType, setActiveChartType] = useState<'price' | 'pnl' | 'greeks' | null>(null);
+
+  // Mirrored out of the chart-building effect for the Indicators sync effect below, the same way
+  // `indexSeriesRef` already is: it has to reach these without re-entering that effect. Null
+  // between rebuilds, and null for a pane that is switched off.
+  const hostTooltipsRef = useRef<HostTooltipUpdate | null>(null);
+  const basketSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  /** Whichever delta line the Greeks pane is currently leading with — a crosshair anchor only. */
+  const greeksAnchorRef = useRef<ISeriesApi<'Line'> | null>(null);
 
   // Greeks Chart Refs
   const greeksContainerRef = useRef<HTMLDivElement>(null);
@@ -1312,6 +1351,12 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       greeksChartRef.current = null;
     }
 
+    // Crosshair anchors for the Indicators sync effect — see `hostTooltipsRef`. Assigned here,
+    // where this block's picture of the three charts is complete, and cleared with them below.
+    basketSeriesRef.current = basketSeries;
+    greeksAnchorRef.current =
+      greeksSeriesMap[`${activeGreekSource(greeksLegFilter)}_delta`] ?? null;
+
     setChartEpoch((e) => e + 1);
 
     // Fit timescale layout
@@ -1406,6 +1451,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
       return { spot, totalPnl, delta };
     };
+    hostTooltipsRef.current = updateAllTooltips;
 
     // ── Crosshair hover updates (Price Chart) ──
     if (priceChart && indexSeries) {
@@ -1532,18 +1578,16 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       pnlChartRef.current = null;
       greeksChartRef.current = null;
       indexSeriesRef.current = null;
-      if (priceChart)
-        try {
-          priceChart.remove();
-        } catch {}
-      if (pnlChart)
-        try {
-          pnlChart.remove();
-        } catch {}
-      if (greeksChart)
-        try {
-          greeksChart.remove();
-        } catch {}
+      basketSeriesRef.current = null;
+      greeksAnchorRef.current = null;
+      hostTooltipsRef.current = null;
+      // `removeChart`, not `chart.remove()`: this block rebuilds its charts on a dozen different
+      // state changes, and the Indicators sync effect below only re-binds a render later. Between
+      // the two it still holds these handles, and the only way it can tell a dead chart from a
+      // live one is if the teardown was recorded. See lib/chartLifecycle.
+      removeChart(priceChart);
+      removeChart(pnlChart);
+      removeChart(greeksChart);
     };
   }, [
     evalResult,
@@ -1695,9 +1739,14 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
   /** The pane owns its chart, so it hands the handle up. See the sync effect below. */
   const handleIndicatorsChart = useCallback(
-    (chart: IChartApi | null, baseSeries: ISeriesApi<'Line'> | null) => {
+    (
+      chart: IChartApi | null,
+      baseSeries: ISeriesApi<'Line'> | null,
+      syncCrosshair: ((time: number | null) => void) | null,
+    ) => {
       indicatorsChartRef.current = chart;
       indicatorsSeriesRef.current = baseSeries;
+      indicatorsSyncRef.current = syncCrosshair;
       setChartEpoch((e) => e + 1);
     },
     [],
@@ -1718,32 +1767,98 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   );
 
   /**
-   * Keep the Indicators pane scrolling AND crosshair-locked with the price chart.
+   * Keep the Indicators pane scrolling AND crosshair-locked with the three panes above it.
    *
    * A standalone effect rather than another entry in the big chart block: that block creates and
    * destroys the three charts it syncs, while this chart belongs to a child component with its
-   * own lifecycle. Re-runs when handleIndicatorsChart bumps chartEpoch.
+   * own lifecycle. Re-runs when either side bumps chartEpoch — the pane on mount, the block on
+   * every rebuild — so the handles it closes over are never a rebuild behind.
    *
-   * Pushing a crosshair onto the price chart is safe from out here because that block's own
-   * handlers explicitly ignore programmatic echoes — the `param.point === undefined &&
-   * param.time !== undefined` branch — so this cannot start a feedback loop with them.
+   * Pushing a crosshair onto those charts is safe from out here because the block's own handlers
+   * explicitly ignore programmatic echoes — the `param.point === undefined && param.time !==
+   * undefined` branch — so this cannot start a feedback loop with them.
    */
   useEffect(() => {
     const ic = indicatorsChartRef.current;
     const pc = priceChartRef.current;
     if (!ic || !pc) return;
+    // Both may be absent: the Greeks pane is opt-in, and the P&L pane goes with its container.
+    const siblings = [pc, pnlChartRef.current, greeksChartRef.current].filter(
+      (c): c is IChartApi => !!c,
+    );
     const cleanups: Array<() => void> = [];
 
+    // The two ends hold different series kinds — the price pane is candles, the Indicators pane a
+    // line — and setCrosshairPosition only needs *a* series to anchor against, so the union is
+    // the honest type here rather than `any`.
+    type AnchorSeries = ISeriesApi<'Line'> | ISeriesApi<'Candlestick'>;
+
+    /**
+     * The chart, or null once it has been torn down.
+     *
+     * Every push out of this effect goes through here, because a removed chart does not fail
+     * where you touch it: it quietly queues a repaint and throws `Object is disposed` from inside
+     * lightweight-charts on the *next* frame, where no try/catch of ours can reach it. The block
+     * above rebuilds its three charts on a dozen different state changes and this effect re-binds
+     * a render later, so between the two it is still holding dead handles — while this pane's own
+     * chart, which is never rebuilt, keeps firing range and crosshair events into them.
+     */
+    const live = (c: IChartApi | null | undefined): IChartApi | null => (isChartLive(c) ? c : null);
+
     // ── Range ──
+    //
+    // These two charts do NOT share a bar index. The price, P&L and Greeks charts plot every bar
+    // the run returned, pre-open ones included; the Indicators pane draws its underlying through
+    // `barsToSessionLine`, which drops everything outside the session. So bar 0 is 08:50 on one
+    // chart and 09:15 on the other, and copying a logical range across — which is what this used
+    // to do — parked the pane about 25 minutes away from its siblings, reading a different minute
+    // under the same crosshair. (StrategyAnalysisView never hit this: it clips its underlying to
+    // the session before charting it, so there the two grids happen to coincide.)
+    //
+    // Rather than assume any particular offset, ask both charts where one shared instant sits and
+    // move the range by the difference. That holds for any grid mismatch, and collapses to the
+    // old copy when there is none.
+    const indexShift = (
+      from: IChartApi,
+      fromSeries: AnchorSeries | null,
+      to: IChartApi,
+      range: { from: number; to: number },
+    ): number => {
+      if (!live(from) || !live(to)) return 0;
+      try {
+        const centre = Math.round((range.from + range.to) / 2);
+        // NearestLeft finds nothing when the view is parked left of the first bar, which is
+        // exactly when a silent 0 would knock the panes apart; NearestRight covers that end.
+        const at =
+          fromSeries?.dataByIndex(centre, MismatchDirection.NearestLeft) ??
+          fromSeries?.dataByIndex(centre, MismatchDirection.NearestRight);
+        if (!at) return 0;
+        const a = logicalAtTime(from, at.time as number);
+        const b = logicalAtTime(to, at.time as number);
+        return a == null || b == null ? 0 : b - a;
+      } catch {
+        return 0;
+      }
+    };
+
     let syncingRange = false;
-    const bindRange = (from: IChartApi, to: IChartApi) => {
-      const onRange = (range: unknown) => {
-        if (syncingRange || !range) return;
+    // `to` is a getter so the target is resolved at event time: a rebuilt chart is a new object,
+    // and reading it live means this binding picks the new one up rather than pushing at the
+    // corpse of the old one until the effect happens to re-run.
+    const bindRange = (
+      from: IChartApi,
+      fromSeries: () => AnchorSeries | null,
+      to: () => IChartApi | null,
+    ) => {
+      const onRange = (range: { from: number; to: number } | null) => {
+        const target = live(to());
+        if (syncingRange || !range || !target) return;
         syncingRange = true;
         try {
-          to.timeScale().setVisibleLogicalRange(range as never);
+          const d = indexShift(from, fromSeries(), target, range);
+          target.timeScale().setVisibleLogicalRange({ from: range.from + d, to: range.to + d });
         } catch {
-          /* target chart gone */
+          /* genuinely bad range */
         }
         syncingRange = false;
       };
@@ -1758,11 +1873,27 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     };
     try {
       const r = pc.timeScale().getVisibleLogicalRange();
-      if (r) ic.timeScale().setVisibleLogicalRange(r);
+      if (r && live(ic)) {
+        const d = indexShift(pc, indexSeriesRef.current, ic, r);
+        ic.timeScale().setVisibleLogicalRange({ from: r.from + d, to: r.to + d });
+      }
     } catch {
       /* not laid out yet */
     }
-    cleanups.push(bindRange(pc, ic), bindRange(ic, pc));
+    // Only the price chart is enrolled directly: the block's own sync keeps the other two locked
+    // to it, so a scroll anywhere in the stack reaches this pane through it either way.
+    cleanups.push(
+      bindRange(
+        pc,
+        () => indexSeriesRef.current,
+        () => ic,
+      ),
+      bindRange(
+        ic,
+        () => indicatorsSeriesRef.current,
+        () => priceChartRef.current,
+      ),
+    );
 
     // ── Crosshair ──
     // Both charts plot the same underlying, so one close serves as the y for either. Without a
@@ -1782,29 +1913,66 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       return best;
     };
 
-    // The two ends hold different series kinds — the price pane is candles, the Indicators pane a
-    // line — and setCrosshairPosition only needs *a* series to anchor against, so the union is
-    // the honest type here rather than `any`.
-    type AnchorSeries = ISeriesApi<'Line'> | ISeriesApi<'Candlestick'>;
-    const bindCrosshair = (from: IChartApi, to: IChartApi, series: () => AnchorSeries | null) => {
-      const onMove = (param: MouseEventParams) => {
-        const target = series();
-        if (!target) return;
-        if (param.point && param.time != null) {
-          try {
-            to.setCrosshairPosition(closeAt(param.time as number), param.time, target);
-          } catch {
-            /* target gone */
-          }
-        } else if (param.point === undefined && param.time !== undefined) {
-          // Programmatic echo — ignore, exactly as the main block does.
-        } else {
-          try {
-            to.clearCrosshairPosition();
-          } catch {
-            /* target gone */
-          }
+    /**
+     * Show an instant in the Indicators pane, or clear it with null.
+     *
+     * Two calls, not one: `setCrosshairPosition` draws the lines but deliberately suppresses the
+     * crosshair event, so the pane's own tooltip — which listens for that event — never hears
+     * about an instant pushed from out here. That is why the pane drew a bare crosshair with no
+     * card beside it while all three panes above it were showing readings.
+     */
+    /**
+     * True while this effect is the one moving a crosshair.
+     *
+     * Our own pushes bounce: `clearCrosshairPosition` fires exactly the eventless event a real
+     * mouse-leave does, so each direction below would otherwise read the other's clear as the
+     * cursor leaving and take down the card that side is in the middle of drawing. Hovering the
+     * price pane over a pre-open bar, which this pane has no bar to point at, is enough to do it.
+     *
+     * A flag around the push rather than a latch on which pane the cursor is in. The latch this
+     * replaces could never be released: lightweight-charts re-fires a *pointed* crosshair event
+     * when a chart's model updates, synthetic positions included, so a crosshair pushed onto this
+     * pane from above came back looking like the cursor had moved into it — and from then on this
+     * pane ignored its siblings and sat frozen on that instant until you hovered it yourself.
+     */
+    let pushing = false;
+    const push = (fn: () => void) => {
+      pushing = true;
+      try {
+        fn();
+      } finally {
+        pushing = false;
+      }
+    };
+
+    const showOnIndicators = (t: number | null) => {
+      const chart = live(ic);
+      if (!chart) return;
+      const target = indicatorsSeriesRef.current;
+      push(() => {
+        try {
+          // Only in-session instants exist here. Clearing on the others beats leaving the
+          // crosshair frozen wherever it last landed while the cursor is out in the pre-open bars.
+          if (t == null || !target || logicalAtTime(chart, t) == null)
+            chart.clearCrosshairPosition();
+          else chart.setCrosshairPosition(closeAt(t), t as Time, target);
+        } catch {
+          /* pane gone */
         }
+        indicatorsSyncRef.current?.(t);
+      });
+    };
+
+    // ── The three panes above → this one ──
+    // Every one of them, not just the price pane: with the Greeks pane open the cursor spends its
+    // time there, and hovering it used to leave this pane blank.
+    const bindFromSibling = (from: IChartApi) => {
+      const onMove = (param: MouseEventParams) => {
+        if (pushing) return;
+        if (param.point && param.time != null) showOnIndicators(param.time as number);
+        else if (param.point === undefined && param.time !== undefined) {
+          // Programmatic echo — ignore, exactly as the main block does.
+        } else showOnIndicators(null);
       };
       from.subscribeCrosshairMove(onMove);
       return () => {
@@ -1815,10 +1983,47 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         }
       };
     };
-    cleanups.push(
-      bindCrosshair(pc, ic, () => indicatorsSeriesRef.current),
-      bindCrosshair(ic, pc, () => indexSeriesRef.current),
-    );
+    for (const c of siblings) cleanups.push(bindFromSibling(c));
+
+    // ── This pane → the three above ──
+    // The mirror image, and for the same reason: hovering here drew a crosshair line up there and
+    // no cards. `x` carries across untranslated because all four plot areas start at the same
+    // 75px gutter and are the same width, so a plot-relative x means the same column in each.
+    const place = (
+      target: IChartApi | null,
+      t: number | null,
+      value: number | null,
+      s: AnchorSeries | null,
+    ) => {
+      const chart = live(target);
+      if (!chart) return;
+      try {
+        if (t == null || value == null || !s) chart.clearCrosshairPosition();
+        else chart.setCrosshairPosition(value, t as Time, s);
+      } catch {
+        /* chart gone */
+      }
+    };
+    const pushToSiblings = (param: MouseEventParams) => {
+      if (pushing) return; // our own clear coming back, not the cursor
+      if (param.point === undefined && param.time !== undefined) return; // echo
+      const pt = param.point;
+      const t = pt && param.time != null ? (param.time as number) : null;
+      push(() => {
+        const res = hostTooltipsRef.current?.(t, pt ? pt.x : null, null, null) ?? null;
+        place(priceChartRef.current, t, res?.spot ?? null, indexSeriesRef.current);
+        place(pnlChartRef.current, t, res ? res.totalPnl : null, basketSeriesRef.current);
+        place(greeksChartRef.current, t, res ? res.delta : null, greeksAnchorRef.current);
+      });
+    };
+    ic.subscribeCrosshairMove(pushToSiblings);
+    cleanups.push(() => {
+      try {
+        ic.unsubscribeCrosshairMove(pushToSiblings);
+      } catch {
+        /* chart disposed */
+      }
+    });
 
     return () => cleanups.forEach((fn) => fn());
   }, [chartEpoch, indicatorsVisible, evalResult]);

@@ -11,6 +11,7 @@ import type { DayTrade, IntradayPoint, Underlying } from './types';
 import { blackScholes, impliedVolatility, RISK_FREE } from '../lib/GexService';
 import { IST_OFFSET } from '../lib/utils';
 import GreekIndicatorPane from '../components/GreekIndicatorPane';
+import { isChartLive, removeChart } from '../lib/chartLifecycle';
 
 // TradingView-style multi-pane view for a single backtested day, mirroring the
 // live Positions P&L tracker (StrategyAnalysisView): underlying candles + each
@@ -596,9 +597,12 @@ export default function TradeChartView({
     return () => {
       unsubs.forEach((u) => u());
       priceChartRef.current = null;
-      pc.remove();
-      nc.remove();
-      gc.remove();
+      // `removeChart`, not `chart.remove()`: the Indicators sync effect below outlives this one
+      // and still holds these handles for a render afterwards. Recording the teardown is the only
+      // way it can tell a live chart from a dead one — see lib/chartLifecycle.
+      removeChart(pc);
+      removeChart(nc);
+      removeChart(gc);
     };
   }, [bars, series, legs, frames, trade.date, underlying]);
 
@@ -613,14 +617,20 @@ export default function TradeChartView({
     const pc = priceChartRef.current;
     if (!ic || !pc) return;
     let syncing = false;
-    const bind = (from: IChartApi, to: IChartApi) => {
+    // The target is resolved at event time and checked for liveness, because the effect above
+    // rebuilds its three charts while this pane's chart — created once, never rebuilt — keeps
+    // firing range events at whatever it was handed. A removed chart does not throw where you
+    // touch it: it queues a repaint and throws `Object is disposed` from inside lightweight-charts
+    // on the next frame, past any catch of ours. See lib/chartLifecycle.
+    const bind = (from: IChartApi, to: () => IChartApi | null) => {
       const onRange = (range: unknown) => {
-        if (syncing || !range) return;
+        const target = to();
+        if (syncing || !range || !isChartLive(target)) return;
         syncing = true;
         try {
-          to.timeScale().setVisibleRange(range as never);
+          target.timeScale().setVisibleRange(range as never);
         } catch {
-          /* target gone */
+          /* genuinely bad range */
         }
         syncing = false;
       };
@@ -635,12 +645,12 @@ export default function TradeChartView({
     };
     try {
       const r = pc.timeScale().getVisibleRange();
-      if (r) ic.timeScale().setVisibleRange(r);
+      if (r && isChartLive(ic)) ic.timeScale().setVisibleRange(r);
     } catch {
       /* not laid out yet */
     }
-    const a = bind(pc, ic);
-    const b = bind(ic, pc);
+    const a = bind(pc, () => ic);
+    const b = bind(ic, () => priceChartRef.current);
     return () => {
       a();
       b();
