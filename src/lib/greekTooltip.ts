@@ -225,6 +225,12 @@ export function logicalAtTime(chart: IChartApi, time: CrosshairTime): number | n
  *
  * `desiredTop` is the intended top edge rather than the cursor's y, because the synced-crosshair
  * path below wants the card pinned to the top of the pane instead of trailing a y it never had.
+ *
+ * `flipAtMidpoint` switches sides once the cursor is past the pane's horizontal midpoint instead
+ * of waiting until the card would overflow the right edge. That is the rule the stacked panes
+ * follow (StrategyAnalysisView's `place`, and PinnedCrosshairLayer's `alignLeft`), and a pane
+ * among them has to follow it too: on the last-resort rule its card is still sitting to the right
+ * of the crosshair while every card above it has already swung left.
  */
 export function placeTooltip(
   container: HTMLElement,
@@ -232,16 +238,60 @@ export function placeTooltip(
   cursorX: number,
   desiredTop: number,
   gap = 16,
+  flipAtMidpoint = false,
 ): void {
   const tw = tooltip.offsetWidth;
   const th = tooltip.offsetHeight;
-  let x = cursorX + gap;
+  let x =
+    flipAtMidpoint && cursorX > container.clientWidth / 2 ? cursorX - tw - gap : cursorX + gap;
+  // Still the backstop for a card that would run off the right edge before the midpoint — a wide
+  // card in a narrow pane.
   if (x + tw > container.clientWidth) x = cursorX - tw - gap;
   let y = desiredTop;
   if (y + th > container.clientHeight) y = container.clientHeight - th - 8;
   tooltip.style.left = `${Math.max(4, x)}px`;
   tooltip.style.top = `${Math.max(4, y)}px`;
 }
+
+/**
+ * The card's chrome — how its timestamp header and each reading are marked up.
+ *
+ * Split out because the same rows are read in two very different frames. On the Tracker the card
+ * floats over someone else's price chart and stays deliberately plain; in a pane that sits in a
+ * stack of sibling panes it has to match the cards those panes draw, or the stack reads as four
+ * unrelated widgets. Only the markup varies — which rows exist, and how they are found, does not.
+ */
+export interface GreekTooltipStyle {
+  header(time: CrosshairTime): string;
+  row(color: string, label: string, value: string): string;
+}
+
+/** The Tracker's card: a bare timestamp over `tipRow`s. */
+export const PLAIN_TOOLTIP_STYLE: GreekTooltipStyle = {
+  header: (t) =>
+    `<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">${fmtCrosshairTime(t)}</div>`,
+  row: tipRow,
+};
+
+const PANEL_MONO = 'ui-monospace,SFMono-Regular,Menlo,Consolas,monospace';
+
+/**
+ * The panel card used by panes that live in a stack: a ruled monospace timestamp over rows with
+ * round swatches and tabular figures — the markup of `ChartTooltips`' `*Body` components, in the
+ * innerHTML form this file writes. The two have to be edited together to stay in step.
+ */
+export const PANEL_TOOLTIP_STYLE: GreekTooltipStyle = {
+  header: (t) =>
+    `<div style="font-size:10px;color:var(--text-muted);font-family:${PANEL_MONO};letter-spacing:0.02em;` +
+    `border-bottom:1px solid #ffffff0a;padding-bottom:4px;margin-bottom:6px">${fmtCrosshairTime(t)}</div>`,
+  row: (color, label, val) =>
+    `<div style="display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:11px;padding:2px 0;white-space:nowrap">` +
+    `<span style="display:flex;align-items:center;gap:6px;color:var(--text-secondary)">` +
+    `<span style="width:8px;height:8px;border-radius:9999px;background:${escapeHtml(color)};flex:none"></span>` +
+    `${escapeHtml(label)}</span>` +
+    `<span style="color:var(--text-primary);font-weight:500;font-variant-numeric:tabular-nums">${escapeHtml(val)}</span>` +
+    `</div>`,
+};
 
 export interface GreekCrosshairOpts {
   chart: IChartApi;
@@ -255,26 +305,88 @@ export interface GreekCrosshairOpts {
   formatBase: (v: number) => string;
   /** Pane whose series are enumerated for greek rows. Defaults to 0 (where inline overlays live). */
   paneIndex?: number;
+  /** Card chrome. Defaults to the Tracker's plain card. */
+  style?: GreekTooltipStyle;
+  /** See `placeTooltip` — set by panes that sit in a stack of sibling panes. */
+  flipAtMidpoint?: boolean;
 }
 
 /**
- * Subscribe a crosshair tooltip listing the base series plus every visible greek line.
- * Returns an unsubscribe function.
+ * Card markup and placement, shared by the hover subscription below and the host-driven sync
+ * path in `createGreekTooltip`.
  *
  * Greek/IV history is 1-minute while a live price line is 1-second, so `seriesData` is empty for
  * a greek series at ~59 of every 60 crosshair positions — rows would blink out and the tooltip
  * would collapse to just the price. Enumerating the pane's series and carrying the last known
  * value forward (NearestLeft) is what keeps them steady, rather than relying on an exact time hit.
+ * `readExact` is the crosshair's own `seriesData` where there is one, and null for an instant the
+ * host synced onto this pane, which carries no series data at all.
  */
-export function bindGreekCrosshair(opts: GreekCrosshairOpts): () => void {
+function makeGreekTooltipRenderer(opts: GreekCrosshairOpts) {
   const { chart, container, tooltip, baseSeries, baseLabel, formatBase } = opts;
   const paneIndex = opts.paneIndex ?? 0;
+  const style = opts.style ?? PLAIN_TOOLTIP_STYLE;
+
+  const hide = () => {
+    tooltip.style.display = 'none';
+  };
+
+  // The time scale reports x within the PLOT area, excluding any visible left price scale, while
+  // the tooltip is positioned inside the whole pane div — which includes that gutter. Measured
+  // rather than assumed: the scale's rendered width depends on its widest label.
+  const leftGutter = (): number => {
+    try {
+      return chart.priceScale('left').width() ?? 0;
+    } catch {
+      return 0;
+    }
+  };
+
+  /** `x` is plot-relative; `top` is the card's intended top edge within the pane. */
+  const render = (
+    time: CrosshairTime,
+    logical: number | null,
+    x: number,
+    top: number,
+    readExact: ((s: ISeriesApi<'Line'>) => number | undefined) | null,
+  ) => {
+    const rows: string[] = [];
+    const base = baseSeries();
+    if (base) {
+      // Exact hit first, then carry forward — otherwise the price row is the one thing that
+      // disappears on a synced crosshair, leaving greek rows with nothing to read them against.
+      const exact = readExact?.(base);
+      const v =
+        typeof exact === 'number' && Number.isFinite(exact) ? exact : seriesValueAt(base, logical);
+      if (v != null) rows.push(style.row('#2962ff', baseLabel(), formatBase(v)));
+    }
+
+    for (const r of greekRows(chart, base, readExact, logical, paneIndex)) {
+      rows.push(style.row(r.color, r.label, fmtCompact(r.value)));
+    }
+    if (!rows.length) {
+      hide();
+      return;
+    }
+    tooltip.innerHTML = style.header(time) + rows.join('');
+    tooltip.style.display = 'block';
+    placeTooltip(container, tooltip, x + leftGutter(), top, 16, !!opts.flipAtMidpoint);
+  };
+
+  return { hide, render };
+}
+
+/**
+ * Subscribe a crosshair tooltip listing the base series plus every visible greek line.
+ * Returns an unsubscribe function.
+ */
+export function bindGreekCrosshair(opts: GreekCrosshairOpts): () => void {
+  const { chart, container } = opts;
+  const { hide, render } = makeGreekTooltipRenderer(opts);
 
   const onCrosshair = (param: MouseEventParams) => {
-    // A host that syncs crosshairs across panes calls setCrosshairPosition on the panes the
-    // cursor is NOT over, and those fire with a time but no point. Deriving x from the time
-    // scale keeps the reading visible on a synced pane instead of blanking it — without this,
-    // hovering the price chart would move a crosshair line here and show nothing beside it.
+    // Some crosshair events arrive with a time but no point. Deriving x from the time scale
+    // keeps the reading visible rather than blanking it.
     let pt = param.point;
     let synced = false;
     if (!pt && param.time != null) {
@@ -296,44 +408,21 @@ export function bindGreekCrosshair(opts: GreekCrosshairOpts): () => void {
       pt.x > container.clientWidth ||
       pt.y > container.clientHeight
     ) {
-      tooltip.style.display = 'none';
+      hide();
       return;
     }
-    // A synced crosshair carries no seriesData either, so fall back to the time when there is
-    // no logical index to read against.
     const logical =
       param.logical ?? (synced ? logicalAtTime(chart, param.time as CrosshairTime) : null);
 
-    const rows: string[] = [];
-    const base = baseSeries();
-    if (base) {
-      // Exact hit first, then carry forward — otherwise the price row is the one thing that
-      // disappears on a synced crosshair, leaving greek rows with nothing to read them against.
-      const exact = (param.seriesData.get(base) as { value?: number } | undefined)?.value;
-      const v = typeof exact === 'number' ? exact : seriesValueAt(base, logical);
-      if (v != null) rows.push(tipRow('#2962ff', baseLabel(), formatBase(v)));
-    }
-
-    for (const r of greekRows(
-      chart,
-      base,
-      (s) => (param.seriesData.get(s) as { value?: number } | undefined)?.value,
+    render(
+      param.time as CrosshairTime,
       logical,
-      paneIndex,
-    )) {
-      rows.push(tipRow(r.color, r.label, fmtCompact(r.value)));
-    }
-    if (!rows.length) {
-      tooltip.style.display = 'none';
-      return;
-    }
-    tooltip.innerHTML =
-      `<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">${fmtCrosshairTime(param.time as CrosshairTime)}</div>` +
-      rows.join('');
-    tooltip.style.display = 'block';
-    // A synced crosshair has no cursor to dodge, so pin the card to the top of the pane rather
-    // than trailing a y that is really just 0.
-    placeTooltip(container, tooltip, pt.x, synced ? 8 : pt.y + 16);
+      pt.x,
+      // No cursor to dodge on a point-less event, so pin the card to the top of the pane rather
+      // than trailing a y that is really just 0.
+      synced ? 8 : pt.y + 16,
+      (s) => (param.seriesData.get(s) as { value?: number } | undefined)?.value,
+    );
   };
 
   chart.subscribeCrosshairMove(onCrosshair);
@@ -343,6 +432,50 @@ export function bindGreekCrosshair(opts: GreekCrosshairOpts): () => void {
     } catch {
       /* chart already disposed */
     }
+  };
+}
+
+/** Drives the same card from an instant the host chose, rather than from a cursor. */
+export interface GreekTooltipView {
+  /** Show the reading at `time`; null hides the card. */
+  showAt(time: CrosshairTime | null): void;
+  hide(): void;
+}
+
+/**
+ * A tooltip a HOST can drive, for panes it syncs a crosshair onto.
+ *
+ * `chart.setCrosshairPosition()` draws the crosshair but deliberately suppresses the
+ * crosshairMove event (`setAndSaveSyntheticPosition` → `setAndSaveCurrentPosition(..., skipEvent:
+ * true)` inside lightweight-charts), so a pane the host syncs gets crosshair LINES and no
+ * notification — `bindGreekCrosshair` never runs for it and the card silently stays hidden. The
+ * host has to say so itself, which is what this is for. Both may be created over one tooltip
+ * element: the hover path owns the card while the cursor is in the pane, this one while it is not.
+ */
+export function createGreekTooltip(opts: GreekCrosshairOpts): GreekTooltipView {
+  const { chart, container } = opts;
+  const { hide, render } = makeGreekTooltipRenderer(opts);
+
+  return {
+    hide,
+    showAt(time) {
+      if (time == null) {
+        hide();
+        return;
+      }
+      let x: number | null = null;
+      try {
+        x = chart.timeScale().timeToCoordinate(time as UTCTimestamp);
+      } catch {
+        x = null;
+      }
+      // Scrolled out of the visible range — the crosshair is off-pane, so is its reading.
+      if (x == null || !Number.isFinite(x) || x < 0 || x > container.clientWidth) {
+        hide();
+        return;
+      }
+      render(time, logicalAtTime(chart, time), x, 8, null);
+    },
   };
 }
 

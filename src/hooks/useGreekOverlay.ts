@@ -248,6 +248,12 @@ interface Deps {
   /** Render greeks inline on the price pane (Tracker) instead of a sub-pane below (Chart). */
   inline?: boolean;
   /**
+   * Visible axis ('left' / 'right') for the inline totals, instead of an invisible overlay
+   * scale. Only meaningful with `inline`; see `GreekPaneOpts.axisScaleId` for why a host that
+   * OWNS its pane wants this and the Tracker, which does not, leaves it unset.
+   */
+  axisScaleId?: string;
+  /**
    * Trailing days of history to reconstruct, ending at the selected day. Defaults to
    * GREEK_HIST_DAYS (7), which matches the Chart and Tracker candle loads.
    *
@@ -295,6 +301,7 @@ export function useGreekOverlay({
   currentInstRef,
   allBarsRef,
   inline,
+  axisScaleId,
   histDays,
   initialDay,
 }: Deps): GreekOverlayApi {
@@ -449,7 +456,7 @@ export function useGreekOverlay({
     const chart = chartRef.current;
     if (!chart || !enabledRef.current) return;
     const paneOpts = {
-      ...(inline ? { inline: true, paneIndex: 0 } : {}),
+      ...(inline ? { inline: true, paneIndex: 0, axisScaleId } : {}),
       ceColor: palette.ce,
       peColor: palette.pe,
       // Resolved per draw: panes are reused across instrument switches, so this has to

@@ -9,7 +9,7 @@
 // `GreekButton` tray, the same `greekAggregator` maths and `greekRenderer` panes. A change to a
 // Greek formula or a control lands here and in the Chart and Tracker views at once.
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createChart,
   CrosshairMode,
@@ -24,12 +24,15 @@ import { useGreekOverlay } from '../hooks/useGreekOverlay';
 import { GreekButton } from './GreekControls';
 import {
   bindGreekCrosshair,
+  createGreekTooltip,
   fmtCompact,
   fmtCrosshairTime,
   greekRows,
   logicalAtTime,
   seriesValueAt,
+  PANEL_TOOLTIP_STYLE,
   type GreekRow,
+  type GreekTooltipView,
 } from '../lib/greekTooltip';
 import { removeChart } from '../lib/chartLifecycle';
 import { barsToSessionLine, fmtPrice } from '../lib/utils';
@@ -44,12 +47,13 @@ import { bindPinTrigger, type ChartPin } from '../lib/chartPins';
  * the card has to come from here.
  */
 function GreekPinCard({ time, rows }: { time: number; rows: GreekRow[] }) {
+  // Same chrome as PANEL_TOOLTIP_STYLE and the ChartTooltips `*Body` cards — a pin and a hover
+  // reading sit side by side in this pane, so they must be the same object in two states.
   return (
-    <div
-      className="rounded-md border border-[var(--border)] bg-[var(--bg-card)] px-2.5 py-2 shadow-2xl"
-      style={{ minWidth: 120 }}
-    >
-      <div className="text-[10px] text-[var(--text-muted)] mb-1">{fmtCrosshairTime(time)}</div>
+    <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
+      <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">
+        {fmtCrosshairTime(time)}
+      </div>
       {rows.length === 0 ? (
         // Distinct from "no data": the pin can sit on a bar the overlays are simply switched
         // off for, and saying so beats an empty box that reads as a broken card.
@@ -58,11 +62,16 @@ function GreekPinCard({ time, rows }: { time: number; rows: GreekRow[] }) {
         rows.map((r) => (
           <div
             key={r.label}
-            className="flex items-center gap-1.5 leading-6 whitespace-nowrap text-[11px]"
+            className="flex items-center justify-between gap-4 text-[11px] py-0.5 whitespace-nowrap"
           >
-            <span className="w-2 h-2 rounded-sm shrink-0" style={{ backgroundColor: r.color }} />
-            <span className="text-[var(--text-secondary)]">{r.label}</span>
-            <span className="ml-auto pl-3.5 font-semibold text-[var(--text-primary)]">
+            <span className="flex items-center gap-1.5 text-[var(--text-secondary)]">
+              <span
+                className="w-2 h-2 rounded-full shrink-0"
+                style={{ backgroundColor: r.color }}
+              />
+              {r.label}
+            </span>
+            <span className="text-[var(--text-primary)] font-medium tabular-nums">
               {(r.format ?? fmtCompact)(r.value)}
             </span>
           </div>
@@ -83,6 +92,21 @@ export interface GreekIndicatorPaneProps {
   /** Trading day to open on ('YYYY-MM-DD') — e.g. the session the trade ran in. */
   initialDay?: string;
   /**
+   * The host's own chart metrics, so this pane's plot area starts and ends where its siblings'
+   * do — price-scale gutter widths in px, and the axis font size.
+   *
+   * A host stacks this pane under its price and P&L panes and syncs all of them to one logical
+   * range, but a logical range only lines up on screen if the plot areas do, and a plot area
+   * starts where its left price scale ends. `fontSize` is here for the same reason and not as
+   * styling: a price scale is as wide as its widest label or its `minimumWidth`, whichever wins,
+   * so a pane rendering its ticks a point larger than its neighbours can outgrow the gutter they
+   * agreed on and drift out of step again.
+   *
+   * The defaults match the hosts that build their panes at 75/75 and 12px (Nubra BT, the
+   * backtest trade view); StrategyAnalysisView is 60/75 at 11px and says so.
+   */
+  axisMetrics?: { leftWidth: number; rightWidth: number; fontSize: number };
+  /**
    * Handed the pane's chart on mount and null on unmount, so the host can enroll it in its own
    * scroll/crosshair sync and the pane scrolls in lockstep with price and P&L.
    *
@@ -90,8 +114,16 @@ export interface GreekIndicatorPaneProps {
    * to place the crosshair against — a host pushing a synced crosshair onto this pane has no
    * other way to name one, and reaching into `chart.panes()[0].getSeries()[0]` would silently
    * depend on the overlays never being added ahead of it.
+   *
+   * `syncCrosshair` is the readout half of that: `setCrosshairPosition` suppresses the crosshair
+   * event (see `createGreekTooltip`), so a host that syncs a crosshair here must also name the
+   * instant, or the pane draws the lines with no card beside them. Pass null to hide it.
    */
-  onChartReady?: (chart: IChartApi | null, baseSeries: ISeriesApi<'Line'> | null) => void;
+  onChartReady?: (
+    chart: IChartApi | null,
+    baseSeries: ISeriesApi<'Line'> | null,
+    syncCrosshair: ((time: number | null) => void) | null,
+  ) => void;
   /**
    * The host's pins. Supplying these makes the pane a full participant: it draws each pinned
    * line with its own frozen card, and middle-click / Alt+click here pins across every pane.
@@ -108,6 +140,7 @@ export default function GreekIndicatorPane({
   theme,
   histDays,
   initialDay,
+  axisMetrics = { leftWidth: 75, rightWidth: 75, fontSize: 12 },
   onChartReady,
   pins,
   onTogglePin,
@@ -117,6 +150,9 @@ export default function GreekIndicatorPane({
   const tooltipRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const lineRef = useRef<ISeriesApi<'Line'> | null>(null);
+  // The card the HOST drives, for instants the cursor is in another pane for. Distinct from the
+  // hover binding below, which owns the same element while the cursor is in this pane.
+  const syncTooltipRef = useRef<GreekTooltipView | null>(null);
 
   // The hook reads both of these through refs, so they must be written before any effect that
   // can trigger a draw — hence the assignment during render rather than in an effect.
@@ -137,7 +173,26 @@ export default function GreekIndicatorPane({
   const togglePinRef = useRef(onTogglePin);
   togglePinRef.current = onTogglePin;
 
-  const overlayDeps = { chartRef, currentInstRef, allBarsRef, inline: true, histDays, initialDay };
+  /** Shown while the cursor is elsewhere; a no-op until the chart exists. */
+  const showSyncedCrosshair = useCallback((time: number | null) => {
+    syncTooltipRef.current?.showAt(time);
+  }, []);
+
+  // `axisScaleId: 'left'` is what keeps the overlays off the right scale. This pane belongs to
+  // the overlays, so their totals get the real left axis and the underlying reference line keeps
+  // the right one to itself — the same division the host's price pane makes between its legs and
+  // its candles. On an invisible overlay scale (the Tracker's arrangement) lightweight-charts
+  // hangs every greek's axis tag off the right scale instead, stacking readings in the hundreds
+  // against an axis ticked in thousands of rupees, describing neither.
+  const overlayDeps = {
+    chartRef,
+    currentInstRef,
+    allBarsRef,
+    inline: true,
+    axisScaleId: 'left',
+    histDays,
+    initialDay,
+  };
   const vega = useGreekOverlay({ greek: 'vega', ...overlayDeps });
   const theta = useGreekOverlay({ greek: 'theta', ...overlayDeps });
   const iv = useGreekOverlay({ greek: 'iv', ...overlayDeps });
@@ -155,7 +210,7 @@ export default function GreekIndicatorPane({
       layout: {
         background: { color: isDark ? '#0d0f11' : '#ffffff' },
         textColor: isDark ? '#c9d1d9' : '#131722',
-        fontSize: 12,
+        fontSize: axisMetrics.fontSize,
         fontFamily: "'Inter', 'Segoe UI', sans-serif",
       },
       grid: {
@@ -163,7 +218,19 @@ export default function GreekIndicatorPane({
         horzLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
       },
       crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', minimumWidth: 72 },
+      // Both gutters, at the host's widths — see `axisMetrics`. The left one carries the
+      // overlays' totals; it stays visible even with every overlay switched off, exactly as the
+      // host's P&L pane keeps an empty left gutter, because the alignment is what it is for.
+      leftPriceScale: {
+        visible: true,
+        borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+        minimumWidth: axisMetrics.leftWidth,
+      },
+      rightPriceScale: {
+        visible: true,
+        borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+        minimumWidth: axisMetrics.rightWidth,
+      },
       timeScale: {
         borderColor: isDark ? '#2a2d32' : '#e0e3eb',
         timeVisible: true,
@@ -175,15 +242,24 @@ export default function GreekIndicatorPane({
     });
     chartRef.current = chart;
 
-    // A faint underlying reference line. The overlays sit on their own price scales above it —
-    // it exists to give the pane a time grid and the crosshair something to read against.
+    // A faint underlying reference line, on the RIGHT scale — the side the host's price pane
+    // charts its underlying on, so the two axes read the same numbers. Stated rather than left
+    // to the default because `setCrosshairPosition` prices a synced crosshair off the pane's
+    // default scale, and that has to be the scale this line actually lives on.
     const line = chart.addSeries(LineSeries, {
       color: '#2962ff',
       lineWidth: 1,
+      priceScaleId: 'right',
       priceLineVisible: false,
       lastValueVisible: true,
     } as Partial<LineSeriesOptions>);
     line.priceScale().applyOptions({ autoScale: true, scaleMargins: { top: 0.08, bottom: 0.1 } });
+    // The overlays' own axis. Seeded with the margins `createGreekPane` applies to an inline
+    // overlay's scale, so switching the first overlay on does not shift the band the gutter
+    // already implied — and so an empty left axis still reads against the same grid.
+    chart
+      .priceScale('left')
+      .applyOptions({ autoScale: true, scaleMargins: { top: 0.1, bottom: 0.08 } });
     lineRef.current = line;
 
     const observer = new ResizeObserver(() => {
@@ -193,25 +269,32 @@ export default function GreekIndicatorPane({
     });
     observer.observe(containerRef.current);
 
-    const unbindCrosshair =
+    const tooltipOpts =
       tooltipRef.current && containerRef.current
-        ? bindGreekCrosshair({
+        ? {
             chart,
             container: containerRef.current,
             tooltip: tooltipRef.current,
             baseSeries: () => lineRef.current,
             baseLabel: () => symRef.current,
-            formatBase: (v) => '₹' + fmtPrice(v),
-          })
-        : () => {};
+            formatBase: (v: number) => '₹' + fmtPrice(v),
+            // This pane sits in a stack, so its card wears the same chrome as its siblings' and
+            // swings to the same side of the crosshair they do.
+            style: PANEL_TOOLTIP_STYLE,
+            flipAtMidpoint: true,
+          }
+        : null;
+    const unbindCrosshair = tooltipOpts ? bindGreekCrosshair(tooltipOpts) : () => {};
+    syncTooltipRef.current = tooltipOpts ? createGreekTooltip(tooltipOpts) : null;
 
-    onChartReady?.(chart, line);
+    onChartReady?.(chart, line, showSyncedCrosshair);
     setChartTick((t) => t + 1);
 
     return () => {
       observer.disconnect();
       unbindCrosshair();
-      onChartReady?.(null, null);
+      syncTooltipRef.current = null;
+      onChartReady?.(null, null, null);
       removeChart(chart);
       chartRef.current = null;
       lineRef.current = null;
@@ -319,8 +402,7 @@ export default function GreekIndicatorPane({
         <div ref={containerRef} className="absolute inset-0" />
         <div
           ref={tooltipRef}
-          className="absolute z-30 hidden pointer-events-none rounded-md border border-[var(--border)] bg-[var(--bg-card)] px-2.5 py-2 shadow-2xl"
-          style={{ minWidth: 120 }}
+          className="absolute z-30 hidden pointer-events-none bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]"
         />
         {pins && (
           <PinnedCrosshairLayer

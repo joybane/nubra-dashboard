@@ -667,6 +667,9 @@ export default function StrategyAnalysisView({
   const [indicatorsHeight, setIndicatorsHeight] = useState(200);
   const indicatorsChartRef = useRef<IChartApi | null>(null);
   const indicatorsSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  // The pane's own readout, driven from here: setCrosshairPosition draws the crosshair on that
+  // pane but fires no crosshair event, so nothing inside it can know when we synced one.
+  const indicatorsSyncRef = useRef<((time: number | null) => void) | null>(null);
   const indicatorsPaneRef = useRef<HTMLDivElement>(null);
   const [orderBookCollapsed, setOrderBookCollapsed] = useState(false);
   const [chartsPopupOpen, setChartsPopupOpen] = useState(false);
@@ -1855,11 +1858,14 @@ export default function StrategyAnalysisView({
                   if (gs) c.setCrosshairPosition(res.greekNorm, t as any, gs);
                 } else if (c === ic && indicatorsSeriesRef.current) {
                   // Placed against the pane's underlying reference line, so the crosshair lands
-                  // on the same spot the price pane shows. The overlays sit on their own scales;
-                  // the pane's own tooltip reads their values off the synced crosshair.
+                  // on the same spot the price pane shows. The overlays sit on their own scale;
+                  // the pane's card reads their values itself, off the instant named below.
                   // `as Time`, not the `as any` above: chart time is a branded UTCTimestamp and
                   // the brand is phantom, so the real type asserts just as cleanly.
                   c.setCrosshairPosition(res.spot, t as Time, indicatorsSeriesRef.current);
+                  // Separate call because setCrosshairPosition deliberately suppresses the
+                  // crosshair event — without this the pane draws the lines and no reading.
+                  indicatorsSyncRef.current?.(t);
                 }
               } catch {}
             }
@@ -1869,6 +1875,9 @@ export default function StrategyAnalysisView({
         } else {
           lastHoverTimeRef.current = null;
           updateAllTooltips(null, null, null, null);
+          // Not covered by updateAllTooltips: that one drives the three tooltips this file owns,
+          // and the Indicators card belongs to the pane.
+          indicatorsSyncRef.current?.(null);
           for (const c of charts) {
             if (c !== sourceChart && isChartLive(c)) {
               try {
@@ -2702,9 +2711,14 @@ export default function StrategyAnalysisView({
    * a rebuilt chart too — without it the new chart would never join the scroll lockstep.
    */
   const handleIndicatorsChart = useCallback(
-    (chart: IChartApi | null, baseSeries: ISeriesApi<'Line'> | null) => {
+    (
+      chart: IChartApi | null,
+      baseSeries: ISeriesApi<'Line'> | null,
+      syncCrosshair: ((time: number | null) => void) | null,
+    ) => {
       indicatorsChartRef.current = chart;
       indicatorsSeriesRef.current = baseSeries;
+      indicatorsSyncRef.current = syncCrosshair;
       setChartEpoch((e) => e + 1);
     },
     [],
@@ -3559,6 +3573,10 @@ export default function StrategyAnalysisView({
                 // moves to another session when needed.
                 histDays={1}
                 initialDay={indicatorInitialDay}
+                // Must track chartOpts' leftPriceScale / rightPriceScale minimumWidth and layout
+                // fontSize, or this pane's plot area starts and ends somewhere the other three
+                // panes' do not and the shared logical range lands at a different x in each.
+                axisMetrics={{ leftWidth: 60, rightWidth: 75, fontSize: 11 }}
                 onChartReady={handleIndicatorsChart}
                 pins={pins}
                 onTogglePin={togglePinAt}

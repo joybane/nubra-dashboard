@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { IChartApi, ISeriesApi } from 'lightweight-charts';
-import { escapeHtml, fmtCrosshairTime, greekRows, greekRowsAllPanes } from './greekTooltip';
+import {
+  escapeHtml,
+  fmtCrosshairTime,
+  greekRows,
+  greekRowsAllPanes,
+  placeTooltip,
+} from './greekTooltip';
 
 // Enough of a chart to exercise pane walking. The real API is far larger, but these functions
 // only ever ask a chart for its panes and each pane for its series.
@@ -76,6 +82,47 @@ describe('greekRowsAllPanes', () => {
     expect(greekRows(chart, null, null, 5, 0)).toEqual([
       { color: '#22c55e', label: 'Vega·mine CE', value: 42 },
     ]);
+  });
+});
+
+describe('placeTooltip', () => {
+  // offsetWidth/offsetHeight are 0 under jsdom's non-layout DOM, so the card is faked outright.
+  const card = (w: number, h: number) => {
+    const style: Record<string, string> = {};
+    return { offsetWidth: w, offsetHeight: h, style } as unknown as HTMLElement & {
+      style: Record<string, string>;
+    };
+  };
+  const pane = (w: number, h: number) => ({ clientWidth: w, clientHeight: h }) as HTMLElement;
+
+  it('flips at the pane midpoint when asked, matching the sibling panes', () => {
+    // The card used to sit to the right of the crosshair until it would have overflowed, while
+    // every other pane's card had already swung left — the whole point of the flag.
+    const tip = card(220, 120);
+    placeTooltip(pane(1900, 240), tip, 1300, 8, 16, true);
+    expect(tip.style.left).toBe(`${1300 - 220 - 16}px`);
+  });
+
+  it('stays right of the crosshair before the midpoint', () => {
+    const tip = card(220, 120);
+    placeTooltip(pane(1900, 240), tip, 600, 8, 16, true);
+    expect(tip.style.left).toBe(`${600 + 16}px`);
+  });
+
+  it('without the flag, only an overflow moves it — the Tracker/Chart behaviour', () => {
+    const right = card(220, 120);
+    placeTooltip(pane(1900, 240), right, 1300, 8);
+    expect(right.style.left).toBe(`${1300 + 16}px`);
+
+    const overflow = card(220, 120);
+    placeTooltip(pane(1900, 240), overflow, 1800, 8);
+    expect(overflow.style.left).toBe(`${1800 - 220 - 16}px`);
+  });
+
+  it('keeps a flipped card inside the pane rather than off its left edge', () => {
+    const tip = card(600, 120);
+    placeTooltip(pane(700, 240), tip, 400, 8, 16, true);
+    expect(tip.style.left).toBe('4px');
   });
 });
 

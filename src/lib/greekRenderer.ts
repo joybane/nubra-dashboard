@@ -123,6 +123,22 @@ export interface GreekPaneOpts {
    */
   scaleKey?: string;
   /**
+   * Visible axis ('left' / 'right') to plot the totals against when inline, instead of the
+   * private overlay scale.
+   *
+   * An overlay scale auto-scales on its own but is never drawn, and lightweight-charts hangs
+   * every overlay series' axis label off whichever visible scale is the pane's default. On the
+   * Tracker that is the right price scale — the *candles'* scale — so an inline greek's tag ends
+   * up beside prices it has nothing to do with. That is tolerable when the greeks are guests on
+   * someone else's price pane, and wrong on a pane the overlays own: there the totals deserve a
+   * real axis whose ticks describe them, which is what passing 'left' gives them.
+   *
+   * The Δ lines stay on their private overlay scale either way — they are a different magnitude
+   * from the totals by construction (see the header note), and co-plotting them would flatten
+   * them to a straight line.
+   */
+  axisScaleId?: string;
+  /**
    * Which exchange's session to keep points inside. Defaults to NSE (09:15–15:30);
    * MCX runs to 23:30, and filtering a commodity against NSE hours throws away two
    * thirds of its session.
@@ -156,7 +172,8 @@ export function createGreekPane(
   // Unique overlay-scale ids so multiple inline overlays (e.g. Vega + Theta, mine + industry)
   // never share a scale or collide with the price scale.
   const safe = opts.scaleKey ?? scaleSuffix(label);
-  const totScale = inline ? `gt-${safe}` : undefined; // undefined → pane's own right scale
+  // undefined → pane's own right scale; `axisScaleId` → a visible axis the host has set aside.
+  const totScale = inline ? (opts.axisScaleId ?? `gt-${safe}`) : undefined;
   const diffScale = inline ? `gd-${safe}` : DIFF_SCALE;
 
   const mk = (
@@ -279,7 +296,9 @@ export function createIvPane(chart: IChartApi, label: string, opts: GreekPaneOpt
   if (pane) pane.setHeight(opts.height ?? 120);
   const paneIndex = inline ? (opts.paneIndex ?? 0) : pane!.paneIndex();
 
-  const scaleId = inline ? `iv-${opts.scaleKey ?? scaleSuffix(label)}` : undefined;
+  const scaleId = inline
+    ? (opts.axisScaleId ?? `iv-${opts.scaleKey ?? scaleSuffix(label)}`)
+    : undefined;
 
   const line = chart.addSeries(
     LineSeries,
