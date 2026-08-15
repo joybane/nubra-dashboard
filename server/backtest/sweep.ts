@@ -1,6 +1,5 @@
 import type {
   BacktestConfig,
-  Metrics,
   SweepCell,
   SweepParam,
   SweepRequest,

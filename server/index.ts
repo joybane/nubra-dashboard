@@ -37,7 +37,13 @@ import {
   istToday,
   type FeedIndex,
 } from './ocFeedGuard.ts';
-import { loadPositionRules, evaluateAndFire } from './positionRules.ts';
+import {
+  loadPositionRules,
+  evaluateAndFire,
+  sweepTimeExits,
+  type RuleFireEvent,
+} from './positionRules.ts';
+import { buildAllowedOrigins, isAllowedOrigin } from './corsPolicy.ts';
 import { createRefdataCache } from './refdataCache.ts';
 import { createRefdataQueue } from './refdataQueue.ts';
 import { previousTradingDay } from './tradingDay.ts';
@@ -59,6 +65,22 @@ const __dirname = path.dirname(__filename);
 const BASE_URL = process.env.NUBRA_BASE_URL || 'https://api2.nubra.io';
 const MARGIN_BASE_URL = process.env.NUBRA_MARGIN_BASE_URL || BASE_URL;
 const PORT = Number(process.env.SERVER_PORT || 3000);
+
+// ─── Network exposure ─────────────────────────────────────────────────────────
+// This server holds a live broker session and exposes paper trading, the Nubra REST proxy
+// and the instrument master — none of which authenticate the *caller*. So the only things
+// standing between the account and the outside world are which interface the port is bound
+// to and which origins the browser will let script it.
+//
+// Both were open: `listen(PORT)` binds 0.0.0.0, so anyone on the LAN could place paper
+// orders and read the account through the proxy; and CORS reflected any origin, so any
+// website open in the browser could do the same from the user's own machine.
+//
+// Both are closed by default now, and both stay openable on purpose — set SERVER_HOST to
+// 0.0.0.0 to reach the dashboard from a phone on the same network, and CORS_ORIGINS to the
+// origins that should be allowed to script it. See server/corsPolicy.ts.
+const HOST = process.env.SERVER_HOST || '127.0.0.1';
+const ALLOWED_ORIGINS = buildAllowedOrigins({ port: PORT, extra: process.env.CORS_ORIGINS });
 
 // ─── Server-side refdata cache ────────────────────────────────────────────────
 // Avoids fetching 100k+ instrument records from Nubra on every search keystroke.
@@ -402,7 +424,9 @@ const fastify = Fastify({
   logger: { level: 'warn' },
 });
 
-await fastify.register(fastifyCors, { origin: true });
+await fastify.register(fastifyCors, {
+  origin: (origin, cb) => cb(null, isAllowedOrigin(origin, ALLOWED_ORIGINS)),
+});
 
 // /api/refdata ships the instrument master — a multi-megabyte, ~100k-record array of highly
 // repetitive JSON — and the search worker asks for three exchanges. It went out uncompressed.
@@ -414,11 +438,15 @@ const distPath = path.join(__dirname, '..', 'dist');
 if (existsSync(distPath)) {
   await fastify.register(fastifyStatic, {
     root: distPath,
-    setHeaders: (res, filePath) => {
+    // @fastify/static v10 hands `setHeaders` a FastifyReply where v8 passed the raw
+    // ServerResponse, so this is `reply.header(...)` rather than `res.setHeader(...)`.
+    // The caching intent is unchanged: never cache the HTML entry point (it names the
+    // hashed asset bundles), revalidate everything else.
+    setHeaders: (reply, filePath) => {
       if (filePath.endsWith('.html')) {
-        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+        reply.header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
       } else {
-        res.setHeader('Cache-Control', 'public, max-age=0');
+        reply.header('Cache-Control', 'public, max-age=0');
       }
     },
   });
@@ -514,6 +542,18 @@ async function loadProto(): Promise<void> {
 // falling back to asset|expiry|exchange|side|strike.
 const ocLastTs = new Map<string, number>();
 
+// The `r:<ref_id>` half of that map was never pruned. `clearOcTsGuard` below only removes the
+// strike-keyed entries for one asset/expiry, so on a server that stays up for weeks the ref_id
+// keys accumulated one per option contract ever ticked — every strike of every chain of every
+// expiry, kept for the life of the process.
+//
+// Dropping the whole map is the cheapest safe bound, and safe for the same reason
+// `clearOcTsGuard` is: with no recorded timestamp the next tick for a key is simply accepted,
+// which is the behaviour on any first tick. The only thing lost is one flicker's worth of
+// out-of-order suppression per contract, once per reset. The cap is far above a realistic
+// working set (a NIFTY weekly chain is ~200 legs), so this is rare rather than periodic.
+const OC_TS_GUARD_MAX_KEYS = 20_000;
+
 function ocItemKey(
   asset: string,
   expiry: string,
@@ -528,6 +568,10 @@ function ocItemKey(
 }
 
 function dropStaleOcItems(data: Record<string, unknown>): void {
+  if (ocLastTs.size > OC_TS_GUARD_MAX_KEYS) {
+    console.log(`[OC] Reset the tick-order guard at ${ocLastTs.size} keys`);
+    ocLastTs.clear();
+  }
   const asset = String(data.asset || '').toUpperCase();
   const expiry = String(data.expiry || '');
   const exchange = String(data.exchange || 'NSE');
@@ -739,7 +783,20 @@ function sendOcCmd(
   }
 }
 
-const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+// WebSocket upgrades are not subject to CORS — a browser will open a socket to any host that
+// accepts one, whatever origin the page came from. So the HTTP allow-list above would have left
+// the live feed and the subscription commands reachable from a foreign page even after it was
+// closed. Same policy, applied at the handshake; a client sending no Origin (a script, a probe)
+// is allowed exactly as it is over HTTP.
+const wss = new WebSocketServer({
+  server: httpServer,
+  path: '/ws',
+  verifyClient: ({ origin }, done) => {
+    if (isAllowedOrigin(origin, ALLOWED_ORIGINS)) return done(true);
+    console.warn(`[ws] refused upgrade from origin ${origin}`);
+    done(false, 403, 'Forbidden origin');
+  },
+});
 
 function connectNubraWs(): void {
   if (authState.status !== 'authenticated') return;
@@ -1211,10 +1268,20 @@ function queuePosLtp(changes: { ref_id: number; ltp: number }[]): void {
 // Evaluate SL/target/trailing rules for a position whose LTP just changed, and
 // broadcast anything that fired so the browser can refresh without waiting on
 // the 2s position poll.
-function fireRules(refId: number): void {
-  const events = evaluateAndFire(simBroker, refId);
+function broadcastRuleEvents(events: RuleFireEvent[]): void {
   if (events.length) broadcast({ type: 'position_rule_fired', data: events });
 }
+
+function fireRules(refId: number): void {
+  broadcastRuleEvents(evaluateAndFire(simBroker, refId));
+}
+
+// A time-based exit has no tick to arrive on — its trigger is the clock — so it is swept on a
+// timer instead. Five seconds bounds how late a 15:15 square-off can be without making the sweep
+// itself noticeable: it is one comparison per armed rule over the open book, and returns
+// immediately when no rules exist at all.
+const RULE_SWEEP_MS = 5_000;
+setInterval(() => broadcastRuleEvents(sweepTimeExits(simBroker)), RULE_SWEEP_MS).unref();
 
 function routeTickToSim(decoded: { type: string; data: unknown }): void {
   if (decoded.type === 'option_chain') {
@@ -1509,7 +1576,13 @@ registerNubraBacktestRoutes({
 await loadProto();
 await fastify.ready();
 
-httpServer.listen(PORT, async () => {
-  console.log(`Nubra Dashboard server → http://localhost:${PORT}`);
+httpServer.listen(PORT, HOST, async () => {
+  console.log(`Nubra Dashboard server → http://localhost:${PORT} (bound to ${HOST})`);
+  if (HOST !== '127.0.0.1' && HOST !== 'localhost') {
+    console.warn(
+      `[security] SERVER_HOST=${HOST} exposes the broker proxy and paper book to the network. ` +
+        `Nothing authenticates the caller — only do this on a network you control.`,
+    );
+  }
   await tryRestoreSession();
 });

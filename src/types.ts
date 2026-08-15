@@ -140,7 +140,7 @@ export interface WsRuleFiredMsg {
   type: 'position_rule_fired';
   data: {
     scope: 'LEG' | 'GROUP';
-    reason: 'STOPLOSS' | 'TARGET' | 'PORTFOLIO_TP' | 'PORTFOLIO_SL';
+    reason: 'STOPLOSS' | 'TARGET' | 'PORTFOLIO_TP' | 'PORTFOLIO_SL' | 'TIME_EXIT';
     ref_ids: number[];
     basket_group_id?: string;
   }[];
@@ -359,6 +359,8 @@ export interface LegPositionRule {
   stopLoss?: LiveSLTarget;
   target?: LiveSLTarget;
   trail?: LiveTrailStop;
+  /** IST wall-clock 'HH:MM' — square this leg off at that time if nothing else fired first. */
+  exitTime?: string;
 }
 export interface GroupPositionRule {
   scope: 'GROUP';
@@ -367,6 +369,8 @@ export interface GroupPositionRule {
   maxLoss?: number;
   trail?: LiveTrailStop;
   exitAllOnLegHit?: boolean;
+  /** IST wall-clock 'HH:MM' — square every leg in the group off at that time. */
+  exitTime?: string;
 }
 export type PositionRule = LegPositionRule | GroupPositionRule;
 

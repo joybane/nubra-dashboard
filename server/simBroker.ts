@@ -1,6 +1,8 @@
 import {
   dbInsertOrder,
   dbUpdateOrder,
+  dbModifyOrder,
+  dbSetOrderSlTriggered,
   dbLoadOrders,
   dbInsertFill,
   dbUpsertPosition,
@@ -25,6 +27,19 @@ export function simSpread(ltp: number): number {
   if (ltp < 1_000) return Math.max(2, Math.round(ltp * 0.004));
   if (ltp < 10_000) return Math.max(5, Math.round(ltp * 0.003));
   return Math.max(10, Math.round(ltp * 0.002));
+}
+
+/**
+ * Read one optional non-negative whole number off an order amendment — a price in paise or a
+ * quantity in units.
+ *
+ * `null` means "absent, leave it alone", `false` means "present but not a usable number" — the
+ * caller must reject rather than treat it as absent, or a typo'd price would silently no-op.
+ */
+function readAmendedNumber(raw: unknown): number | null | false {
+  if (raw == null) return null;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) return false;
+  return Math.round(raw);
 }
 
 export interface SimOrder {
@@ -130,6 +145,7 @@ export class SimBroker {
         exit_time: row.exit_time as number | undefined,
         exit_price: row.exit_price as number | undefined,
         margin_required: row.margin_required as number | undefined,
+        entry_qty: (row.entry_qty as number | null) ?? undefined,
       };
       this.positions.set(this.posKey(p.ref_id, p.basket_group_id), p);
       if (p.qty !== 0) this.ticks.set(p.ref_id, p.last_traded_price);
@@ -222,6 +238,13 @@ export class SimBroker {
             if (!isBuy && bid >= order.order_price) this.fill(order, bid);
           } else {
             this.fill(order, isBuy ? ask : bid); // SL-Market
+          }
+          // An SL-Limit can trigger without filling — the price gapped past the limit. Only
+          // `fill()` writes to SQLite, so until now that armed state lived in memory alone and a
+          // restart un-triggered the order: it would then demand a *second* crossing of a
+          // trigger the market had already gone through, which for a gap-down never comes.
+          if (order.order_status !== 'ORDER_STATUS_FILLED') {
+            dbSetOrderSlTriggered(order.order_id, true);
           }
         }
       } else if (order.order_price > 0) {
@@ -325,6 +348,7 @@ export class SimBroker {
       exit_time: pos.exit_time,
       exit_price: pos.exit_price,
       margin_required: pos.margin_required,
+      entry_qty: pos.entry_qty,
     });
     // Record P&L at fill time
     const unrealizedAtFill = (pos.last_traded_price - pos.avg_price) * pos.qty;
@@ -413,12 +437,45 @@ export class SimBroker {
     return true;
   }
 
+  /**
+   * Amend a still-open order's price, trigger or quantity.
+   *
+   * Three things this deliberately does beyond mutating the in-memory record:
+   *
+   * 1. **Persists.** The amendment used to live in memory alone, so a restart silently reverted
+   *    the order to the price it was placed at — and the user had no way to tell.
+   * 2. **Rejects nonsense.** Prices are paise and quantity is a lot count; a negative or
+   *    non-finite value would have been written straight through into the fill comparison.
+   * 3. **Re-evaluates against the last tick**, exactly as `placeOrder` does. Fills are otherwise
+   *    only checked when a price *changes*, so moving a limit onto the wrong side of a market
+   *    that is standing still would sit unfilled until the next differing tick.
+   */
   modifyOrder(id: number, updates: Record<string, unknown>): boolean {
     const o = this.orders.get(id);
     if (!o || o.order_status !== 'ORDER_STATUS_OPEN') return false;
-    if (typeof updates.order_price === 'number') o.order_price = updates.order_price;
-    if (typeof updates.trigger_price === 'number') o.trigger_price = updates.trigger_price;
-    if (typeof updates.order_qty === 'number') o.order_qty = updates.order_qty;
+
+    const price = readAmendedNumber(updates.order_price);
+    const trigger = readAmendedNumber(updates.trigger_price);
+    const qty = readAmendedNumber(updates.order_qty);
+    if (price === false || trigger === false || qty === false) return false;
+    if (qty != null && qty <= 0) return false;
+
+    if (price != null) o.order_price = price;
+    if (trigger != null) o.trigger_price = trigger;
+    if (qty != null) o.order_qty = qty;
+
+    dbModifyOrder({
+      order_id: o.order_id,
+      order_price: o.order_price,
+      trigger_price: o.trigger_price,
+      order_qty: o.order_qty,
+    });
+
+    const ltp = this.ticks.get(o.ref_id);
+    if (ltp) {
+      const half = simSpread(ltp);
+      this.tryFill(o, ltp - half, ltp + half);
+    }
     return true;
   }
 

@@ -43,7 +43,29 @@ NUBRA_BASE_URL=https://api2.nubra.io
 ```
 
 Optional: `NUBRA_MARGIN_BASE_URL`, `NSE_SPAN_RISK_FILE`, `LOCAL_MARGIN_EXPOSURE_RATE`,
-`LOCAL_MARGIN_NAKED_SHORT_SPAN_RATE`, `LOCAL_MARGIN_STRANGLE_SECOND_LEG_ADDON`.
+`LOCAL_MARGIN_NAKED_SHORT_SPAN_RATE`, `LOCAL_MARGIN_STRANGLE_SECOND_LEG_ADDON`,
+`SERVER_HOST`, `CORS_ORIGINS`.
+
+> **`.env`, `session.json` and `uat-session.json` must never be committed.** They hold the
+> MPIN, the phone number, and a live broker auth token. All three were tracked until
+> 2026-08-14 and are now git-ignored, but they remain in the history of this repository —
+> rotating the MPIN and re-authenticating is the only thing that actually revokes them.
+
+### Network exposure
+
+Nothing in this server authenticates the **caller**. `requireAuth` asks whether the server
+holds a broker session, not who is asking, so any request that reaches the port is trusted
+with paper trading, the account, and the Nubra REST proxy. Two settings control who can
+reach it, and both are closed by default:
+
+| Variable       | Default     | Effect                                                            |
+| -------------- | ----------- | ----------------------------------------------------------------- |
+| `SERVER_HOST`  | `127.0.0.1` | Bind address. Set `0.0.0.0` to reach the dashboard from the LAN.  |
+| `CORS_ORIGINS` | _(empty)_   | Extra browser origins allowed to script the API, comma separated. |
+
+`localhost`/`127.0.0.1` on the server port and on the Vite dev ports (8000, 5173) are always
+allowed — see `server/corsPolicy.ts`. Requests with no `Origin` header (same-origin
+navigation, curl, server-to-server) are unaffected.
 
 ### Install & run
 
@@ -211,7 +233,7 @@ routes used for single-day replay and comparison.
 | GET / POST   | `/paper/orders`                | List or place orders                                  |
 | POST         | `/paper/orders/multi`          | Place independent orders                              |
 | POST         | `/paper/orders/basket`         | Place grouped basket legs and snapshot margin         |
-| POST         | `/paper/orders/modify/:id`     | Modify an open order                                  |
+| POST         | `/paper/orders/modify/:id`     | Amend an open order's price, trigger or quantity      |
 | DELETE       | `/paper/orders/:id`            | Cancel an order                                       |
 | GET          | `/paper/positions`             | Get open positions and unrealised PnL                 |
 | GET          | `/paper/positions/closed`      | Get closed positions and realised PnL                 |
@@ -227,6 +249,18 @@ routes used for single-day replay and comparison.
 | GET / DELETE | `/paper/strategy/snapshot/:id` | Get or delete one snapshot                            |
 | GET          | `/paper/auth/status`           | Return paper-trading auth status                      |
 | GET          | `/paper/debug`                 | Return subscription, position, and WS diagnostics     |
+
+Every route above is behind `requireAuth` except `/paper/auth/status` and `/paper/debug`, which
+are the two that have to answer while logged out. The four `/paper/strategy/snapshot*` routes
+were outside the guard until 2026-08-15, which left the one store on this server that accepts an
+arbitrary-sized JSON blob as its only unguarded writer.
+
+`POST /paper/orders/modify/:id` takes any of `order_price`, `trigger_price`, `order_qty` (prices
+in paise, quantity in units) and 400s on an empty patch, a non-numeric or negative value, or a
+zero or fractional quantity. It answers `{ ok, order }` with the amended order, because the amendment can cross
+a standing market and fill on the spot — a bare ack would leave the client polling to find out.
+The Orders tab drives it from an inline editor on any open, unfilled row; `src/lib/orderAmendment.ts`
+holds the rupees→paise conversion and the change detection, so only edited fields are sent.
 
 ---
 
@@ -277,6 +311,11 @@ Option-chain flow is:
 - Market orders fill immediately at simulated ask for buys or bid for sells.
 - Regular limit orders fill when the simulated market crosses the limit.
 - Stop-loss orders trigger first, then follow market- or limit-fill behavior.
+- Amending an open order (`modifyOrder`) persists through `dbModifyOrder`, rejects non-numeric,
+  negative or zero-quantity values without partially applying them, and re-evaluates the order
+  against the last tick — the same immediate-fill attempt `placeOrder` makes, because fills are
+  otherwise only checked when a price *changes* and a limit moved onto the wrong side of a
+  standing market would sit there until it did.
 - Every live tick flows through `SimBroker.onLtp()`, fill checking, position updates, and
   `position_ltp` broadcasting.
 - At 15:35 IST on weekdays, the server creates end-of-day basket snapshots unless a manual
@@ -301,7 +340,7 @@ fills(fill_id AUTOINCREMENT PK, order_id, ref_id, fill_price, fill_qty, fill_tim
 positions(ref_id + basket_group_id = composite PK,
           nubra_name, display_name, qty, avg_price, realized_pnl,
           last_traded_price, order_delivery_type, strategy_name,
-          entry_time, exit_time, exit_price)
+          entry_time, exit_time, exit_price, entry_qty)
 
 pnl_ticks(id AUTOINCREMENT PK, ts, ref_id, ltp, qty, avg_price,
           unrealized_pnl, realized_pnl, total_pnl)
@@ -316,6 +355,23 @@ saved_strategies(snapshot_id TEXT PK, basket_group_id, strategy_name, underlying
 
 Startup migrations add newer order and position columns when required. Strategy snapshots
 are unique by `(basket_group_id, trade_date)`.
+
+`entry_qty` is the signed size the position was opened at, kept so a closed position reports
+its real quantity and side. Rows written before the column existed are `NULL`, and those fall
+back to deriving the size from `realized_pnl / |exit_price − avg_price|` — a lossy estimate that
+was the *only* path until the column was added, because `entry_qty` was computed at fill time
+and never persisted.
+
+The `positions` upsert deliberately re-writes `entry_time` and `entry_qty` on conflict. A closed
+position can be re-opened under the same `(ref_id, basket_group_id)` key, and leaving those out
+pinned the row to the first entry it ever had — which then mis-dated it after a restart, and
+`entry_time` is what the end-of-day snapshot groups a strategy's trade date by. `strategy_name`
+is deliberately **not** in the conflict clause: renames go through `dbRenameStrategy`, and a
+later fill still carries the name its order was placed under.
+
+`server/paperDb.test.ts` exercises the DDL and both migration paths against a scratch file via
+the `PAPER_DB_PATH` override, which exists for exactly that reason — the app itself always uses
+`paper.db` beside the repo root.
 
 ---
 
@@ -774,6 +830,17 @@ NIFTY, which is the same _relative_ accuracy given crude runs ~65 % IV and NIFTY
 
 ## Conventions
 
+- **An open position's P&L is mark-to-market _plus_ what it has already booked.** A leg can be
+  squared off in part: it stays in `/paper/positions` with the remaining quantity and carries the
+  booked amount in `realised_pnl`. `openPositionPnlPaise` in `src/lib/paperPnl.ts` sums both, which
+  is what makes the terminal's per-leg P&L, its group totals and its Day P&L agree with
+  `/paper/pnl`. `openPositionUnrealisedPnlPaise` is the mark-to-market half on its own, and is what
+  the `P&L %` column is a percentage of — the two can differ in sign on a partially closed leg, so
+  each cell is coloured by the number it actually shows.
+- **Irreversible actions confirm through `ConfirmDialog`**, never `window.confirm`. That is the
+  square-off buttons in the Positions tab (both the per-strategy one and Exit All) and logout. A
+  pending square-off holds position *keys* and re-reads the book when confirmed, so a leg that
+  closed while the dialog was open cannot be ordered against.
 - `nubra_name` is the broker's exchange-prefixed instrument name.
 - `zanskar_name` is the legacy/alternate API name.
 - `stock_name` is the plain underlying name.

@@ -89,6 +89,22 @@ body {
   border-radius: 3px;
 }
 
+/* ─── Native date/time pickers ──────────────────────────── */
+/* These controls draw their own glyphs (the clock and calendar buttons) and the popup panel,
+   and the browser picks that palette from `color-scheme` — not from the field's own colours.
+   Left unset it assumes light, so on the dark theme the icon is a near-black SVG on a near-black
+   input. Scoped to these input types rather than set on :root so nothing else changes. */
+input[type='time'],
+input[type='date'],
+input[type='datetime-local'] {
+  color-scheme: dark;
+}
+[data-theme='light'] input[type='time'],
+[data-theme='light'] input[type='date'],
+[data-theme='light'] input[type='datetime-local'] {
+  color-scheme: light;
+}
+
 /* ─── Vector Graphics Rendering ─────────────────────────── */
 svg {
   shape-rendering: geometricPrecision;

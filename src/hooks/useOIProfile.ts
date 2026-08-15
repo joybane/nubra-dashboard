@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ISeriesApi } from 'lightweight-charts';
 import type { Instrument, OhlcBar, OptionChainData, WsMessage } from '../types';
 import { getChainAsset } from '../types';
-import { formatExpiry, IST_OFFSET, marketSession } from '../lib/utils';
+import { IST_OFFSET, marketSession } from '../lib/utils';
 import {
   drawOI as renderOI,
   hitTestOIBar,

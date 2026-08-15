@@ -15,6 +15,7 @@ import { useWatchlist } from './hooks/useWatchlistContext';
 import { useOIProfile } from './hooks/useOIProfile';
 import { useGreekOverlay } from './hooks/useGreekOverlay';
 import { GreekButton } from './components/GreekControls';
+import { bindCandleCrosshair } from './lib/greekTooltip';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
 import { emptyHistoryMessage } from './lib/emptyHistory';
 import type {
@@ -206,9 +207,12 @@ export default function CandleChart({ instrument, theme }: Props) {
   const { addItem: addToWatchlist } = useWatchlist();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  // Read by the crosshair tooltip, which is bound once and outlives every symbol switch.
+  const symRef = useRef('');
 
   const allBarsRef = useRef<OhlcBar[]>([]);
   const allVolBarsRef = useRef<VolBar[]>([]);
@@ -409,9 +413,28 @@ export default function CandleChart({ instrument, theme }: Props) {
     };
     containerRef.current.addEventListener('dblclick', onDblClick);
 
+    // ── Crosshair tooltip: hovered candle + volume + every visible greek sub-pane line ──
+    // The top-left legend answers "what is this candle"; the card answers it at the cursor and,
+    // unlike the legend, carries the Vega/Theta/IV overlays — which otherwise only ever show a
+    // last value on their own price axis, never a reading at the bar being looked at.
+    const unbindTooltip =
+      tooltipRef.current && containerRef.current
+        ? bindCandleCrosshair({
+            chart,
+            container: containerRef.current,
+            tooltip: tooltipRef.current,
+            candleSeries: () => candleRef.current,
+            volumeSeries: () => volRef.current,
+            symbol: () => symRef.current,
+            formatPrice: (v) => fmtPrice(v),
+            formatVolume: (v) => fmtVol(v),
+          })
+        : () => {};
+
     return () => {
       containerRef.current?.removeEventListener('dblclick', onDblClick);
       observer.disconnect();
+      unbindTooltip();
       stopCountdown(); // otherwise the 1s countdown interval keeps ticking after unmount
       removeChart(chart);
       // Clear the refs too: an in-flight history fetch resolving after this point
@@ -939,6 +962,7 @@ export default function CandleChart({ instrument, theme }: Props) {
 
   // ── Toolbar ───────────────────────────────────────────────────────────────
   const sym = instrument ? getSymbol(instrument) : '—';
+  symRef.current = sym;
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -1180,6 +1204,13 @@ export default function CandleChart({ instrument, theme }: Props) {
         onDoubleClick={resetZoom}
       >
         <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none z-[5]" />
+
+        {/* Crosshair tooltip — positioned imperatively by bindCandleCrosshair */}
+        <div
+          ref={tooltipRef}
+          className="absolute z-30 hidden pointer-events-none rounded-md border border-[var(--border)] bg-[var(--bg-card)] px-2.5 py-2 shadow-2xl"
+          style={{ minWidth: 150 }}
+        />
 
         {/* OI time range slider */}
         {oi.oiOn && (

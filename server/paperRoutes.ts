@@ -18,6 +18,7 @@ import {
   deleteGroupRule,
   listPositionRules,
   sanitizeSLTarget,
+  sanitizeExitTime,
   legRuleKey,
   type LegRule,
   type GroupRule,
@@ -264,10 +265,11 @@ export function registerPaperRoutes({
     stopLoss?: SLTarget;
     target?: SLTarget;
     trail?: TrailStop;
+    exitTime?: string;
   }
   fastify.put<{ Body: LegRuleBody }>('/paper/positions/rules/leg', async (req, reply) => {
     if (!requireAuth(reply)) return;
-    const { ref_id, basket_group_id, stopLoss, target, trail } = req.body;
+    const { ref_id, basket_group_id, stopLoss, target, trail, exitTime } = req.body;
     if (!ref_id) return reply.status(400).send({ error: 'ref_id is required' });
     const rule: LegRule = {
       scope: 'LEG',
@@ -276,6 +278,7 @@ export function registerPaperRoutes({
       stopLoss: sanitizeSLTarget(stopLoss),
       target: sanitizeSLTarget(target),
       trail,
+      exitTime: sanitizeExitTime(exitTime),
     };
     upsertLegRule(rule);
     // Evaluate straight away. Rules are otherwise only checked when routeTickToSim
@@ -291,10 +294,11 @@ export function registerPaperRoutes({
     maxLoss?: number;
     trail?: TrailStop;
     exitAllOnLegHit?: boolean;
+    exitTime?: string;
   }
   fastify.put<{ Body: GroupRuleBody }>('/paper/positions/rules/group', async (req, reply) => {
     if (!requireAuth(reply)) return;
-    const { basket_group_id, maxProfit, maxLoss, trail, exitAllOnLegHit } = req.body;
+    const { basket_group_id, maxProfit, maxLoss, trail, exitAllOnLegHit, exitTime } = req.body;
     if (!basket_group_id) return reply.status(400).send({ error: 'basket_group_id is required' });
     const rule: GroupRule = {
       scope: 'GROUP',
@@ -303,6 +307,7 @@ export function registerPaperRoutes({
       maxLoss: maxLoss || undefined,
       trail,
       exitAllOnLegHit: exitAllOnLegHit || undefined,
+      exitTime: sanitizeExitTime(exitTime),
     };
     upsertGroupRule(rule);
     // Same immediate evaluation as the leg route. evaluateAndFire keys off a
@@ -381,14 +386,58 @@ export function registerPaperRoutes({
     }
   });
 
-  fastify.post<{ Params: { id: string }; Body: Record<string, unknown> }>(
+  interface ModifyOrderBody {
+    order_price?: number;
+    trigger_price?: number;
+    order_qty?: number;
+  }
+
+  const MODIFIABLE_FIELDS = ['order_price', 'trigger_price', 'order_qty'] as const;
+
+  fastify.post<{ Params: { id: string }; Body: ModifyOrderBody }>(
     '/paper/orders/modify/:id',
     async (req, reply) => {
       if (!requireAuth(reply)) return;
-      const ok = simBroker.modifyOrder(Number(req.params.id), req.body);
+      const orderId = Number(req.params.id);
+      if (!Number.isInteger(orderId) || orderId <= 0)
+        return reply.status(400).send({ error: 'order id must be a positive integer' });
+
+      // Distinguish "nothing to change" from "the broker refused the change" up front, so the
+      // 404 below can only ever mean the latter.
+      const body = (req.body ?? {}) as ModifyOrderBody;
+      const supplied = MODIFIABLE_FIELDS.filter((field) => body[field] != null);
+      if (supplied.length === 0)
+        return reply
+          .status(400)
+          .send({ error: `supply at least one of ${MODIFIABLE_FIELDS.join(', ')}` });
+      const invalid = supplied.filter((field) => {
+        const value = body[field];
+        return typeof value !== 'number' || !Number.isFinite(value) || value < 0;
+      });
+      if (invalid.length > 0)
+        return reply
+          .status(400)
+          .send({ error: `${invalid.join(', ')} must be a non-negative number` });
+      if (body.order_qty != null && body.order_qty <= 0)
+        return reply.status(400).send({ error: 'order_qty must be greater than zero' });
+      // Lots are whole. Without this the broker's Math.round would quietly turn 65.5 into 66 —
+      // a silently different order from the one the caller asked for.
+      if (body.order_qty != null && !Number.isInteger(body.order_qty))
+        return reply.status(400).send({ error: 'order_qty must be a whole number' });
+
+      // Rebuild from the validated fields rather than forwarding the raw body: anything the
+      // client sent that is not modifiable has no business reaching the broker.
+      const patch: Record<string, unknown> = {};
+      for (const field of supplied) patch[field] = body[field];
+      const ok = simBroker.modifyOrder(orderId, patch);
       if (!ok)
         return reply.status(404).send({ error: 'Order not found or already filled/cancelled.' });
-      return reply.send({ ok: true });
+      // The amendment can fill the order immediately against the last tick, so hand back the
+      // order itself rather than a bare ack — the client would otherwise have to poll to notice.
+      const updated = (simBroker.getOrders('all') as Array<{ order_id: number }>).find(
+        (o) => o.order_id === orderId,
+      );
+      return reply.send({ ok: true, order: updated ?? null });
     },
   );
 
@@ -1109,11 +1158,17 @@ export function registerPaperRoutes({
 
   fastify.get('/paper/baskets', async (_req, reply) => {
     if (!requireAuth(reply)) return;
-    const baskets = dbLoadBaskets().map((b) => ({
-      ...b,
-      legs: JSON.parse(b.legs_json),
-      legs_json: undefined,
-    }));
+    const baskets = dbLoadBaskets().map((b) => {
+      // One unparseable row used to 500 the whole list, taking every healthy basket with it.
+      // An empty leg list is visibly broken in the UI; a dead endpoint is not diagnosable at all.
+      let legs: unknown = [];
+      try {
+        legs = JSON.parse(b.legs_json);
+      } catch {
+        console.warn(`[baskets] ${b.basket_id} has unparseable legs_json — serving it empty`);
+      }
+      return { ...b, legs, legs_json: undefined };
+    });
     return reply.send({ baskets });
   });
 
@@ -1127,7 +1182,17 @@ export function registerPaperRoutes({
     };
   }>('/paper/baskets', async (req, reply) => {
     if (!requireAuth(reply)) return;
-    const { name, symbol, expiry, legs, basket_group_id } = req.body;
+    const { name, symbol, expiry, legs, basket_group_id } = req.body ?? {};
+    // These four columns are NOT NULL. Without this check a malformed body reached better-sqlite3
+    // and came back as an opaque 500 from the driver rather than a 400 naming the missing field.
+    if (typeof name !== 'string' || !name.trim())
+      return reply.status(400).send({ error: 'name is required' });
+    if (typeof symbol !== 'string' || !symbol.trim())
+      return reply.status(400).send({ error: 'symbol is required' });
+    if (typeof expiry !== 'string' || !expiry.trim())
+      return reply.status(400).send({ error: 'expiry is required' });
+    if (!Array.isArray(legs) || legs.length === 0)
+      return reply.status(400).send({ error: 'legs must be a non-empty array' });
     const basketId = `bsk_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const now = Date.now();
     dbInsertBasket({
@@ -1192,7 +1257,12 @@ export function registerPaperRoutes({
     data: unknown;
   }
 
+  // Every other /paper route is behind requireAuth; the four snapshot routes were not, which left
+  // the one store on this server that accepts an arbitrary-sized JSON blob as its only unguarded
+  // writer. The guard asks whether a broker session exists, so this changes nothing for a
+  // logged-in user and closes the inconsistency for everyone else.
   fastify.post<{ Body: SnapshotBody }>('/paper/strategy/snapshot', async (req, reply) => {
+    if (!requireAuth(reply)) return;
     const b = req.body;
     if (!b?.basket_group_id || !b?.trade_date || b.data == null) {
       return reply.status(400).send({ error: 'basket_group_id, trade_date and data required' });
@@ -1217,10 +1287,12 @@ export function registerPaperRoutes({
   });
 
   fastify.get('/paper/strategy/snapshots', async (_req, reply) => {
+    if (!requireAuth(reply)) return;
     return reply.send({ snapshots: dbListSnapshots() });
   });
 
   fastify.get<{ Params: { id: string } }>('/paper/strategy/snapshot/:id', async (req, reply) => {
+    if (!requireAuth(reply)) return;
     const row = dbGetSnapshot(req.params.id);
     if (!row) return reply.status(404).send({ error: 'snapshot not found' });
     let data: unknown = null;
@@ -1234,6 +1306,7 @@ export function registerPaperRoutes({
   });
 
   fastify.delete<{ Params: { id: string } }>('/paper/strategy/snapshot/:id', async (req, reply) => {
+    if (!requireAuth(reply)) return;
     const ok = dbDeleteSnapshot(req.params.id);
     if (!ok) return reply.status(404).send({ error: 'snapshot not found' });
     return reply.send({ ok: true });

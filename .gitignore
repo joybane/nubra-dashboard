@@ -13,6 +13,13 @@ dist/
 .env
 .env.local
 
+# Broker session material. These hold a live auth token, deviceId, salt and phone number —
+# the same standing as .env, which is why they sit beside it. They were tracked until
+# 2026-08-14; `git rm --cached` untracked them, but every commit before that still contains
+# them, so the credentials themselves must be rotated rather than merely un-listed here.
+session.json
+uat-session.json
+
 # OS
 Thumbs.db
 .DS_Store

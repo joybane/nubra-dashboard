@@ -71,6 +71,57 @@ export function liveLevels(
   return { slPrice, tgtPrice };
 }
 
+// ─── Time-based exit ─────────────────────────────────────────────────────────
+// "Square off at 15:15 whether or not the SL/target ever fires." A wall-clock IST
+// HH:MM, deliberately not a date: the rule outlives the session it was written in
+// (it is persisted in SQLite), and a trader who says "15:15" means 15:15 on
+// whichever day the position is still open.
+
+const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+/** IST is UTC+5:30 with no DST, so a fixed offset is exact rather than an approximation. */
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+/**
+ * Accept only a well-formed 24-hour HH:MM, and return undefined for everything else.
+ *
+ * Undefined rather than a thrown error because this is the API boundary's sanitizer: a garbled
+ * value means "no time exit", exactly as `sanitizeSLTarget` downgrades an unknown SL type to
+ * NONE. Silently arming a rule at a time nobody can predict would be the worse failure.
+ */
+export function normalizeExitTime(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const s = v.trim();
+  return HHMM.test(s) ? s : undefined;
+}
+
+/** Minutes past IST midnight for an HH:MM, or null if it is not one. */
+export function exitTimeMinutes(hhmm: unknown): number | null {
+  const s = normalizeExitTime(hhmm);
+  if (!s) return null;
+  return Number(s.slice(0, 2)) * 60 + Number(s.slice(3, 5));
+}
+
+/** Wall-clock IST minute-of-day for an instant, independent of the host's own timezone. */
+export function istMinuteOfDay(nowMs: number = Date.now()): number {
+  const ist = new Date(nowMs + IST_OFFSET_MS);
+  return ist.getUTCHours() * 60 + ist.getUTCMinutes();
+}
+
+/**
+ * Is a time exit due?
+ *
+ * True from the configured minute onward, with no upper bound. The bound is deliberately absent:
+ * the whole point of the rule is that it still acts on a position nobody closed, and a window
+ * would make it silently give up in exactly the cases it exists for — the server was restarting
+ * at 15:15, the browser was shut, the feed was quiet. The editor says so in as many words, since
+ * arming a time that has already passed therefore exits immediately.
+ */
+export function exitTimeDue(exitTime: unknown, nowMs: number = Date.now()): boolean {
+  const target = exitTimeMinutes(exitTime);
+  return target != null && istMinuteOfDay(nowMs) >= target;
+}
+
 /**
  * Would this level be hit at `ltpRs`? The comparison direction is the same one
  * `evaluateAndFire` uses, exported so the editor can warn "this exits

@@ -1,7 +1,11 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 
-const DB_PATH = path.join(import.meta.dirname ?? __dirname, '..', 'paper.db');
+// `paper.db` beside the repo root is the only path the app ever uses. The override exists so the
+// schema and its migrations can be exercised against a scratch file in tests — running them
+// against the real book is exactly the thing a migration test must not do.
+const DB_PATH =
+  process.env.PAPER_DB_PATH || path.join(import.meta.dirname ?? __dirname, '..', 'paper.db');
 
 let db: Database.Database;
 
@@ -58,6 +62,7 @@ export function initDb(): Database.Database {
       entry_time          INTEGER,
       exit_time           INTEGER,
       exit_price          INTEGER,
+      entry_qty           INTEGER,
       PRIMARY KEY (ref_id, basket_group_id)
     );
 
@@ -175,6 +180,10 @@ export function initDb(): Database.Database {
   if (!posCols2.has('exit_price')) db.exec(`ALTER TABLE positions ADD COLUMN exit_price INTEGER`);
   if (!posCols2.has('margin_required'))
     db.exec(`ALTER TABLE positions ADD COLUMN margin_required INTEGER`);
+  // entry_qty was memory-only until now: SimBroker computed it at fill time but nothing wrote it,
+  // so a restart left every closed position guessing its own size from realized_pnl / price move.
+  // Rows written before this column existed stay NULL and keep that fallback; new fills carry it.
+  if (!posCols2.has('entry_qty')) db.exec(`ALTER TABLE positions ADD COLUMN entry_qty INTEGER`);
 
   const basketCols = cols('saved_baskets');
   if (!basketCols.has('basket_group_id'))
@@ -273,6 +282,39 @@ export function dbUpdateOrder(o: {
   });
 }
 
+/**
+ * Persist an amendment to a still-open order.
+ *
+ * Narrow for the same reason `dbSetOrderSlTriggered` is: `dbUpdateOrder` rewrites the fill block,
+ * which on an order that has not filled would blank filled_qty / avg_filled_price / order_status.
+ * These three columns are the only ones `SimBroker.modifyOrder` can change.
+ */
+export function dbModifyOrder(o: {
+  order_id: number;
+  order_price: number;
+  trigger_price: number;
+  order_qty: number;
+}): void {
+  db.prepare(
+    `UPDATE orders SET order_price = @order_price, trigger_price = @trigger_price,
+      order_qty = @order_qty WHERE order_id = @order_id`,
+  ).run(o);
+}
+
+/**
+ * Persist only the SL trigger latch.
+ *
+ * `dbUpdateOrder` above rewrites the whole fill block, which is right at fill time and wrong
+ * here: an SL-Limit can trigger *without* filling, and writing this through that function would
+ * blank filled_qty / avg_filled_price / order_status on an order that is still open.
+ */
+export function dbSetOrderSlTriggered(orderId: number, triggered: boolean): void {
+  db.prepare('UPDATE orders SET sl_triggered = ? WHERE order_id = ?').run(
+    triggered ? 1 : 0,
+    orderId,
+  );
+}
+
 export function dbLoadOrders(): Array<Record<string, unknown>> {
   return db.prepare('SELECT * FROM orders ORDER BY order_time DESC').all() as Array<
     Record<string, unknown>
@@ -316,19 +358,25 @@ export function dbUpsertPosition(p: {
   exit_time?: number;
   exit_price?: number;
   margin_required?: number;
+  entry_qty?: number;
 }): void {
   db.prepare(
     `INSERT INTO positions (ref_id, nubra_name, display_name, qty, avg_price,
       realized_pnl, last_traded_price, order_delivery_type, basket_group_id, strategy_name,
-      entry_time, exit_time, exit_price, margin_required)
+      entry_time, exit_time, exit_price, margin_required, entry_qty)
     VALUES (@ref_id, @nubra_name, @display_name, @qty, @avg_price,
       @realized_pnl, @last_traded_price, @order_delivery_type, @basket_group_id, @strategy_name,
-      @entry_time, @exit_time, @exit_price, @margin_required)
+      @entry_time, @exit_time, @exit_price, @margin_required, @entry_qty)
     ON CONFLICT(ref_id, basket_group_id) DO UPDATE SET
       qty=@qty, avg_price=@avg_price, realized_pnl=@realized_pnl,
       last_traded_price=@last_traded_price, display_name=@display_name,
       exit_time=@exit_time, exit_price=@exit_price,
-      margin_required=COALESCE(@margin_required, margin_required)
+      margin_required=COALESCE(@margin_required, margin_required),
+      -- entry_time/entry_qty describe the *current* occupant of this key, and a closed position
+      -- can be re-opened under it. Leaving them out of the update pinned both to the first ever
+      -- entry, which then dated the position wrongly after a restart — and entry_time is what
+      -- the EOD snapshot groups a strategy's trade date by.
+      entry_time=@entry_time, entry_qty=@entry_qty
   `,
   ).run({
     ref_id: p.ref_id,
@@ -345,6 +393,7 @@ export function dbUpsertPosition(p: {
     exit_time: p.exit_time ?? null,
     exit_price: p.exit_price ?? null,
     margin_required: p.margin_required ?? null,
+    entry_qty: p.entry_qty ?? null,
   });
 }
 

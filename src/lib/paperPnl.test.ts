@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'vitest';
 import type { PaperPosition } from '../types';
-import { isOnLocalDay, summarizeTodayPositions } from './paperPnl';
+import {
+  isOnLocalDay,
+  openPositionPnlPaise,
+  openPositionUnrealisedPnlPaise,
+  summarizeTodayPositions,
+} from './paperPnl';
 
 function ns(date: Date): number {
   return date.getTime() * 1_000_000;
@@ -75,6 +80,44 @@ describe('summarizeTodayPositions', () => {
       closed: [],
       totalPnlPaise: 50,
     });
+  });
+
+  // A leg can be squared off in part: it stays in /paper/positions with the remaining quantity
+  // and carries the booked amount in realised_pnl. Counting only the mark-to-market left the
+  // terminal's Day P&L disagreeing with /paper/pnl by exactly that amount.
+  test('counts P&L already booked on a partially squared-off open position', () => {
+    const partial = position({
+      ref_id: 1,
+      entry_time: ns(new Date(2026, 7, 14, 9, 30, 0)),
+      qty: 1,
+      avg_price: 10_000,
+      last_traded_price: 10_400,
+      realised_pnl: 900,
+    });
+
+    expect(openPositionUnrealisedPnlPaise(partial)).toBe(400);
+    expect(openPositionPnlPaise(partial)).toBe(1_300);
+    expect(summarizeTodayPositions([partial], [], day).totalPnlPaise).toBe(1_300);
+  });
+
+  test('a short position books its realised leg with the same sign convention', () => {
+    const shortLeg = position({
+      order_side: 'ORDER_SIDE_SELL',
+      qty: 2,
+      avg_price: 10_000,
+      last_traded_price: 9_800,
+      realised_pnl: -150,
+    });
+
+    expect(openPositionUnrealisedPnlPaise(shortLeg)).toBe(400);
+    expect(openPositionPnlPaise(shortLeg)).toBe(250);
+  });
+
+  test('a fully open position is unchanged by the realised term', () => {
+    const clean = position({ qty: 3, avg_price: 10_000, last_traded_price: 10_100 });
+
+    expect(openPositionPnlPaise(clean)).toBe(openPositionUnrealisedPnlPaise(clean));
+    expect(openPositionPnlPaise(clean)).toBe(300);
   });
 
   test('uses local calendar-day boundaries', () => {

@@ -15,11 +15,19 @@ import { exchangeFromName } from '../types';
 import { fmtPrice } from '../lib/utils';
 import { liveLevels } from '../lib/positionRuleLevels';
 import { isOnLocalDay, openPositionPnlPaise, summarizeTodayPositions } from '../lib/paperPnl';
+import {
+  buildOrderPatch,
+  draftFromOrder,
+  editableFields,
+  EMPTY_DRAFT,
+  type OrderDraft,
+} from '../lib/orderAmendment';
 import { usePaperTrading } from '../hooks/usePaperTrading';
 import { useWorkspaceState } from '../workspace/useWorkspaceState';
 import { useWs } from '../hooks/useWsContext';
 import SavedStrategiesTab from './SavedStrategiesTab';
 import PositionRuleEditor from './PositionRuleEditor';
+import ConfirmDialog from './ConfirmDialog';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 function paise(v: number | undefined | null): string {
@@ -150,6 +158,10 @@ function OrdersTab({
   const [showHistory, setShowHistory] = useState(false);
   const [histFrom, setHistFrom] = useState('');
   const [histTo, setHistTo] = useState('');
+  const [editingOrder, setEditingOrder] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState<OrderDraft>(EMPTY_DRAFT);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [savingOrder, setSavingOrder] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const toggleExpand = useCallback((gid: string) => {
@@ -222,6 +234,53 @@ function OrdersTab({
     }
   }
 
+  const startEdit = useCallback((o: PaperOrder) => {
+    setEditingOrder(o.order_id);
+    setEditDraft(draftFromOrder(o));
+    setEditError(null);
+  }, []);
+
+  const cancelEdit = useCallback(() => {
+    setEditingOrder(null);
+    setEditDraft(EMPTY_DRAFT);
+    setEditError(null);
+  }, []);
+
+  const commitEdit = useCallback(
+    async (o: PaperOrder) => {
+      const built = buildOrderPatch(o, editDraft);
+      if ('error' in built) {
+        setEditError(built.error);
+        return;
+      }
+      setSavingOrder(true);
+      setEditError(null);
+      try {
+        const res = await fetch(`/paper/orders/modify/${o.order_id}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(built.patch),
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          setEditError(body.error || `Could not modify the order (HTTP ${res.status})`);
+          return;
+        }
+        // The amendment can cross the market and fill on the spot, so re-read rather than
+        // patching the row in place — the order may have left the open list entirely.
+        await fetchOrders();
+        setEditingOrder(null);
+        setEditDraft(EMPTY_DRAFT);
+      } catch (e) {
+        console.warn('[Orders] modify failed:', e);
+        setEditError('Could not reach the server');
+      } finally {
+        setSavingOrder(false);
+      }
+    },
+    [editDraft, fetchOrders],
+  );
+
   const filteredOpen = openOrders.filter((o) => isOnLocalDay(o.order_time));
   const filteredClosed = closedOrders.filter((o) => isOnLocalDay(o.order_time));
   const historyOrders = showHistory
@@ -236,6 +295,12 @@ function OrdersTab({
     const isBuy = o.order_side === 'ORDER_SIDE_BUY';
     const canCancel =
       o.order_status === 'ORDER_STATUS_PENDING' || o.order_status === 'ORDER_STATUS_OPEN';
+    // Only a still-open order can be amended, and only where the market has not already
+    // partly filled it — a partial fill would make the remaining quantity ambiguous.
+    const canModify = o.order_status === 'ORDER_STATUS_OPEN' && !o.filled_qty;
+    // Guarded on canModify, not just on the id: the 5s poll can fill the order out from under
+    // the editor, and the same order then reappears under History where an edit row is nonsense.
+    if (editingOrder === o.order_id && canModify) return renderOrderEditRow(o, indent);
     return (
       <tr
         key={o.order_id}
@@ -275,16 +340,145 @@ function OrdersTab({
           {o.avg_filled_price ? paise(o.avg_filled_price) : '—'}
         </td>
         <td className="px-3 py-1.5">
-          {canCancel && (
-            <button
-              onClick={() => cancelOrder(o.order_id)}
-              disabled={cancelling === o.order_id}
-              className="w-5 h-5 rounded flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--red)] hover:bg-red-500/10 disabled:opacity-40 transition-colors"
-              title="Cancel order"
-            >
-              {cancelling === o.order_id ? '…' : '×'}
-            </button>
+          <div className="flex items-center gap-1">
+            {canModify && (
+              <button
+                onClick={() => startEdit(o)}
+                className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--text-muted)] hover:text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors"
+                title="Modify price, trigger or quantity"
+              >
+                Modify
+              </button>
+            )}
+            {canCancel && (
+              <button
+                onClick={() => cancelOrder(o.order_id)}
+                disabled={cancelling === o.order_id}
+                className="w-5 h-5 rounded flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--red)] hover:bg-red-500/10 disabled:opacity-40 transition-colors"
+                title="Cancel order"
+              >
+                {cancelling === o.order_id ? '…' : '×'}
+              </button>
+            )}
+          </div>
+        </td>
+      </tr>
+    );
+  }
+
+  /** The same row with Qty / Price / Trigger swapped for inputs. */
+  function renderOrderEditRow(o: PaperOrder, indent: boolean) {
+    const { price: canPrice, trigger: canTrigger } = editableFields(o);
+    const isBuy = o.order_side === 'ORDER_SIDE_BUY';
+    const cellInput = (
+      value: string,
+      onChange: (v: string) => void,
+      label: string,
+      disabled: boolean,
+    ) =>
+      disabled ? (
+        <span className="text-[var(--text-muted)]">—</span>
+      ) : (
+        <input
+          type="number"
+          min="0"
+          step="0.05"
+          value={value}
+          aria-label={label}
+          disabled={savingOrder}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commitEdit(o);
+            if (e.key === 'Escape') cancelEdit();
+          }}
+          className="w-20 bg-[var(--bg-primary)] border border-[var(--accent)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none tabular-nums disabled:opacity-50"
+        />
+      );
+
+    return (
+      <tr
+        key={o.order_id}
+        className={`border-b border-[var(--border)]/50 bg-[var(--accent)]/[0.06] ${indent ? 'bg-[var(--bg-primary)]/50' : ''}`}
+      >
+        <td
+          className={`px-3 py-1.5 font-semibold text-[var(--text-primary)] whitespace-nowrap ${indent ? 'pl-8' : ''}`}
+        >
+          {displayName(o)}
+          {editError && (
+            <span role="alert" className="ml-2 font-normal text-[10px] text-[var(--red)]">
+              {editError}
+            </span>
           )}
+        </td>
+        <td className="px-3 py-1.5">
+          <span
+            className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${STATUS_STYLE[o.order_status] || ''}`}
+          >
+            {STATUS_LABEL[o.order_status] || o.order_status}
+          </span>
+        </td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
+          {fmtTime(o.order_time)}
+        </td>
+        <td className="px-3 py-1.5 text-[var(--text-secondary)]">
+          {productLabel(o.order_delivery_type)}
+        </td>
+        <td
+          className={`px-3 py-1.5 font-semibold ${isBuy ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+        >
+          {isBuy ? 'BUY' : 'SELL'}
+        </td>
+        <td className="px-3 py-1.5">
+          <input
+            type="number"
+            min="1"
+            step="1"
+            value={editDraft.qty}
+            aria-label="Quantity"
+            autoFocus
+            disabled={savingOrder}
+            onChange={(e) => setEditDraft((d) => ({ ...d, qty: e.target.value }))}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitEdit(o);
+              if (e.key === 'Escape') cancelEdit();
+            }}
+            className="w-16 bg-[var(--bg-primary)] border border-[var(--accent)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none tabular-nums disabled:opacity-50"
+          />
+        </td>
+        <td className="px-3 py-1.5">
+          {cellInput(
+            editDraft.price,
+            (v) => setEditDraft((d) => ({ ...d, price: v })),
+            'Limit price',
+            !canPrice,
+          )}
+        </td>
+        <td className="px-3 py-1.5">
+          {cellInput(
+            editDraft.trigger,
+            (v) => setEditDraft((d) => ({ ...d, trigger: v })),
+            'Trigger price',
+            !canTrigger,
+          )}
+        </td>
+        <td className="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+        <td className="px-3 py-1.5">
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => commitEdit(o)}
+              disabled={savingOrder}
+              className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--accent)] bg-[var(--accent)]/10 hover:bg-[var(--accent)]/20 disabled:opacity-40 transition-colors"
+            >
+              {savingOrder ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              onClick={cancelEdit}
+              disabled={savingOrder}
+              className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-40 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
         </td>
       </tr>
     );
@@ -333,7 +527,7 @@ function OrdersTab({
                   setHistTo((t) => (t < v ? v : t));
                 }
               }}
-              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]"
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
             />
             <button
               onClick={() => shiftDates(1)}
@@ -353,7 +547,7 @@ function OrdersTab({
                 const v = e.target.value;
                 if (v) setHistTo(v);
               }}
-              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]"
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
             />
             <span className="ml-auto text-[11px] text-[var(--text-muted)]">
               {historyOrders.length} orders
@@ -649,6 +843,19 @@ async function fetchPositionGroupMarginPaise(
   };
 }
 
+/**
+ * A square-off awaiting confirmation.
+ *
+ * Holds position **keys**, not position objects. The 2-second poll and the live LTP feed both
+ * replace the position array while the dialog is open, and a rule can partly close a leg in that
+ * window — so the exit has to be built from the book as it stands at confirm time, not as it
+ * stood when the button was clicked.
+ */
+interface PendingExit {
+  label: string;
+  keys: string[];
+}
+
 // ─── Positions tab ────────────────────────────────────────────────────────────
 interface PositionsTabProps {
   uatAuth: boolean;
@@ -681,6 +888,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     | { mode: 'GROUP'; basketGroupId: string; strategyName: string }
     | null
   >(null);
+  const [pendingExit, setPendingExit] = useState<PendingExit | null>(null);
   const { subscribe } = useWs();
 
   const posExitKey = (p: PaperPosition) => `${p.ref_id}:${p.basket_group_id || ''}`;
@@ -745,12 +953,15 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
       await fetch('/paper/positions/rules/group', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
+        // The PUT replaces the whole rule, so every field the editor owns has to be echoed
+        // back — a partial body silently disarms whatever it leaves out.
         body: JSON.stringify({
           basket_group_id: gid,
           maxProfit: current?.maxProfit,
           maxLoss: current?.maxLoss,
           trail: current?.trail,
           exitAllOnLegHit: checked,
+          exitTime: current?.exitTime,
         }),
       });
       fetch_();
@@ -893,20 +1104,22 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     [exiting, fetch_],
   );
 
-  const exitAllInGroup = useCallback(
-    async (gPositions: PaperPosition[]) => {
-      for (const p of gPositions) {
-        if (!exiting.has(posExitKey(p))) exitDirect(p);
-      }
-    },
-    [exiting, exitDirect],
-  );
+  // Squaring off is a market order per leg and cannot be taken back, so it asks first. The two
+  // buttons were one mis-click apart from closing an entire book — the only destructive actions
+  // in the product that were not confirmed, while deleting a *snapshot* already was.
+  const confirmExit = useCallback((pending: PendingExit) => setPendingExit(pending), []);
 
-  const exitAll = useCallback(async () => {
+  const runPendingExit = useCallback(() => {
+    if (!pendingExit) return;
+    const wanted = new Set(pendingExit.keys);
+    setPendingExit(null);
+    // Re-read from the live book. A leg that closed while the dialog was open is simply absent
+    // here, so confirming cannot place an order against a position that no longer exists.
     for (const p of positions) {
-      if (!exiting.has(posExitKey(p))) exitDirect(p);
+      const key = posExitKey(p);
+      if (wanted.has(key) && !exiting.has(key)) exitDirect(p);
     }
-  }, [positions, exiting, exitDirect]);
+  }, [pendingExit, positions, exiting, exitDirect]);
 
   const todaySummary = summarizeTodayPositions(positions, closedPositions);
   const filteredOpen = todaySummary.open;
@@ -980,12 +1193,33 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     if (slPrice != null) parts.push(`SL ₹${slPrice.toFixed(2)}`);
     if (tgtPrice != null) parts.push(`Target ₹${tgtPrice.toFixed(2)}`);
     if (rule.trail && rule.trail.type !== 'NONE') parts.push('trailing');
+    if (rule.exitTime) parts.push(`exit ${rule.exitTime} IST`);
     return parts.length ? `Auto-exit — ${parts.join(' · ')}` : 'Auto SL/Target active';
+  }
+
+  // Same idea for the group marker, which until now said only that *something* was armed.
+  function groupRuleTitle(rule: GroupPositionRule): string {
+    const parts: string[] = [];
+    if (rule.maxProfit) parts.push(`Max profit ₹${fmtPrice(rule.maxProfit)}`);
+    if (rule.maxLoss) parts.push(`Max loss ₹${fmtPrice(Math.abs(rule.maxLoss))}`);
+    if (rule.trail && rule.trail.type !== 'NONE') parts.push('trailing');
+    if (rule.exitAllOnLegHit) parts.push('exit all on any leg hit');
+    if (rule.exitTime) parts.push(`exit ${rule.exitTime} IST`);
+    return parts.length ? `Group auto-exit — ${parts.join(' · ')}` : 'Group auto SL/Target active';
   }
 
   function renderPositionRow(p: PaperPosition, indent = false) {
     const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
     const pnl = calcPnl(p);
+    // The % column is the move on the quantity still open, so it is deliberately *not* pnl
+    // restated as a percentage — on a partially squared-off leg the two can differ in sign, and
+    // each cell has to be coloured by the number it is actually showing.
+    const pnlChgPct =
+      (p.avg_price || 0) > 0
+        ? (((p.last_traded_price || 0) - (p.avg_price || 0)) / (p.avg_price || 1)) *
+          100 *
+          (side === 'BUY' ? 1 : -1)
+        : 0;
     const ek = posExitKey(p);
     const legRule = legRuleFor(p);
     return (
@@ -1018,15 +1252,11 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
         >
           {pnl >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(pnl))}
         </td>
-        <td className={`px-3 py-1.5 ${pnl >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}>
-          {pnl >= 0 ? '+' : ''}
-          {((p.avg_price || 0) > 0
-            ? (((p.last_traded_price || 0) - (p.avg_price || 0)) / (p.avg_price || 1)) *
-              100 *
-              (side === 'BUY' ? 1 : -1)
-            : 0
-          ).toFixed(2)}
-          %
+        <td
+          className={`px-3 py-1.5 ${pnlChgPct >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+        >
+          {pnlChgPct >= 0 ? '+' : ''}
+          {pnlChgPct.toFixed(2)}%
         </td>
         <td className="px-3 py-1.5 text-[var(--text-secondary)] whitespace-nowrap">
           {fmtTime(p.entry_time)}
@@ -1168,7 +1398,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                   setHistTo((t) => (t < v ? v : t));
                 }
               }}
-              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]"
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
             />
             <button
               onClick={() => shiftDates(1)}
@@ -1188,7 +1418,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                 const v = e.target.value;
                 if (v) setHistTo(v);
               }}
-              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)] [color-scheme:dark]"
+              className="bg-[var(--bg-primary)] border border-[var(--border)] rounded px-1.5 py-0.5 text-[11px] text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
             />
             <span className="ml-auto text-[11px] text-[var(--text-muted)]">
               {historyPositions.length} positions
@@ -1231,9 +1461,14 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
             </span>
             {subTab === 'open' && filteredOpen.length > 0 && (
               <button
-                onClick={exitAll}
+                onClick={() =>
+                  confirmExit({
+                    label: `all ${positions.length} open position${positions.length === 1 ? '' : 's'}`,
+                    keys: positions.map(posExitKey),
+                  })
+                }
                 disabled={positions.every((p) => exiting.has(posExitKey(p)))}
-                className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--red)] bg-[var(--red)]/10 hover:bg-[var(--red)]/25 border border-[var(--red)]/30 transition-colors"
+                className="px-2 py-0.5 rounded text-[10px] font-semibold text-[var(--red)] bg-[var(--red)]/10 hover:bg-[var(--red)]/25 border border-[var(--red)]/30 transition-colors disabled:opacity-40"
               >
                 Exit All
               </button>
@@ -1404,7 +1639,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                           {groupRule && (
                             <span
                               className="text-[var(--accent)]"
-                              title="Group auto SL/Target active"
+                              title={groupRuleTitle(groupRule)}
                             >
                               ●
                             </span>
@@ -1521,7 +1756,12 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                           SL/T
                         </button>
                         <button
-                          onClick={() => exitAllInGroup(g.positions)}
+                          onClick={() =>
+                            confirmExit({
+                              label: `all ${g.positions.length} leg${g.positions.length === 1 ? '' : 's'} of “${g.strategy_name}”`,
+                              keys: g.positions.map(posExitKey),
+                            })
+                          }
                           disabled={allExiting}
                           className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${allExiting ? 'text-[var(--text-muted)] bg-[var(--bg-hover)] border border-[var(--border)] cursor-not-allowed' : 'text-[var(--red)] bg-[var(--red)]/10 hover:bg-[var(--red)]/25 border border-[var(--red)]/30'}`}
                           title="Exit all legs"
@@ -1793,6 +2033,19 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
           onSaved={fetch_}
         />
       )}
+      <ConfirmDialog
+        open={pendingExit != null}
+        danger
+        title="Square off at market?"
+        message={
+          pendingExit
+            ? `This places an immediate market order to close ${pendingExit.label}. It cannot be undone.`
+            : undefined
+        }
+        confirmLabel="Square off"
+        onConfirm={runPendingExit}
+        onCancel={() => setPendingExit(null)}
+      />
     </div>
   );
 }

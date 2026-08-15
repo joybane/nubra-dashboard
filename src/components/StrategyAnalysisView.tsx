@@ -1,13 +1,4 @@
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  memo,
-  forwardRef,
-  useImperativeHandle,
-} from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
   createSeriesMarkers,
@@ -300,11 +291,6 @@ type GreekKey = 'delta' | 'gamma' | 'theta' | 'vega';
 const GREEK_LINE_STYLES: Record<string, number> = { net: 0, CE: 2, PE: 1 };
 const GREEK_LINE_WIDTHS: Record<string, 1 | 2> = { net: 2, CE: 1, PE: 1 };
 
-function activeGreekSource(filter: Set<string>): GreekSource {
-  for (const src of GREEK_SOURCES) if (filter.has(src)) return src;
-  return 'net';
-}
-
 function deriveUnderlying(positions: PaperPosition[]): string | null {
   return strategyPositionAsset(positions);
 }
@@ -517,19 +503,6 @@ const GREEK_COLORS: Record<string, string> = {
   vega: '#f59e0b',
 };
 
-// Min-max normalization factor: maps a series' [min,max] to [-1,1]. True value = plotted × half + mid.
-function minMaxFactor(values: number[]): { mid: number; half: number } {
-  let min = Infinity,
-    max = -Infinity;
-  for (const v of values) {
-    if (v < min) min = v;
-    if (v > max) max = v;
-  }
-  if (min === Infinity) return { mid: 0, half: 1 };
-  const mid = (max + min) / 2,
-    half = (max - min) / 2;
-  return { mid, half: half > 0 ? half : 1 };
-}
 import {
   PriceTooltip,
   PnlTooltip,

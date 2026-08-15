@@ -154,6 +154,112 @@ test('preserves holdings and PnL calculations', async () => {
   expect(pnl.json()).toEqual({ realised: 15, unrealised: 40, total: 55 });
 });
 
+// ── Order amendment ──────────────────────────────────────────────────────────
+
+test('rejects an empty or malformed amendment before it reaches the broker', async () => {
+  const cases: Array<[unknown, string]> = [
+    [{}, 'supply at least one of order_price, trigger_price, order_qty'],
+    [{ order_qty: 0 }, 'order_qty must be greater than zero'],
+    [{ order_qty: -3 }, 'order_qty must be a non-negative number'],
+    [{ order_qty: 65.5 }, 'order_qty must be a whole number'],
+    [{ order_price: -1 }, 'order_price must be a non-negative number'],
+    [{ order_price: 'cheap' }, 'order_price must be a non-negative number'],
+  ];
+
+  for (const [payload, error] of cases) {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/paper/orders/modify/7',
+      payload: payload as object,
+    });
+    expect(response.statusCode, JSON.stringify(payload)).toBe(400);
+    expect(response.json()).toEqual({ error });
+  }
+
+  const badId = await app.inject({
+    method: 'POST',
+    url: '/paper/orders/modify/not-a-number',
+    payload: { order_qty: 1 },
+  });
+  expect(badId.statusCode).toBe(400);
+  expect(simBroker.modifyOrder).not.toHaveBeenCalled();
+});
+
+test('returns the amended order so a fill on amendment is visible without polling', async () => {
+  simBroker.modifyOrder.mockReturnValueOnce(true);
+  simBroker.getOrders.mockReturnValueOnce([
+    { order_id: 7, order_status: 'ORDER_STATUS_FILLED', order_price: 9_500 },
+  ]);
+
+  const response = await app.inject({
+    method: 'POST',
+    url: '/paper/orders/modify/7',
+    payload: { order_price: 9_500 },
+  });
+
+  expect(response.statusCode).toBe(200);
+  expect(response.json()).toEqual({
+    ok: true,
+    order: { order_id: 7, order_status: 'ORDER_STATUS_FILLED', order_price: 9_500 },
+  });
+  expect(simBroker.modifyOrder).toHaveBeenCalledWith(7, { order_price: 9_500 });
+});
+
+test('still 404s an amendment the broker refuses', async () => {
+  const response = await app.inject({
+    method: 'POST',
+    url: '/paper/orders/modify/7',
+    payload: { order_price: 9_500 },
+  });
+
+  expect(response.statusCode).toBe(404);
+  expect(response.json()).toEqual({ error: 'Order not found or already filled/cancelled.' });
+});
+
+// ── Saved baskets ────────────────────────────────────────────────────────────
+
+test('answers a malformed basket with the field that is wrong, not a driver 500', async () => {
+  const cases: Array<[object, string]> = [
+    [{}, 'name is required'],
+    [{ name: '  ' }, 'name is required'],
+    [{ name: 'Condor' }, 'symbol is required'],
+    [{ name: 'Condor', symbol: 'NIFTY' }, 'expiry is required'],
+    [{ name: 'Condor', symbol: 'NIFTY', expiry: '20260827' }, 'legs must be a non-empty array'],
+    [
+      { name: 'Condor', symbol: 'NIFTY', expiry: '20260827', legs: [] },
+      'legs must be a non-empty array',
+    ],
+  ];
+
+  for (const [payload, error] of cases) {
+    const response = await app.inject({ method: 'POST', url: '/paper/baskets', payload });
+    expect(response.statusCode, JSON.stringify(payload)).toBe(400);
+    expect(response.json()).toEqual({ error });
+  }
+});
+
+test('puts the snapshot store behind the same auth guard as every other paper route', async () => {
+  await app.close();
+  app = Fastify();
+  register((reply) => {
+    reply.status(401).send({ error: 'Not authenticated. Complete login first.' });
+    return false;
+  });
+  await app.ready();
+
+  const guarded: Array<{ method: 'GET' | 'POST' | 'DELETE'; url: string }> = [
+    { method: 'POST', url: '/paper/strategy/snapshot' },
+    { method: 'GET', url: '/paper/strategy/snapshots' },
+    { method: 'GET', url: '/paper/strategy/snapshot/abc' },
+    { method: 'DELETE', url: '/paper/strategy/snapshot/abc' },
+  ];
+
+  for (const route of guarded) {
+    const response = await app.inject({ ...route, payload: {} });
+    expect(response.statusCode, route.url).toBe(401);
+  }
+});
+
 test('preserves the authentication guard ahead of broker work', async () => {
   await app.close();
   app = Fastify();

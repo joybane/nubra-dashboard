@@ -14,8 +14,19 @@ import {
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
+/**
+ * Either shape lightweight-charts uses for a time on these charts.
+ *
+ * Intraday intervals carry IST-baked epoch seconds; 1d/1w/1mt carry a business day instead
+ * (see `toChartTime`). A tooltip on the Chart view sees both, because the interval buttons
+ * switch between them.
+ */
+export type CrosshairTime = number | { year: number; month: number; day: number };
+
 /** Chart time is IST-baked seconds, so read UTC parts to get the IST wall clock. */
-export function fmtCrosshairTime(t: number): string {
+export function fmtCrosshairTime(t: CrosshairTime): string {
+  // A business day has no clock to show — printing one would invent a 00:00 that means nothing.
+  if (typeof t === 'object' && t) return `${t.day} ${MONTHS[t.month - 1]} ${t.year}`;
   const d = new Date(t * 1000);
   const hh = String(d.getUTCHours()).padStart(2, '0');
   const mm = String(d.getUTCMinutes()).padStart(2, '0');
@@ -31,12 +42,28 @@ export function fmtCompact(v: number): string {
   return v.toFixed(2);
 }
 
+/**
+ * Escape text destined for a tooltip's `innerHTML`.
+ *
+ * Series titles and instrument names reach these cards from the broker's refdata, not from a
+ * literal in this repo — so they are interpolated into markup we did not author. Nothing observed
+ * there contains markup today; escaping costs one pass over a short string and removes the
+ * question entirely.
+ */
+export function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 export function tipRow(color: string, label: string, val: string): string {
   return (
     `<div style="display:flex;align-items:center;gap:6px;line-height:1.6;white-space:nowrap">` +
-    `<span style="width:8px;height:8px;border-radius:2px;background:${color};flex:none"></span>` +
-    `<span style="color:var(--text-secondary);font-size:11px">${label}</span>` +
-    `<span style="margin-left:auto;padding-left:14px;color:var(--text-primary);font-weight:600;font-size:11px">${val}</span>` +
+    `<span style="width:8px;height:8px;border-radius:2px;background:${escapeHtml(color)};flex:none"></span>` +
+    `<span style="color:var(--text-secondary);font-size:11px">${escapeHtml(label)}</span>` +
+    `<span style="margin-left:auto;padding-left:14px;color:var(--text-primary);font-weight:600;font-size:11px">${escapeHtml(val)}</span>` +
     `</div>`
   );
 }
@@ -92,13 +119,42 @@ export function greekRows(
 }
 
 /**
+ * Every visible greek line the chart carries, gathered across its sub-panes.
+ *
+ * The Tracker draws its overlays *inline* on the price pane, so one `greekRows` call over pane 0
+ * covers it. The Chart view gives each greek a pane of its own below the price (see
+ * `createGreekPane`'s non-inline branch), so its rows are spread over panes 1..n — and how many
+ * exist depends on which overlays are switched on. Enumerating from `fromPane` keeps the price
+ * pane's own candles and volume out of the greek section.
+ */
+export function greekRowsAllPanes(
+  chart: IChartApi,
+  exclude: ISeriesApi<'Line'> | null,
+  readExact: ((s: ISeriesApi<'Line'>) => number | undefined) | null,
+  logical: number | null,
+  fromPane = 1,
+): GreekRow[] {
+  let paneCount = 0;
+  try {
+    paneCount = chart.panes().length;
+  } catch {
+    return []; // chart disposed
+  }
+  const rows: GreekRow[] = [];
+  for (let i = fromPane; i < paneCount; i++) {
+    rows.push(...greekRows(chart, exclude, readExact, logical, i));
+  }
+  return rows;
+}
+
+/**
  * One series' value at a logical index, carried forward from the last bar at or before it.
  *
  * The host's own price row needs this for the same reason the greek rows do: a synced crosshair
  * and a pinned card both arrive without `seriesData`, so an exact-hit read would drop the row.
  */
 export function seriesValueAt(
-  series: ISeriesApi<'Line'> | null,
+  series: ISeriesApi<'Line'> | ISeriesApi<'Histogram'> | null,
   logical: number | null,
 ): number | undefined {
   if (!series || logical == null) return undefined;
@@ -112,14 +168,49 @@ export function seriesValueAt(
   }
 }
 
+/** One O/H/L/C bar, carried forward the same way `seriesValueAt` carries a single value. */
+export interface TooltipBar {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export function seriesBarAt(
+  series: ISeriesApi<'Candlestick'> | null,
+  logical: number | null,
+): TooltipBar | undefined {
+  if (!series || logical == null) return undefined;
+  try {
+    const p = series.dataByIndex(
+      logical,
+      MismatchDirection.NearestLeft,
+    ) as Partial<TooltipBar> | null;
+    return isTooltipBar(p) ? p : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isTooltipBar(p: Partial<TooltipBar> | null | undefined): p is TooltipBar {
+  return (
+    !!p &&
+    Number.isFinite(p.open) &&
+    Number.isFinite(p.high) &&
+    Number.isFinite(p.low) &&
+    Number.isFinite(p.close)
+  );
+}
+
 /**
  * Logical index for a chart time, via the time scale's own coordinate mapping.
  *
  * A pinned card knows only a timestamp — there is no cursor and therefore no `param.logical` —
  * but `dataByIndex` is the only way to carry a reading forward off-grid, and it wants an index.
  */
-export function logicalAtTime(chart: IChartApi, time: number): number | null {
+export function logicalAtTime(chart: IChartApi, time: CrosshairTime): number | null {
   try {
+    // The time scale accepts a business day as readily as a timestamp; only the type says otherwise.
     const x = chart.timeScale().timeToCoordinate(time as UTCTimestamp);
     if (x == null || !Number.isFinite(x)) return null;
     const logical = chart.timeScale().coordinateToLogical(x);
@@ -127,6 +218,29 @@ export function logicalAtTime(chart: IChartApi, time: number): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Park a tooltip beside the cursor without letting it leave the pane.
+ *
+ * `desiredTop` is the intended top edge rather than the cursor's y, because the synced-crosshair
+ * path below wants the card pinned to the top of the pane instead of trailing a y it never had.
+ */
+export function placeTooltip(
+  container: HTMLElement,
+  tooltip: HTMLElement,
+  cursorX: number,
+  desiredTop: number,
+  gap = 16,
+): void {
+  const tw = tooltip.offsetWidth;
+  const th = tooltip.offsetHeight;
+  let x = cursorX + gap;
+  if (x + tw > container.clientWidth) x = cursorX - tw - gap;
+  let y = desiredTop;
+  if (y + th > container.clientHeight) y = container.clientHeight - th - 8;
+  tooltip.style.left = `${Math.max(4, x)}px`;
+  tooltip.style.top = `${Math.max(4, y)}px`;
 }
 
 export interface GreekCrosshairOpts {
@@ -187,7 +301,8 @@ export function bindGreekCrosshair(opts: GreekCrosshairOpts): () => void {
     }
     // A synced crosshair carries no seriesData either, so fall back to the time when there is
     // no logical index to read against.
-    const logical = param.logical ?? (synced ? logicalAtTime(chart, param.time as number) : null);
+    const logical =
+      param.logical ?? (synced ? logicalAtTime(chart, param.time as CrosshairTime) : null);
 
     const rows: string[] = [];
     const base = baseSeries();
@@ -213,24 +328,184 @@ export function bindGreekCrosshair(opts: GreekCrosshairOpts): () => void {
       return;
     }
     tooltip.innerHTML =
-      `<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">${fmtCrosshairTime(param.time as number)}</div>` +
+      `<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">${fmtCrosshairTime(param.time as CrosshairTime)}</div>` +
       rows.join('');
     tooltip.style.display = 'block';
-
-    const tw = tooltip.offsetWidth,
-      th = tooltip.offsetHeight;
     // A synced crosshair has no cursor to dodge, so pin the card to the top of the pane rather
     // than trailing a y that is really just 0.
-    let x = pt.x + 16,
-      y = synced ? 8 : pt.y + 16;
-    if (x + tw > container.clientWidth) x = pt.x - tw - 16;
-    if (y + th > container.clientHeight) y = container.clientHeight - th - 8;
-    tooltip.style.left = `${Math.max(4, x)}px`;
-    tooltip.style.top = `${Math.max(4, y)}px`;
+    placeTooltip(container, tooltip, pt.x, synced ? 8 : pt.y + 16);
   };
 
   chart.subscribeCrosshairMove(onCrosshair);
   return () => {
+    try {
+      chart.unsubscribeCrosshairMove(onCrosshair);
+    } catch {
+      /* chart already disposed */
+    }
+  };
+}
+
+// ─── Candlestick crosshair tooltip ───────────────────────────────────────────────
+//
+// The Chart view differs from the Tracker in two ways that the binding above cannot absorb:
+// its base series is a candlestick (four numbers per bar, not one) and its greek overlays live
+// in sub-panes below the price rather than inline on it. What the two share — carrying readings
+// forward off-grid, escaping, and keeping the card inside the pane — is shared code.
+
+const MUTED = 'color:var(--text-muted)';
+
+function ohlcCell(label: string, value: string, color: string): string {
+  return (
+    `<span style="${MUTED};font-size:10px">${label}</span>` +
+    `<span style="color:${color};font-weight:600;font-size:11px;text-align:right">${escapeHtml(value)}</span>`
+  );
+}
+
+function metaRow(label: string, value: string, color: string): string {
+  return (
+    `<div style="display:flex;align-items:center;gap:6px;line-height:1.6;white-space:nowrap">` +
+    `<span style="${MUTED};font-size:11px">${escapeHtml(label)}</span>` +
+    `<span style="margin-left:auto;padding-left:14px;color:${color};font-weight:600;font-size:11px">${escapeHtml(value)}</span>` +
+    `</div>`
+  );
+}
+
+export interface CandleCrosshairOpts {
+  chart: IChartApi;
+  container: HTMLElement;
+  tooltip: HTMLElement;
+  candleSeries: () => ISeriesApi<'Candlestick'> | null;
+  /** Volume histogram. Its row is skipped whenever the series is switched off. */
+  volumeSeries: () => ISeriesApi<'Histogram'> | null;
+  /** Symbol shown in the header, beside the timestamp. */
+  symbol: () => string;
+  formatPrice: (v: number) => string;
+  formatVolume: (v: number) => string;
+}
+
+/**
+ * Crosshair tooltip for the Chart view: the hovered candle's O/H/L/C and change, the volume bar
+ * when it is on, and every visible greek overlay line from the sub-panes below.
+ *
+ * Positioning is driven by a DOM `mousemove` on the container rather than by `param.point`,
+ * because `point.y` is measured within the pane the cursor is in. On a chart with Vega and Theta
+ * panes underneath, trusting it would place the card hundreds of pixels too high whenever the
+ * cursor was in a sub-pane. `param` is still what supplies the *data* — the mouse position alone
+ * cannot say which bar the crosshair snapped to.
+ */
+export function bindCandleCrosshair(opts: CandleCrosshairOpts): () => void {
+  const { chart, container, tooltip, candleSeries, volumeSeries, symbol } = opts;
+  const { formatPrice, formatVolume } = opts;
+
+  let cursor: { x: number; y: number } | null = null;
+  let lastParam: MouseEventParams | null = null;
+
+  const hide = () => {
+    tooltip.style.display = 'none';
+  };
+
+  const render = () => {
+    const param = lastParam;
+    if (!param || param.time == null || !cursor) return hide();
+
+    const candle = candleSeries();
+    if (!candle) return hide();
+    const logical = param.logical ?? logicalAtTime(chart, param.time as CrosshairTime);
+    const exactBar = param.seriesData.get(candle) as Partial<TooltipBar> | undefined;
+    const bar = isTooltipBar(exactBar) ? exactBar : seriesBarAt(candle, logical);
+    if (!bar) return hide();
+
+    const up = bar.close >= bar.open;
+    const closeColor = up ? 'var(--green)' : 'var(--red)';
+    const chg = bar.close - bar.open;
+    const chgPct = bar.open ? (chg / bar.open) * 100 : 0;
+
+    const parts: string[] = [
+      `<div style="display:flex;align-items:baseline;gap:6px;margin-bottom:5px;padding-bottom:4px;border-bottom:1px solid var(--border)">` +
+        `<span style="font-size:11px;font-weight:700;color:var(--text-primary)">${escapeHtml(symbol())}</span>` +
+        `<span style="margin-left:auto;font-size:10px;${MUTED}">${fmtCrosshairTime(param.time as CrosshairTime)}</span>` +
+        `</div>`,
+      `<div style="display:grid;grid-template-columns:auto 1fr auto 1fr;gap:1px 8px;align-items:baseline">` +
+        ohlcCell('O', formatPrice(bar.open), 'var(--text-primary)') +
+        ohlcCell('H', formatPrice(bar.high), 'var(--green)') +
+        ohlcCell('L', formatPrice(bar.low), 'var(--red)') +
+        ohlcCell('C', formatPrice(bar.close), closeColor) +
+        `</div>`,
+      metaRow(
+        'Chg',
+        `${chg >= 0 ? '+' : ''}${formatPrice(chg)} (${chg >= 0 ? '+' : ''}${chgPct.toFixed(2)}%)`,
+        closeColor,
+      ),
+    ];
+
+    const vol = volumeSeries();
+    // `visible:false` is how the Vol toggle switches the histogram off; the series still holds
+    // its data, so without this check the row would report a volume the chart is not drawing.
+    if (vol && vol.options().visible !== false) {
+      const exactVol = (param.seriesData.get(vol) as { value?: number } | undefined)?.value;
+      const v = typeof exactVol === 'number' ? exactVol : seriesValueAt(vol, logical);
+      if (v != null) parts.push(metaRow('Vol', formatVolume(v), 'var(--text-primary)'));
+    }
+
+    const greeks = greekRowsAllPanes(
+      chart,
+      null,
+      (s) => (param.seriesData.get(s) as { value?: number } | undefined)?.value,
+      logical,
+    );
+    if (greeks.length) {
+      parts.push(`<div style="height:1px;background:var(--border);margin:5px 0 4px"></div>`);
+      for (const r of greeks)
+        parts.push(tipRow(r.color, r.label, (r.format ?? fmtCompact)(r.value)));
+    }
+
+    tooltip.innerHTML = parts.join('');
+    tooltip.style.display = 'block';
+    placeTooltip(container, tooltip, cursor.x, cursor.y + 16);
+  };
+
+  // Both inputs fire for the same physical mouse move, and a render writes innerHTML then reads
+  // offsetWidth — a forced layout. Coalescing to one render per frame halves that, and there is
+  // nothing to see between two events in the same frame anyway.
+  let raf = 0;
+  const schedule = () => {
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      render();
+    });
+  };
+
+  const onCrosshair = (param: MouseEventParams) => {
+    lastParam = param;
+    schedule();
+  };
+  // Pointer events rather than mouse events, so a touch or pen drag positions the card too —
+  // `mousemove` is only synthesized for taps, and never during a drag.
+  const onPointerMove = (e: PointerEvent) => {
+    const rect = container.getBoundingClientRect();
+    cursor = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    // The crosshair fires on its own for every move over data; tracking the pointer here as well
+    // keeps the card glued to the cursor in the margins, where the crosshair stays silent.
+    schedule();
+  };
+  const onPointerLeave = () => {
+    cursor = null;
+    hide();
+  };
+
+  chart.subscribeCrosshairMove(onCrosshair);
+  container.addEventListener('pointermove', onPointerMove);
+  container.addEventListener('pointerleave', onPointerLeave);
+  // A touch drag ends with pointerup and no leave; without this the card would be stranded.
+  container.addEventListener('pointercancel', onPointerLeave);
+
+  return () => {
+    if (raf) cancelAnimationFrame(raf);
+    container.removeEventListener('pointermove', onPointerMove);
+    container.removeEventListener('pointerleave', onPointerLeave);
+    container.removeEventListener('pointercancel', onPointerLeave);
     try {
       chart.unsubscribeCrosshairMove(onCrosshair);
     } catch {

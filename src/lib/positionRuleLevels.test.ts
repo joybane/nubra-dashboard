@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { liveLevels, levelHit } from './positionRuleLevels';
+import {
+  liveLevels,
+  levelHit,
+  normalizeExitTime,
+  exitTimeMinutes,
+  istMinuteOfDay,
+  exitTimeDue,
+} from './positionRuleLevels';
 
 const NONE = { type: 'NONE' } as const;
 
@@ -123,5 +130,86 @@ describe('levelHit', () => {
   it('never fires on a level that is switched off', () => {
     expect(levelHit('SL', 'BUY', null, 1)).toBe(false);
     expect(levelHit('TARGET', 'SELL', null, 1)).toBe(false);
+  });
+});
+
+// ── Time exit ──────────────────────────────────────────────────────────────────
+// Instants are written as UTC and asserted in IST (UTC+5:30) on purpose: the whole
+// point of these helpers is that they read the same clock whatever timezone the
+// host running them is set to.
+const AT = (utcIso: string) => new Date(utcIso).getTime();
+
+describe('normalizeExitTime', () => {
+  it('accepts a 24-hour HH:MM and trims surrounding space', () => {
+    expect(normalizeExitTime('15:15')).toBe('15:15');
+    expect(normalizeExitTime('00:00')).toBe('00:00');
+    expect(normalizeExitTime('23:59')).toBe('23:59');
+    expect(normalizeExitTime(' 09:20 ')).toBe('09:20');
+  });
+
+  it('rejects everything that is not one, rather than guessing', () => {
+    for (const bad of [
+      '',
+      '9:20', // unpadded — an input[type=time] never emits this, a hand-rolled body might
+      '24:00',
+      '15:60',
+      '15:15:30',
+      'later',
+      '15-15',
+      null,
+      undefined,
+      1515,
+      {},
+    ]) {
+      expect(normalizeExitTime(bad)).toBeUndefined();
+    }
+  });
+});
+
+describe('exitTimeMinutes', () => {
+  it('counts minutes from IST midnight', () => {
+    expect(exitTimeMinutes('00:00')).toBe(0);
+    expect(exitTimeMinutes('09:15')).toBe(555);
+    expect(exitTimeMinutes('15:15')).toBe(915);
+    expect(exitTimeMinutes('23:59')).toBe(1439);
+  });
+
+  it('is null for anything unparseable, so a bad value can never read as midnight', () => {
+    expect(exitTimeMinutes('nope')).toBeNull();
+    expect(exitTimeMinutes(undefined)).toBeNull();
+  });
+});
+
+describe('istMinuteOfDay', () => {
+  it('reads the IST wall clock regardless of the host timezone', () => {
+    expect(istMinuteOfDay(AT('2026-08-14T09:45:00Z'))).toBe(15 * 60 + 15); // 15:15 IST
+    expect(istMinuteOfDay(AT('2026-08-14T03:45:00Z'))).toBe(9 * 60 + 15); // 09:15 IST
+  });
+
+  it('handles the 18:30 UTC rollover into the next IST day', () => {
+    expect(istMinuteOfDay(AT('2026-08-14T18:29:00Z'))).toBe(23 * 60 + 59);
+    expect(istMinuteOfDay(AT('2026-08-14T18:30:00Z'))).toBe(0);
+  });
+});
+
+describe('exitTimeDue', () => {
+  const AT_1514 = AT('2026-08-14T09:44:00Z');
+  const AT_1515 = AT('2026-08-14T09:45:00Z');
+
+  it('is due from the configured minute onward, and not a minute before', () => {
+    expect(exitTimeDue('15:15', AT_1514)).toBe(false);
+    expect(exitTimeDue('15:15', AT_1515)).toBe(true);
+    expect(exitTimeDue('15:15', AT('2026-08-14T17:00:00Z'))).toBe(true); // 22:30 IST, still due
+  });
+
+  it('is never due without a valid time — a garbled rule must not square anything off', () => {
+    expect(exitTimeDue(undefined, AT_1515)).toBe(false);
+    expect(exitTimeDue('', AT_1515)).toBe(false);
+    expect(exitTimeDue('half past three', AT_1515)).toBe(false);
+  });
+
+  it('resets across the IST midnight rollover rather than staying latched', () => {
+    // 00:05 IST on the 15th: a 15:15 rule is not due again until that afternoon.
+    expect(exitTimeDue('15:15', AT('2026-08-14T18:35:00Z'))).toBe(false);
   });
 });

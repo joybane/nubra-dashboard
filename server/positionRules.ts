@@ -9,7 +9,7 @@
 // group (GROUP, combined ₹ P&L) level. Underlying/delta-based SL are deferred
 // (would need live spot + reconstructed greeks piped into this loop).
 // ─────────────────────────────────────────────────────────────────────────────
-import { liveLevels, type LiveSLTarget } from '../src/lib/positionRuleLevels.ts';
+import { liveLevels, exitTimeDue, type LiveSLTarget } from '../src/lib/positionRuleLevels.ts';
 import type { TrailStop } from './backtest/types.ts';
 import { dbUpsertPositionRule, dbLoadPositionRules, dbDeletePositionRule } from './paperDb.ts';
 
@@ -27,6 +27,7 @@ export interface LegRule {
   stopLoss?: SLTarget; // type restricted to NONE | PREMIUM_PERCENT | PREMIUM_ABSOLUTE
   target?: SLTarget;
   trail?: TrailStop;
+  exitTime?: string; // IST 'HH:MM' — time-based square-off, independent of price
 }
 export interface GroupRule {
   scope: 'GROUP';
@@ -35,6 +36,7 @@ export interface GroupRule {
   maxLoss?: number; // ₹, positive magnitude
   trail?: TrailStop; // trailing lock/giveback on combined ₹ MTM (entry treated as 0)
   exitAllOnLegHit?: boolean; // cascade: any single leg's own SL/target hit closes the whole group
+  exitTime?: string; // IST 'HH:MM' — squares off every leg in the group
 }
 export type PositionRule = LegRule | GroupRule;
 
@@ -49,6 +51,9 @@ export function sanitizeSLTarget(v: SLTarget | undefined): SLTarget {
   if (!v || !ALLOWED_SL_TYPES.has(v.type)) return { type: 'NONE' };
   return { type: v.type, value: v.value };
 }
+
+/** Anything that is not a well-formed IST 'HH:MM' is stored as "no time exit". */
+export { normalizeExitTime as sanitizeExitTime } from '../src/lib/positionRuleLevels.ts';
 
 // ── mutable trailing-stop runtime state ──────────────────────────────────────
 // Keyed identically to legRules. Reset whenever the position's entry_time no
@@ -146,7 +151,7 @@ export interface RuleBroker {
 
 export interface RuleFireEvent {
   scope: 'LEG' | 'GROUP';
-  reason: 'STOPLOSS' | 'TARGET' | 'PORTFOLIO_TP' | 'PORTFOLIO_SL';
+  reason: 'STOPLOSS' | 'TARGET' | 'PORTFOLIO_TP' | 'PORTFOLIO_SL' | 'TIME_EXIT';
   ref_ids: number[];
   basket_group_id?: string;
 }
@@ -226,12 +231,27 @@ function applyLiveTrail(
 // Evaluates any LEG rule on the touched position(s) and any GROUP rule on
 // their basket(s), firing opposite-side market exits through the broker on a
 // hit. Returns the events that fired so the caller can broadcast them.
-export function evaluateAndFire(broker: RuleBroker, changedRefId: number): RuleFireEvent[] {
+//
+// `changedRefId` of null means "every open position" — see `sweepTimeExits`, which
+// is the only caller that needs it, because a clock trigger has no tick to ride in on.
+export function evaluateAndFire(
+  broker: RuleBroker,
+  changedRefId: number | null,
+  nowMs: number = Date.now(),
+  /**
+   * Sweeps pass false. A price level is only meaningful against a price that just
+   * moved: re-testing one on a timer would exit at whatever LTP happens to be cached,
+   * which after a restart or a dead feed can be hours old and not a price anything
+   * traded at. The clock has no such problem, which is why only it is swept.
+   */
+  checkPriceLevels = true,
+): RuleFireEvent[] {
   const events: RuleFireEvent[] = [];
   if (legRules.size === 0 && groupRules.size === 0) return events;
 
   const allPositions = broker.getPositions();
-  const touched = allPositions.filter((p) => p.ref_id === changedRefId);
+  const touched =
+    changedRefId == null ? allPositions : allPositions.filter((p) => p.ref_id === changedRefId);
 
   for (const pos of touched) {
     const key = legRuleKey(pos.ref_id, pos.basket_group_id);
@@ -246,14 +266,21 @@ export function evaluateAndFire(broker: RuleBroker, changedRefId: number): RuleF
     const tgt = sanitizeSLTarget(rule.target);
     const { slPrice, tgtPrice } = liveLevels(side, entryRs, sl, tgt);
 
-    let hitReason: 'STOPLOSS' | 'TARGET' | null = null;
-    if (slPrice != null && (sell ? ltpRs >= slPrice : ltpRs <= slPrice)) hitReason = 'STOPLOSS';
+    let hitReason: RuleFireEvent['reason'] | null = null;
+    if (!checkPriceLevels) {
+      /* sweep: the clock below is the only trigger being tested */
+    } else if (slPrice != null && (sell ? ltpRs >= slPrice : ltpRs <= slPrice))
+      hitReason = 'STOPLOSS';
     else if (tgtPrice != null && (sell ? ltpRs <= tgtPrice : ltpRs >= tgtPrice))
       hitReason = 'TARGET';
     else if (rule.trail && rule.trail.type !== 'NONE') {
       const trailSl = applyLiveTrail(key, side, entryRs, ltpRs, rule.trail, pos.entry_time);
       if (trailSl != null && (sell ? ltpRs >= trailSl : ltpRs <= trailSl)) hitReason = 'STOPLOSS';
     }
+    // Checked last, and only if nothing else fired: the time exit is the backstop for a
+    // position none of the price rules ever caught, so a real SL/target hit keeps its own
+    // (more informative) reason on the event the browser is about to be told about.
+    if (!hitReason && exitTimeDue(rule.exitTime, nowMs)) hitReason = 'TIME_EXIT';
 
     if (hitReason) {
       closePosition(broker, pos);
@@ -301,8 +328,10 @@ export function evaluateAndFire(broker: RuleBroker, changedRefId: number): RuleF
       0,
     );
 
-    let hit: 'PORTFOLIO_TP' | 'PORTFOLIO_SL' | null = null;
-    if (rule.maxProfit && mtmRs >= rule.maxProfit) hit = 'PORTFOLIO_TP';
+    let hit: RuleFireEvent['reason'] | null = null;
+    if (!checkPriceLevels) {
+      /* sweep: only the clock below */
+    } else if (rule.maxProfit && mtmRs >= rule.maxProfit) hit = 'PORTFOLIO_TP';
     else if (rule.maxLoss && mtmRs <= -Math.abs(rule.maxLoss)) hit = 'PORTFOLIO_SL';
     else if (rule.trail && rule.trail.type !== 'NONE') {
       // Combined MTM starts at 0 for the group ("entry"); anchor the trail's
@@ -319,6 +348,9 @@ export function evaluateAndFire(broker: RuleBroker, changedRefId: number): RuleF
       );
       if (trailFloor != null && mtmRs <= trailFloor) hit = 'PORTFOLIO_SL';
     }
+    // Backstop, as on the leg above: square the whole basket off at the named time if no
+    // combined-₹ threshold got there first.
+    if (!hit && exitTimeDue(rule.exitTime, nowMs)) hit = 'TIME_EXIT';
 
     if (hit) {
       for (const p of members) closePosition(broker, p);
@@ -333,4 +365,17 @@ export function evaluateAndFire(broker: RuleBroker, changedRefId: number): RuleF
   }
 
   return events;
+}
+
+/**
+ * The scheduled pass: fire any time exit that has come due, and nothing else.
+ *
+ * Every other trigger in this module is a function of price, and price arrives as a tick that
+ * already drives `evaluateAndFire`. A time exit has no such carrier — its trigger is the wall
+ * clock — so it needs a caller that runs whether or not the market said anything. Deliberately
+ * blind to SL/target/trailing: re-testing those on a timer would evaluate them against a cached
+ * LTP that, after a restart or a silent feed, is not a price anything is trading at.
+ */
+export function sweepTimeExits(broker: RuleBroker, nowMs: number = Date.now()): RuleFireEvent[] {
+  return evaluateAndFire(broker, null, nowMs, false);
 }

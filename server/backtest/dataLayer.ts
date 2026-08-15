@@ -6,7 +6,7 @@
 // Columns: symbol expiry expiryFlag expiryCode atmStrike optionType timestamp
 //          datetime open high low close iv volume strike oi spot
 // ─────────────────────────────────────────────────────────────────────────────
-import { readdir, stat } from 'fs/promises';
+import { readdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
 import { asyncBufferFromFile, parquetReadObjects } from 'hyparquet';

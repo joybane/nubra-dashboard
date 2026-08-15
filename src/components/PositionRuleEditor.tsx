@@ -12,7 +12,13 @@ import type {
   LiveTrailStop,
   LiveTrailType,
 } from '../types';
-import { liveLevels, levelHit, type LiveSide } from '../lib/positionRuleLevels';
+import {
+  liveLevels,
+  levelHit,
+  exitTimeMinutes,
+  istMinuteOfDay,
+  type LiveSide,
+} from '../lib/positionRuleLevels';
 
 const inputCls =
   'w-full px-1.5 py-1 bg-[var(--bg-card)] border border-[var(--border)] rounded text-[12px] ' +
@@ -29,6 +35,12 @@ const SL_TYPES: { v: LiveSLTargetType; label: string }[] = [
 ];
 const valueUnit = (t: LiveSLTargetType) => (t === 'PREMIUM_PERCENT' ? '%' : '₹');
 const rs = (v: number) => `₹${v.toFixed(2)}`;
+/** "in 2h 14m" / "in 6m" — how long the armed time exit still has to run. */
+function untilLabel(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
+}
 const TRAIL_TYPES: { v: LiveTrailType; label: string }[] = [
   { v: 'NONE', label: 'No trailing' },
   { v: 'TO_COST', label: 'Move SL to cost' },
@@ -77,6 +89,8 @@ export default function PositionRuleEditor(props: Props) {
   const [exitAllOnLegHit, setExitAllOnLegHit] = useState<boolean>(
     props.mode === 'GROUP' ? (props.initial?.exitAllOnLegHit ?? false) : false,
   );
+  // '' means no time exit. Both rule shapes carry it, so this needs no mode split.
+  const [exitTime, setExitTime] = useState<string>(props.initial?.exitTime ?? '');
 
   const hasExisting = !!props.initial;
 
@@ -113,6 +127,28 @@ export default function PositionRuleEditor(props: Props) {
     );
   }
 
+  // The time exit's preview, in the same "→ exits when…" voice as the level hints above. Computed
+  // once per render rather than on a ticker: the dialog is open for seconds, and the only value
+  // that goes stale is the countdown, which the server does not read.
+  const exitMin = exitTimeMinutes(exitTime);
+  const minsAway = exitMin == null ? 0 : exitMin - istMinuteOfDay();
+  const everyLeg = props.mode === 'GROUP';
+  const exitTimeHint =
+    exitMin == null ? (
+      <span className="text-[var(--text-muted)]">
+        Blank = off. Squares {everyLeg ? 'every leg' : 'this leg'} off at that time if nothing above
+        has fired.
+      </span>
+    ) : minsAway > 0 ? (
+      <span className="text-[var(--text-muted)]">
+        → exits {everyLeg ? 'all legs ' : ''}at {exitTime} IST ({untilLabel(minsAway)})
+      </span>
+    ) : (
+      <span className="text-[var(--yellow)]">
+        → {exitTime} IST has already passed today — this exits immediately
+      </span>
+    );
+
   async function save() {
     setSaving(true);
     try {
@@ -126,6 +162,7 @@ export default function PositionRuleEditor(props: Props) {
             stopLoss,
             target,
             trail,
+            exitTime: exitTime || undefined,
           }),
         });
       } else {
@@ -138,6 +175,7 @@ export default function PositionRuleEditor(props: Props) {
             maxLoss: maxLoss || undefined,
             trail,
             exitAllOnLegHit,
+            exitTime: exitTime || undefined,
           }),
         });
       }
@@ -372,6 +410,34 @@ export default function PositionRuleEditor(props: Props) {
               )}
             </div>
           )}
+
+          {/* Time exit — the backstop for a position no price rule ever caught. */}
+          <div className="pt-2 mt-1 border-t border-[var(--border)]">
+            <div className="flex items-end gap-2">
+              <label className="w-28 shrink-0">
+                <span className={lblCls}>Exit at time (IST)</span>
+                <input
+                  type="time"
+                  value={exitTime}
+                  onChange={(e) => setExitTime(e.target.value)}
+                  className={inputCls}
+                  aria-describedby="rule-exit-time-hint"
+                />
+              </label>
+              {exitTime && (
+                <button
+                  type="button"
+                  onClick={() => setExitTime('')}
+                  className="px-2 py-1 mb-[1px] rounded text-[10px] font-semibold text-[var(--text-muted)] bg-[var(--bg-hover)] border border-[var(--border)] hover:text-[var(--text-primary)] transition-colors"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <div id="rule-exit-time-hint" className="text-[10px] mt-1">
+              {exitTimeHint}
+            </div>
+          </div>
         </div>
         {props.mode === 'GROUP' && trail.type !== 'NONE' && (
           <p className="text-[10px] text-[var(--text-muted)] mt-1">

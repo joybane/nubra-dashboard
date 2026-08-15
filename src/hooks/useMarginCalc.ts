@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { fmtPrice } from '../lib/utils';
 
 export interface MarginData {
   span?: number;
