@@ -518,6 +518,7 @@ import {
   GreeksTooltipBody,
 } from './ChartTooltips';
 import PinnedCrosshairLayer from './PinnedCrosshairLayer';
+import PaneDivider, { type PaneSpec } from './PaneDivider';
 import PinCompareStrip, { type CompareRow } from './PinCompareStrip';
 import { usePinnedTimes, bindPinTrigger, PIN_COLORS } from '../lib/chartPins';
 
@@ -607,6 +608,27 @@ export default function StrategyAnalysisView({
   const expiryCacheRef = useRef<Map<string, string>>(new Map());
   const legMetasRef = useRef<LegMeta[]>([]);
   const markersRef = useRef<Array<{ detach: () => void }>>([]);
+  /**
+   * Detach every entry/exit marker and forget them.
+   *
+   * Markers are series primitives on the PRICE chart, so they only stay detachable while that
+   * chart is alive: `detach()` runs `model.fullUpdate()`, which on a removed chart quietly
+   * schedules a repaint of canvases that are already disposed and throws `Object is disposed`
+   * from inside lightweight-charts a frame later — past any try/catch here (see lib/chartLifecycle).
+   *
+   * That is exactly the order React produces when the Charts pane is toggled off: every effect
+   * cleanup runs first, so the price chart is already gone by the time the marker effect below
+   * re-runs and tries to detach what it left behind. So the price chart's own cleanup calls this
+   * while its chart still exists, and the effect below then finds nothing stale to detach.
+   */
+  const dropMarkers = useCallback(() => {
+    markersRef.current.forEach((m) => {
+      try {
+        m.detach();
+      } catch {}
+    });
+    markersRef.current = [];
+  }, []);
   // Latest live LTP (paise) per leg ref_id. A tick batch usually carries only the leg(s)
   // that just moved, so the basket total must sum ALL legs from their last-known LTP — not
   // just the batch — or the live tip spikes to a single leg's P&L.
@@ -656,6 +678,7 @@ export default function StrategyAnalysisView({
   // ── Chart display state ──
   const [pnlHeight, setPnlHeight] = useState(200);
   const [orderBookHeight, setOrderBookHeight] = useState(200);
+  const orderBookPaneRef = useRef<HTMLDivElement>(null);
 
   const positionsPaneRef = useRef<HTMLDivElement>(null);
   const [priceVisible, setPriceVisible] = useState(true);
@@ -1093,13 +1116,15 @@ export default function StrategyAnalysisView({
 
     return () => {
       cancelFit();
+      // Before removeChart, while the series these hang off are still attached — see dropMarkers.
+      dropMarkers();
       seriesRef.current.underlying = null;
       seriesRef.current.legPrice.clear();
       priceChartRef.current = null;
       removeChart(chart);
       setChartEpoch((e) => e + 1);
     };
-  }, [theme, underlying, chartUnderlying, priceVisible]);
+  }, [theme, underlying, chartUnderlying, priceVisible, dropMarkers]);
 
   // ── 2. Create P&L chart ──
   useEffect(() => {
@@ -2198,12 +2223,7 @@ export default function StrategyAnalysisView({
     seriesRef.current.basketPnl?.applyOptions({ visible: visibility.basketPnl });
   }, [visibility.basketPnl, pnlVisible]);
   useEffect(() => {
-    markersRef.current.forEach((m) => {
-      try {
-        m.detach();
-      } catch {}
-    });
-    markersRef.current = [];
+    dropMarkers();
     if (!chartData || !visibility.entryMarkers) return;
     for (const p of allPositionsRef.current) {
       const series = seriesRef.current.legPrice.get(p.ref_id);
@@ -2247,7 +2267,18 @@ export default function StrategyAnalysisView({
         markersRef.current.push(createSeriesMarkers(series, markers as any));
       }
     }
-  }, [chartData, theme, visibility.entryMarkers, priceVisible]);
+    // `underlying` / `chartUnderlying` are here because the price chart is rebuilt on them too,
+    // and its cleanup now drops the markers with it — so this has to run again to put them back
+    // on the new series.
+  }, [
+    chartData,
+    theme,
+    visibility.entryMarkers,
+    priceVisible,
+    underlying,
+    chartUnderlying,
+    dropMarkers,
+  ]);
   useEffect(() => {
     for (const leg of legMetas) {
       seriesRef.current.legPrice
@@ -2639,84 +2670,6 @@ export default function StrategyAnalysisView({
     return () => document.removeEventListener('mousedown', handler);
   }, [chartsPopupOpen, pnlPopupOpen, greeksPopupOpen]);
 
-  // ── Divider drag handlers ──
-  const onPnlDividerDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startY = e.clientY;
-      const startH = pnlHeight;
-      const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
-      const dividersH = greeksVisible ? 12 : 6;
-      const maxCombined = totalH - 8 - dividersH - 80;
-      const maxPnl = greeksVisible ? Math.max(40, maxCombined - greeksChartHeight) : maxCombined;
-
-      let newH = startH;
-      const onMove = (ev: MouseEvent) => {
-        newH = Math.max(40, Math.min(maxPnl, startH - (ev.clientY - startY)));
-        if (pnlChartContainerRef.current) pnlChartContainerRef.current.style.height = `${newH}px`;
-      };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        setPnlHeight(newH);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    },
-    [pnlHeight, greeksChartHeight, greeksVisible],
-  );
-
-  const onGreeksDividerDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startY = e.clientY;
-      const startH = greeksChartHeight;
-      const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
-      const dividersH = greeksVisible ? 12 : 6;
-      const maxCombined = totalH - 8 - dividersH - 80;
-      const maxGreeks = Math.max(40, maxCombined - pnlHeight);
-
-      let newH = startH;
-      const onMove = (ev: MouseEvent) => {
-        newH = Math.max(40, Math.min(maxGreeks, startH - (ev.clientY - startY)));
-        if (greeksChartContainerRef.current)
-          greeksChartContainerRef.current.style.height = `${newH}px`;
-      };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        setGreeksChartHeight(newH);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    },
-    [greeksChartHeight, pnlHeight, greeksVisible],
-  );
-
-  const onIndicatorsDividerDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startY = e.clientY;
-      const startH = indicatorsHeight;
-      // Track the height in a closure and commit that on mouseup, matching the other dividers.
-      // Recomputing from the mouseup event instead would snap to a stale/odd clientY when the
-      // release lands outside the window.
-      let newH = startH;
-      const onMove = (ev: MouseEvent) => {
-        newH = Math.max(80, startH - (ev.clientY - startY));
-        if (indicatorsPaneRef.current) indicatorsPaneRef.current.style.height = `${newH}px`;
-      };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        setIndicatorsHeight(newH);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    },
-    [indicatorsHeight],
-  );
-
   /**
    * The pane owns its chart's lifecycle, so it hands the handle up here rather than the other
    * way round. Bumping chartEpoch re-runs the sync effect, which is how the other panes announce
@@ -2757,24 +2710,6 @@ export default function StrategyAnalysisView({
       .filter((t) => t > 0);
     return entryTimes.length ? istDateFromNs(Math.min(...entryTimes)) : undefined;
   }, [positions, closedPositions]);
-
-  const onObDividerDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startY = e.clientY;
-      const startH = orderBookHeight;
-      const onMove = (ev: MouseEvent) => {
-        setOrderBookHeight(Math.max(40, startH - (ev.clientY - startY)));
-      };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    },
-    [orderBookHeight],
-  );
 
   // ── P&L calculations ──
   function calcPnl(p: PaperPosition): number {
@@ -2880,9 +2815,54 @@ export default function StrategyAnalysisView({
   }, [marginPositionKey, isSnapshot]);
   const displayPositions = posSubTab === 'open' ? positions : closedPositions;
   const effectiveObHeight = orderBookCollapsed ? 32 : orderBookHeight;
-  // The first visible chart panel flexes to fill remaining space; the rest keep their fixed heights.
+  /**
+   * The first visible chart panel flexes to fill remaining space; the rest keep their fixed
+   * heights. Only the price pane used to carry the flex, so switching it off left the column
+   * short of its own height — a dead strip under the panes — and, because a divider can only take
+   * height from whatever flexes, left every other handle with nothing to drag against.
+   */
   const primaryPanel =
-    (priceVisible && 'price') || (pnlVisible && 'pnl') || (greeksVisible && 'greeks') || null;
+    (priceVisible && 'price') ||
+    (pnlVisible && 'pnl') ||
+    (greeksVisible && 'greeks') ||
+    (indicatorsVisible && 'indicators') ||
+    null;
+
+  /**
+   * The chart column as its dividers need to see it: every pane on screen, top to bottom, each
+   * with the height its handle drags. The primary pane is left without one — it flexes, so it has
+   * no height of its own to write.
+   */
+  const chartPanes: PaneSpec[] = [];
+  if (priceVisible) chartPanes.push({ ref: priceChartContainerRef, min: 120 });
+  if (pnlVisible)
+    chartPanes.push({
+      ref: pnlChartContainerRef,
+      min: 40,
+      ...(primaryPanel === 'pnl' ? {} : { height: pnlHeight, onCommit: setPnlHeight }),
+    });
+  if (greeksVisible)
+    chartPanes.push({
+      ref: greeksChartContainerRef,
+      min: 40,
+      ...(primaryPanel === 'greeks'
+        ? {}
+        : { height: greeksChartHeight, onCommit: setGreeksChartHeight }),
+    });
+  if (indicatorsVisible)
+    chartPanes.push({
+      ref: indicatorsPaneRef,
+      min: 80,
+      ...(primaryPanel === 'indicators'
+        ? {}
+        : { height: indicatorsHeight, onCommit: setIndicatorsHeight }),
+    });
+  chartPanes.push({
+    ref: orderBookPaneRef,
+    min: 40,
+    height: orderBookHeight,
+    onCommit: setOrderBookHeight,
+  });
 
   return (
     <div className="flex flex-col h-full bg-[var(--bg-primary)] text-[var(--text-primary)] overflow-hidden">
@@ -3449,21 +3429,19 @@ export default function StrategyAnalysisView({
         {pnlVisible && (
           <>
             {priceVisible && (
-              <div
-                onMouseDown={onPnlDividerDown}
-                className="group h-2 shrink-0 flex items-center justify-center bg-[var(--bg-secondary)] hover:bg-[var(--accent)]/20 cursor-row-resize transition-colors z-20 relative"
-              >
-                <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[var(--accent)]" />
-              </div>
+              <PaneDivider
+                panes={chartPanes}
+                target={pnlChartContainerRef}
+                title="Drag to resize the P&L pane"
+              />
             )}
             <div
               ref={pnlChartContainerRef}
               style={{
-                height: pnlHeight,
+                ...(primaryPanel === 'pnl' ? { flex: 1 } : { height: pnlHeight, flexShrink: 0 }),
                 minHeight: 40,
                 position: 'relative',
                 borderBottom: greeksVisible ? '1px solid var(--border)' : 'none',
-                flexShrink: 0,
                 display: pnlVisible ? 'block' : 'none',
               }}
             >
@@ -3505,21 +3483,22 @@ export default function StrategyAnalysisView({
         {greeksVisible && (
           <>
             {(priceVisible || pnlVisible) && (
-              <div
-                onMouseDown={onGreeksDividerDown}
-                className="group h-2 shrink-0 flex items-center justify-center bg-[var(--bg-secondary)] hover:bg-[#a78bfa]/20 cursor-row-resize transition-colors z-20 relative"
-              >
-                <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[#a78bfa]" />
-              </div>
+              <PaneDivider
+                panes={chartPanes}
+                target={greeksChartContainerRef}
+                accent="#a78bfa"
+                title="Drag to resize the Greeks pane"
+              />
             )}
             <div
               ref={greeksChartContainerRef}
               style={{
-                height: greeksChartHeight,
+                ...(primaryPanel === 'greeks'
+                  ? { flex: 1 }
+                  : { height: greeksChartHeight, flexShrink: 0 }),
                 minHeight: 40,
                 position: 'relative',
                 display: greeksVisible ? 'block' : 'none',
-                flexShrink: 0,
               }}
             >
               <div className="absolute top-1 left-2 z-10 pointer-events-none text-[11px]"></div>
@@ -3564,16 +3543,21 @@ export default function StrategyAnalysisView({
         {indicatorsVisible && (
           <>
             {(priceVisible || pnlVisible || greeksVisible) && (
-              <div
-                onMouseDown={onIndicatorsDividerDown}
-                className="group h-2 shrink-0 flex items-center justify-center bg-[var(--bg-secondary)] hover:bg-[#38bdf8]/20 cursor-row-resize transition-colors z-20 relative"
-              >
-                <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[#38bdf8]" />
-              </div>
+              <PaneDivider
+                panes={chartPanes}
+                target={indicatorsPaneRef}
+                accent="#38bdf8"
+                title="Drag to resize the Indicators pane"
+              />
             )}
             <div
               ref={indicatorsPaneRef}
-              style={{ height: indicatorsHeight, minHeight: 80, flexShrink: 0 }}
+              style={{
+                ...(primaryPanel === 'indicators'
+                  ? { flex: 1 }
+                  : { height: indicatorsHeight, flexShrink: 0 }),
+                minHeight: 80,
+              }}
               className="bg-[var(--bg-primary)]"
             >
               <GreekIndicatorPane
@@ -3598,16 +3582,17 @@ export default function StrategyAnalysisView({
           </>
         )}
 
-        <div
-          onMouseDown={orderBookCollapsed ? undefined : onObDividerDown}
-          className={`group h-2 shrink-0 flex items-center justify-center bg-[var(--bg-secondary)] transition-colors z-20 relative ${orderBookCollapsed ? '' : 'hover:bg-[var(--accent)]/20 cursor-row-resize'}`}
-        >
-          {!orderBookCollapsed && (
-            <div className="w-10 h-0.5 rounded-full bg-[var(--border)] group-hover:bg-[var(--accent)]" />
-          )}
-        </div>
+        <PaneDivider
+          panes={chartPanes}
+          target={orderBookPaneRef}
+          // Collapsed, the pane renders at a fixed 32px header, so a drag would set a height
+          // React never reads back and the two would disagree until it reopened.
+          disabled={orderBookCollapsed}
+          title="Drag to resize the positions table"
+        />
 
         <div
+          ref={orderBookPaneRef}
           style={{ height: effectiveObHeight }}
           className="shrink-0 flex flex-col overflow-hidden bg-[var(--bg-primary)] border-t border-[var(--border)]"
         >

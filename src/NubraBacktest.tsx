@@ -27,6 +27,7 @@ import {
   GreeksTooltipBody,
 } from './components/ChartTooltips';
 import PinnedCrosshairLayer from './components/PinnedCrosshairLayer';
+import PaneDivider, { type PaneSpec } from './components/PaneDivider';
 import PinCompareStrip, { type CompareRow } from './components/PinCompareStrip';
 import GreekIndicatorPane from './components/GreekIndicatorPane';
 import { usePinnedTimes, bindPinTrigger, PIN_COLORS } from './lib/chartPins';
@@ -400,9 +401,16 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const [positionsHeight, setPositionsHeight] = useState(160);
   const [positionsCollapsed, setPositionsCollapsed] = useState(false);
 
+  const pricePaneRef = useRef<HTMLDivElement>(null);
   const pnlPaneRef = useRef<HTMLDivElement>(null);
   const greeksPaneRef = useRef<HTMLDivElement>(null);
   const positionsPaneRef = useRef<HTMLDivElement>(null);
+
+  // Pane visibility. The Charts / P&L buttons add and remove the pane itself, the way the
+  // Indicators and Greeks buttons beside them always have — and the way the Tracker's own
+  // Charts / P&L buttons do. The layer chips inside each dropdown still toggle only their line.
+  const [priceVisible, setPriceVisible] = useState(true);
+  const [pnlVisible, setPnlVisible] = useState(true);
 
   // Greeks visible state
   const [greeksVisible, setGreeksVisible] = useState(false);
@@ -1567,24 +1575,17 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       };
     };
 
-    if (priceChart && pnlChart) {
-      const priceTargets = [pnlChart];
-      if (greeksChart) priceTargets.push(greeksChart);
-
-      const pnlTargets = [priceChart];
-      if (greeksChart) pnlTargets.push(greeksChart);
-
-      priceChart
-        .timeScale()
-        .subscribeVisibleLogicalRangeChange(syncTimeScale(priceChart, priceTargets));
-      pnlChart.timeScale().subscribeVisibleLogicalRangeChange(syncTimeScale(pnlChart, pnlTargets));
-
-      if (greeksChart) {
-        const greeksTargets = [priceChart, pnlChart];
-        greeksChart
-          .timeScale()
-          .subscribeVisibleLogicalRangeChange(syncTimeScale(greeksChart, greeksTargets));
-      }
+    // Every pane that exists drives every other one. Written as a loop rather than the three
+    // hand-written pairings it replaces because the price and P&L panes can now be hidden: the
+    // pairings assumed both were always there, so with either one away the survivors stopped
+    // scrolling together. For the three-pane case this enrols exactly the same subscriptions.
+    const syncedCharts = [priceChart, pnlChart, greeksChart].filter(
+      (c): c is IChartApi => c !== null,
+    );
+    for (const source of syncedCharts) {
+      const targets = syncedCharts.filter((c) => c !== source);
+      if (targets.length === 0) continue;
+      source.timeScale().subscribeVisibleLogicalRangeChange(syncTimeScale(source, targets));
     }
 
     return () => {
@@ -1606,6 +1607,8 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   }, [
     evalResult,
     theme,
+    priceVisible,
+    pnlVisible,
     greeksVisible,
     greeksData,
     chartsExpanded,
@@ -1678,79 +1681,6 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     [leftWidth],
   );
 
-  const onPnlDividerDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startY = e.clientY;
-      const startH = pnlHeight;
-      const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
-      const dividersH = greeksVisible ? 12 : 6;
-      const maxCombined = totalH - 8 - dividersH - 120;
-      const maxPnl = greeksVisible ? Math.max(80, maxCombined - greeksHeight) : maxCombined;
-
-      let newH = startH;
-      const onMove = (ev: MouseEvent) => {
-        newH = Math.max(80, Math.min(maxPnl, startH - (ev.clientY - startY)));
-        if (pnlPaneRef.current) pnlPaneRef.current.style.height = `${newH}px`;
-      };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        setPnlHeight(newH);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    },
-    [pnlHeight, greeksHeight, greeksVisible],
-  );
-
-  const onGreeksDividerDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startY = e.clientY;
-      const startH = greeksHeight;
-      const totalH = chartsWrapperRef.current?.clientHeight ?? 600;
-      const dividersH = greeksVisible ? 12 : 6;
-      const maxCombined = totalH - 8 - dividersH - 120;
-      const maxGreeks = Math.max(80, maxCombined - pnlHeight);
-
-      let newH = startH;
-      const onMove = (ev: MouseEvent) => {
-        newH = Math.max(80, Math.min(maxGreeks, startH - (ev.clientY - startY)));
-        if (greeksPaneRef.current) greeksPaneRef.current.style.height = `${newH}px`;
-      };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        setGreeksHeight(newH);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    },
-    [greeksHeight, pnlHeight, greeksVisible],
-  );
-
-  const onIndicatorsDividerDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startY = e.clientY;
-      const startH = indicatorsHeight;
-      let newH = startH;
-      const onMove = (ev: MouseEvent) => {
-        newH = Math.max(80, startH - (ev.clientY - startY));
-        if (indicatorsPaneRef.current) indicatorsPaneRef.current.style.height = `${newH}px`;
-      };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        setIndicatorsHeight(newH);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    },
-    [indicatorsHeight],
-  );
-
   /** The pane owns its chart, so it hands the handle up. See the sync effect below. */
   const handleIndicatorsChart = useCallback(
     (
@@ -1794,12 +1724,22 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
    */
   useEffect(() => {
     const ic = indicatorsChartRef.current;
-    const pc = priceChartRef.current;
-    if (!ic || !pc) return;
-    // Both may be absent: the Greeks pane is opt-in, and the P&L pane goes with its container.
-    const siblings = [pc, pnlChartRef.current, greeksChartRef.current].filter(
+    // Any of the three may be absent: each is its own pane and each can be switched off.
+    const siblings = [priceChartRef.current, pnlChartRef.current, greeksChartRef.current].filter(
       (c): c is IChartApi => !!c,
     );
+    /**
+     * The pane this one takes its lead from: the price pane whenever it is on screen, otherwise
+     * the first that is. All three plot the same bar grid and the block above keeps them locked
+     * to each other, so driving any one of them reaches the rest — which is what lets this pane
+     * still scroll in step when the price pane is the one that has been hidden.
+     *
+     * A getter, like `bindRange`'s targets, so a rebuilt chart is picked up rather than a corpse.
+     */
+    const host = (): IChartApi | null =>
+      priceChartRef.current ?? pnlChartRef.current ?? greeksChartRef.current;
+    const pc = host();
+    if (!ic || !pc) return;
     const cleanups: Array<() => void> = [];
 
     // The two ends hold different series kinds — the price pane is candles, the Indicators pane a
@@ -1818,6 +1758,14 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
      * chart, which is never rebuilt, keeps firing range and crosshair events into them.
      */
     const live = (c: IChartApi | null | undefined): IChartApi | null => (isChartLive(c) ? c : null);
+
+    /** The line `pc`'s bar grid is read off — whichever of the three ended up leading. */
+    const pcSeries = (): AnchorSeries | null =>
+      pc === priceChartRef.current
+        ? indexSeriesRef.current
+        : pc === pnlChartRef.current
+          ? basketSeriesRef.current
+          : greeksAnchorRef.current;
 
     // ── Range ──
     //
@@ -1888,25 +1836,17 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     try {
       const r = pc.timeScale().getVisibleLogicalRange();
       if (r && live(ic)) {
-        const d = indexShift(pc, indexSeriesRef.current, ic, r);
+        const d = indexShift(pc, pcSeries(), ic, r);
         ic.timeScale().setVisibleLogicalRange({ from: r.from + d, to: r.to + d });
       }
     } catch {
       /* not laid out yet */
     }
-    // Only the price chart is enrolled directly: the block's own sync keeps the other two locked
+    // Only the leading chart is enrolled directly: the block's own sync keeps the others locked
     // to it, so a scroll anywhere in the stack reaches this pane through it either way.
     cleanups.push(
-      bindRange(
-        pc,
-        () => indexSeriesRef.current,
-        () => ic,
-      ),
-      bindRange(
-        ic,
-        () => indicatorsSeriesRef.current,
-        () => priceChartRef.current,
-      ),
+      bindRange(pc, pcSeries, () => ic),
+      bindRange(ic, () => indicatorsSeriesRef.current, host),
     );
 
     // ── Crosshair ──
@@ -2042,27 +1982,6 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     return () => cleanups.forEach((fn) => fn());
   }, [chartEpoch, indicatorsVisible, evalResult]);
 
-  const onPositionsDividerDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      const startY = e.clientY;
-      const startH = positionsHeight;
-      let newH = startH;
-      const onMove = (ev: MouseEvent) => {
-        newH = Math.max(40, startH - (ev.clientY - startY));
-        if (positionsPaneRef.current) positionsPaneRef.current.style.height = `${newH}px`;
-      };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        setPositionsHeight(newH);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    },
-    [positionsHeight],
-  );
-
   // ── No instrument selected ────────────────────────────────────────────────
 
   if (!instrument) {
@@ -2089,6 +2008,62 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const isDark = theme === 'dark';
+
+  /**
+   * The topmost visible pane, which is the one that flexes to fill the chart column; every pane
+   * below it keeps the fixed height its divider drags. The price pane was hard-coded as that pane
+   * before it could be hidden — without this, hiding it would leave the stack short of the
+   * column's height and open a blank strip above the positions table.
+   *
+   * A pane is only ever the primary one when nothing is drawn above it, so no divider that could
+   * fight the flex for control of its height is on screen: each divider renders only when some
+   * pane precedes it.
+   */
+  const primaryPane =
+    (priceVisible && 'price') ||
+    (pnlVisible && 'pnl') ||
+    (greeksVisible && 'greeks') ||
+    (indicatorsVisible && 'indicators') ||
+    null;
+
+  /**
+   * The chart column as its dividers need to see it: every pane on screen, top to bottom, each
+   * with the height its handle drags. The primary pane is left without one — it flexes, so it has
+   * no height of its own to write. A divider works out from this which pane to take height from,
+   * which is why hiding one no longer leaves the others with nowhere to grow into.
+   */
+  const chartPanes: PaneSpec[] = [];
+  if (priceVisible) chartPanes.push({ ref: pricePaneRef, min: 120 });
+  if (pnlVisible)
+    chartPanes.push({
+      ref: pnlPaneRef,
+      min: 80,
+      ...(primaryPane === 'pnl' ? {} : { height: pnlHeight, onCommit: setPnlHeight }),
+    });
+  if (greeksVisible)
+    chartPanes.push({
+      ref: greeksPaneRef,
+      min: 80,
+      ...(primaryPane === 'greeks' ? {} : { height: greeksHeight, onCommit: setGreeksHeight }),
+    });
+  if (indicatorsVisible)
+    chartPanes.push({
+      ref: indicatorsPaneRef,
+      min: 80,
+      ...(primaryPane === 'indicators'
+        ? {}
+        : { height: indicatorsHeight, onCommit: setIndicatorsHeight }),
+    });
+
+  /**
+   * The outer column: the whole chart stack over the positions table. It is its own stack, so the
+   * positions handle pushes against the charts as a block rather than against any one pane. The
+   * chart stack's floor is stated here because its own min-height has to stay 0 to flex.
+   */
+  const columnPanes: PaneSpec[] = [
+    { ref: chartsWrapperRef, min: 120 },
+    { ref: positionsPaneRef, min: 40, height: positionsHeight, onCommit: setPositionsHeight },
+  ];
 
   return (
     <div
@@ -2480,17 +2455,18 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
               style={{ height: 24 }}
             >
               <button
-                onClick={() => setShowSpotPrice((s) => !s)}
+                onClick={() => setPriceVisible((s) => !s)}
+                title="Show or hide the price pane"
                 style={{
                   padding: '0 8px',
                   borderRadius: '4px 0 0 4px',
                   fontSize: 11,
                   fontWeight: 600,
                   cursor: 'pointer',
-                  border: '1px solid ' + (showSpotPrice ? 'var(--accent)' : 'var(--border)'),
+                  border: '1px solid ' + (priceVisible ? 'var(--accent)' : 'var(--border)'),
                   borderRight: 'none',
-                  background: showSpotPrice ? 'rgba(88,101,242,0.15)' : 'transparent',
-                  color: showSpotPrice ? 'var(--accent)' : 'var(--text-secondary)',
+                  background: priceVisible ? 'rgba(88,101,242,0.15)' : 'transparent',
+                  color: priceVisible ? 'var(--accent)' : 'var(--text-secondary)',
                   transition: 'all 0.15s',
                   display: 'flex',
                   alignItems: 'center',
@@ -2506,10 +2482,10 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                   fontSize: 10,
                   fontWeight: 600,
                   cursor: 'pointer',
-                  border: '1px solid ' + (showSpotPrice ? 'var(--accent)' : 'var(--border)'),
+                  border: '1px solid ' + (priceVisible ? 'var(--accent)' : 'var(--border)'),
                   borderLeft: 'none',
-                  background: showSpotPrice ? 'rgba(88,101,242,0.15)' : 'transparent',
-                  color: showSpotPrice ? 'var(--accent)' : 'var(--text-secondary)',
+                  background: priceVisible ? 'rgba(88,101,242,0.15)' : 'transparent',
+                  color: priceVisible ? 'var(--accent)' : 'var(--text-secondary)',
                   transition: 'all 0.15s',
                   display: 'flex',
                   alignItems: 'center',
@@ -2598,17 +2574,18 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
             {/* P&L Split Dropdown */}
             <div ref={pnlPopupRef} className="relative flex items-stretch" style={{ height: 24 }}>
               <button
-                onClick={() => setShowTotalPnl((s) => !s)}
+                onClick={() => setPnlVisible((s) => !s)}
+                title="Show or hide the P&L pane"
                 style={{
                   padding: '0 8px',
                   borderRadius: '4px 0 0 4px',
                   fontSize: 11,
                   fontWeight: 600,
                   cursor: 'pointer',
-                  border: '1px solid ' + (showTotalPnl ? 'var(--accent)' : 'var(--border)'),
+                  border: '1px solid ' + (pnlVisible ? 'var(--accent)' : 'var(--border)'),
                   borderRight: 'none',
-                  background: showTotalPnl ? 'rgba(88,101,242,0.15)' : 'transparent',
-                  color: showTotalPnl ? 'var(--accent)' : 'var(--text-secondary)',
+                  background: pnlVisible ? 'rgba(88,101,242,0.15)' : 'transparent',
+                  color: pnlVisible ? 'var(--accent)' : 'var(--text-secondary)',
                   transition: 'all 0.15s',
                   display: 'flex',
                   alignItems: 'center',
@@ -2624,10 +2601,10 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                   fontSize: 10,
                   fontWeight: 600,
                   cursor: 'pointer',
-                  border: '1px solid ' + (showTotalPnl ? 'var(--accent)' : 'var(--border)'),
+                  border: '1px solid ' + (pnlVisible ? 'var(--accent)' : 'var(--border)'),
                   borderLeft: 'none',
-                  background: showTotalPnl ? 'rgba(88,101,242,0.15)' : 'transparent',
-                  color: showTotalPnl ? 'var(--accent)' : 'var(--text-secondary)',
+                  background: pnlVisible ? 'rgba(88,101,242,0.15)' : 'transparent',
+                  color: pnlVisible ? 'var(--accent)' : 'var(--text-secondary)',
                   transition: 'all 0.15s',
                   display: 'flex',
                   alignItems: 'center',
@@ -3650,126 +3627,122 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                 }}
               >
                 {/* Price Chart Container */}
-                <div
-                  style={{
-                    flex: 1,
-                    minHeight: 120,
-                    position: 'relative',
-                    borderBottom: '1px solid var(--border)',
-                  }}
-                >
-                  <div ref={priceContainerRef} style={{ width: '100%', height: '100%' }} />
-
-                  <PriceTooltip ref={priceTooltipRef} />
-                  <PinnedCrosshairLayer
-                    pins={pins}
-                    chart={priceChartRef.current}
-                    epoch={chartEpoch}
-                    onRemove={removePin}
-                    renderCard={(pin) => {
-                      const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
-                      if (!snap) return null;
-                      return (
-                        <PriceTooltipBody
-                          timeStr={snap.timeStr}
-                          ohlc={snap.price.ohlc}
-                          legPrices={snap.price.legs}
-                          underlying={underlying}
-                        />
-                      );
+                {priceVisible && (
+                  <div
+                    ref={pricePaneRef}
+                    style={{
+                      flex: 1,
+                      minHeight: 120,
+                      position: 'relative',
+                      borderBottom: '1px solid var(--border)',
                     }}
-                    compare={
-                      pinCompare && (
-                        <PinCompareStrip
-                          dtSeconds={pinCompare.dtSeconds}
-                          rows={pinCompare.price}
-                          colors={pinColors}
-                        />
-                      )
-                    }
-                  />
-                </div>
+                  >
+                    <div ref={priceContainerRef} style={{ width: '100%', height: '100%' }} />
+
+                    <PriceTooltip ref={priceTooltipRef} />
+                    <PinnedCrosshairLayer
+                      pins={pins}
+                      chart={priceChartRef.current}
+                      epoch={chartEpoch}
+                      onRemove={removePin}
+                      renderCard={(pin) => {
+                        const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
+                        if (!snap) return null;
+                        return (
+                          <PriceTooltipBody
+                            timeStr={snap.timeStr}
+                            ohlc={snap.price.ohlc}
+                            legPrices={snap.price.legs}
+                            underlying={underlying}
+                          />
+                        );
+                      }}
+                      compare={
+                        pinCompare && (
+                          <PinCompareStrip
+                            dtSeconds={pinCompare.dtSeconds}
+                            rows={pinCompare.price}
+                            colors={pinColors}
+                          />
+                        )
+                      }
+                    />
+                  </div>
+                )}
 
                 {/* Divider 1: Price / PNL */}
-                <div
-                  onMouseDown={onPnlDividerDown}
-                  style={{
-                    height: 6,
-                    cursor: 'row-resize',
-                    background: 'var(--border)',
-                    flexShrink: 0,
-                    zIndex: 10,
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = '#5865f2')}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = 'var(--border)')}
-                />
+                {priceVisible && pnlVisible && (
+                  <PaneDivider
+                    panes={chartPanes}
+                    target={pnlPaneRef}
+                    accent="#5865f2"
+                    title="Drag to resize the P&L pane"
+                  />
+                )}
 
                 {/* P&L Chart Container */}
-                <div
-                  ref={pnlPaneRef}
-                  style={{
-                    height: pnlHeight,
-                    minHeight: 80,
-                    position: 'relative',
-                    borderBottom: greeksVisible ? '1px solid var(--border)' : 'none',
-                    flexShrink: 0,
-                  }}
-                >
+                {pnlVisible && (
                   <div
-                    ref={pnlContainerRef}
+                    ref={pnlPaneRef}
                     style={{
-                      width: '100%',
-                      height: '100%',
-                      paddingLeft: 75,
-                      boxSizing: 'border-box',
+                      ...(primaryPane === 'pnl'
+                        ? { flex: 1 }
+                        : { height: pnlHeight, flexShrink: 0 }),
+                      minHeight: 80,
+                      position: 'relative',
+                      borderBottom: greeksVisible ? '1px solid var(--border)' : 'none',
                     }}
-                  />
+                  >
+                    <div
+                      ref={pnlContainerRef}
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        paddingLeft: 75,
+                        boxSizing: 'border-box',
+                      }}
+                    />
 
-                  <PnlTooltip ref={pnlTooltipRef} strategyMargin={0} />
-                  <PinnedCrosshairLayer
-                    pins={pins}
-                    chart={pnlChartRef.current}
-                    // This pane's chart div carries paddingLeft: 75 (its native left scale is
-                    // hidden), so plot coordinates need the same correction the hover path makes.
-                    xAdjust={75}
-                    epoch={chartEpoch}
-                    onRemove={removePin}
-                    renderCard={(pin) => {
-                      const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
-                      if (!snap) return null;
-                      return (
-                        <PnlTooltipBody
-                          timeStr={snap.timeStr}
-                          values={{ legs: snap.pnl.legs, total: snap.pnl.total }}
-                          strategyMargin={0}
-                        />
-                      );
-                    }}
-                    compare={
-                      pinCompare && (
-                        <PinCompareStrip
-                          dtSeconds={pinCompare.dtSeconds}
-                          rows={pinCompare.pnl}
-                          colors={pinColors}
-                        />
-                      )
-                    }
-                  />
-                </div>
+                    <PnlTooltip ref={pnlTooltipRef} strategyMargin={0} />
+                    <PinnedCrosshairLayer
+                      pins={pins}
+                      chart={pnlChartRef.current}
+                      // This pane's chart div carries paddingLeft: 75 (its native left scale is
+                      // hidden), so plot coordinates need the same correction the hover path makes.
+                      xAdjust={75}
+                      epoch={chartEpoch}
+                      onRemove={removePin}
+                      renderCard={(pin) => {
+                        const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
+                        if (!snap) return null;
+                        return (
+                          <PnlTooltipBody
+                            timeStr={snap.timeStr}
+                            values={{ legs: snap.pnl.legs, total: snap.pnl.total }}
+                            strategyMargin={0}
+                          />
+                        );
+                      }}
+                      compare={
+                        pinCompare && (
+                          <PinCompareStrip
+                            dtSeconds={pinCompare.dtSeconds}
+                            rows={pinCompare.pnl}
+                            colors={pinColors}
+                          />
+                        )
+                      }
+                    />
+                  </div>
+                )}
 
                 {/* Divider 2: PNL / Greeks */}
-                {greeksVisible && (
-                  <div
-                    onMouseDown={onGreeksDividerDown}
-                    style={{
-                      height: 6,
-                      cursor: 'row-resize',
-                      background: 'var(--border)',
-                      flexShrink: 0,
-                      zIndex: 10,
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = '#5865f2')}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = 'var(--border)')}
+                {greeksVisible && (priceVisible || pnlVisible) && (
+                  <PaneDivider
+                    panes={chartPanes}
+                    target={greeksPaneRef}
+                    accent="#a78bfa"
+                    title="Drag to resize the Greeks pane"
                   />
                 )}
 
@@ -3777,11 +3750,12 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                 <div
                   ref={greeksPaneRef}
                   style={{
-                    height: greeksHeight,
+                    ...(primaryPane === 'greeks'
+                      ? { flex: 1 }
+                      : { height: greeksHeight, flexShrink: 0 }),
                     minHeight: 80,
                     position: 'relative',
                     display: greeksVisible ? 'block' : 'none',
-                    flexShrink: 0,
                   }}
                 >
                   <div ref={greeksContainerRef} style={{ width: '100%', height: '100%' }} />
@@ -3833,18 +3807,12 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                 </div>
 
                 {/* Divider 2b: Indicators */}
-                {indicatorsVisible && (
-                  <div
-                    onMouseDown={onIndicatorsDividerDown}
-                    style={{
-                      height: 6,
-                      cursor: 'row-resize',
-                      background: 'var(--border)',
-                      flexShrink: 0,
-                      zIndex: 10,
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = '#38bdf8')}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = 'var(--border)')}
+                {indicatorsVisible && (priceVisible || pnlVisible || greeksVisible) && (
+                  <PaneDivider
+                    panes={chartPanes}
+                    target={indicatorsPaneRef}
+                    accent="#38bdf8"
+                    title="Drag to resize the Indicators pane"
                   />
                 )}
 
@@ -3852,7 +3820,12 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                 {indicatorsVisible && (
                   <div
                     ref={indicatorsPaneRef}
-                    style={{ height: indicatorsHeight, minHeight: 80, flexShrink: 0 }}
+                    style={{
+                      ...(primaryPane === 'indicators'
+                        ? { flex: 1 }
+                        : { height: indicatorsHeight, flexShrink: 0 }),
+                      minHeight: 80,
+                    }}
                   >
                     <GreekIndicatorPane
                       instrument={indicatorInstrument}
@@ -3873,17 +3846,14 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
               {/* Divider 3: Charts / Positions */}
               {!chartsExpanded && (
-                <div
-                  onMouseDown={onPositionsDividerDown}
-                  style={{
-                    height: 6,
-                    cursor: 'row-resize',
-                    background: 'var(--border)',
-                    flexShrink: 0,
-                    zIndex: 10,
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = '#5865f2')}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = 'var(--border)')}
+                <PaneDivider
+                  panes={columnPanes}
+                  target={positionsPaneRef}
+                  // Collapsed, the pane renders at a fixed 28px header, so a drag would set a
+                  // height React never reads back and the two would disagree until it reopened.
+                  disabled={positionsCollapsed}
+                  accent="#5865f2"
+                  title="Drag to resize the positions table"
                 />
               )}
 
