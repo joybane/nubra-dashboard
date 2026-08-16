@@ -702,8 +702,18 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       return;
     }
 
-    // Time points in the basket
-    const times = evalResult.basketPnlData?.map((d) => d.time) || [];
+    // Time grid: the legs' OWN bars, spanning the whole session — not `basketPnlData`, which the
+    // server clips to entry→exit (it is a position P&L curve) and which used to cut the pane off
+    // at the exit bar. Greeks here are a property of the selected legs at their quantity, so they
+    // stay defined for every minute a leg has a price, exactly like the leg lines in the price
+    // pane. Points where spot or the leg price is missing are skipped below.
+    // Floored to the minute, the same key the spot/leg lookups below and `padToGrid` use, so the
+    // union of several legs' bars can never yield two points inside one minute.
+    const timeSet = new Set<number>();
+    for (const lp of evalResult.legPriceData) {
+      for (const d of lp.data) timeSet.add(Math.floor(d.time / 60) * 60);
+    }
+    const times = [...timeSet].sort((a, b) => a - b);
     if (!times.length) {
       setGreeksData(null);
       return;
@@ -749,11 +759,21 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         peT = 0,
         peV = 0;
 
+      // An illiquid leg can miss a minute entirely (CRUDEOIL 2026-08-14 missed four). Dropping
+      // just that leg from the sum would publish a one-leg figure under the "net" label — the
+      // basket's theta and vega halve for one bar and snap back, which reads as a spike in the
+      // pane rather than as the missing data it is. Publish nothing for the minute instead;
+      // padToGrid turns the hole into whitespace.
+      let legMissing = false;
+
       for (let legIdx = 0; legIdx < legs.length; legIdx++) {
         const leg = legs[legIdx];
         const prices = legPriceMap.get(legIdx);
         const ltp = prices?.get(minuteKey) ?? 0;
-        if (ltp <= 0) continue;
+        if (ltp <= 0) {
+          legMissing = true;
+          break;
+        }
 
         const K = leg.strike;
         const type = leg.optionType;
@@ -785,6 +805,8 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
           peV += vg;
         }
       }
+
+      if (legMissing) continue;
 
       netDelta.push({ time: t, value: netD });
       netGamma.push({ time: t, value: netG });
@@ -2762,8 +2784,14 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                   const activeGreeks = ['delta', 'gamma', 'theta', 'vega'].filter((k) =>
                     selectedGreeks.has(k),
                   );
+                  // With no crosshair, read the same bar the pane's last-value labels do — the
+                  // last point of the greeks series, i.e. session end, not the exit bar.
+                  const lastGreekT = greeksData?.net.delta.length
+                    ? greeksData.net.delta[greeksData.net.delta.length - 1].time
+                    : null;
                   const targetT =
                     activeTime ||
+                    lastGreekT ||
                     (evalResult?.basketPnlData && evalResult.basketPnlData.length > 0
                       ? evalResult.basketPnlData[evalResult.basketPnlData.length - 1].time
                       : null);
