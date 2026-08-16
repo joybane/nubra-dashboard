@@ -1,6 +1,13 @@
-import { test, expect } from 'vitest';
-import type { IChartApi } from 'lightweight-charts';
-import { createGreekPane, createIvPane, msToChartTime, scaleSuffix } from './greekRenderer.ts';
+import { test, expect, describe } from 'vitest';
+import type { AutoscaleInfo, IChartApi } from 'lightweight-charts';
+import {
+  createGreekPane,
+  createIvPane,
+  makeVScaleProvider,
+  msToChartTime,
+  scaleSuffix,
+  type VScale,
+} from './greekRenderer.ts';
 import { IST_OFFSET } from './utils.ts';
 
 /** Full-height margins — the arrangement every inline overlay is created with. */
@@ -16,6 +23,7 @@ const FULL_HEIGHT = { top: 0.1, bottom: 0.08 };
 function fakeChart() {
   const scales = new Map<string, { opts: Record<string, unknown>; calls: number }>();
   const seriesByScale: string[] = [];
+  const seriesOpts: Record<string, unknown>[] = [];
   const scaleFor = (id: string) => {
     let s = scales.get(id);
     if (!s) scales.set(id, (s = { opts: {}, calls: 0 }));
@@ -26,6 +34,7 @@ function fakeChart() {
     addSeries: (_type: unknown, opts: { priceScaleId?: string }) => {
       const id = opts.priceScaleId ?? 'right';
       seriesByScale.push(id);
+      seriesOpts.push(opts as Record<string, unknown>);
       return {
         priceScale: () => ({
           applyOptions: (o: Record<string, unknown>) => {
@@ -41,7 +50,7 @@ function fakeChart() {
     removeSeries() {},
     removePane() {},
   };
-  return { chart: chart as unknown as IChartApi, scales, seriesByScale };
+  return { chart: chart as unknown as IChartApi, scales, seriesByScale, seriesOpts };
 }
 
 /**
@@ -156,4 +165,98 @@ test('msToChartTime: bakes the IST offset into the chart timestamp', () => {
   const d = new Date((msToChartTime(ms) as number) * 1000);
   expect(d.getUTCHours()).toBe(9);
   expect(d.getUTCMinutes()).toBe(20);
+});
+
+// ─── Vertical zoom / pan ─────────────────────────────────────────────────────────
+
+describe('makeVScaleProvider', () => {
+  /** The library's own autoscale result: 20 wide, centred on 50. */
+  const auto = (): AutoscaleInfo => ({ priceRange: { minValue: 40, maxValue: 60 } });
+  const run = (v: VScale, original: () => AutoscaleInfo | null = auto) =>
+    makeVScaleProvider(() => v)(original);
+
+  test('1× with no pan is the identity — a host that never stretches pays nothing', () => {
+    expect(run({ zoom: 1, pan: 0 })).toEqual({ priceRange: { minValue: 40, maxValue: 60 } });
+  });
+
+  test('zoom narrows the range about its midpoint, which is what stretches the line', () => {
+    // Span 20 → 20/3, midpoint still 50. A narrower range over the same pixels = a taller line.
+    expect(run({ zoom: 3, pan: 0 })).toEqual({
+      priceRange: { minValue: 50 - 10 / 3, maxValue: 50 + 10 / 3 },
+    });
+    // Below 1 it compresses, the other half of the same gesture.
+    expect(run({ zoom: 0.5, pan: 0 })).toEqual({ priceRange: { minValue: 30, maxValue: 70 } });
+  });
+
+  test('pan shifts by fractions of the auto HALF-range, leaving the span alone', () => {
+    // half = 10, so pan 0.5 moves the window 5 — and because every scale in the pane maps its own
+    // half-range onto the same pixels, that is the same pixel shift for a line at 60 and one at -300.
+    expect(run({ zoom: 1, pan: 0.5 })).toEqual({ priceRange: { minValue: 35, maxValue: 55 } });
+    expect(run({ zoom: 1, pan: -0.5 })).toEqual({ priceRange: { minValue: 45, maxValue: 65 } });
+  });
+
+  test('pan is applied before the span, so zooming does not move where you were looking', () => {
+    // centre 50 - 0.5*10 = 45, then half 10/2 = 5 either side.
+    expect(run({ zoom: 2, pan: 0.5 })).toEqual({ priceRange: { minValue: 40, maxValue: 50 } });
+  });
+
+  test('zoom is clamped — a runaway drag cannot collapse the range to nothing', () => {
+    const tiny = run({ zoom: 1e6, pan: 0 }) as AutoscaleInfo;
+    const span = tiny.priceRange!.maxValue - tiny.priceRange!.minValue;
+    expect(span).toBeCloseTo(20 / 50, 10); // V_ZOOM_MAX
+    const huge = run({ zoom: 1e-6, pan: 0 }) as AutoscaleInfo;
+    expect(huge.priceRange!.maxValue - huge.priceRange!.minValue).toBeCloseTo(20 / 0.2, 10);
+  });
+
+  test('anything it cannot meaningfully scale is passed through untouched', () => {
+    expect(run({ zoom: 3, pan: 1 }, () => null)).toBeNull();
+    const noRange = { priceRange: null };
+    expect(run({ zoom: 3, pan: 1 }, () => noRange)).toBe(noRange);
+    // A flat line has no span: dividing zero by the zoom is still zero, and inventing a span around
+    // it would draw an axis out of nothing.
+    const flat = { priceRange: { minValue: 7, maxValue: 7 } };
+    expect(run({ zoom: 3, pan: 1 }, () => flat)).toBe(flat);
+    const bad = { priceRange: { minValue: NaN, maxValue: 60 } };
+    expect(run({ zoom: 3, pan: 1 }, () => bad)).toBe(bad);
+  });
+
+  test('a non-finite factor is treated as no factor rather than destroying the range', () => {
+    expect(run({ zoom: NaN, pan: NaN })).toEqual({ priceRange: { minValue: 40, maxValue: 60 } });
+  });
+
+  test('margins survive — they are the library’s padding for price lines and markers', () => {
+    const withMargins = (): AutoscaleInfo => ({
+      priceRange: { minValue: 40, maxValue: 60 },
+      margins: { above: 12, below: 4 },
+    });
+    expect((run({ zoom: 2, pan: 0 }, withMargins) as AutoscaleInfo).margins).toEqual({
+      above: 12,
+      below: 4,
+    });
+  });
+
+  test('reads the factor at call time, so one drag moves lines built long before it', () => {
+    const live: VScale = { zoom: 1, pan: 0 };
+    const provider = makeVScaleProvider(() => live);
+    expect(provider(auto)).toEqual({ priceRange: { minValue: 40, maxValue: 60 } });
+    live.zoom = 2;
+    expect(provider(auto)).toEqual({ priceRange: { minValue: 45, maxValue: 55 } });
+  });
+});
+
+test('no vScale means no autoscaleInfoProvider at all — the Tracker and Chart stay on the library path', () => {
+  const bare = fakeChart();
+  createGreekPane(bare.chart, 'Vega·mine', { inline: true, scaleKey: 'vega-mine' });
+  createIvPane(bare.chart, 'IV·ATM', { inline: true, scaleKey: 'atm' });
+  expect(bare.seriesOpts).toHaveLength(5); // CE/PE totals, CE/PE Δ, IV
+  expect(bare.seriesOpts.every((o) => o.autoscaleInfoProvider === undefined)).toBe(true);
+
+  // With one, every series in the pane gets it — a stretch that reached only some of the lines is
+  // the bug this whole mechanism exists to fix.
+  const wired = fakeChart();
+  const vScale = () => ({ zoom: 1, pan: 0 });
+  createGreekPane(wired.chart, 'Vega·mine', { inline: true, scaleKey: 'vega-mine', vScale });
+  createIvPane(wired.chart, 'IV·ATM', { inline: true, scaleKey: 'atm', vScale });
+  expect(wired.seriesOpts).toHaveLength(5);
+  expect(wired.seriesOpts.every((o) => typeof o.autoscaleInfoProvider === 'function')).toBe(true);
 });

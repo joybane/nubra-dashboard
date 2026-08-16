@@ -46,10 +46,19 @@ describe('greekRowsAllPanes', () => {
       [fakeSeries({ color: '#a78bfa', title: 'Theta·mine CE' }, -77.62)],
     ]);
 
-    expect(greekRowsAllPanes(chart, null, null, 5)).toEqual([
+    // `toMatchObject`, because each row also carries the series it was read from — the handle the
+    // axis-follow hit test needs to ask where a line sits on screen.
+    expect(greekRowsAllPanes(chart, null, null, 5)).toMatchObject([
       { color: '#22c55e', label: 'Vega·mine CE', value: 69.7 },
       { color: '#a78bfa', label: 'Theta·mine CE', value: -77.62 },
     ]);
+  });
+
+  it('hands back the series each reading came from', () => {
+    const ce = fakeSeries({ color: '#22c55e', title: 'Vega·mine CE' }, 69.7);
+    const rows = greekRowsAllPanes(fakeChart([[], [ce]]), null, null, 5);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].series).toBe(ce);
   });
 
   it('honours a series that is switched off, and drops one with no reading', () => {
@@ -81,9 +90,30 @@ describe('greekRowsAllPanes', () => {
 
   it('reads the inline case identically — the Tracker path is unchanged', () => {
     const chart = fakeChart([[fakeSeries({ color: '#22c55e', title: 'Vega·mine CE' }, 42)]]);
-    expect(greekRows(chart, null, null, 5, 0)).toEqual([
+    expect(greekRows(chart, null, null, 5, 0)).toMatchObject([
       { color: '#22c55e', label: 'Vega·mine CE', value: 42 },
     ]);
+  });
+
+  it('excludes a list of series, not just one', () => {
+    // GreekIndicatorPane keeps two series that are not readings: the underlying it prints itself,
+    // and the invisible anchor that lends its scale to the left axis. Left in, the anchor shows up
+    // as a nameless row in every tooltip and pinned card.
+    const base = fakeSeries({ color: '#2962ff', title: 'NIFTY' }, 24000);
+    const anchor = fakeSeries({ color: 'rgba(0,0,0,0)', title: '' }, 1);
+    const greek = fakeSeries({ color: '#22c55e', title: 'Vega·mine CE' }, 42);
+    const chart = fakeChart([[base, anchor, greek]]);
+
+    expect(greekRows(chart, [base, anchor], null, 5, 0).map((r) => r.label)).toEqual([
+      'Vega·mine CE',
+    ]);
+    // A null in the list is tolerated — refs are null before the chart exists.
+    expect(greekRows(chart, [base, null], null, 5, 0).map((r) => r.label)).toEqual([
+      '',
+      'Vega·mine CE',
+    ]);
+    // And a bare series still works, which is what the Tracker and Chart view pass.
+    expect(greekRows(chart, base, null, 5, 0).map((r) => r.label)).toEqual(['', 'Vega·mine CE']);
   });
 });
 

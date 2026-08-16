@@ -75,10 +75,24 @@ export interface GreekRow {
   value: number;
   /** Overrides fmtCompact — the underlying row is a price, not a nine-digit greek total. */
   format?: (v: number) => string;
+  /**
+   * The line this reading came from, where there was one. Absent on rows a caller synthesised —
+   * the underlying's price row, which its host prepends by hand.
+   *
+   * Carried so a caller can go back to the series for things a value alone cannot answer: what y
+   * it sits at (`priceToCoordinate`), or what range its scale is holding. That is what lets the
+   * left axis follow the cursor without re-walking the pane's series a second time.
+   */
+  series?: ISeriesApi<'Line'>;
 }
 
 /**
  * Read every visible greek line on `paneIndex`, skipping `exclude` (the host's own price series).
+ *
+ * `exclude` takes a list as readily as one series, because a pane may carry more than one series
+ * that is not a reading: `GreekIndicatorPane` also owns an invisible anchor whose only job is to
+ * lend its scale to the left axis. Without it the anchor would show up as a nameless row in every
+ * tooltip and pinned card.
  *
  * `readExact` supplies a value when the caller already has one for this instant — the crosshair
  * path passes `param.seriesData`. Where that misses, the reading is carried forward from the last
@@ -87,15 +101,16 @@ export interface GreekRow {
  */
 export function greekRows(
   chart: IChartApi,
-  exclude: ISeriesApi<'Line'> | null,
+  exclude: ISeriesApi<'Line'> | ReadonlyArray<ISeriesApi<'Line'> | null> | null,
   readExact: ((s: ISeriesApi<'Line'>) => number | undefined) | null,
   logical: number | null,
   paneIndex = 0,
 ): GreekRow[] {
+  const skip = new Set(Array.isArray(exclude) ? exclude : [exclude]);
   let overlaySeries: ISeriesApi<'Line'>[] = [];
   try {
     overlaySeries = (chart.panes()[paneIndex]?.getSeries() ?? []).filter(
-      (s) => s !== exclude,
+      (s) => !skip.has(s as ISeriesApi<'Line'>),
     ) as ISeriesApi<'Line'>[];
   } catch {
     /* pane gone */
@@ -113,7 +128,7 @@ export function greekRows(
       v = prev?.value;
     }
     if (v == null || !Number.isFinite(v)) continue;
-    rows.push({ color: o.color || '#888', label: o.title || '', value: v });
+    rows.push({ color: o.color || '#888', label: o.title || '', value: v, series });
   }
   return rows;
 }
@@ -155,7 +170,7 @@ export function diffGreekRows(before: GreekRow[], after: GreekRow[]): GreekRowDe
  */
 export function greekRowsAllPanes(
   chart: IChartApi,
-  exclude: ISeriesApi<'Line'> | null,
+  exclude: ISeriesApi<'Line'> | ReadonlyArray<ISeriesApi<'Line'> | null> | null,
   readExact: ((s: ISeriesApi<'Line'>) => number | undefined) | null,
   logical: number | null,
   fromPane = 1,
@@ -331,6 +346,11 @@ export interface GreekCrosshairOpts {
   formatBase: (v: number) => string;
   /** Pane whose series are enumerated for greek rows. Defaults to 0 (where inline overlays live). */
   paneIndex?: number;
+  /**
+   * Further series to keep out of the rows, on top of `baseSeries`. For panes carrying a series
+   * that is not a reading — `GreekIndicatorPane`'s invisible axis anchor.
+   */
+  excludeSeries?: () => ReadonlyArray<ISeriesApi<'Line'> | null>;
   /** Card chrome. Defaults to the Tracker's plain card. */
   style?: GreekTooltipStyle;
   /** See `placeTooltip` — set by panes that sit in a stack of sibling panes. */
@@ -387,7 +407,13 @@ function makeGreekTooltipRenderer(opts: GreekCrosshairOpts) {
       if (v != null) rows.push(style.row('#2962ff', baseLabel(), formatBase(v)));
     }
 
-    for (const r of greekRows(chart, base, readExact, logical, paneIndex)) {
+    for (const r of greekRows(
+      chart,
+      [base, ...(opts.excludeSeries?.() ?? [])],
+      readExact,
+      logical,
+      paneIndex,
+    )) {
       rows.push(style.row(r.color, r.label, fmtCompact(r.value)));
     }
     if (!rows.length) {

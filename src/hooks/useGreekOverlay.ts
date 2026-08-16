@@ -47,6 +47,7 @@ import {
   type IvPane,
   type SeriesMode,
   type TimeMapper,
+  type VScale,
 } from '../lib/greekRenderer';
 import {
   blackScholes,
@@ -243,6 +244,11 @@ export interface GreekOverlayApi {
    * has no id to pass to `chart.priceScale()` — without this they cannot be recovered at all.
    */
   resetScales: () => void;
+  /**
+   * Re-read the `vScale` getter and repaint this measure's lines. Same reason `resetScales` is
+   * exposed: the scales are overlay scales whose ids live inside the renderer.
+   */
+  applyVScale: () => void;
   clearForInstrumentChange: () => void;
   enabledRef: React.RefObject<boolean>;
 }
@@ -264,6 +270,13 @@ interface Deps {
    * after the panes exist rebuilds them: a series' `priceScaleId` is fixed at creation.
    */
   axisScaleId?: string;
+  /**
+   * User-driven vertical zoom/pan for this measure's lines — see `makeVScaleProvider`. A getter,
+   * so a drag can move the value without re-rendering the host or rebuilding a pane.
+   *
+   * Omit it (the Tracker, the Chart view) and no `autoscaleInfoProvider` is installed at all.
+   */
+  vScale?: () => VScale;
   /**
    * Trailing days of history to reconstruct, ending at the selected day. Defaults to
    * GREEK_HIST_DAYS (7), which matches the Chart and Tracker candle loads.
@@ -313,6 +326,7 @@ export function useGreekOverlay({
   allBarsRef,
   inline,
   axisScaleId,
+  vScale,
   histDays,
   initialDay,
 }: Deps): GreekOverlayApi {
@@ -478,11 +492,19 @@ export function useGreekOverlay({
     ivPaneRef.current?.resetScales();
   }
 
+  /** See `GreekPane.applyVScale`. A no-op unless the host passed `vScale`. */
+  function applyVScale() {
+    minePaneRef.current?.applyVScale();
+    indPaneRef.current?.applyVScale();
+    ivPaneRef.current?.applyVScale();
+  }
+
   function syncPanes(m: Method | 'both') {
     const chart = chartRef.current;
     if (!chart || !enabledRef.current) return;
     const paneOpts = {
       ...(inline ? { inline: true, paneIndex: 0, axisScaleId } : {}),
+      ...(vScale ? { vScale } : {}),
       ceColor: palette.ce,
       peColor: palette.pe,
       // Resolved per draw: panes are reused across instrument switches, so this has to
@@ -1544,6 +1566,7 @@ export function useGreekOverlay({
     applySettings,
     refresh,
     resetScales,
+    applyVScale,
     clearForInstrumentChange,
     enabledRef,
   };

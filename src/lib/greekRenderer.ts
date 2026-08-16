@@ -13,6 +13,7 @@
 import {
   LineSeries,
   LineStyle,
+  type AutoscaleInfoProvider,
   type IChartApi,
   type ISeriesApi,
   type UTCTimestamp,
@@ -67,6 +68,66 @@ export function scaleSuffix(label: string): string {
 }
 
 const defaultMapper: TimeMapper = (ms) => msToChartTime(ms) as number;
+
+// ─── User-driven vertical zoom / pan ────────────────────────────────────────────
+//
+// A pane can only ever show two price axes — lightweight-charts builds a PriceAxisWidget for
+// 'left' and 'right' and nothing else — so an overlay scale has no gutter to grab and NO drag
+// gesture can reach it. A host stacking several measures on overlay scales therefore cannot let
+// the user stretch them by any built-in means. This is that missing capability, expressed as a
+// factor over the library's own autoscale result rather than as a fixed range.
+//
+// That distinction is the whole point. `IPriceScaleApi.setVisibleRange` exists and does reach
+// overlay scales, but it turns `autoScale` OFF — which is exactly the latch that makes lines walk
+// off the pane on the next zoom. Rewriting the range the scale auto-fits TO keeps every scale
+// auto-fitting the visible window, with the user's stretch multiplied on top.
+
+/** Vertical zoom/pan applied on top of each scale's own auto-fit. */
+export interface VScale {
+  /** 1 = the library's own fit. Above 1 stretches the lines, below 1 compresses them. */
+  zoom: number;
+  /**
+   * Shift in units of the auto HALF-range, not in price. Every scale spans the same pixel band, so
+   * one fraction moves every line by the same number of pixels however different their magnitudes
+   * — which is what makes a single pan gesture coherent across Vega at +60 and Theta at −300.
+   */
+  pan: number;
+}
+
+/** Past these the line is either a flat smear or a single point's worth of noise. */
+const V_ZOOM_MIN = 0.2;
+const V_ZOOM_MAX = 50;
+
+/**
+ * An `autoscaleInfoProvider` that re-centres and re-spans whatever the library computed.
+ *
+ * Reads through a getter rather than closing over a value: a series outlives any number of drags,
+ * so a captured `VScale` would be the one that existed when the pane was built.
+ *
+ * Everything it cannot meaningfully scale is passed straight through — no range, a non-finite
+ * bound, or a flat line whose span is zero (dividing its half-span by the zoom would still be
+ * zero, and inventing a span around it would draw an axis out of nothing).
+ */
+export function makeVScaleProvider(read: () => VScale): AutoscaleInfoProvider {
+  return (original) => {
+    const res = original();
+    const range = res?.priceRange;
+    if (!res || !range) return res;
+    const { minValue, maxValue } = range;
+    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return res;
+    const half = (maxValue - minValue) / 2;
+    if (half <= 0) return res;
+
+    const { zoom, pan } = read();
+    const z = Math.min(V_ZOOM_MAX, Math.max(V_ZOOM_MIN, Number.isFinite(zoom) ? zoom : 1));
+    const p = Number.isFinite(pan) ? pan : 0;
+    // Pan first, then span: the shift is a property of where you are looking, not of how far in.
+    const mid = (minValue + maxValue) / 2 - p * half;
+    // `margins` carried through — the library puts price-line and marker padding there, and
+    // dropping it would clip those against the pane edge.
+    return { ...res, priceRange: { minValue: mid - half / z, maxValue: mid + half / z } };
+  };
+}
 
 type LinePoint =
   | { time: UTCTimestamp; value: number; color?: string }
@@ -126,6 +187,17 @@ export interface GreekPane {
    * double-click, so they are otherwise unrecoverable.
    */
   resetScales(): void;
+  /**
+   * Re-read the `vScale` getter and repaint.
+   *
+   * The provider closure sees the live value, but nothing tells lightweight-charts that the value
+   * moved — so a drag that only mutates the ref changes nothing on screen. Poking one series is
+   * enough for the whole pane: `applyOptions` raises a Light invalidation, and the pane widget
+   * recalculates its left, right AND every overlay scale at anything above Cursor level.
+   *
+   * A no-op when the host passed no `vScale`, so the Tracker and the Chart view never pay for it.
+   */
+  applyVScale(): void;
   destroy(): void;
 }
 
@@ -171,6 +243,14 @@ export interface GreekPaneOpts {
    * stale the moment the user moves from NIFTY to crude.
    */
   exchange?: () => string | undefined;
+  /**
+   * User-driven vertical zoom/pan for this pane's lines — see `makeVScaleProvider`.
+   *
+   * A resolver for the same reason `exchange` is one. Omit it and no `autoscaleInfoProvider` is
+   * installed at all, which is what keeps hosts that offer no stretch gesture (the Tracker, the
+   * Chart view) on exactly the library's own autoscale path.
+   */
+  vScale?: () => VScale;
 }
 
 /**
@@ -199,6 +279,10 @@ export function createGreekPane(
   const totScale = inline ? (opts.axisScaleId ?? `gt-${safe}`) : undefined;
   const diffScale = inline ? `gd-${safe}` : DIFF_SCALE;
 
+  // One provider shared by all four series: they read the same host-level zoom, and re-applying
+  // the identical function object is what `applyVScale` uses to force a recalculation.
+  const vProvider = opts.vScale ? makeVScaleProvider(opts.vScale) : null;
+
   const mk = (
     color: string,
     dashed: boolean,
@@ -223,6 +307,7 @@ export function createGreekPane(
         ...(inline
           ? { priceFormat: { type: 'custom' as const, minMove: 0.01, formatter: compactAxis } }
           : {}),
+        ...(vProvider ? { autoscaleInfoProvider: vProvider } : {}),
         ...(scaleId ? { priceScaleId: scaleId } : {}),
       },
       paneIndex,
@@ -297,6 +382,15 @@ export function createGreekPane(
       ceTotal.priceScale().applyOptions({ autoScale: true });
       ceDiff.priceScale().applyOptions({ autoScale: true });
     },
+    applyVScale() {
+      if (!vProvider) return;
+      // One series is enough — see the interface note. Re-asserting `autoScale` first so a scale
+      // some earlier axis drag latched off rejoins rather than sitting out the stretch: the
+      // provider is only consulted while a scale is auto-scaling.
+      ceTotal.priceScale().applyOptions({ autoScale: true });
+      ceDiff.priceScale().applyOptions({ autoScale: true });
+      ceTotal.applyOptions({ autoscaleInfoProvider: vProvider });
+    },
     destroy() {
       for (const s of all) {
         try {
@@ -326,6 +420,8 @@ export interface IvPane {
   setHeight(px: number): void;
   /** See `GreekPane.resetScales` — same latched-autoscale problem, one scale instead of two. */
   resetScales(): void;
+  /** See `GreekPane.applyVScale`. */
+  applyVScale(): void;
   destroy(): void;
 }
 
@@ -345,6 +441,7 @@ export function createIvPane(chart: IChartApi, label: string, opts: GreekPaneOpt
     : undefined;
 
   const ivColor = opts.ceColor ?? '#38bdf8';
+  const vProvider = opts.vScale ? makeVScaleProvider(opts.vScale) : null;
   const line = chart.addSeries(
     LineSeries,
     {
@@ -359,6 +456,7 @@ export function createIvPane(chart: IChartApi, label: string, opts: GreekPaneOpt
       crosshairMarkerBackgroundColor: ivColor,
       title: label,
       priceFormat: { type: 'custom' as const, minMove: 0.01, formatter: ivAxis },
+      ...(vProvider ? { autoscaleInfoProvider: vProvider } : {}),
       ...(scaleId ? { priceScaleId: scaleId } : {}),
     },
     paneIndex,
@@ -379,6 +477,11 @@ export function createIvPane(chart: IChartApi, label: string, opts: GreekPaneOpt
     },
     resetScales() {
       line.priceScale().applyOptions({ autoScale: true });
+    },
+    applyVScale() {
+      if (!vProvider) return;
+      line.priceScale().applyOptions({ autoScale: true });
+      line.applyOptions({ autoscaleInfoProvider: vProvider });
     },
     destroy() {
       try {

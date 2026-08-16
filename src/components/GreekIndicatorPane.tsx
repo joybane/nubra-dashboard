@@ -14,9 +14,11 @@ import {
   createChart,
   CrosshairMode,
   LineSeries,
+  type AutoscaleInfoProvider,
   type IChartApi,
   type ISeriesApi,
   type LineSeriesOptions,
+  type MouseEventParams,
 } from 'lightweight-charts';
 import type { Instrument, OhlcBar } from '../types';
 import { getSymbol } from '../types';
@@ -32,9 +34,12 @@ import {
   logicalAtTime,
   seriesValueAt,
   PANEL_TOOLTIP_STYLE,
+  type CrosshairTime,
   type GreekRow,
   type GreekTooltipView,
 } from '../lib/greekTooltip';
+import { pickAxisTarget, type AxisCandidate } from '../lib/axisFollow';
+import type { VScale } from '../lib/greekRenderer';
 import { removeChart } from '../lib/chartLifecycle';
 import { barsToSessionLine, fmtPrice } from '../lib/utils';
 import PinnedCrosshairLayer from './PinnedCrosshairLayer';
@@ -99,22 +104,32 @@ function GreekPinCard({ time, rows }: { time: number; rows: GreekRow[] }) {
 // use the whole pane and re-fit as you zoom.
 //
 // The cost, stated plainly: vertical position is no longer comparable ACROSS measures. A Theta line
-// above a Vega line means nothing. Each line's real value is on its own last-value tag and in the
-// crosshair tooltip, which is where it should be read from.
-type Measure = 'vega' | 'theta' | 'iv';
-const MEASURE_ORDER: Measure[] = ['vega', 'theta', 'iv'];
-
+// above a Vega line means nothing. That is what the two features below are for — the axis follows
+// the cursor so any line can be read against real ticks, and the stretch reaches every scale at
+// once so any line can be inspected closely.
+//
+// ─── Reading the lines: an axis that follows the cursor ─────────────────────────
+//
+// A pane can show at most two price axes — lightweight-charts builds a PriceAxisWidget for 'left'
+// and 'right' and nothing else — and one of those is the underlying's. So with five greek scales in
+// here, any fixed assignment leaves most lines with nothing but a floating last-value tag.
+//
+// Instead the LEFT axis follows the cursor: hover a line and the axis shows that line's range and
+// number format. It cannot be done by moving series onto the axis, because `priceScaleId` is fixed
+// at series creation and following the cursor that way would destroy and rebuild four series per
+// hover. So an invisible ANCHOR series sits alone on the left scale, and its `autoscaleInfoProvider`
+// returns whichever line's range is wanted. Nothing moves between scales; one option changes.
+//
+// The ticks land in the right place because every overlay scale in this pane carries identical
+// `scaleMargins`, so two scales holding the same range paint their gridlines at the same y.
 /**
- * The measure whose totals get the visible LEFT axis — the first one enabled, in tray order.
+ * The scale the anchor occupies, and therefore the axis that follows the cursor.
  *
- * Only one series can own an axis. The rest keep their last-value tags, which carry correct values
- * against their own scales, exactly as the Δ lines do. Never null: with nothing enabled it falls
- * back to the first measure, so the pane is already holding the axis open for the switch the user
- * is about to make, rather than rebuilding onto it a render later.
+ * 'left' rather than 'right' because the underlying keeps the right one: its price is what the
+ * sibling price pane ticks, so the two axes agree, and `setCrosshairPosition` prices a host-synced
+ * crosshair off the scale that series actually lives on.
  */
-function axisOwnerFor(enabled: Measure[]): Measure {
-  return enabled[0] ?? MEASURE_ORDER[0];
-}
+const AXIS_ANCHOR_SCALE = 'left';
 
 export interface GreekIndicatorPaneProps {
   /** The underlying the basket is built around. Null keeps the pane inert. */
@@ -189,6 +204,21 @@ export default function GreekIndicatorPane({
   // hover binding below, which owns the same element while the cursor is in this pane.
   const syncTooltipRef = useRef<GreekTooltipView | null>(null);
 
+  // ── The left axis and the line it currently describes ──────────────────────
+  // `anchorRef` plots nothing. It exists only to occupy the 'left' scale so that scale can be
+  // given the range of whichever line the cursor is nearest; see the header note.
+  const anchorRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const axisTargetRef = useRef<ISeriesApi<'Line'> | null>(null);
+  // Mirrored into state purely to caption the axis in the header — an axis gutter is a canvas and
+  // cannot label itself, so without this nothing on screen says whose numbers those ticks are.
+  const [axisLabel, setAxisLabel] = useState<{ label: string; color: string } | null>(null);
+  // Following the cursor is unusable on its own: move toward the gutter to read a tick and the
+  // axis has already changed to whatever you passed over. Locking freezes it on one line.
+  const axisLockedRef = useRef(false);
+  const [axisLocked, setAxisLocked] = useState(false);
+  // Shown beside the reset control while the pane is stretched, so a non-1 scale always says so.
+  const [vZoomLabel, setVZoomLabel] = useState(1);
+
   // The hook reads both of these through refs, so they must be written before any effect that
   // can trigger a draw — hence the assignment during render rather than in an effect.
   const currentInstRef = useRef<Instrument | null>(null);
@@ -213,33 +243,30 @@ export default function GreekIndicatorPane({
     syncTooltipRef.current?.showAt(time);
   }, []);
 
-  // `axisScaleId: 'left'` is what keeps a measure's totals off the right scale. This pane belongs
-  // to the overlays, so the owning measure's totals get the real left axis and the underlying
-  // reference line keeps the right one to itself — the same division the host's price pane makes
-  // between its legs and its candles. On an invisible overlay scale (the Tracker's arrangement)
-  // lightweight-charts hangs every greek's axis tag off the right scale instead, stacking readings
-  // in the hundreds against an axis ticked in thousands of rupees, describing neither.
+  // No measure owns an axis. Every greek and IV line sits on its own private overlay scale, and the
+  // left axis is driven by the anchor instead — so nothing here passes `axisScaleId`, and toggling
+  // a measure no longer rebuilds another measure's series to hand the axis over.
   //
-  // The axis owner is state rather than something derived here because `on` belongs to the hooks,
-  // and a hook cannot be fed a value that its own return decides — so the enabled set reaches the
-  // next render through the effect below. One extra render per toggle, and none per tick.
-  const [axisOwner, setAxisOwner] = useState<Measure>(() => axisOwnerFor([]));
+  // `vScale` is a getter over a ref rather than a value, so a stretch drag mutates one object and
+  // repaints, without re-rendering this component or re-running the hooks.
+  const vScaleRef = useRef<VScale>({ zoom: 1, pan: 0 });
+  const readVScale = useCallback(() => vScaleRef.current, []);
   const overlayDeps = {
     chartRef,
     currentInstRef,
     allBarsRef,
     inline: true,
+    vScale: readVScale,
     histDays,
     initialDay,
   };
-  const axisFor = (m: Measure) => ({ axisScaleId: axisOwner === m ? 'left' : undefined });
-  const vega = useGreekOverlay({ greek: 'vega', ...overlayDeps, ...axisFor('vega') });
-  const theta = useGreekOverlay({ greek: 'theta', ...overlayDeps, ...axisFor('theta') });
-  const iv = useGreekOverlay({ greek: 'iv', ...overlayDeps, ...axisFor('iv') });
+  const vega = useGreekOverlay({ greek: 'vega', ...overlayDeps });
+  const theta = useGreekOverlay({ greek: 'theta', ...overlayDeps });
+  const iv = useGreekOverlay({ greek: 'iv', ...overlayDeps });
 
-  // The hooks hand back a fresh object every render, so the reset callback reads them through refs
-  // — the same reason `togglePinRef` exists below. Without this, `resetAllScales` would change
-  // identity on every tick and rebind the dblclick listener with it.
+  // The hooks hand back a fresh object every render, so the callbacks below read them through refs
+  // — the same reason `togglePinRef` exists. Without this, `resetAllScales` would change identity
+  // on every tick and rebind the dblclick listener with it.
   const vegaRef = useRef(vega);
   const thetaRef = useRef(theta);
   const ivRef = useRef(iv);
@@ -247,13 +274,47 @@ export default function GreekIndicatorPane({
   thetaRef.current = theta;
   ivRef.current = iv;
 
-  // Re-pick the axis owner whenever the enabled set changes. Switching owner rebuilds that
-  // measure's series (`priceScaleId` is fixed at creation), which is why this is the only thing
-  // the enabled set still drives — there are no bands left to re-slice.
-  useEffect(() => {
-    const isOn: Record<Measure, boolean> = { vega: vega.on, theta: theta.on, iv: iv.on };
-    setAxisOwner(axisOwnerFor(MEASURE_ORDER.filter((m) => isOn[m])));
-  }, [vega.on, theta.on, iv.on]);
+  /**
+   * The range the left axis should hold: whatever scale the target line is on.
+   *
+   * Read live rather than cached, so the axis cannot describe a range the target has since left.
+   * `getVisibleRange` is the scale's own range excluding `scaleMargins`, and every overlay scale in
+   * this pane carries the same margins as 'left' — so handing the anchor that range puts the ticks
+   * exactly where the target line's values are.
+   *
+   * A stable identity (`useCallback([])`) because re-applying this same function object is how a
+   * repaint is forced.
+   */
+  const anchorProvider = useCallback<AutoscaleInfoProvider>(() => {
+    const target = axisTargetRef.current;
+    if (!target) return null; // nothing hovered yet — the axis stays blank rather than inventing one
+    let r: { from: number; to: number } | null = null;
+    try {
+      r = target.priceScale().getVisibleRange();
+    } catch {
+      r = null; // series removed between the hover and this recalculation
+    }
+    if (!r || !Number.isFinite(r.from) || !Number.isFinite(r.to) || r.from === r.to) return null;
+    return {
+      priceRange: { minValue: Math.min(r.from, r.to), maxValue: Math.max(r.from, r.to) },
+    };
+  }, []);
+
+  /**
+   * Repaint after `vScaleRef` or the axis target moves.
+   *
+   * Poking one series would in fact be enough for the entire pane — `applyOptions` raises a Light
+   * invalidation and the pane widget then recalculates its left, right and every overlay scale —
+   * but each hook only reaches its own panes, so each is asked in turn. Three pokes, not eight.
+   */
+  const applyVScale = useCallback(() => {
+    vegaRef.current?.applyVScale();
+    thetaRef.current?.applyVScale();
+    ivRef.current?.applyVScale();
+    // Asked last, and separately: the anchor belongs to no hook, and with every measure switched
+    // off it is the only series in the pane carrying a provider at all.
+    anchorRef.current?.applyOptions({ autoscaleInfoProvider: anchorProvider });
+  }, [anchorProvider]);
 
   // ── Chart init ─────────────────────────────────────────────────────────────
   // Created ONCE and never rebuilt. The host views recreate their own charts on theme and
@@ -316,13 +377,34 @@ export default function GreekIndicatorPane({
       crosshairMarkerBackgroundColor: '#2962ff',
     } as Partial<LineSeriesOptions>);
     line.priceScale().applyOptions({ autoScale: true, scaleMargins: { top: 0.08, bottom: 0.1 } });
-    // The overlays' own axis. Seeded with the margins `createGreekPane` applies to an inline
-    // overlay's scale, so switching the first overlay on does not shift the band the gutter
-    // already implied — and so an empty left axis still reads against the same grid.
+    // The overlays' own axis. Its margins MUST match the ones `createGreekPane` applies to an
+    // inline overlay's scale: the anchor lends this axis another scale's range, and two scales only
+    // paint their gridlines at the same y when their margins agree. This is what makes the ticks
+    // land on the target line's values rather than near them.
     chart
       .priceScale('left')
       .applyOptions({ autoScale: true, scaleMargins: { top: 0.1, bottom: 0.08 } });
     lineRef.current = line;
+
+    // The axis anchor. Transparent and tagless — it is never read, only measured. It carries the
+    // underlying's own data (set alongside it below) because a series with no points in the visible
+    // range contributes nothing to a scale's recalculation, and then its provider is never asked.
+    const anchor = chart.addSeries(LineSeries, {
+      color: 'rgba(0,0,0,0)',
+      lineWidth: 1,
+      priceScaleId: AXIS_ANCHOR_SCALE,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+      autoscaleInfoProvider: anchorProvider,
+      // Replaced with the target's own format the moment one is chosen — see `setAxisTarget`.
+      priceFormat: {
+        type: 'custom' as const,
+        minMove: 0.01,
+        formatter: (v: number) => v.toFixed(2),
+      },
+    } as Partial<LineSeriesOptions>);
+    anchorRef.current = anchor;
 
     const observer = new ResizeObserver(() => {
       const el = containerRef.current;
@@ -340,6 +422,8 @@ export default function GreekIndicatorPane({
             baseSeries: () => lineRef.current,
             baseLabel: () => symRef.current,
             formatBase: (v: number) => '₹' + fmtPrice(v),
+            // The anchor is not a reading; left in it would show up as a nameless row.
+            excludeSeries: () => [anchorRef.current],
             // This pane sits in a stack, so its card wears the same chrome as its siblings' and
             // swings to the same side of the crosshair they do.
             style: PANEL_TOOLTIP_STYLE,
@@ -360,6 +444,8 @@ export default function GreekIndicatorPane({
       removeChart(chart);
       chartRef.current = null;
       lineRef.current = null;
+      anchorRef.current = null;
+      axisTargetRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -387,7 +473,12 @@ export default function GreekIndicatorPane({
   useEffect(() => {
     const line = lineRef.current;
     if (!line) return;
-    line.setData(barsToSessionLine(bars, exchange) as Parameters<typeof line.setData>[0]);
+    const sessionLine = barsToSessionLine(bars, exchange) as Parameters<typeof line.setData>[0];
+    line.setData(sessionLine);
+    // The anchor gets the same points — not to draw them (it is transparent) but so it has data in
+    // the visible range. A source with none contributes nothing to a scale's recalculation, and its
+    // `autoscaleInfoProvider` is then never consulted, which would leave the left axis blank.
+    anchorRef.current?.setData(sessionLine);
     // fitContent ONCE, on the first bars that arrive. A live position replaces this array on
     // every tick, so fitting each time would yank the view back on every tick — and, because the
     // host enrolls this chart in its scroll sync, drag the price and P&L panes along with it.
@@ -448,8 +539,107 @@ export default function GreekIndicatorPane({
               format: (v: number) => '₹' + fmtPrice(v),
             },
           ];
-    return [...rows, ...greekRows(chart, base, null, logical)];
+    return [...rows, ...greekRows(chart, [base, anchorRef.current], null, logical)];
   }, []);
+
+  // ── The left axis follows the cursor ───────────────────────────────────────
+  // Point at a line and the axis takes that line's range and its own number format. The format is
+  // copied off the target rather than inferred from its label — greeks compact to K/M/B and IV is
+  // plain vol points, and deriving that from display text is exactly the coupling `scaleSuffix`
+  // warns about in greekRenderer.
+  const setAxisTarget = useCallback(
+    (target: ISeriesApi<'Line'> | null) => {
+      if (axisTargetRef.current === target) return;
+      axisTargetRef.current = target;
+      const anchor = anchorRef.current;
+      if (target && anchor) {
+        const o = target.options() as { title?: string; color?: string; priceFormat?: unknown };
+        anchor.applyOptions({
+          priceFormat: o.priceFormat,
+        } as Partial<LineSeriesOptions>);
+        setAxisLabel({ label: o.title || '', color: o.color || '#888' });
+      } else if (!target) {
+        setAxisLabel(null);
+      }
+      applyVScale();
+    },
+    [applyVScale],
+  );
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const onMove = (param: MouseEventParams) => {
+      if (axisLockedRef.current) return;
+      const logical =
+        param.logical ??
+        (param.time != null ? logicalAtTime(chart, param.time as CrosshairTime) : null);
+      // The same enumeration and carry-forward the tooltip uses, so the axis can never follow a
+      // line the tooltip is not reporting. `series` comes back on the row for exactly this.
+      const rows = greekRows(
+        chart,
+        [lineRef.current, anchorRef.current],
+        (s) => (param.seriesData.get(s) as { value?: number } | undefined)?.value,
+        logical,
+      );
+      const candidates: AxisCandidate<ISeriesApi<'Line'>>[] = [];
+      for (const r of rows) {
+        if (!r.series) continue;
+        const y = r.series.priceToCoordinate(r.value);
+        if (y == null) continue;
+        candidates.push({ key: r.series, y });
+      }
+      setAxisTarget(pickAxisTarget(candidates, param.point?.y ?? null, axisTargetRef.current));
+    };
+    chart.subscribeCrosshairMove(onMove);
+    return () => {
+      try {
+        chart.unsubscribeCrosshairMove(onMove);
+      } catch {
+        /* chart already disposed */
+      }
+    };
+  }, [chartTick, setAxisTarget]);
+
+  // A measure switched off — or switched between mine/industry, or totals/Δ — destroys and rebuilds
+  // its series, so an axis pointed at one would be describing a line that has left the chart, under
+  // a caption still naming it. The hit test self-heals on the next hover (a target missing from the
+  // candidate list has no claim to stickiness, so anything in range takes the axis immediately);
+  // this is for the caption, which would otherwise sit there lying until the cursor came back.
+  //
+  // Unlocking too: a lock is a promise to keep showing ONE line, and that promise cannot be kept
+  // once the line is gone.
+  useEffect(() => {
+    const target = axisTargetRef.current;
+    if (!target) return;
+    const chart = chartRef.current;
+    let live = false;
+    try {
+      live =
+        (chart?.panes()[0]?.getSeries() ?? []).includes(target) &&
+        (target.options() as { visible?: boolean }).visible !== false;
+    } catch {
+      live = false; // series or chart already disposed
+    }
+    if (live) return;
+    axisLockedRef.current = false;
+    setAxisLocked(false);
+    setAxisTarget(null);
+  }, [
+    vega.on,
+    theta.on,
+    iv.on,
+    vega.method,
+    theta.method,
+    vega.seriesMode,
+    theta.seriesMode,
+    vega.showCalls,
+    theta.showCalls,
+    vega.showPuts,
+    theta.showPuts,
+    iv.ivMeasure,
+    setAxisTarget,
+  ]);
 
   // ── The Δ strip: what moved between the two pinned instants ────────────────
   // The sibling price and P&L panes each carry one; this pane could not, because the Δ has to be
@@ -466,21 +656,106 @@ export default function GreekIndicatorPane({
     return rows.length ? { dtSeconds: b.time - a.time, rows } : null;
   })();
 
-  // ── Reset: hand every price scale back to autoscale ────────────────────────
-  // Dragging a price axis scales it by hand, and lightweight-charts switches that scale's
-  // `autoScale` off for good when you do — from then on the lines on it drift out of the pane on
-  // every zoom and nothing brings them back. This pane needs the escape hatch more than its
-  // siblings do: it shows TWO visible axes, so there is twice the gutter to catch a stray drag.
+  // ── Stretching the lines: a drag on either gutter ──────────────────────────
+  // The library's own price-axis drag can only ever reach 'left' and 'right' — a PriceAxisWidget
+  // exists for those two gutters and nothing else — so with eight greek lines on private overlay
+  // scales, the built-in gesture moves one measure's totals and leaves the other seven untouched.
+  // That is the bug this replaces.
   //
-  // The two visible scales are only half of it. Every measure past the axis owner, and all four Δ
-  // lines, live on overlay scales whose ids are built inside `greekRenderer` from an internal
-  // `scaleKey` — there is no id to pass to `chart.priceScale()`, so before `resetScales` existed
-  // those lines could not be recovered by anything at all. That is why the hooks are asked too.
+  // The gesture is claimed in the CAPTURE phase, the same trick `bindPinTrigger` uses, so
+  // lightweight-charts' own handler never sees the mousedown and cannot also scale 'left' on top of
+  // what we do. `handleScale` is therefore left exactly as it was: the time axis, wheel and pinch
+  // are untouched, and so is the double-click reset.
+  //
+  // What moves is a FACTOR over each scale's own auto-fit, never a fixed range. Every scale stays
+  // on autoscale, so each keeps re-fitting the visible window as the time axis zooms, with the
+  // stretch multiplied on top — and no line can be stranded off-pane the way a frozen range strands
+  // one. `IPriceScaleApi.setVisibleRange` would have been the shorter road and is exactly that trap.
+  useEffect(() => {
+    const el = containerRef.current;
+    const chart = chartRef.current;
+    if (!el || !chart) return;
+
+    let start: { y: number; zoom: number; pan: number; shift: boolean } | null = null;
+    let frame: number | null = null;
+
+    const inGutter = (ev: MouseEvent) => {
+      const rect = el.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      let leftW = 0;
+      try {
+        leftW = chart.priceScale('left').width() ?? 0;
+      } catch {
+        leftW = 0;
+      }
+      return x <= leftW || x >= rect.width - axisMetrics.rightWidth;
+    };
+
+    const schedule = () => {
+      if (frame != null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        applyVScale();
+      });
+    };
+
+    const onMouseDown = (ev: MouseEvent) => {
+      if (ev.button !== 0 || !inGutter(ev)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const { zoom, pan } = vScaleRef.current;
+      start = { y: ev.clientY, zoom, pan, shift: ev.shiftKey };
+      el.style.cursor = 'ns-resize';
+      window.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+    };
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!start) return;
+      const dy = ev.clientY - start.y;
+      if (start.shift) {
+        // Pan in units of the auto half-range. Half the pane's height is one half-range, so a drag
+        // moves every line by the pixels the cursor moved, whatever each line's magnitude.
+        const half = Math.max(1, el.clientHeight / 2);
+        vScaleRef.current = { zoom: start.zoom, pan: start.pan + dy / half };
+      } else {
+        // Dragging UP stretches, matching the native axis gesture. Exponential so the feel is the
+        // same at 1× and at 10× — a linear factor crawls when zoomed in and lurches when zoomed out.
+        vScaleRef.current = { zoom: start.zoom * Math.exp(-dy / 180), pan: start.pan };
+        setVZoomLabel(vScaleRef.current.zoom);
+      }
+      schedule();
+    };
+
+    const onMouseUp = () => {
+      start = null;
+      el.style.cursor = '';
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    el.addEventListener('mousedown', onMouseDown, true);
+    return () => {
+      if (frame != null) cancelAnimationFrame(frame);
+      el.removeEventListener('mousedown', onMouseDown, true);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [chartTick, applyVScale, axisMetrics.rightWidth]);
+
+  // ── Reset: back to 1×, unlocked, everything auto-scaling ───────────────────
+  // Three things can leave this pane in a state the user cannot get out of by hovering: a stretch
+  // factor, a locked axis, and a scale some earlier drag latched off autoscale. One control clears
+  // all three, because from the outside they are one complaint — "it will not go back".
   //
   // Price scales only. The Tracker also resets its time range here, but this chart is enrolled in
   // the host's scroll sync, so touching the time scale would drag price and P&L along with it.
-  // Margins are left alone deliberately: an axis drag changes the range, never the layout.
+  // Margins are left alone deliberately: a drag changes the range, never the layout.
   const resetAllScales = useCallback(() => {
+    vScaleRef.current = { zoom: 1, pan: 0 };
+    setVZoomLabel(1);
+    axisLockedRef.current = false;
+    setAxisLocked(false);
     const chart = chartRef.current;
     if (chart)
       for (const id of ['left', 'right']) {
@@ -493,7 +768,8 @@ export default function GreekIndicatorPane({
     vegaRef.current?.resetScales();
     thetaRef.current?.resetScales();
     ivRef.current?.resetScales();
-  }, []);
+    applyVScale();
+  }, [applyVScale]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -529,12 +805,50 @@ export default function GreekIndicatorPane({
         {symRef.current && (
           <span className="text-[10px] text-[var(--text-secondary)]">{symRef.current}</span>
         )}
+        {/*
+          Which line the left axis is describing. The gutter is a canvas and cannot caption itself,
+          so without this the ticks are numbers with no owner — and with nine lines in the pane that
+          is most of the readability problem. Doubles as the lock, because an axis that follows the
+          cursor is unusable for reading a line's shape: you move toward the ticks and it has
+          already changed to whatever you passed over.
+        */}
+        {axisLabel && (
+          <button
+            type="button"
+            onClick={() => {
+              const next = !axisLockedRef.current;
+              axisLockedRef.current = next;
+              setAxisLocked(next);
+            }}
+            title={
+              axisLocked
+                ? 'Left axis is locked to this line — click to follow the cursor again'
+                : 'Left axis follows the cursor — click to lock it to this line'
+            }
+            className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] leading-none max-w-[190px] hover:bg-[var(--bg-hover)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--accent)] ${
+              axisLocked ? 'text-[var(--text-primary)]' : 'text-[var(--text-secondary)]'
+            }`}
+          >
+            <span
+              className="w-2 h-2 rounded-full shrink-0"
+              style={{ backgroundColor: axisLabel.color }}
+            />
+            <span className="truncate">{axisLabel.label}</span>
+            <span className="shrink-0 opacity-70">{axisLocked ? '🔒' : '🔓'}</span>
+          </button>
+        )}
         <div className="ml-auto flex items-center gap-1.5">
+          {/* Silent at 1×: a readout that is always on screen stops being a signal. */}
+          {Math.abs(vZoomLabel - 1) > 0.01 && (
+            <span className="text-[10px] tabular-nums text-[var(--text-muted)]">
+              {vZoomLabel.toFixed(1)}×
+            </span>
+          )}
           {/* Double-clicking the plot does the same thing, but nothing on screen says so. */}
           <button
             type="button"
             onClick={resetAllScales}
-            title="Reset vertical scales (or double-click the pane)"
+            title="Reset the vertical scale and unlock the axis. Drag either price gutter to stretch every line, shift-drag to pan. Double-clicking the pane does the same as this button."
             aria-label="Reset vertical scales"
             className="px-1.5 py-0.5 rounded text-[11px] leading-none text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-[var(--accent)]"
           >

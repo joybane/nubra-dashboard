@@ -76,6 +76,11 @@ npm start          # server (:3000) + Vite dev (:8000) together
 
 Then open http://localhost:8000 and complete the OTP → MPIN login.
 
+> **:8000 is Vite; :3000 is the server serving the prebuilt `dist/`.** Only the former has
+> HMR. A source edit is invisible at :3000 until `npm run build` runs, so when a change
+> "didn't take effect" there, compare `dist/` mtimes against the file before re-reading the
+> logic.
+
 ---
 
 ## Scripts
@@ -414,6 +419,7 @@ dynamic position sizing, position adjustments, Monte Carlo analysis, and strateg
 | `src/StrategyChart.tsx` | Strategy chart                                                 |
 | `src/BasketOrder.tsx`   | Basket construction and paper-order workflow                   |
 | `src/Backtest.tsx`      | Backtest configuration and result views                        |
+| `src/NubraBacktest.tsx` | Broker-history single-day replay, three-pane chart             |
 | `src/Watchlist.tsx`     | Instrument watchlist and prices                                |
 | `src/Tracker.tsx`       | Position tracking                                              |
 
@@ -445,6 +451,43 @@ strategy templates, chart lifecycle guards (`chartLifecycle.ts`), and shared uti
 leg configuration, intraday trade charts, and client analysis helpers. Shared frontend domain
 interfaces live in `src/types.ts`.
 
+### Nubra BT greeks pane
+
+Two greek surfaces live in `src/NubraBacktest.tsx` and they are **not** the same thing. The
+`Greeks` toggle plots net / CE / PE delta, gamma, theta and vega of **the legs you configured**,
+computed per minute from each leg's own price by inverting IV and re-pricing under Black-76. The
+`Indicators` toggle mounts `GreekIndicatorPane`, the shared Vega/Theta/IV overlay of the whole
+near-the-money basket described in the next section, which knows nothing about the configured
+legs. Both changes below are about the first pane only.
+
+**Its time grid is the legs' bars, not the P&L curve.** `basketPnlData` is clipped server-side to
+entry→exit (`nubraBacktestRoutes.ts` keeps only `m >= entryMin && m <= exitMin`) because it is a
+_position_ P&L curve; `legPriceData` and `underlyingBars` are unfiltered. Using the clipped series
+as the greeks grid cut the pane off at the exit bar — 356 points, 09:20–15:15, against the
+session's 870 on CRUDEOIL 14-08-2026. Greeks here are a property of the legs at their quantity,
+not of a position, so they stay defined for every minute a leg has a price, exactly like the leg
+lines in the price pane. The grid is now the union of every leg's bar times **floored to the
+minute** — the same key the spot/leg lookups and `padToGrid` use, so two legs can never contribute
+two points inside one minute. The Greeks popover reads the last point of the greeks series for the
+same reason, so with no crosshair it agrees with the pane's own last-value labels.
+
+**A minute missing any leg publishes nothing at all.** An illiquid leg can skip a 1-minute bar
+entirely — CRUDEOIL 2026-08-14 skipped four, at 09:41, 10:39, 10:57 and 13:27. Dropping just that
+leg from the sum published a one-leg figure under the `net` label: theta 43.7 → 22.1 and vega
+−5.41 → −2.76 for one bar, snapping back on the next, which reads as a needle spike rather than as
+the missing data it is. The loop now skips the whole minute and `padToGrid` renders the hole as
+whitespace. Over that day's payload the largest bar-to-bar theta jump falls from 21.6 to 1.64 and
+vega from 2.75 to 0.03. Carrying the last price forward was rejected deliberately: now that the
+pane runs to 23:29, a leg that goes dark for a long stretch would otherwise accrue a whole tail of
+fabricated greeks.
+
+Two known gaps, both left as they are. `getGreeksAtTime`, which feeds the popover's per-leg
+breakdown, still sums whatever legs it holds on those minutes — its net is partial there, but the
+table names the legs it used, so the omission is visible rather than silent, and returning null
+would blank the popover. And the loop still falls back to `iv = 0.2` when the solve fails, against
+`impliedVolatility`'s documented contract of returning NaN and never a fabricated default; it
+fired zero times across that session, so it is a latent wart rather than a live one.
+
 ---
 
 ## Greek and IV overlays
@@ -473,7 +516,7 @@ effect, because that effect owns the lifecycle of the charts it syncs while this
 child component. Pushing a crosshair in from outside is safe there because those handlers already
 ignore programmatic echoes — the `param.point === undefined && param.time !== undefined` branch.
 
-#### Price scales: one band per measure
+#### Price scales: one full-height scale per measure, and two ways to read it
 
 The pane shows two visible axes — the underlying reference line owns **right**, the greeks own
 **left** — plus a private overlay scale per measure. Putting every measure's totals on the one left
@@ -481,29 +524,87 @@ axis does not work: Vega sits near +70 and Theta near −75, so each holds the a
 other, neither can ever expand, and zooming changes nothing because every window is still spanned
 by both. On CRUDEOIL, Theta at −246 flattened Vega into a straight line.
 
-So each enabled measure gets a disjoint horizontal **band** of the pane and auto-scales inside it.
-A band is nothing but `scaleMargins`: `GreekPane.setBand` / `IvPane.setBand` apply it to the
-measure's totals scale **and** its Δ scale, so a measure's dashed lines follow its solid ones
-instead of wandering across a slice they have nothing to do with. `GreekIndicatorPane` computes the
-slices in tray order (`vega, theta, iv`) from how many are switched on — one measure keeps the
-renderer's own margins and is pixel-identical to a single-scale pane; `n` measures get
-`{ top: i/n + 0.05, bottom: (n−1−i)/n + 0.05 }`.
+Separation comes from the **scales**, not from the space. Every measure's overlay scale spans the
+**full** pane with `autoScale: true`, so lightweight-charts re-fits each one to the visible window
+on every zoom — per-window normalisation for free, with real values throughout: no transform on the
+data and no de-normalising `priceFormat.formatter`. `autoScale` is stated at the call site in
+`greekRenderer` rather than left to the library default, because it is the arrangement rather than
+a detail: a frozen scale silently breaks it.
 
-The **first** enabled measure additionally owns the visible left axis, passed down as
-`axisScaleId: 'left'`. Because that scale carries the owner's band too, its ticks and grid lines
-are drawn only inside the owner's slice, so the numbers describe the band beside them. Every other
-measure keeps its last-value tags — correct values, hung off the right-hand column, exactly where
-lightweight-charts already puts the Δ tags. Moving that axis is the one layout change that cannot
-be applied in place, since a series' `priceScaleId` is fixed at creation: `useGreekOverlay` watches
-`axisScaleId` and rebuilds its panes, the same destroy/recreate an IV-measure switch already does.
-The enabled set reaches the hooks through component state, because `on` is the hooks' own return
-value — one extra render per toggle, none per tick.
+An earlier version instead sliced the pane into disjoint horizontal `scaleMargins` **bands**, one
+per measure. That did separate them, but it also pinned Vega to the top third and Theta to the
+bottom third for good and left each measure a third of the height to move in. `ScaleBand` and
+`setBand` are gone; the cost of removing them, stated plainly, is that vertical position is no
+longer comparable **across** measures — a Theta line above a Vega line means nothing. Each line's
+value is on its own last-value tag and in the crosshair tooltip, which is where it should be read.
 
-Double-clicking the pane restores `autoScale` on both visible axes. Dragging a price axis scales
-it by hand and lightweight-charts turns that scale's `autoScale` off permanently, after which the
-lines drift out of the pane on every zoom with no way back. The handler deliberately leaves the
-**time** scale alone — this chart is enrolled in the host's scroll sync, so resetting it would drag
-price and P&L along with it.
+#### The left axis follows the cursor
+
+A pane can show at most **two** price axes: lightweight-charts builds a `PriceAxisWidget` for
+`left` and `right` and nothing else. One of those is the underlying's, so with five greek scales in
+here any fixed assignment leaves most lines reading off floating last-value tags — and the Δ pairs
+never get one at all.
+
+So the left axis follows the cursor. Hover a line and the axis takes **that line's** range and its
+own number format; move to another and it changes. All nine lines are reachable, IV and the dashed
+Δ pairs included.
+
+It cannot be done by moving series onto the axis — `priceScaleId` is fixed at series creation, so
+following the cursor that way would destroy and rebuild four series per hover. An invisible **anchor
+series** sits alone on the `left` scale instead, and its `autoscaleInfoProvider` returns whichever
+line's range is wanted (read live via `IPriceScaleApi.getVisibleRange`, which is new in 5.2.0 and
+does resolve overlay ids). Nothing moves between scales; one series' options change. The anchor
+carries the underlying's time grid because a source with no points in view contributes nothing to a
+scale's recalculation and its provider is then never consulted. The ticks land in the right place
+because every overlay scale here carries identical `scaleMargins`, so two scales holding one range
+paint their gridlines at the same y.
+
+Three details that are load-bearing rather than polish. The nearest line is chosen by
+`pickAxisTarget` (`src/lib/axisFollow.ts`) with a radius and a **stickiness** margin — nine lines
+crossing in a 200px pane would otherwise trade the axis on cursor jitter, and drifting into empty
+space would blank it exactly when you move off a line to go and read its ticks. The header caption
+names the current line, because an axis gutter is a canvas and cannot label itself. And that caption
+is also the **lock**: hover-follow alone is unusable for reading a line's shape, since moving toward
+the ticks changes the axis to whatever you passed over.
+
+The anchor is not a reading, so `greekRows` takes a list of series to exclude rather than one —
+otherwise it appears as a nameless row in every tooltip and pinned card.
+
+#### Stretching the lines
+
+The same two-gutter limit means the library's own price-axis drag reaches one measure's totals and
+leaves the other seven untouched: `handleScale.axisPressedMouseMove.price` is read only inside
+`PriceAxisWidget`'s mouse handlers, and an overlay scale has no widget, no hit area and no handler.
+Pane-body price scrolling is no escape either — it uses `pane.defaultPriceScale()`.
+
+A drag on **either** gutter is therefore claimed capture-phase (the trick `bindPinTrigger` uses) and
+applies one `{ zoom, pan }` factor to every greek and IV line at once; shift-drag pans. `handleScale`
+itself is untouched, so the time axis, wheel and pinch are exactly as they were.
+
+What moves is a **factor over each scale's own auto-fit**, never a fixed range — `makeVScaleProvider`
+in `greekRenderer.ts` rewrites what `original()` returned. Every scale stays on autoscale, so each
+keeps re-fitting the visible window as the time axis zooms with the stretch multiplied on top, and no
+line can be stranded off-pane. `IPriceScaleApi.setVisibleRange` would have been the shorter road and
+is exactly that trap: it forces `autoScale: false`. `pan` is denominated in the auto **half-range**,
+not in price, so one gesture moves a line at +60 and one at −300 by the same number of pixels.
+
+Changing the factor is not enough on its own — nothing tells the library the value moved. `applyVScale`
+re-applies the option on one series, which raises a Light invalidation; the pane widget then
+recalculates its left, right **and every overlay** scale, so one poke re-runs every provider in the
+pane. That is why a stretch drag costs three `applyOptions` calls per frame and not eight.
+
+**Reset is `⟲` in the pane header, or a double-click on the plot**, and it clears all three states
+that can leave the pane somewhere the user cannot get out of by hovering: the stretch factor, a
+locked axis, and any scale an earlier drag latched off autoscale. That last one is why
+`GreekPane.resetScales` / `IvPane.resetScales` exist at all — the Δ pairs and the non-hovered
+measures live on overlay scales whose ids are built inside `greekRenderer` from an internal
+`scaleKey`, so there is no id to hand `chart.priceScale()` and nothing else in the app could recover
+them. The handler deliberately leaves the **time** scale alone: this chart is enrolled in the host's
+scroll sync, so resetting it would drag price and P&L along with it.
+
+Both features are opt-in per host. `vScale` and the anchor exist only in `GreekIndicatorPane`; the
+Tracker and the Chart view pass no `vScale`, so no `autoscaleInfoProvider` is installed and they stay
+on exactly the library's own autoscale path.
 
 #### Enrolling the pane: three things that bite
 
@@ -546,12 +647,16 @@ than captured handles, so each event re-reads liveness instead of trusting a han
 `src/lib/greekTooltip.ts` handles that echo from the other side, and is where every "what do the
 overlay lines read at instant X" question is answered:
 
-| Export               | Answers                                                                |
-| -------------------- | ---------------------------------------------------------------------- |
-| `greekRows`          | Every visible overlay line's colour, title and value at a bar          |
-| `seriesValueAt`      | One series' value, carried forward from the last bar at or before it   |
-| `logicalAtTime`      | Bar index for a timestamp — a pin has no cursor, so no `param.logical` |
-| `bindGreekCrosshair` | Wires the above into a pane's hover tooltip                            |
+| Export               | Answers                                                                   |
+| -------------------- | ------------------------------------------------------------------------- |
+| `greekRows`          | Every visible overlay line's colour, title, value **and series** at a bar |
+| `seriesValueAt`      | One series' value, carried forward from the last bar at or before it      |
+| `logicalAtTime`      | Bar index for a timestamp — a pin has no cursor, so no `param.logical`    |
+| `diffGreekRows`      | Two readings of one pane, paired by series title and subtracted           |
+| `bindGreekCrosshair` | Wires the above into a pane's hover tooltip                               |
+
+A row carries the series it was read from, which is what lets the axis-follow hit test ask where
+each line sits on screen (`priceToCoordinate`) without walking the pane's series a second time.
 
 Readings are carried forward with `MismatchDirection.NearestLeft` rather than requiring an exact
 hit, because greek history is 1-minute while a live price line is 1-second: an exact read misses
@@ -560,10 +665,23 @@ lets a **synced** crosshair (no `point`, no `seriesData`) and a **pinned** card 
 show the same numbers a live hover does — including the underlying price row.
 
 **Pins** work on the Indicators pane too. The host owns the pin list (`usePinnedTimes`) and passes
-it down; the pane binds its own trigger and renders its own card, because the hosts' pin cards
-come from `buildPaneSnapshots`, which knows the price / P&L / Greeks shapes and nothing about the
-aggregate overlay. The host must therefore NOT also bind a trigger on the pane's wrapper — both
-listeners are capture-phase, so one middle-click would toggle the pin on and straight back off.
+it down; the pane binds its own trigger and renders both its own card **and its own Δ strip**,
+because the hosts' own cards and strips come from `buildPaneSnapshots`, which knows the price / P&L
+/ Greeks shapes and nothing about which aggregate overlays are switched on. Both are built from the
+same `rowsAt`, so a frozen card and the strip beside it can never describe different lines.
+`diffGreekRows` pairs the two readings by series **title**, not by position: toggling a measure
+between the pins shifts the list, and a positional pairing would quietly subtract Theta from Vega.
+The host must NOT also bind a trigger on the pane's wrapper — both listeners are capture-phase, so
+one middle-click would toggle the pin on and straight back off.
+
+`PinnedCrosshairLayer` reserves a band at the foot of every pane for that strip, so Nubra BT's and
+`StrategyAnalysisView`'s own panes inherit the fix too. The removable `n ✕` badges keep the bottom
+20px and the strip sits directly above them — both used to be anchored to the bottom, so whichever
+badge landed on the strip wrote straight through it. The layout pass measures the strip (after
+capping its width, since a wrapped strip is taller) and keeps the pinned cards above it; `zIndex`
+is the backstop for a card taller than its pane, because a card that overflows can be scrolled back
+into view while a strip written over is simply lost. The strip wraps to a second row rather than
+clipping — the Indicators pane can list nine rows where its siblings list three.
 
 The settings tray is portalled to `document.body` and positioned by `src/lib/popupPlacement.ts`.
 It has to be: as an `absolute` child it was clipped by four nested `overflow-hidden` ancestors,
