@@ -1,10 +1,15 @@
 import React from 'react';
+import { fmtCompact } from '../lib/greekTooltip';
 
 export interface CompareRow {
   label: string;
   /** pin 2 minus pin 1. */
   value: number;
-  kind?: 'money' | 'price' | 'percent' | 'plain';
+  /**
+   * `compact` is for aggregate greeks, which reach ~1e9 (greek × OI × lot). Everything else in a
+   * strip is a price, a rupee amount or a percent and prints in full.
+   */
+  kind?: 'money' | 'price' | 'percent' | 'plain' | 'compact';
   digits?: number;
 }
 
@@ -13,6 +18,10 @@ function fmtDelta(row: CompareRow): string {
   const digits = row.digits ?? (kind === 'percent' ? 2 : 2);
   const sign = value > 0 ? '+' : value < 0 ? '-' : '';
   const abs = Math.abs(value);
+  // A strip is one band across the foot of a pane, so a ten-digit greek would push every row
+  // after it off the edge. Same compaction the axis tags and the tooltip rows use, so a Δ reads
+  // against the numbers it was computed from.
+  if (kind === 'compact') return sign + fmtCompact(abs);
   const num = abs.toLocaleString('en-IN', {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
@@ -47,10 +56,13 @@ export default function PinCompareStrip({
 }) {
   if (rows.length === 0) return null;
   // Unpositioned by design: PinnedCrosshairLayer places it midway between the two pinned lines,
-  // where it reads as belonging to both of them.
+  // where it reads as belonging to both of them — and caps its width to the pane, which is what
+  // the wrap below is for. A pane carrying eight overlay lines does not fit on one line in a
+  // narrow window, and wrapping onto a second row beats being clipped at the edge; the layer
+  // measures the wrapped height and keeps the pinned cards above it.
   return (
     <div className="pointer-events-none">
-      <div className="flex items-center gap-2 flex-nowrap whitespace-nowrap bg-[#1a1e24]/80 border border-[#ffffff10] rounded-md px-2 py-1 shadow-lg backdrop-blur-md text-[10px]">
+      <div className="flex items-center gap-x-2 gap-y-0.5 flex-wrap whitespace-nowrap bg-[#1a1e24]/80 border border-[#ffffff10] rounded-md px-2 py-1 shadow-lg backdrop-blur-md text-[10px]">
         <span className="flex items-center gap-1 font-semibold text-[var(--text-muted)]">
           <span className="w-1.5 h-1.5 rounded-full" style={{ background: colors[0] }} />
           <span>→</span>

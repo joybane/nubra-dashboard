@@ -118,6 +118,32 @@ export function greekRows(
   return rows;
 }
 
+/** One line's change between two instants: `after` minus `before`, for a Δ strip. */
+export interface GreekRowDelta {
+  label: string;
+  value: number;
+}
+
+/**
+ * Pair two readings of the same pane up by series title and subtract.
+ *
+ * By title rather than by position, because each reading enumerates whatever lines existed when it
+ * was taken: switching a measure on or off between the two pinned instants shifts the list, and a
+ * positional pairing would quietly subtract Theta from Vega. A line present in only one of the two
+ * readings is dropped — there is no difference to state — and the order of `after` is kept, so the
+ * strip lists its rows in the order the pane draws them.
+ */
+export function diffGreekRows(before: GreekRow[], after: GreekRow[]): GreekRowDelta[] {
+  const prior = new Map(before.map((r) => [r.label, r.value]));
+  const out: GreekRowDelta[] = [];
+  for (const r of after) {
+    const was = prior.get(r.label);
+    if (was == null || !Number.isFinite(was) || !Number.isFinite(r.value)) continue;
+    out.push({ label: r.label, value: r.value - was });
+  }
+  return out;
+}
+
 /**
  * Every visible greek line the chart carries, gathered across its sub-panes.
  *

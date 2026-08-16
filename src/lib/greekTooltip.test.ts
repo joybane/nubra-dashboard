@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { IChartApi, ISeriesApi } from 'lightweight-charts';
 import {
+  diffGreekRows,
   escapeHtml,
   fmtCrosshairTime,
   greekRows,
   greekRowsAllPanes,
   placeTooltip,
+  type GreekRow,
 } from './greekTooltip';
 
 // Enough of a chart to exercise pane walking. The real API is far larger, but these functions
@@ -82,6 +84,49 @@ describe('greekRowsAllPanes', () => {
     expect(greekRows(chart, null, null, 5, 0)).toEqual([
       { color: '#22c55e', label: 'Vega·mine CE', value: 42 },
     ]);
+  });
+});
+
+describe('diffGreekRows', () => {
+  const row = (label: string, value: number): GreekRow => ({ color: '#fff', label, value });
+
+  it('subtracts the earlier reading from the later one', () => {
+    const out = diffGreekRows(
+      [row('Vega·mine CE', 40), row('Theta·mine CE', -300)],
+      [row('Vega·mine CE', 52.5), row('Theta·mine CE', -260)],
+    );
+    expect(out).toEqual([
+      { label: 'Vega·mine CE', value: 12.5 },
+      { label: 'Theta·mine CE', value: 40 },
+    ]);
+  });
+
+  it('pairs by series title, not by position', () => {
+    // Vega switched off between the two pins, so the later reading is one line shorter and the
+    // lists no longer line up. Pairing positionally here would subtract Vega from Theta.
+    const out = diffGreekRows(
+      [row('Vega·mine CE', 40), row('Theta·mine CE', -300)],
+      [row('Theta·mine CE', -260)],
+    );
+    expect(out).toEqual([{ label: 'Theta·mine CE', value: 40 }]);
+  });
+
+  it('drops a line that only one of the two readings has', () => {
+    // Theta switched ON between the pins: there is no earlier value to difference against, and
+    // reporting its absolute reading as a Δ would be a lie.
+    const out = diffGreekRows([row('Vega·mine CE', 40)], [row('Vega·mine CE', 41), row('T', -260)]);
+    expect(out).toEqual([{ label: 'Vega·mine CE', value: 1 }]);
+  });
+
+  it('keeps a genuine zero rather than treating it as missing', () => {
+    expect(diffGreekRows([row('IV·atm', 0)], [row('IV·atm', 0)])).toEqual([
+      { label: 'IV·atm', value: 0 },
+    ]);
+  });
+
+  it('skips non-finite readings on either side', () => {
+    expect(diffGreekRows([row('a', NaN)], [row('a', 1)])).toEqual([]);
+    expect(diffGreekRows([row('a', 1)], [row('a', Infinity)])).toEqual([]);
   });
 });
 

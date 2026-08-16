@@ -45,7 +45,6 @@ import {
   createIvPane,
   type GreekPane,
   type IvPane,
-  type ScaleBand,
   type SeriesMode,
   type TimeMapper,
 } from '../lib/greekRenderer';
@@ -237,6 +236,13 @@ export interface GreekOverlayApi {
   openSettings: () => void;
   applySettings: () => void;
   refresh: () => void;
+  /**
+   * Hand this measure's price scales back to autoscale after a manual axis drag froze one.
+   *
+   * They are overlay scales created inside `greekRenderer` from an internal `scaleKey`, so a host
+   * has no id to pass to `chart.priceScale()` — without this they cannot be recovered at all.
+   */
+  resetScales: () => void;
   clearForInstrumentChange: () => void;
   enabledRef: React.RefObject<boolean>;
 }
@@ -258,15 +264,6 @@ interface Deps {
    * after the panes exist rebuilds them: a series' `priceScaleId` is fixed at creation.
    */
   axisScaleId?: string;
-  /**
-   * The horizontal slice of the host's pane this measure gets, as `scaleMargins` fractions — see
-   * `ScaleBand`. Two numbers rather than an object so a fresh literal each render cannot churn the
-   * effect that applies them.
-   *
-   * Leave unset (Tracker, Chart) and the renderer's own margins stand: the measure spans the pane.
-   */
-  bandTop?: number;
-  bandBottom?: number;
   /**
    * Trailing days of history to reconstruct, ending at the selected day. Defaults to
    * GREEK_HIST_DAYS (7), which matches the Chart and Tracker candle loads.
@@ -316,8 +313,6 @@ export function useGreekOverlay({
   allBarsRef,
   inline,
   axisScaleId,
-  bandTop,
-  bandBottom,
   histDays,
   initialDay,
 }: Deps): GreekOverlayApi {
@@ -366,11 +361,6 @@ export function useGreekOverlay({
   const minePaneRef = useRef<GreekPane | null>(null);
   const indPaneRef = useRef<GreekPane | null>(null);
   const ivPaneRef = useRef<IvPane | null>(null);
-  // Read during pane creation, which can happen from a WS callback rather than a render, so the
-  // band has to be a ref and not the prop closure.
-  const bandRef = useRef<ScaleBand | null>(null);
-  bandRef.current =
-    bandTop == null || bandBottom == null ? null : { top: bandTop, bottom: bandBottom };
   // Multi-expiry WS state + latest live legs per expiry (merged into each snapshot).
   const wsAssetRef = useRef<string | null>(null);
   const wsExpiriesRef = useRef<Set<string>>(new Set());
@@ -477,17 +467,15 @@ export function useGreekOverlay({
 
   // ── Pane lifecycle ─────────────────────────────────────────────────────────
   /**
-   * Confine whatever panes exist to this measure's slice of the host pane.
+   * Hand every scale this measure owns back to autoscale — see `GreekPane.resetScales`.
    *
-   * A no-op for hosts that pass no band, which is what keeps the Tracker's and the Chart's
-   * overlays on the renderer's own margins.
+   * Exposed on the api because the scales are overlay scales whose ids live inside the renderer:
+   * a host cannot name them, so it cannot reach them through `chart.priceScale(id)`.
    */
-  function applyBand() {
-    const b = bandRef.current;
-    if (!b) return;
-    minePaneRef.current?.setBand(b);
-    indPaneRef.current?.setBand(b);
-    ivPaneRef.current?.setBand(b);
+  function resetScales() {
+    minePaneRef.current?.resetScales();
+    indPaneRef.current?.resetScales();
+    ivPaneRef.current?.resetScales();
   }
 
   function syncPanes(m: Method | 'both') {
@@ -512,7 +500,6 @@ export function useGreekOverlay({
         ivPaneRef.current = null;
       }
       ivPaneRef.current = createIvPane(chart, title, { ...paneOpts, scaleKey: measure });
-      applyBand();
       return;
     }
 
@@ -536,9 +523,6 @@ export function useGreekOverlay({
       indPaneRef.current.destroy();
       indPaneRef.current = null;
     }
-    // After creation, so a pane opens already inside its band rather than spanning the host pane
-    // for a frame and snapping into place.
-    applyBand();
   }
 
   function destroyPanes() {
@@ -742,13 +726,7 @@ export function useGreekOverlay({
     [],
   );
 
-  // ── Layout: band, and the axis the totals hang off ─────────────────────────
-  // A host that stacks measures in one pane re-slices them whenever the enabled set changes.
-  // Margins are a live scale option, so this is just a re-apply — no series are touched.
-  useEffect(() => {
-    applyBand();
-  }, [bandTop, bandBottom]);
-
+  // ── Layout: the axis the totals hang off ───────────────────────────────────
   // Moving the visible axis to another measure is the one layout change that CANNOT be applied in
   // place: `priceScaleId` is fixed when a series is created, so the panes have to be rebuilt onto
   // the new scale and re-fed. Same destroy/recreate the IV-measure switch above already does, and
@@ -1565,6 +1543,7 @@ export function useGreekOverlay({
     openSettings,
     applySettings,
     refresh,
+    resetScales,
     clearForInstrumentChange,
     enabledRef,
   };

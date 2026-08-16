@@ -21,6 +21,13 @@ interface Props {
 }
 
 /**
+ * Height of the band the removable pin badges occupy at the foot of each dashed line. The Δ strip
+ * is stacked directly on top of it: both are anchored to the bottom of the pane, so a strip sitting
+ * at the same offset is written straight through by whichever badge lands on it.
+ */
+const BADGE_BAND = 20;
+
+/**
  * Draws the pinned crosshairs for one pane: a dashed vertical line per pin, a removable badge
  * at the foot of each line, and the pin's frozen tooltip card beside it.
  *
@@ -111,6 +118,22 @@ export default function PinnedCrosshairLayer({
   // stack illegibly. Measured rather than assumed, because card height varies with leg count.
   useLayoutEffect(() => {
     const h = rootRef.current?.clientHeight ?? 0;
+    const rootW = rootRef.current?.clientWidth ?? 0;
+
+    // The Δ strip is measured BEFORE the cards are placed, because it owns the foot of the pane
+    // and the cards have to stop above it. Capping its width first is part of that measurement:
+    // a strip too wide for the pane wraps onto a second row, and a wrapped strip is taller, so
+    // measuring before the cap would reserve too little space and let a card sit on it anyway.
+    const strip = compareRef.current;
+    let stripH = 0;
+    if (strip && rootW > 0) {
+      strip.style.maxWidth = `${rootW - 8}px`;
+      stripH = strip.getBoundingClientRect().height;
+    }
+    // What the cards must clear at the bottom of the pane: the badge band, the strip above it, and
+    // a gap. With no strip this is the badge-only reserve the layer has always used.
+    const footer = stripH > 0 ? BADGE_BAND + stripH + 6 : 30;
+
     const boxes: Array<{ left: number; right: number; top: number; bottom: number }> = [];
     for (const el of cardRefs.current) {
       if (!el) continue;
@@ -133,8 +156,11 @@ export default function PinnedCrosshairLayer({
           box.bottom += shift;
         }
       }
-      if (h > 0 && box.top > h - 30) {
-        const back = box.top - (h - 30);
+      // Pull a card that was pushed down back up until it clears the footer — but never above
+      // where it would have sat unstacked. A card taller than the pane is clipped either way,
+      // and dragging its top off the pane as well would cost its timestamp header too.
+      if (h > 0) {
+        const back = Math.min(Math.max(0, box.bottom - (h - footer)), Math.max(0, box.top - 8));
         box.top -= back;
         box.bottom -= back;
       }
@@ -144,8 +170,6 @@ export default function PinnedCrosshairLayer({
 
     // Centre the Δ strip on the midpoint, then pull it back inside the pane. Measured, because
     // its width depends on the leg count and it would otherwise be clipped at the edges.
-    const strip = compareRef.current;
-    const rootW = rootRef.current?.clientWidth ?? 0;
     if (strip && rootW > 0) {
       const sw = strip.getBoundingClientRect().width;
       const left = Math.max(4, Math.min(compareXRef.current - sw / 2, rootW - sw - 4));
@@ -170,8 +194,18 @@ export default function PinnedCrosshairLayer({
 
   return (
     <div ref={rootRef} className="absolute inset-0 pointer-events-none z-40 overflow-hidden">
+      {/*
+        Above the badge band, and above the cards in stacking order. The reserve computed in the
+        layout effect already keeps the cards off it whenever the pane has the room; `zIndex` is
+        the backstop for when it does not, because a card that overflows its pane is a card the
+        user can scroll back into view, while a Δ strip written over by one is simply lost.
+      */}
       {compare && (
-        <div ref={compareRef} className="absolute" style={{ left: 0, bottom: 6 }}>
+        <div
+          ref={compareRef}
+          className="absolute"
+          style={{ left: 0, bottom: BADGE_BAND, zIndex: 1 }}
+        >
           {compare}
         </div>
       )}

@@ -116,22 +116,17 @@ export interface GreekPane {
     mapTime?: TimeMapper,
   ): void;
   setHeight(px: number): void;
-  setBand(m: ScaleBand): void;
+  /**
+   * Hand this pane's scales back to autoscale.
+   *
+   * lightweight-charts latches `autoScale: false` on a price scale the moment the user drags it,
+   * and never turns it back on. The scale then holds a frozen range while the time axis keeps
+   * zooming, so its lines walk off the pane and nothing brings them back. A host offering a
+   * "reset" gesture has to reach the OVERLAY scales too — they have no visible axis to
+   * double-click, so they are otherwise unrecoverable.
+   */
+  resetScales(): void;
   destroy(): void;
-}
-
-/**
- * A horizontal slice of the host pane, as lightweight-charts `scaleMargins` — the fraction of the
- * pane's height left empty above and below this measure's lines.
- *
- * A host stacking several measures in ONE pane hands each of them a disjoint band, so they stop
- * sharing a price range: Vega near +70 and Theta near −75 on one scale each hold the axis open for
- * the other, and neither can ever expand. Bands are per-scale, so this is the whole mechanism —
- * there is no clipping and no data transform, each measure simply auto-scales inside its own slice.
- */
-export interface ScaleBand {
-  top: number;
-  bottom: number;
 }
 
 export interface GreekPaneOpts {
@@ -240,14 +235,23 @@ export function createGreekPane(
   const ceDiff = mk(CE, true, diffScale, 'CE Δ');
   const peDiff = mk(PE, true, diffScale, 'PE Δ');
 
+  // `autoScale` is stated rather than left to the library default on purpose: it is what makes each
+  // scale re-fit its lines to the VISIBLE window on every zoom, which is the whole reason several
+  // measures can share one pane without being sliced into fixed bands. A measure spanning the full
+  // height and auto-fitting the window is the arrangement; a frozen scale silently breaks it.
   if (inline) {
     // Greeks share the price pane and span most of its height (overlapping the NIFTY
     // line is fine — distinct colors + the crosshair tooltip keep them readable).
-    ceTotal.priceScale().applyOptions({ scaleMargins: { top: 0.1, bottom: 0.08 } });
-    ceDiff.priceScale().applyOptions({ scaleMargins: { top: 0.1, bottom: 0.08 } });
+    ceTotal
+      .priceScale()
+      .applyOptions({ autoScale: true, scaleMargins: { top: 0.1, bottom: 0.08 } });
+    ceDiff.priceScale().applyOptions({ autoScale: true, scaleMargins: { top: 0.1, bottom: 0.08 } });
   } else {
     // Separate sub-pane: give the overlay diff scale its own margins vs the totals.
-    ceDiff.priceScale().applyOptions({ scaleMargins: { top: 0.15, bottom: 0.15 } });
+    ceTotal.priceScale().applyOptions({ autoScale: true });
+    ceDiff
+      .priceScale()
+      .applyOptions({ autoScale: true, scaleMargins: { top: 0.15, bottom: 0.15 } });
   }
 
   const all = [ceTotal, peTotal, ceDiff, peDiff];
@@ -286,12 +290,12 @@ export function createGreekPane(
     setHeight(px) {
       pane?.setHeight(px);
     },
-    setBand(m) {
-      // Both scales, so a measure's Δ lines follow its totals into the band instead of wandering
-      // across a slice they have nothing to do with. They stay SEPARATE scales — totals and diffs
-      // are different magnitudes by construction (see the header note) — just co-located.
-      ceTotal.priceScale().applyOptions({ scaleMargins: m });
-      ceDiff.priceScale().applyOptions({ scaleMargins: m });
+    resetScales() {
+      // Both scales this pane owns. `peTotal`/`peDiff` share them with their CE partners, so two
+      // calls cover all four series. Margins are deliberately untouched — an axis drag changes the
+      // range, never the band, and re-applying margins here would fight the host's layout.
+      ceTotal.priceScale().applyOptions({ autoScale: true });
+      ceDiff.priceScale().applyOptions({ autoScale: true });
     },
     destroy() {
       for (const s of all) {
@@ -320,7 +324,8 @@ export function createGreekPane(
 export interface IvPane {
   setData(points: ReadonlyArray<IvPoint>, mapTime?: TimeMapper): void;
   setHeight(px: number): void;
-  setBand(m: ScaleBand): void;
+  /** See `GreekPane.resetScales` — same latched-autoscale problem, one scale instead of two. */
+  resetScales(): void;
   destroy(): void;
 }
 
@@ -359,7 +364,11 @@ export function createIvPane(chart: IChartApi, label: string, opts: GreekPaneOpt
     paneIndex,
   );
 
-  if (inline) line.priceScale().applyOptions({ scaleMargins: { top: 0.1, bottom: 0.08 } });
+  // See the Greek pane above for why `autoScale` is stated rather than defaulted.
+  line.priceScale().applyOptions({
+    autoScale: true,
+    ...(inline ? { scaleMargins: { top: 0.1, bottom: 0.08 } } : {}),
+  });
 
   return {
     setData(points, mapTime = defaultMapper) {
@@ -368,8 +377,8 @@ export function createIvPane(chart: IChartApi, label: string, opts: GreekPaneOpt
     setHeight(px) {
       pane?.setHeight(px);
     },
-    setBand(m) {
-      line.priceScale().applyOptions({ scaleMargins: m });
+    resetScales() {
+      line.priceScale().applyOptions({ autoScale: true });
     },
     destroy() {
       try {
