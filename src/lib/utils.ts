@@ -113,9 +113,67 @@ export function isMarketSessionChartTime(
 type ChartTime = number | { year: number; month: number; day: number };
 
 /**
- * Bars → line points for a session-aware chart: out-of-session bars dropped, and a valueless
- * point inserted at each day boundary so lightweight-charts breaks the line instead of drawing
- * a straight segment across the overnight gap (which reads as a move that never happened).
+ * The colour painted onto the LAST point of a session so the segment that would run into the
+ * next session is stroked invisibly. Every session therefore reads as its own line.
+ *
+ * Whitespace alone does not do this. On `setData`, lightweight-charts' data layer keeps only the
+ * rows that carry a value (`seriesRows.filter(isSeriesPlotRow)` in `DataLayer`); a whitespace item
+ * reserves a column on the time scale and is then dropped from the series itself. `walkLine` gets
+ * the surviving points and strokes ONE continuous path through all of them, so an overnight gap
+ * is drawn as a straight segment no matter how much whitespace sits inside it. (Verified against
+ * lightweight-charts 5.2.0 — see `markSessionBreaks`' test.)
+ *
+ * What lightweight-charts does honour is a per-point colour. `walkLine` draws the segment INTO a
+ * point with the style in force at the *previous* point and only then swaps style, so recolouring
+ * a session's last point hides exactly the crossing segment and leaves the segment arriving at it
+ * — and every other segment — untouched.
+ *
+ * Series that can carry this colour set `crosshairMarkerBackgroundColor` to their own line colour,
+ * because the marker's colour otherwise falls back to the hovered point's colour and the hover dot
+ * would vanish on the one bar per session that carries the break.
+ */
+export const SESSION_BREAK_COLOR = 'transparent';
+
+/**
+ * Recolour the last valued point of every session so lightweight-charts stops drawing the line
+ * into the next one. Returns a new array; the points it recolours are copied rather than mutated,
+ * so callers may pass cached data straight in.
+ *
+ * Whitespace entries (no finite `value`) are carried through untouched and ignored when locating a
+ * session's edge — they are not part of the series as far as the renderer is concerned.
+ *
+ * Only INTRADAY points are broken. On a 1d/1w/1mt chart a bar IS a session, so every point would
+ * otherwise open a new one and the series would render as unconnected dots. The same guard as
+ * `barsToSessionLine`'s whitespace: business-day times are passed through.
+ *
+ * The final point is never recoloured: there is no following session to break away from, and it is
+ * the point `lastValueVisible` reads its axis tag's colour from.
+ */
+export function markSessionBreaks<T extends { time: ChartTime; value?: number; color?: string }>(
+  points: ReadonlyArray<T>,
+): Array<T & { color?: string }> {
+  const out: Array<T & { color?: string }> = points.slice();
+  let lastValued = -1;
+  let lastDay: string | null = null;
+
+  for (let i = 0; i < out.length; i++) {
+    const p = out[i];
+    if (p.value == null || !Number.isFinite(p.value)) continue;
+    const day = typeof p.time === 'number' ? chartTimeDayKey(p.time) : null;
+    if (lastValued >= 0 && lastDay && day && day !== lastDay)
+      out[lastValued] = { ...out[lastValued], color: SESSION_BREAK_COLOR };
+    lastValued = i;
+    lastDay = day;
+  }
+  return out;
+}
+
+/**
+ * Bars → line points for a session-aware chart: out-of-session bars dropped, a valueless point
+ * inserted at each day boundary so the two sessions never share a column, and the last point of
+ * each session recoloured so the line does not run across the overnight gap (which reads as a move
+ * that never happened). See `markSessionBreaks` for why the colour, not the whitespace, is what
+ * actually breaks the line.
  *
  * Shared by every host that draws an underlying reference line under the Greek overlays, so all
  * of them break their nights identically.
@@ -123,8 +181,8 @@ type ChartTime = number | { year: number; month: number; day: number };
 export function barsToSessionLine<T extends { time: ChartTime; close: number }>(
   bars: ReadonlyArray<T>,
   exchange?: string,
-): Array<{ time: ChartTime; value?: number }> {
-  const points: Array<{ time: ChartTime; value?: number }> = [];
+): Array<{ time: ChartTime; value?: number; color?: string }> {
+  const points: Array<{ time: ChartTime; value?: number; color?: string }> = [];
   let lastDay: string | null = null;
   let lastNumericTime: number | null = null;
 
@@ -138,7 +196,7 @@ export function barsToSessionLine<T extends { time: ChartTime; close: number }>(
     lastDay = day;
     if (typeof b.time === 'number') lastNumericTime = b.time;
   }
-  return points;
+  return markSessionBreaks(points);
 }
 
 /** @deprecated Prefer `isMarketSessionChartTime(t, exchange)` — this is the NSE-only form. */

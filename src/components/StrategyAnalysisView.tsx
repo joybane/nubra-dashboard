@@ -18,7 +18,7 @@ import type {
   OptionChainData,
   OptionLeg,
 } from '../types';
-import { fmtPrice, IST_OFFSET, marketSession, toChartTime } from '../lib/utils';
+import { fmtPrice, IST_OFFSET, markSessionBreaks, marketSession, toChartTime } from '../lib/utils';
 import { useWs } from '../hooks/useWsContext';
 import { chartFrame, isChartLive, removeChart } from '../lib/chartLifecycle';
 import { blackScholes, impliedVolatility, RISK_FREE } from '../lib/GexService';
@@ -107,12 +107,14 @@ function upsertBar(arr: HistBar[], bar: HistBar): void {
 // Fill a P&L data series over the full underlying time grid (09:15 to session close).
 // P&L before entry time defaults to 0, and holds its value for un-ticked minutes so lightweight-charts
 // creates a 1-to-1 matching bar index array starting at 09:15 for 100% perfect multi-pane alignment.
+// The hold is capped at the session edge by markSessionBreaks: a grid spanning more than one
+// trading day must read as one line per session, never as a value carried across a night.
 function fillPnlToGrid(
   grid: number[],
   data: Array<{ time: any; value: number }>,
-): Array<{ time: any; value: number }> {
-  if (grid.length === 0) return data;
-  if (data.length === 0) return grid.map((t) => ({ time: t as any, value: 0 }));
+): Array<{ time: any; value: number; color?: string }> {
+  if (grid.length === 0) return markSessionBreaks(data);
+  if (data.length === 0) return markSessionBreaks(grid.map((t) => ({ time: t as any, value: 0 })));
 
   const valMap = new Map<number, number>();
   for (const d of data) {
@@ -133,21 +135,22 @@ function fillPnlToGrid(
       result.push({ time: t as any, value: currentVal });
     }
   }
-  return result;
+  return markSessionBreaks(result);
 }
 
 // Fill a Greek series over the full underlying time grid (09:15 to session close).
 // Forward-fills the initial value to 09:15 and holds across un-ticked minutes so lightweight-charts
 // creates an identical 1-to-1 bar index mapping (index 0 = 09:15) matching the candlestick chart.
+// Like fillPnlToGrid, the carry-forward stops at each session edge — see markSessionBreaks.
 function fillGreeksToGrid(
   grid: number[],
   byTime: Map<number, { delta: number; gamma: number; theta: number; vega: number }>,
   greekKey: 'delta' | 'gamma' | 'theta' | 'vega',
   factor: { mid: number; half: number },
-): Array<{ time: any; value: number }> {
+): Array<{ time: any; value: number; color?: string }> {
   if (grid.length === 0) return [];
   const times = [...byTime.keys()].sort((a, b) => a - b);
-  if (times.length === 0) return grid.map((t) => ({ time: t as any, value: 0 }));
+  if (times.length === 0) return markSessionBreaks(grid.map((t) => ({ time: t as any, value: 0 })));
 
   const firstTime = times[0];
   const firstVal = (byTime.get(firstTime)![greekKey] - factor.mid) / factor.half;
@@ -165,7 +168,7 @@ function fillGreeksToGrid(
       result.push({ time: t as any, value: currentVal });
     }
   }
-  return result;
+  return markSessionBreaks(result);
 }
 
 function safeSetVisibleLogicalRange(chart: IChartApi | null | undefined, range: any): void {
@@ -1070,11 +1073,14 @@ export default function StrategyAnalysisView({
           title: leg.displayName,
           lastValueVisible: true,
           priceLineVisible: true,
+          // Each session's last point carries SESSION_BREAK_COLOR; without this the hover dot,
+          // whose colour otherwise follows the point's, would vanish on that bar.
+          crosshairMarkerBackgroundColor: leg.color,
           priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
         });
         seriesRef.current.legPrice.set(leg.refId, s);
         const data = cached.legPriceData.get(leg.refId);
-        if (data) s.setData(data.map((d) => ({ time: d.time, value: d.value })));
+        if (data) s.setData(markSessionBreaks(data.map((d) => ({ time: d.time, value: d.value }))));
       }
       try {
         chart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } });
@@ -1109,6 +1115,7 @@ export default function StrategyAnalysisView({
       title: 'Total P&L',
       lastValueVisible: true,
       priceLineVisible: true,
+      crosshairMarkerBackgroundColor: '#ffffff', // see the leg-price series above
       priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
     });
     seriesRef.current.basketPnl = basketSeries;
@@ -1121,6 +1128,7 @@ export default function StrategyAnalysisView({
         title: leg.displayName,
         lastValueVisible: true,
         priceLineVisible: true,
+        crosshairMarkerBackgroundColor: leg.color, // see the leg-price series above
         priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
       });
       seriesRef.current.legPnl.set(leg.refId, s);
@@ -1132,9 +1140,10 @@ export default function StrategyAnalysisView({
     if (cached) {
       for (const leg of legMetasRef.current) {
         const data = cached.legPnlData.get(leg.refId);
-        if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(data);
+        if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(markSessionBreaks(data));
       }
-      if (cached.basketPnlData.length > 0) basketSeries.setData(cached.basketPnlData);
+      if (cached.basketPnlData.length > 0)
+        basketSeries.setData(markSessionBreaks(cached.basketPnlData));
       cancelFit = chartFrame(chart, (c) => c.timeScale().fitContent());
     }
 
@@ -1470,6 +1479,7 @@ export default function StrategyAnalysisView({
             title: leg.displayName,
             lastValueVisible: true,
             priceLineVisible: true,
+            crosshairMarkerBackgroundColor: leg.color, // see the create-effect above
             priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
           seriesRef.current.legPrice.set(leg.refId, s);
@@ -1478,7 +1488,7 @@ export default function StrategyAnalysisView({
         if (data)
           seriesRef.current.legPrice
             .get(leg.refId)
-            ?.setData(data.map((d) => ({ time: d.time, value: d.value })));
+            ?.setData(markSessionBreaks(data.map((d) => ({ time: d.time, value: d.value }))));
       }
       try {
         priceChart.priceScale('right').applyOptions({ scaleMargins: { top: 0.08, bottom: 0.08 } });
@@ -1512,6 +1522,7 @@ export default function StrategyAnalysisView({
             title: leg.displayName,
             lastValueVisible: true,
             priceLineVisible: true,
+            crosshairMarkerBackgroundColor: leg.color, // see the create-effect above
             priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
           });
           seriesRef.current.legPnl.set(leg.refId, s);
@@ -2347,6 +2358,7 @@ export default function StrategyAnalysisView({
           lastValueVisible: true,
           priceLineVisible: false,
           visible: false,
+          crosshairMarkerBackgroundColor: GREEK_COLORS[k], // see the leg-price series above
           priceFormat: {
             type: 'custom',
             minMove: 0.00001,

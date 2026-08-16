@@ -232,6 +232,10 @@ export default function Tracker({ instrument, theme }: Props) {
       lineWidth: 2,
       priceLineVisible: true,
       lastValueVisible: true,
+      // barsToSessionLine paints each session's last point SESSION_BREAK_COLOR to stop the line
+      // running into the next session; without this the hover dot would vanish on that bar, since
+      // its colour otherwise follows the point's.
+      crosshairMarkerBackgroundColor: '#2962ff',
     } as Partial<LineSeriesOptions>);
     lineRef.current = line;
 

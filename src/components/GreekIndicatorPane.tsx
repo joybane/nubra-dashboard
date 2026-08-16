@@ -315,6 +315,10 @@ export default function GreekIndicatorPane({
       priceScaleId: 'right',
       priceLineVisible: false,
       lastValueVisible: true,
+      // barsToSessionLine paints each session's last point SESSION_BREAK_COLOR to stop the line
+      // running into the next session; without this the hover dot would vanish on that bar, since
+      // its colour otherwise follows the point's.
+      crosshairMarkerBackgroundColor: '#2962ff',
     } as Partial<LineSeriesOptions>);
     line.priceScale().applyOptions({ autoScale: true, scaleMargins: { top: 0.08, bottom: 0.1 } });
     // The overlays' own axis. Seeded with the margins `createGreekPane` applies to an inline

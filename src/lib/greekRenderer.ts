@@ -17,7 +17,12 @@ import {
   type ISeriesApi,
   type UTCTimestamp,
 } from 'lightweight-charts';
-import { IST_OFFSET, chartTimeDayKey, isMarketSessionChartTime } from './utils.ts';
+import {
+  IST_OFFSET,
+  chartTimeDayKey,
+  isMarketSessionChartTime,
+  markSessionBreaks,
+} from './utils.ts';
 import type { IvPoint, SeriesPoint } from './greekAggregator.ts';
 
 export type SeriesMode = 'totals' | 'diff' | 'both';
@@ -63,9 +68,17 @@ export function scaleSuffix(label: string): string {
 
 const defaultMapper: TimeMapper = (ms) => msToChartTime(ms) as number;
 
-type LinePoint = { time: UTCTimestamp; value: number } | { time: UTCTimestamp };
+type LinePoint =
+  | { time: UTCTimestamp; value: number; color?: string }
+  | { time: UTCTimestamp; value?: undefined; color?: string };
 
-/** De-duplicate by mapped time (keep last), filter closed-market points, and break overnight lines. */
+/**
+ * De-duplicate by mapped time (keep last), filter closed-market points, and break overnight lines.
+ *
+ * The break is the per-point colour `markSessionBreaks` writes onto each session's last point. The
+ * valueless point pushed at the boundary keeps the two sessions off one another's column, but it
+ * does NOT break the line on its own — see `SESSION_BREAK_COLOR`.
+ */
 function toLine<T extends { ts: number }>(
   points: ReadonlyArray<T>,
   pick: (p: T) => number,
@@ -90,7 +103,7 @@ function toLine<T extends { ts: number }>(
     lastDay = day;
     lastTime = time;
   }
-  return out;
+  return markSessionBreaks(out);
 }
 
 export interface GreekPane {
@@ -206,6 +219,9 @@ export function createGreekPane(
         priceLineVisible: false,
         lastValueVisible: scaleId !== diffScale, // axis tag only for the totals scale
         crosshairMarkerVisible: true,
+        // Stated rather than defaulted: the marker's colour otherwise falls back to the hovered
+        // POINT's colour, and each session's last point carries SESSION_BREAK_COLOR.
+        crosshairMarkerBackgroundColor: color,
         title: `${label} ${title}`,
         // Inline greeks share the price pane, so format their (often huge) values
         // compactly instead of dumping raw 10-digit numbers onto the axis tag.
@@ -323,15 +339,19 @@ export function createIvPane(chart: IChartApi, label: string, opts: GreekPaneOpt
     ? (opts.axisScaleId ?? `iv-${opts.scaleKey ?? scaleSuffix(label)}`)
     : undefined;
 
+  const ivColor = opts.ceColor ?? '#38bdf8';
   const line = chart.addSeries(
     LineSeries,
     {
-      color: opts.ceColor ?? '#38bdf8',
+      color: ivColor,
       lineWidth: 2,
       lineStyle: LineStyle.Solid,
       priceLineVisible: false,
       lastValueVisible: true,
       crosshairMarkerVisible: true,
+      // See the Greek pane above: the marker would otherwise disappear on each session's
+      // last point, which is the one carrying SESSION_BREAK_COLOR.
+      crosshairMarkerBackgroundColor: ivColor,
       title: label,
       priceFormat: { type: 'custom' as const, minMove: 0.01, formatter: ivAxis },
       ...(scaleId ? { priceScaleId: scaleId } : {}),

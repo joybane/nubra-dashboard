@@ -11,7 +11,7 @@ import SvgChart from './components/SvgChart';
 import type { Instrument } from './types';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
 import { payoffAtExpiry, blackScholes, impliedVolatility, RISK_FREE } from './lib/GexService';
-import { fmtPrice } from './lib/utils';
+import { fmtPrice, markSessionBreaks } from './lib/utils';
 import { logicalAtTime } from './lib/greekTooltip';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
 import { defaultBacktestDate } from './lib/tradingDay';
@@ -263,15 +263,23 @@ function adjustTime(timeStr: string, deltaMinutes: number): string {
   return `${newH}:${newM}`;
 }
 
+/**
+ * Align a series onto the underlying's bar grid, leaving a valueless point wherever it has no
+ * reading, and break it at every session boundary so a run spanning more than one trading day
+ * reads as one line per session rather than a single sweep across the nights.
+ *
+ * The whitespace is what keeps the bar indices aligned with the underlying; the session break is
+ * the per-point colour `markSessionBreaks` applies — see `SESSION_BREAK_COLOR`.
+ */
 function padToGrid(
   grid: number[],
   data: Array<{ time: number; value: number }>,
-): Array<{ time: number; value?: number }> {
-  if (grid.length === 0) return data;
+): Array<{ time: number; value?: number; color?: string }> {
+  if (grid.length === 0) return markSessionBreaks(data);
   const valMap = new Map<number, number>();
   for (const d of data) valMap.set(Math.floor(d.time / 60) * 60, d.value);
 
-  const result: Array<{ time: number; value?: number }> = [];
+  const result: Array<{ time: number; value?: number; color?: string }> = [];
   const allTimes = new Set<number>(grid.map((t) => Math.floor(t / 60) * 60));
   for (const d of data) allTimes.add(Math.floor(d.time / 60) * 60);
 
@@ -283,7 +291,7 @@ function padToGrid(
       result.push({ time: t });
     }
   }
-  return result;
+  return markSessionBreaks(result);
 }
 
 let _idSeq = 0;
@@ -1241,6 +1249,9 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
             color,
             lineWidth: 1,
             crosshairMarkerRadius: 4,
+            // padToGrid paints each session's last point SESSION_BREAK_COLOR; pin the marker to
+            // the line colour so the hover dot survives on that one bar.
+            crosshairMarkerBackgroundColor: color,
             title: `${leg.side === 'BUY' ? 'B' : 'S'} ${leg.strike} ${leg.optionType}`,
             lastValueVisible: true,
             priceLineVisible: false,
@@ -1278,6 +1289,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         color: '#ffffff',
         lineWidth: 3,
         crosshairMarkerRadius: 4,
+        crosshairMarkerBackgroundColor: '#ffffff', // see the leg-price series above
         lastValueVisible: true,
         priceLineVisible: true,
         visible: showTotalPnl,
@@ -1297,6 +1309,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
             color,
             lineWidth: 1,
             crosshairMarkerRadius: 4,
+            crosshairMarkerBackgroundColor: color, // see the leg-price series above
             title: `${leg.side === 'BUY' ? 'B' : 'S'} ${leg.strike} ${leg.optionType}`,
             lastValueVisible: true,
             priceLineVisible: false,
@@ -1336,6 +1349,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
             lineWidth: gLineWidths[src],
             lineStyle: gLineStyles[src],
             crosshairMarkerRadius: 4,
+            crosshairMarkerBackgroundColor: gColors[k], // see the leg-price series above
             priceScaleId: k,
 
             lastValueVisible: true,
