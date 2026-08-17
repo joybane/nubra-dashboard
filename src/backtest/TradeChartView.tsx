@@ -292,6 +292,10 @@ export default function TradeChartView({
   }, [trade, underlying]);
 
   const [bars, setBars] = useState<{ under: Bar[]; legBars: Map<string, Bar[]> } | null>(null);
+  // Hoisted out of the JSX: `bars?.under ?? []` inline handed the Indicators pane a fresh array on
+  // every render of this view, and the pane rebuilds its line and re-snaps three greek overlays off
+  // that prop's identity. Memoised, only a real reload moves it.
+  const indicatorBars = useMemo(() => bars?.under ?? [], [bars]);
   const [status, setStatus] = useState<'loading' | 'ready' | 'nodata'>('loading');
   const [hover, setHover] = useState<{ time: string; f: Frame } | null>(null);
 
@@ -765,7 +769,7 @@ export default function TradeChartView({
           <div className="h-[220px] w-full border border-[var(--border)] rounded overflow-hidden">
             <GreekIndicatorPane
               instrument={{ asset: underlying, nubra_name: underlying, exchange: 'NSE' }}
-              bars={bars?.under ?? []}
+              bars={indicatorBars}
               // This view is dark-only — every pane above hardcodes #0d0f11.
               theme="dark"
               // One session: the trade has a date, and that is the only day worth rebuilding.

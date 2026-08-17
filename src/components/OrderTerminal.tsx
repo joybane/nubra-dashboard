@@ -12,6 +12,7 @@ import type {
   GroupPositionRule,
 } from '../types';
 import { exchangeFromName } from '../types';
+import { strategyPositionExchange } from '../lib/strategyPositionMeta';
 import { fmtPrice } from '../lib/utils';
 import { liveLevels } from '../lib/positionRuleLevels';
 import { isOnLocalDay, openPositionPnlPaise, summarizeTodayPositions } from '../lib/paperPnl';
@@ -830,7 +831,11 @@ async function fetchPositionGroupMarginPaise(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      exchange: exchangeFromName(positions[0]?.display_name || positions[0]?.zanskar_name),
+      // Only the zanskar name carries the MCX shape — "CRUDEOIL 7800 PE" reads as NSE, and
+      // an NSE-tagged commodity basket is rejected by the broker ("Strategy Flexi is not
+      // supported in MCX"), so the route silently fell back to the local SPAN estimate and
+      // every crude group showed roughly a third of its real margin.
+      exchange: strategyPositionExchange(positions),
       multiplier: 1,
       orders,
     }),
@@ -1269,7 +1274,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                   onViewChart({
                     stock_name: p.display_name || p.zanskar_name || String(p.ref_id),
                     ref_id: p.ref_id,
-                    exchange: exchangeFromName(p.display_name || p.zanskar_name),
+                    exchange: strategyPositionExchange([p]),
                     derivative_type: p.derivative_type,
                     option_type: p.option_type,
                     strike_price: p.strike_price,
@@ -2242,7 +2247,7 @@ export default function OrderTerminal({
           stock_name: p.display_name || p.zanskar_name || String(p.ref_id),
           zanskar_name: p.zanskar_name,
           ref_id: p.ref_id,
-          exchange: exchangeFromName(p.display_name || p.zanskar_name),
+          exchange: strategyPositionExchange([p]),
           derivative_type: p.derivative_type,
           option_type: p.option_type,
           strike_price: p.strike_price,

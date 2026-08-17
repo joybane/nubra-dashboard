@@ -24,6 +24,8 @@ function fakeChart() {
   const scales = new Map<string, { opts: Record<string, unknown>; calls: number }>();
   const seriesByScale: string[] = [];
   const seriesOpts: Record<string, unknown>[] = [];
+  /** Every `setData` push, in order, tagged with the series' title — see the laziness tests. */
+  const setDataCalls: Array<{ title: string; points: number }> = [];
   const scaleFor = (id: string) => {
     let s = scales.get(id);
     if (!s) scales.set(id, (s = { opts: {}, calls: 0 }));
@@ -31,7 +33,7 @@ function fakeChart() {
   };
   const chart = {
     addPane: () => ({ setHeight() {}, paneIndex: () => 1 }),
-    addSeries: (_type: unknown, opts: { priceScaleId?: string }) => {
+    addSeries: (_type: unknown, opts: { priceScaleId?: string; title?: string }) => {
       const id = opts.priceScaleId ?? 'right';
       seriesByScale.push(id);
       seriesOpts.push(opts as Record<string, unknown>);
@@ -44,13 +46,15 @@ function fakeChart() {
           },
         }),
         applyOptions() {},
-        setData() {},
+        setData(points: unknown[]) {
+          setDataCalls.push({ title: opts.title ?? '', points: points.length });
+        },
       };
     },
     removeSeries() {},
     removePane() {},
   };
-  return { chart: chart as unknown as IChartApi, scales, seriesByScale, seriesOpts };
+  return { chart: chart as unknown as IChartApi, scales, seriesByScale, seriesOpts, setDataCalls };
 }
 
 /**
@@ -122,6 +126,74 @@ test('CE and PE share a scale; totals and Δ do not', () => {
 
   // Creation order in `createGreekPane`: ceTotal, peTotal, ceDiff, peDiff.
   expect(seriesByScale).toEqual(['gt-vega-mine', 'gt-vega-mine', 'gd-vega-mine', 'gd-vega-mine']);
+});
+
+/**
+ * `setData` used to build all four lines and then discard the ones nobody could see. `toLine` maps,
+ * sorts and re-colours every point in the series, so on the default 'diff' that was double the
+ * per-draw work — three times over, once per measure — for lines that were never drawn.
+ *
+ * Counted through the payloads rather than by spying on `toLine`, which is module-private: a
+ * skipped line shows up as an empty push, a built one as a populated push.
+ */
+describe('setData only builds the lines it is going to draw', () => {
+  // 09:20 and 09:21 IST — inside the NSE session, or the session filter drops both points.
+  const points = [
+    { ts: Date.UTC(2026, 6, 30, 3, 50), ceTotal: 10, peTotal: 20, ceDiff: 1, peDiff: 2 },
+    { ts: Date.UTC(2026, 6, 30, 3, 51), ceTotal: 11, peTotal: 21, ceDiff: 2, peDiff: 3 },
+  ];
+
+  test("'diff' leaves the totals empty and populates the Δ lines", () => {
+    const { chart, setDataCalls } = fakeChart();
+    const pane = createGreekPane(chart, 'Vega·mine', { inline: true, scaleKey: 'vega-mine' });
+    setDataCalls.length = 0;
+
+    pane.setData(points, 'diff', true, true);
+
+    expect(setDataCalls).toEqual([
+      { title: 'Vega·mine CE', points: 0 },
+      { title: 'Vega·mine PE', points: 0 },
+      { title: 'Vega·mine CE Δ', points: 2 },
+      { title: 'Vega·mine PE Δ', points: 2 },
+    ]);
+  });
+
+  test('an unticked side is not built either', () => {
+    const { chart, setDataCalls } = fakeChart();
+    const pane = createGreekPane(chart, 'Vega·mine', { inline: true, scaleKey: 'vega-mine' });
+    setDataCalls.length = 0;
+
+    pane.setData(points, 'both', true, false); // CE only
+    const built = setDataCalls.filter((c) => c.points > 0).map((c) => c.title);
+    expect(built).toEqual(['Vega·mine CE', 'Vega·mine CE Δ']);
+  });
+
+  test('a line that was already hidden is not handed another empty array', () => {
+    const { chart, setDataCalls } = fakeChart();
+    const pane = createGreekPane(chart, 'Vega·mine', { inline: true, scaleKey: 'vega-mine' });
+
+    pane.setData(points, 'diff', true, true); // first pass: all four written
+    setDataCalls.length = 0;
+    pane.setData(points, 'diff', true, true); // second: the totals are already empty and hidden
+
+    expect(setDataCalls.map((c) => c.title)).toEqual(['Vega·mine CE Δ', 'Vega·mine PE Δ']);
+  });
+
+  test('a line coming back into view is rebuilt, not left empty', () => {
+    const { chart, setDataCalls } = fakeChart();
+    const pane = createGreekPane(chart, 'Vega·mine', { inline: true, scaleKey: 'vega-mine' });
+
+    pane.setData(points, 'diff', true, true);
+    setDataCalls.length = 0;
+    pane.setData(points, 'both', true, true); // user switches SERIES back to Both
+
+    expect(setDataCalls).toEqual([
+      { title: 'Vega·mine CE', points: 2 },
+      { title: 'Vega·mine PE', points: 2 },
+      { title: 'Vega·mine CE Δ', points: 2 },
+      { title: 'Vega·mine PE Δ', points: 2 },
+    ]);
+  });
 });
 
 // The scaleKeys useGreekOverlay actually passes: `${greek}-${method}` for the Greek panes and

@@ -262,16 +262,40 @@ export function logicalAtTime(chart: IChartApi, time: CrosshairTime): number | n
 }
 
 /**
+ * The gap the stacked panes put between crosshair and card — StrategyAnalysisView's own `GAP`.
+ * Theirs, not this file's: matching it is the point. See the STACKED section of `placeTooltip`,
+ * which is why that path ignores the `gap` argument.
+ */
+const STACK_GAP = 24;
+
+/**
  * Park a tooltip beside the cursor without letting it leave the pane.
  *
  * `desiredTop` is the intended top edge rather than the cursor's y, because the synced-crosshair
  * path below wants the card pinned to the top of the pane instead of trailing a y it never had.
  *
- * `flipAtMidpoint` switches sides once the cursor is past the pane's horizontal midpoint instead
- * of waiting until the card would overflow the right edge. That is the rule the stacked panes
- * follow (StrategyAnalysisView's `place`, and PinnedCrosshairLayer's `alignLeft`), and a pane
- * among them has to follow it too: on the last-resort rule its card is still sitting to the right
- * of the crosshair while every card above it has already swung left.
+ * ── STACKED (`flipAtMidpoint`) ──
+ * A pane living in a stack of sibling panes has to place its card by the *same* rule its siblings
+ * use, or it visibly disagrees with them: `place` in StrategyAnalysisView and `alignLeft` in
+ * PinnedCrosshairLayer both swing left once the cursor passes the pane's horizontal midpoint,
+ * while this card used to sit right until it would have overflowed.
+ *
+ * Matching them means copying HOW they place it, not just when. They anchor a flipped card by CSS
+ * — `translate3d(calc(Xpx - 100%), …)` — and never measure it. This used to subtract a measured
+ * `offsetWidth` instead, and a greek card's width follows its widest reading, which changes digit
+ * count on every tick: the card's left edge crept with the numbers even under a motionless cursor.
+ * The old right-edge backstop was worse, because it could flip a card the shared rule had just
+ * decided to leave on the right — the "every other pane went left, this one didn't" case.
+ *
+ * The one measurement left is the off-left check, and it decides only WHETHER to flip, never where
+ * the card lands. It can bite only when the card is wider than half the pane, so it turns over when
+ * the row set changes and not when a digit does.
+ *
+ * `gap` applies to the un-flagged path only; the stacked one uses the siblings' own `STACK_GAP`,
+ * since agreeing with them is the whole requirement.
+ *
+ * The un-flagged path — the Tracker and the Chart view, whose cards float alone over their own
+ * chart and answer to nobody — is untouched.
  */
 export function placeTooltip(
   container: HTMLElement,
@@ -281,12 +305,27 @@ export function placeTooltip(
   gap = 16,
   flipAtMidpoint = false,
 ): void {
+  if (flipAtMidpoint) {
+    const cw = container.clientWidth;
+    // Same expression as the siblings', so the two cannot disagree at the boundary.
+    const alignLeft =
+      cursorX > cw * 0.5 &&
+      // …unless flipping would push the card off the pane's left edge entirely.
+      cursorX - STACK_GAP - tooltip.offsetWidth >= 4;
+    const x = alignLeft ? cursorX - STACK_GAP : cursorX + STACK_GAP;
+    // `transform` supersedes left/top, which an earlier call on the un-flagged path may have set.
+    tooltip.style.left = '0px';
+    tooltip.style.top = '0px';
+    tooltip.style.transform = alignLeft
+      ? `translate3d(calc(${x}px - 100%), ${desiredTop}px, 0)`
+      : `translate3d(${x}px, ${desiredTop}px, 0)`;
+    return;
+  }
+
   const tw = tooltip.offsetWidth;
   const th = tooltip.offsetHeight;
-  let x =
-    flipAtMidpoint && cursorX > container.clientWidth / 2 ? cursorX - tw - gap : cursorX + gap;
-  // Still the backstop for a card that would run off the right edge before the midpoint — a wide
-  // card in a narrow pane.
+  let x = cursorX + gap;
+  // The backstop for a card that would run off the right edge.
   if (x + tw > container.clientWidth) x = cursorX - tw - gap;
   let y = desiredTop;
   if (y + th > container.clientHeight) y = container.clientHeight - th - 8;
@@ -355,6 +394,24 @@ export interface GreekCrosshairOpts {
   style?: GreekTooltipStyle;
   /** See `placeTooltip` — set by panes that sit in a stack of sibling panes. */
   flipAtMidpoint?: boolean;
+  /**
+   * Whether the cursor is physically over this pane right now.
+   *
+   * Which of the two drivers over one card is allowed to write it. The hover binding owns the card
+   * while the cursor is in the pane and the host-synced view owns it while the cursor is out — the
+   * arrangement `createGreekTooltip`'s doc describes, and which nothing used to enforce.
+   *
+   * It has to be enforced because lightweight-charts re-fires `crosshairMove` on whichever pane
+   * last held a crosshair position whenever a series is `update()`d — including a position placed
+   * synthetically by `setCrosshairPosition`, which is exactly what a host does to a pane the cursor
+   * is NOT over. So on every live tick the hover binding woke up for a cursor that was somewhere
+   * else and re-placed the card by its own rule, fighting the host's placement: the card shook, and
+   * moving the mouse for real settled it. StrategyAnalysisView defends its own tooltips from the
+   * same echo with a `sourceChart !== hoveredChartRef.current` guard.
+   *
+   * Omit it and both drivers stay unguarded, which is correct for a chart that has only one.
+   */
+  isPointerInside?: () => boolean;
 }
 
 /**
@@ -425,7 +482,23 @@ function makeGreekTooltipRenderer(opts: GreekCrosshairOpts) {
     placeTooltip(container, tooltip, x + leftGutter(), top, 16, !!opts.flipAtMidpoint);
   };
 
-  return { hide, render };
+  /**
+   * The card's top edge, by the rule this pane's neighbours use.
+   *
+   * Stacked, the siblings park the card a fixed distance ABOVE the cursor and clamp it into the
+   * pane (`place` in StrategyAnalysisView), rather than trailing below it. Trailing is what the
+   * lone cards do, and it is kept for them. The clamp is deliberately against the pane's height
+   * alone and never the card's: a greek card gains and loses rows as measures come and go and as
+   * readings carry forward, and clamping against a measured height moved the card every time the
+   * row count changed.
+   */
+  const topFor = (cursorY: number | null): number => {
+    if (cursorY == null) return 8; // synced from elsewhere — pin it to the top of the pane
+    if (!opts.flipAtMidpoint) return cursorY + 16;
+    return Math.max(8, Math.min(cursorY - 80, container.clientHeight - 100));
+  };
+
+  return { hide, render, topFor };
 }
 
 /**
@@ -434,7 +507,7 @@ function makeGreekTooltipRenderer(opts: GreekCrosshairOpts) {
  */
 export function bindGreekCrosshair(opts: GreekCrosshairOpts): () => void {
   const { chart, container } = opts;
-  const { hide, render } = makeGreekTooltipRenderer(opts);
+  const { hide, render, topFor } = makeGreekTooltipRenderer(opts);
 
   const onCrosshair = (param: MouseEventParams) => {
     // Some crosshair events arrive with a time but no point. Deriving x from the time scale
@@ -463,6 +536,11 @@ export function bindGreekCrosshair(opts: GreekCrosshairOpts): () => void {
       hide();
       return;
     }
+    // Checked here and not at the top: "the crosshair is gone" must be honoured whoever it comes
+    // from, or a cursor that leaves the pane strands the card on its last reading. What is refused
+    // is only the PLACEMENT of a live one — this is the synthetic echo described on
+    // `isPointerInside`, and the host-synced view owns the card while the cursor is elsewhere.
+    if (opts.isPointerInside && !opts.isPointerInside()) return;
     const logical =
       param.logical ?? (synced ? logicalAtTime(chart, param.time as CrosshairTime) : null);
 
@@ -472,7 +550,7 @@ export function bindGreekCrosshair(opts: GreekCrosshairOpts): () => void {
       pt.x,
       // No cursor to dodge on a point-less event, so pin the card to the top of the pane rather
       // than trailing a y that is really just 0.
-      synced ? 8 : pt.y + 16,
+      topFor(synced ? null : pt.y),
       (s) => (param.seriesData.get(s) as { value?: number } | undefined)?.value,
     );
   };
@@ -506,15 +584,20 @@ export interface GreekTooltipView {
  */
 export function createGreekTooltip(opts: GreekCrosshairOpts): GreekTooltipView {
   const { chart, container } = opts;
-  const { hide, render } = makeGreekTooltipRenderer(opts);
+  const { hide, render, topFor } = makeGreekTooltipRenderer(opts);
 
   return {
     hide,
     showAt(time) {
       if (time == null) {
+        // Always honoured, even with the cursor in the pane: this is the host saying the crosshair
+        // is gone everywhere. The hover binding re-shows the card on the very next move.
         hide();
         return;
       }
+      // The cursor is in this pane, so the hover binding is driving the card off a real position.
+      // Overwriting it here is what put two rules on one element — see `isPointerInside`.
+      if (opts.isPointerInside?.()) return;
       let x: number | null = null;
       try {
         x = chart.timeScale().timeToCoordinate(time as UTCTimestamp);
@@ -526,7 +609,7 @@ export function createGreekTooltip(opts: GreekCrosshairOpts): GreekTooltipView {
         hide();
         return;
       }
-      render(time, logicalAtTime(chart, time), x, 8, null);
+      render(time, logicalAtTime(chart, time), x, topFor(null), null);
     },
   };
 }

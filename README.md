@@ -42,9 +42,11 @@ SERVER_PORT=3000
 NUBRA_BASE_URL=https://api2.nubra.io
 ```
 
-Optional: `NUBRA_MARGIN_BASE_URL`, `NSE_SPAN_RISK_FILE`, `LOCAL_MARGIN_EXPOSURE_RATE`,
-`LOCAL_MARGIN_NAKED_SHORT_SPAN_RATE`, `LOCAL_MARGIN_STRANGLE_SECOND_LEG_ADDON`,
-`SERVER_HOST`, `CORS_ORIGINS`.
+Optional: `NUBRA_MARGIN_BASE_URL`, `SERVER_HOST`, `CORS_ORIGINS`, and the local-margin
+overrides read by `server/marginEngine.ts` — `LOCAL_MARGIN_ELM_INDEX`,
+`LOCAL_MARGIN_ELM_DEEP_OTM`, `LOCAL_MARGIN_ELM_LONG_DATED`, `LOCAL_MARGIN_ELM_EXPIRY_ADDON`,
+`LOCAL_MARGIN_ELM_STOCK`, `LOCAL_MARGIN_MCX_RATE_FLOOR`, `LOCAL_MARGIN_MCX_RATE_CAP`,
+`LOCAL_MARGIN_SHORT_OPTION_MIN`, `LOCAL_MARGIN_DEFAULT_IV`.
 
 > **`.env`, `session.json` and `uat-session.json` must never be committed.** They hold the
 > MPIN, the phone number, and a live broker auth token. All three were tracked until
@@ -447,9 +449,10 @@ option chain, straddle, strategy, basket, backtest, watchlist, and tracker. Supp
 are single, horizontal split, vertical split, grid, left-heavy, and right-heavy.
 
 `src/lib/` contains Greek aggregation/rendering, open-interest rendering, GEX calculations,
-strategy templates, chart lifecycle guards (`chartLifecycle.ts`), and shared utilities. `src/backtest/` contains frontend backtest types,
-leg configuration, intraday trade charts, and client analysis helpers. Shared frontend domain
-interfaces live in `src/types.ts`.
+strategy templates, chart lifecycle guards (`chartLifecycle.ts`), pinned-crosshair state
+(`chartPins.ts`), cursor-following axis selection (`axisFollow.ts`), and shared utilities.
+`src/backtest/` contains frontend backtest types, leg configuration, intraday trade charts, and
+client analysis helpers. Shared frontend domain interfaces live in `src/types.ts`.
 
 ### Nubra BT greeks pane
 
@@ -518,11 +521,12 @@ ignore programmatic echoes — the `param.point === undefined && param.time !== 
 
 #### Price scales: one full-height scale per measure, and two ways to read it
 
-The pane shows two visible axes — the underlying reference line owns **right**, the greeks own
-**left** — plus a private overlay scale per measure. Putting every measure's totals on the one left
-axis does not work: Vega sits near +70 and Theta near −75, so each holds the axis open for the
-other, neither can ever expand, and zooming changes nothing because every window is still spanned
-by both. On CRUDEOIL, Theta at −246 flattened Vega into a straight line.
+The pane shows two visible axes — the underlying reference line owns **right**, and **left** is
+driven by the anchor described below — plus a private overlay scale per measure. Putting every
+measure's totals on one shared axis does not work: Vega sits near +70 and Theta near −75, so each
+holds the axis open for the other, neither can ever expand, and zooming changes nothing because
+every window is still spanned by both. On CRUDEOIL, Theta at −246 flattened Vega into a straight
+line.
 
 Separation comes from the **scales**, not from the space. Every measure's overlay scale spans the
 **full** pane with `autoScale: true`, so lightweight-charts re-fits each one to the visible window
@@ -535,8 +539,11 @@ An earlier version instead sliced the pane into disjoint horizontal `scaleMargin
 per measure. That did separate them, but it also pinned Vega to the top third and Theta to the
 bottom third for good and left each measure a third of the height to move in. `ScaleBand` and
 `setBand` are gone; the cost of removing them, stated plainly, is that vertical position is no
-longer comparable **across** measures — a Theta line above a Vega line means nothing. Each line's
-value is on its own last-value tag and in the crosshair tooltip, which is where it should be read.
+longer comparable **across** measures — a Theta line above a Vega line means nothing.
+
+That cost is what the next two sections pay off. Nine lines sharing a pane are only readable if you
+can put real ticks against any one of them and magnify any one of them, and neither is possible
+through the library's own controls once a line is on an overlay scale.
 
 #### The left axis follows the cursor
 
@@ -570,6 +577,13 @@ the ticks changes the axis to whatever you passed over.
 The anchor is not a reading, so `greekRows` takes a list of series to exclude rather than one —
 otherwise it appears as a nameless row in every tooltip and pinned card.
 
+Two consequences worth knowing. Before the first hover there is no target, so the **left axis is
+blank** rather than defaulting to a measure — a deliberate choice: an axis silently describing a
+line you did not pick is worse than one that is visibly waiting. And a measure switched off, or
+flipped between mine/industry or totals/Δ, destroys its series; the hit test self-heals on the next
+hover (a target missing from the candidate list has no claim to stickiness), but the caption and any
+lock are cleared eagerly so neither can sit there naming a line that has gone.
+
 #### Stretching the lines
 
 The same two-gutter limit means the library's own price-axis drag reaches one measure's totals and
@@ -578,8 +592,22 @@ leaves the other seven untouched: `handleScale.axisPressedMouseMove.price` is re
 Pane-body price scrolling is no escape either — it uses `pane.defaultPriceScale()`.
 
 A drag on **either** gutter is therefore claimed capture-phase (the trick `bindPinTrigger` uses) and
-applies one `{ zoom, pan }` factor to every greek and IV line at once; shift-drag pans. `handleScale`
-itself is untouched, so the time axis, wheel and pinch are exactly as they were.
+applies one `{ zoom, pan }` factor to every greek and IV line at once. `handleScale` itself is
+untouched, so the time axis, wheel and pinch are exactly as they were, and the library's own axis
+handler never sees the mousedown and cannot double-apply on top.
+
+| Gesture                         | Effect                                                               |
+| ------------------------------- | -------------------------------------------------------------------- |
+| Drag up / down on either gutter | Stretch or compress every line, same direction as the native gesture |
+| Shift + drag on either gutter   | Pan every line together                                              |
+| Hover a line                    | The left axis takes its range and number format                      |
+| Click the header caption        | Lock / unlock the axis on that line                                  |
+| `⟲`, or double-click the plot   | Back to 1×, unlocked, everything auto-scaling                        |
+
+The zoom is exponential in the drag distance, so the feel is the same at 1× and at 10× — a linear
+factor crawls when you are zoomed in and lurches when you are not. A factor other than 1 is shown
+beside `⟲` (`2.4×`); at 1 it is hidden, because a readout that is always on screen stops being a
+signal.
 
 What moves is a **factor over each scale's own auto-fit**, never a fixed range — `makeVScaleProvider`
 in `greekRenderer.ts` rewrites what `original()` returned. Every scale stays on autoscale, so each
@@ -702,7 +730,7 @@ basket, CE and PE as separate lines. The delta band is CE `[0.05, 0.609]` and PE
 | Basket      | `fixed` / `floating` | Membership locked at t₀, vs. re-filtered every snapshot (default `floating`) |
 | Composition | `chained` / `raw`    | Splice out membership steps, vs. plain Σ (default `chained`)                 |
 | Baseline    | `session` / `window` | Where t₀ sits (default `session`)                                            |
-| Series      | totals / diff / both | Absolute sum (solid) vs. change-from-t₀ (dashed, overlay scale)              |
+| Series      | totals / diff / both | Absolute sum (solid) vs. change-from-t₀ (dashed, overlay scale; default `diff`) |
 
 History loads a trailing window ending at the selected day — 7 days by default, matching the
 Chart and Tracker candle loads. Hosts reviewing a single trade pass `histDays={1}`, so a Nubra BT
@@ -758,7 +786,7 @@ as a one-bar collapse of the whole total. A leg silent for longer than `CARRY_ST
 
 History is reconstructed at 1-minute resolution (per-point IV inversion is too slow for 1s);
 the live tail stays true per-tick from the `option_chain` WS feed, with a 4-second REST
-fallback poll once WS has been silent for 6 seconds. Precedence in `mergeHistory` is:
+fallback poll once WS has been silent for 6 seconds. Precedence in `buildHistorySnapshots` is:
 
 1. Broker-served `delta`/`vega`/`theta` if the timeseries carries them.
 2. Broker-served `iv` + Black-76.
@@ -807,7 +835,7 @@ vega). Our `close`-inverted IV lands inside it 41.6% of the time, and when outsi
 median 0.008 vol pts, biased above the mid 3.5:1 — last trade sits above mid more often than
 below, which is a price-selection artifact and not a model difference.
 
-`mergeHistory` still derives IV by inversion on the broker-Greek path (gated on the IV overlay
+`buildHistorySnapshots` still derives IV by inversion on the broker-Greek path (gated on the IV overlay
 being active, since Vega/Theta never read it). Given the above that is now a _choice_ rather
 than a necessity, and a cheap one to revisit — [useGreekOverlay.ts](src/hooks/useGreekOverlay.ts)
 requests `'iv'` in `HIST_FIELDS`, the one name that is never served, so a single-word change to
@@ -868,7 +896,7 @@ regression-tested against finite differences of the function's own price.
 `impliedVolatility()` returns **NaN** when no finite IV exists (sub-intrinsic or
 past the no-arbitrage bound) or the solve fails — it never substitutes a default. It rejects
 out-of-bound prices up front, seeds from Brenner–Subrahmanyam, runs Newton-Raphson, and falls
-back to bisection on `[1e-4, 5]` when vega collapses. `mergeHistory` drops unpriceable legs
+back to bisection on `[1e-4, 5]` when vega collapses. `buildHistorySnapshots` drops unpriceable legs
 and reports the count via the `partial` history state, so gaps are visible rather than
 smoothed over.
 
@@ -940,12 +968,30 @@ so far-dated selections correctly get no rank. Measured 1-year sample: 45 / 129 
 
 Basket margin follows this chain:
 
-1. Request Nubra v3 `/sentinel/orders/funds_required` using `NUBRA_MARGIN_BASE_URL`.
-2. If unavailable, use `server/marginEngine.ts` with configurable rates and the optional NSE
-   SPAN risk file.
+1. Request Nubra v3 `/sentinel/orders/funds_required` using `NUBRA_MARGIN_BASE_URL`. This is
+   the authoritative number and it works — the response comes back `estimated: false`,
+   `source: nubra-margin-api`.
+2. Only if that request fails, fall back to `server/marginEngine.ts`, which prices the basket
+   from the live feed: a 16-scenario SPAN simulation on NSE, or a per-commodity scan rate on
+   MCX. The response is tagged `estimated: true` and the UI badges it `(Est.)`.
 
 `normalizeMarginResponse()` converts supported broker response shapes into total margin,
 SPAN, exposure, option premium, margin benefit, and per-leg margin values.
+
+**The `exchange` field on the request decides which of the two you get.** The route builds the
+v3 payload from it, and an MCX basket tagged `NSE` is rejected outright with
+`"Strategy Flexi is not supported in MCX"` — so it silently degrades to the local estimate,
+priced by the wrong model. Callers holding only a position (no refdata row) must therefore read
+the exchange off the **zanskar** name, never `display_name`: `strategyPositionExchange()` in
+`src/lib/strategyPositionMeta.ts` is the helper that does this correctly, and it scans every
+leg rather than trusting the first. See the MCX section below for why `display_name` cannot
+work. This bit the Positions panel until 2026-08-17, where
+`exchangeFromName(display_name || zanskar_name)` short-circuited on the one name that can never
+match the MCX shape: a crude strangle whose real margin was ₹5,08,135 displayed ₹1,71,125.
+
+An estimate is not a substitute for the broker figure — it disagreed by a factor of three in
+that case. Treat a persistent `(Est.)` badge on a live position as a bug to diagnose, not as a
+number to trust.
 
 ---
 
@@ -1003,6 +1049,15 @@ orders only ever carry a name, so `exchangeFromName()` (client) and `parseDispla
 (server) read the exchange off the zanskar shape; the old `/^([A-Z]+)/` asset rule returns
 **"OPT"** for every MCX instrument, which would have left commodity positions holding no feed.
 
+A position carries **two** names and only one of them works here. `zanskar_name` is
+`OPT_CRUDEOIL_20260817_PE_780000`; `display_name` is the human `CRUDEOIL 7800 PE`, which is
+deliberately stripped of the `OPT_`/`FUT_` prefix and therefore **can never** match the MCX
+pattern. Because `display_name` is always populated, writing
+`exchangeFromName(p.display_name || p.zanskar_name)` short-circuits on the name that always
+fails and silently resolves every commodity position to `NSE`. Always pass the zanskar name
+first, or better, call `strategyPositionExchange(positions)`, which encodes the precedence and
+checks all the legs.
+
 **Verification.** Reconstructing delta from our own Black-76 and comparing against the broker's
 historical `delta` scores **0.00137** mean error on crude (15,638 points) versus **0.00125** on
 NIFTY measured identically — one control that validates `F`, `T` and the model together. Our
@@ -1011,11 +1066,15 @@ NIFTY, which is the same _relative_ accuracy given crude runs ~65 % IV and NIFTY
 
 **Two caveats, both deliberate:**
 
-- **Margin is not calibrated for MCX.** Every constant in `server/marginEngine.ts` is an NSE
-  equity-derivatives parameter, and the broker margin API is dead, so there is nothing to defer
-  to. Commodity legs run the same model-driven 16-scenario simulation and the response says
-  "NOT calibrated to exchange parameters" outright rather than passing off an NSE-rated number.
-  `LOCAL_MARGIN_ELM_COMMODITY` and `LOCAL_MARGIN_PSR_COMMODITY` take real figures once obtained.
+- **The local MCX margin estimate is uncalibrated, so prefer the broker.** The broker margin API
+  does answer for MCX and is authoritative — request it with `exchange=MCX` and note that the
+  exchange refuses the **Flexi** strategy tag, which is what an `NSE`-tagged commodity basket
+  sends. The local fallback in `computeCommodityMargin()` is deliberately a different shape from
+  the NSE path: MCX behaves as a flat per-commodity charge (a scan rate on spot, plus premium,
+  bounded by `LOCAL_MARGIN_MCX_RATE_FLOOR`/`_CAP`) with **no cross-leg netting**, so the
+  16-scenario SPAN simulation is not merely mis-rated for commodities, it is the wrong model.
+  The rate is derived from live IV, realised vol and gaps rather than an exchange table, so
+  treat it as an order-of-magnitude figure only.
 - **`optionchains/{sym}/price` returns 500 for MCX** in every documented symbol form, while NSE
   works through the identical code path — an upstream limitation. Harmless: its only caller is a
   fallback that fires when the chain reports no `cp`, and the MCX chain always carries one.

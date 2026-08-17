@@ -175,13 +175,33 @@ describe('placeTooltip', () => {
     // every other pane's card had already swung left — the whole point of the flag.
     const tip = card(220, 120);
     placeTooltip(pane(1900, 240), tip, 1300, 8, 16, true);
-    expect(tip.style.left).toBe(`${1300 - 220 - 16}px`);
+    expect(tip.style.transform).toBe('translate3d(calc(1276px - 100%), 8px, 0)');
   });
 
   it('stays right of the crosshair before the midpoint', () => {
     const tip = card(220, 120);
     placeTooltip(pane(1900, 240), tip, 600, 8, 16, true);
-    expect(tip.style.left).toBe(`${600 + 16}px`);
+    expect(tip.style.transform).toBe('translate3d(624px, 8px, 0)');
+  });
+
+  it('places a flipped card without consulting its width', () => {
+    // The bug this guards: a greek card's width follows its widest reading, so measuring it made
+    // the card creep sideways on every tick under a motionless cursor.
+    const narrow = card(190, 120);
+    const wide = card(320, 120);
+    placeTooltip(pane(1900, 240), narrow, 1300, 8, 16, true);
+    placeTooltip(pane(1900, 240), wide, 1300, 8, 16, true);
+    expect(wide.style.transform).toBe(narrow.style.transform);
+  });
+
+  it('places a flipped card without consulting its height', () => {
+    // Same story vertically: rows come and go as measures are toggled and as readings carry
+    // forward, and the old clamp against a measured height moved the card each time.
+    const short = card(220, 90);
+    const tall = card(220, 200);
+    placeTooltip(pane(1900, 240), short, 1300, 120, 16, true);
+    placeTooltip(pane(1900, 240), tall, 1300, 120, 16, true);
+    expect(tall.style.transform).toBe(short.style.transform);
   });
 
   it('without the flag, only an overflow moves it — the Tracker/Chart behaviour', () => {
@@ -195,9 +215,11 @@ describe('placeTooltip', () => {
   });
 
   it('keeps a flipped card inside the pane rather than off its left edge', () => {
+    // Wider than half the pane, so flipping would put it off-screen: it stays on the right. This
+    // is the one place the width is still read, and it decides only whether to flip.
     const tip = card(600, 120);
     placeTooltip(pane(700, 240), tip, 400, 8, 16, true);
-    expect(tip.style.left).toBe('4px');
+    expect(tip.style.transform).toBe('translate3d(424px, 8px, 0)');
   });
 });
 

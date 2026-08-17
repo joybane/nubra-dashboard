@@ -1733,6 +1733,15 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   );
 
   /**
+   * The bar grid handed to the Indicators pane.
+   *
+   * Memoised rather than written inline: `evalResult?.underlyingBars ?? []` produced a fresh array
+   * on every render of this view, and the pane rebuilds its underlying line and re-snaps three
+   * greek overlays whenever that prop's identity moves. Only a new run should do that.
+   */
+  const indicatorBars = useMemo(() => evalResult?.underlyingBars ?? [], [evalResult]);
+
+  /**
    * Keep the Indicators pane scrolling AND crosshair-locked with the three panes above it.
    *
    * A standalone effect rather than another entry in the big chart block: that block creates and
@@ -3857,7 +3866,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                   >
                     <GreekIndicatorPane
                       instrument={indicatorInstrument}
-                      bars={evalResult?.underlyingBars ?? []}
+                      bars={indicatorBars}
                       theme={theme}
                       // A backtest is read one session at a time, and the run already names its
                       // day — reconstructing a wider trailing window would be work nobody reads.

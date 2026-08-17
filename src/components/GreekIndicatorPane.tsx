@@ -9,7 +9,7 @@
 // `GreekButton` tray, the same `greekAggregator` maths and `greekRenderer` panes. A change to a
 // Greek formula or a control lands here and in the Chart and Tracker views at once.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
   CrosshairMode,
@@ -40,8 +40,8 @@ import {
 } from '../lib/greekTooltip';
 import { pickAxisTarget, type AxisCandidate } from '../lib/axisFollow';
 import type { VScale } from '../lib/greekRenderer';
-import { removeChart } from '../lib/chartLifecycle';
-import { barsToSessionLine, fmtPrice } from '../lib/utils';
+import { isChartLive, removeChart } from '../lib/chartLifecycle';
+import { barsToSessionLine, fmtPrice, isMarketSessionChartTime } from '../lib/utils';
 import PinnedCrosshairLayer from './PinnedCrosshairLayer';
 import PinCompareStrip, { type CompareRow } from './PinCompareStrip';
 import { bindPinTrigger, type ChartPin } from '../lib/chartPins';
@@ -203,6 +203,9 @@ export default function GreekIndicatorPane({
   // The card the HOST drives, for instants the cursor is in another pane for. Distinct from the
   // hover binding below, which owns the same element while the cursor is in this pane.
   const syncTooltipRef = useRef<GreekTooltipView | null>(null);
+  // Which of those two is allowed to write the card right now. A ref, not state: it is read inside
+  // crosshair callbacks on every tick and must never cause a render.
+  const pointerInsideRef = useRef(false);
 
   // ── The left axis and the line it currently describes ──────────────────────
   // `anchorRef` plots nothing. It exists only to occupy the 'left' scale so that scale can be
@@ -251,15 +254,20 @@ export default function GreekIndicatorPane({
   // repaints, without re-rendering this component or re-running the hooks.
   const vScaleRef = useRef<VScale>({ zoom: 1, pan: 0 });
   const readVScale = useCallback(() => vScaleRef.current, []);
-  const overlayDeps = {
-    chartRef,
-    currentInstRef,
-    allBarsRef,
-    inline: true,
-    vScale: readVScale,
-    histDays,
-    initialDay,
-  };
+  // Memoised so the three hooks below are handed the same argument object across renders — this
+  // view re-renders on every price tick, and every ref in here is stable by construction.
+  const overlayDeps = useMemo(
+    () => ({
+      chartRef,
+      currentInstRef,
+      allBarsRef,
+      inline: true as const,
+      vScale: readVScale,
+      histDays,
+      initialDay,
+    }),
+    [readVScale, histDays, initialDay],
+  );
   const vega = useGreekOverlay({ greek: 'vega', ...overlayDeps });
   const theta = useGreekOverlay({ greek: 'theta', ...overlayDeps });
   const iv = useGreekOverlay({ greek: 'iv', ...overlayDeps });
@@ -413,6 +421,26 @@ export default function GreekIndicatorPane({
     });
     observer.observe(containerRef.current);
 
+    // Which of the two tooltip drivers below may write the card — see `isPointerInside` in
+    // greekTooltip. Pointer events rather than mouse ones so a touch drag counts as being in the
+    // pane, and `pointercancel` because a drag stolen by the browser fires no `pointerleave`.
+    //
+    // `pointermove` as well as `pointerenter`, in the CAPTURE phase: enter alone never fires for a
+    // cursor that was already over the pane when it mounted, and a bubble-phase listener on this
+    // container runs AFTER the chart canvas' own handler — so the first move would be judged
+    // against a flag that had not been set yet.
+    const paneEl = containerRef.current;
+    const onPointerIn = () => {
+      pointerInsideRef.current = true;
+    };
+    const onPointerOut = () => {
+      pointerInsideRef.current = false;
+    };
+    paneEl.addEventListener('pointerenter', onPointerIn, true);
+    paneEl.addEventListener('pointermove', onPointerIn, true);
+    paneEl.addEventListener('pointerleave', onPointerOut, true);
+    paneEl.addEventListener('pointercancel', onPointerOut, true);
+
     const tooltipOpts =
       tooltipRef.current && containerRef.current
         ? {
@@ -428,6 +456,7 @@ export default function GreekIndicatorPane({
             // swings to the same side of the crosshair they do.
             style: PANEL_TOOLTIP_STYLE,
             flipAtMidpoint: true,
+            isPointerInside: () => pointerInsideRef.current,
           }
         : null;
     const unbindCrosshair = tooltipOpts ? bindGreekCrosshair(tooltipOpts) : () => {};
@@ -438,6 +467,11 @@ export default function GreekIndicatorPane({
 
     return () => {
       observer.disconnect();
+      paneEl.removeEventListener('pointerenter', onPointerIn, true);
+      paneEl.removeEventListener('pointermove', onPointerIn, true);
+      paneEl.removeEventListener('pointerleave', onPointerOut, true);
+      paneEl.removeEventListener('pointercancel', onPointerOut, true);
+      pointerInsideRef.current = false;
       unbindCrosshair();
       syncTooltipRef.current = null;
       onChartReady?.(null, null, null);
@@ -470,9 +504,38 @@ export default function GreekIndicatorPane({
   // The overlays snap their points onto this grid (buildTimeMapper), so a bars change without a
   // refresh would leave greek points mapped against a grid that no longer exists.
   const hasFittedRef = useRef(false);
+  // Ends and length of the grid this effect last rebuilt from. The hosts hand over a fresh array
+  // on every price tick with only the trailing bar's VALUES changed — see the fast path below.
+  const gridSigRef = useRef('');
   useEffect(() => {
     const line = lineRef.current;
     if (!line) return;
+    const n = bars.length;
+    const last = n ? bars[n - 1] : null;
+    const sig = n ? `${n}:${bars[0].time}:${last!.time}:${exchange}` : `0::${exchange}`;
+
+    /**
+     * Nothing but the trailing bar's values moved: `update` it and stop.
+     *
+     * This is the common case by a wide margin — the hosts replace the array identity on every
+     * underlying tick so this effect notices the in-place mutation — and it used to cost a
+     * `barsToSessionLine` pass over every loaded bar, two full-array `setData`s, and three greek
+     * redraws, several times a second.
+     *
+     * Identical output, not an approximation: `markSessionBreaks` only recolours a point when a
+     * LATER point opens a new day, so the final point never carries SESSION_BREAK_COLOR and a
+     * plain `{time, value}` is exactly what the rebuild would have produced for it. The greeks are
+     * left alone deliberately — the bar grid they snap onto has not moved a column, and they
+     * redraw off their own chain ticks.
+     */
+    if (sig === gridSigRef.current && last && isMarketSessionChartTime(last.time, exchange)) {
+      const pt = { time: last.time, value: last.close } as Parameters<typeof line.update>[0];
+      line.update(pt);
+      anchorRef.current?.update(pt);
+      return;
+    }
+    gridSigRef.current = sig;
+
     const sessionLine = barsToSessionLine(bars, exchange) as Parameters<typeof line.setData>[0];
     line.setData(sessionLine);
     // The anchor gets the same points — not to draw them (it is transparent) but so it has data in
@@ -569,8 +632,19 @@ export default function GreekIndicatorPane({
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
-    const onMove = (param: MouseEventParams) => {
-      if (axisLockedRef.current) return;
+
+    // Coalesced to one hit test per frame. The pass below enumerates every series in the pane and
+    // asks each for a coordinate — a forced layout per line, nine of them with all three measures
+    // on — and the tooltip runs its own enumeration off the same event. A pointer emits far more
+    // moves than there are frames to draw them in, and only the last one of a frame can be seen.
+    let raf = 0;
+    let pending: MouseEventParams | null = null;
+
+    const run = () => {
+      raf = 0;
+      const param = pending;
+      pending = null;
+      if (!param || axisLockedRef.current || !isChartLive(chart)) return;
       const logical =
         param.logical ??
         (param.time != null ? logicalAtTime(chart, param.time as CrosshairTime) : null);
@@ -591,8 +665,17 @@ export default function GreekIndicatorPane({
       }
       setAxisTarget(pickAxisTarget(candidates, param.point?.y ?? null, axisTargetRef.current));
     };
+
+    const onMove = (param: MouseEventParams) => {
+      if (axisLockedRef.current) return;
+      pending = param;
+      if (!raf) raf = requestAnimationFrame(run);
+    };
+
     chart.subscribeCrosshairMove(onMove);
     return () => {
+      if (raf) cancelAnimationFrame(raf);
+      pending = null;
       try {
         chart.unsubscribeCrosshairMove(onMove);
       } catch {

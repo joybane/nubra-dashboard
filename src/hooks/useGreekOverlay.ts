@@ -59,6 +59,12 @@ import {
 } from '../lib/GexService';
 import { computeIvRank, dteFromExpiry, type IvObservation, type IvRankResult } from '../lib/ivRank';
 import { sharedJson } from '../lib/sharedRequest';
+import {
+  buildGreekHistory,
+  getGreekHistory,
+  STALE_TODAY_MS,
+  type GreekHistoryKey,
+} from '../lib/greekHistoryCache';
 import { useWs } from './useWsContext';
 
 /**
@@ -115,11 +121,11 @@ function fetchHistoricalShared(body: unknown): Promise<HistoricalResp> {
 // option price (`close`) + spot. Per-point IV inversion makes 1s reconstruction
 // prohibitively expensive across a whole basket, so history is built at 1m; the
 // live WS path stays true per-tick. If a future API serves Greek fields directly,
-// they're used as-is (no reconstruction) — see mergeHistory.
+// they're used as-is (no reconstruction) — see buildHistorySnapshots.
 const HIST_INTERVAL = '1m';
 // `iv` is requested on the same speculative basis as delta/vega/theta: the chain endpoint
 // serves it today, so if the timeseries does too we skip inversion entirely and land history
-// on the same volatility footing as the live tail. Absent, mergeHistory inverts as before.
+// on the same volatility footing as the live tail. Absent, buildHistorySnapshots inverts as before.
 const HIST_FIELDS = ['close', 'cumulative_oi', 'delta', 'vega', 'theta', 'iv'];
 
 type TsV = { ts: number; v: number };
@@ -350,7 +356,11 @@ export function useGreekOverlay({
   // with it, so a raw sum steps for reasons that are not Greek movement. 'raw' stays one click
   // away for reading the live basket's actual level.
   const [composition, setCompositionState] = useState<Composition>('chained');
-  const [seriesMode, setSeriesModeState] = useState<SeriesMode>('both');
+  // Difference by default: the Δ lines are what the overlay is read for — the level of an
+  // aggregate greek is a scale artefact of the basket, its movement since t₀ is the signal.
+  // Opening on 'both' also drew four lines per measure, i.e. double the per-draw work, for two
+  // of them nobody was looking at. 'totals'/'both' stay one click away.
+  const [seriesMode, setSeriesModeState] = useState<SeriesMode>('diff');
   const [showCalls, setShowCallsState] = useState(true);
   const [showPuts, setShowPutsState] = useState(true);
   const [ivMeasure, setIvMeasureState] = useState<IvMeasure>('atm');
@@ -397,6 +407,21 @@ export function useGreekOverlay({
   const lastWsTickRef = useRef(0); // last time a live WS option_chain tick was applied
   const pollTimerRef = useRef<number | null>(null);
   const pollBusyRef = useRef(false);
+  /**
+   * Bumped on every change to `snapshotsRef`, and the reason `redraw` can trust its signature.
+   *
+   * A counter rather than the map's `size`, because `storeSnapshot` deliberately OVERWRITES the
+   * tail bucket inside `SNAP_MIN_GAP_MS` instead of adding one: the size is unchanged and the data
+   * is not, and a size-based signature would sit on a stale line for as long as the ticks kept
+   * landing in the same bucket.
+   */
+  const snapVersionRef = useRef(0);
+  /** Mirrors `ivLegend`, so the draw path can tell a real change from a repeat without a render. */
+  const ivLegendRef = useRef<IvPoint | null>(null);
+  /** The last signature actually drawn. Empty forces the next `redraw` through — see `invalidateDraw`. */
+  const lastDrawSigRef = useRef('');
+  // Cached bar-time grid for `buildTimeMapper`, keyed by `barsSignature()`.
+  const mapperRef = useRef<{ sig: string; times: number[] } | null>(null);
 
   // Mirror settings into refs so the WS callback and redraw read fresh values.
   const cfgRef = useRef({
@@ -502,6 +527,9 @@ export function useGreekOverlay({
   function syncPanes(m: Method | 'both') {
     const chart = chartRef.current;
     if (!chart || !enabledRef.current) return;
+    // Any pane created below starts empty, and `redraw`'s signature describes the DATA — which has
+    // not changed. Without this the new pane is never fed and stays blank until something else moves.
+    invalidateDraw();
     const paneOpts = {
       ...(inline ? { inline: true, paneIndex: 0, axisScaleId } : {}),
       ...(vScale ? { vScale } : {}),
@@ -554,6 +582,8 @@ export function useGreekOverlay({
     indPaneRef.current = null;
     ivPaneRef.current?.destroy();
     ivPaneRef.current = null;
+    // Whatever is built next starts empty — see `invalidateDraw`.
+    invalidateDraw();
   }
 
   // ── Redraw: recompute series from snapshots and push to panes ───────────────
@@ -585,16 +615,65 @@ export function useGreekOverlay({
   }
 
   /**
+   * Publish the IV pane's latest reading, but only when it has actually moved.
+   *
+   * This is the only setState on the draw path, and it re-renders the HOST — which re-runs all
+   * three measures' hook bodies. The tail point is unchanged through most draws (a redraw off a
+   * mid-bucket tick, or off a bars change that moved no data), and paying a full host render to
+   * write the same two numbers back was the cost of finding that out.
+   */
+  function applyIvLegend(next: IvPoint | null) {
+    const prev = ivLegendRef.current;
+    if (next?.ts === prev?.ts && next?.value === prev?.value) return;
+    ivLegendRef.current = next;
+    setIvLegend(next);
+  }
+
+  /**
+   * Cheap identity for the loaded bar grid: what `buildTimeMapper` and `redraw` both key off.
+   *
+   * Ends and length rather than contents. A host replaces this array on every price tick with the
+   * trailing bar's VALUES changed — which moves no grid column, so nothing the greeks are snapped
+   * onto has moved either. Anything that does move the grid (a new bar, a timeframe switch, a
+   * symbol change, a fresh load) changes the length or one of the two ends.
+   */
+  function barsSignature(): string {
+    const bars = allBarsRef.current || [];
+    const n = bars.length;
+    if (!n) return `0::${currentInstRef.current?.exchange ?? ''}`;
+    return `${n}:${bars[0].time}:${bars[n - 1].time}:${currentInstRef.current?.exchange ?? ''}`;
+  }
+
+  /**
+   * Force the next `redraw` past its signature check.
+   *
+   * Called wherever the panes are destroyed and rebuilt: the signature describes the DATA, and a
+   * brand-new empty pane holding the same data would otherwise be left permanently blank.
+   */
+  function invalidateDraw() {
+    lastDrawSigRef.current = '';
+  }
+
+  /**
    * Snap a greek epoch-ms timestamp onto the loaded candle grid so greek points
    * coincide with candles (no off-grid columns, no stretch past the last candle).
    * Floor-snaps to the bar containing the timestamp; clamps live/future ticks to
    * the last bar; drops points before the chart's first bar.
+   *
+   * The sorted grid is cached behind `barsSignature()`. Rebuilding it meant copying and sorting
+   * every loaded bar on EVERY draw, per measure — and on the Tracker's 1s bars that is tens of
+   * thousands of entries sorted three times over for a grid that had not moved.
    */
   function buildTimeMapper(): TimeMapper {
-    const bars = allBarsRef.current || [];
-    const times: number[] = [];
-    for (const b of bars) if (typeof b.time === 'number') times.push(b.time);
-    times.sort((a, b) => a - b);
+    const sig = barsSignature();
+    if (mapperRef.current?.sig !== sig) {
+      const bars = allBarsRef.current || [];
+      const built: number[] = [];
+      for (const b of bars) if (typeof b.time === 'number') built.push(b.time);
+      built.sort((a, b) => a - b);
+      mapperRef.current = { sig, times: built };
+    }
+    const times = mapperRef.current.times;
     const n = times.length;
     return (ms: number): number | null => {
       const ct = Math.floor(ms / 1000) + IST_OFFSET;
@@ -616,8 +695,6 @@ export function useGreekOverlay({
 
   function redraw() {
     if (!enabledRef.current) return;
-    const snaps = [...snapshotsRef.current.values()];
-    if (!snaps.length) return;
     const {
       method: m,
       basket: b,
@@ -628,13 +705,44 @@ export function useGreekOverlay({
       showPuts: sp,
       ivMeasure: im,
     } = cfgRef.current;
+
+    /**
+     * Everything a draw's output depends on. Unchanged means the rebuild would land the identical
+     * points on the identical lines, so there is nothing to do.
+     *
+     * Worth the check because `refresh()` is called far more often than the data changes: a host
+     * fires it for every bars change, and the bars array is replaced on every price tick. Each of
+     * those used to run the whole pipeline — copy the snapshot map, re-sort it, re-run `buildSeries`
+     * over every leg of every snapshot, then map+sort each line — three times over, once per
+     * measure, to redraw exactly what was already on screen.
+     */
+    const sig = [
+      snapVersionRef.current,
+      m,
+      b,
+      bl,
+      cmp,
+      mode,
+      sc,
+      sp,
+      im,
+      lotSizeRef.current,
+      barsSignature(),
+    ].join('|');
+    if (sig === lastDrawSigRef.current) return;
+
+    const snaps = [...snapshotsRef.current.values()];
+    if (!snaps.length) return;
+    // Recorded only once the draw is committed to, so an early return above leaves the next call
+    // free to try again.
+    lastDrawSigRef.current = sig;
     const mapTime = buildTimeMapper();
 
     // Checked against the discriminant rather than `isIv` so `greek` narrows to GreekName below.
     if (greek === 'iv') {
       const pts = buildIvSeries(snaps, { measure: im });
       ivPaneRef.current?.setData(pts, mapTime);
-      setIvLegend(pts.length ? pts[pts.length - 1] : null);
+      applyIvLegend(pts.length ? pts[pts.length - 1] : null);
       return;
     }
 
@@ -711,10 +819,12 @@ export function useGreekOverlay({
     if (!force && snap.ts - lastSnapMsRef.current < SNAP_MIN_GAP_MS) {
       // overwrite the live tail without adding a new bucket
       snapshotsRef.current.set(lastSnapMsRef.current, { ...snap, ts: lastSnapMsRef.current });
+      snapVersionRef.current++;
       return;
     }
     snapshotsRef.current.set(snap.ts, snap);
     lastSnapMsRef.current = snap.ts;
+    snapVersionRef.current++;
   }
 
   // ── Live WS updates ──────────────────────────────────────────────────────
@@ -892,6 +1002,7 @@ export function useGreekOverlay({
 
       snapshotsRef.current = new Map();
       lastSnapMsRef.current = 0;
+      snapVersionRef.current++;
 
       // Default to the latest trading day; preserve a past day the user already picked.
       const today = defaultGreekDay();
@@ -961,6 +1072,7 @@ export function useGreekOverlay({
     greekDateRef.current = dateStr;
     snapshotsRef.current = new Map();
     lastSnapMsRef.current = 0;
+    snapVersionRef.current++;
     // Re-seed the live point only when returning to TODAY during market hours — not merely to
     // the last loaded bar's day, which on a historical host is a past session.
     if (
@@ -1161,31 +1273,65 @@ export function useGreekOverlay({
     const startDate = new Date(endDate.getTime() - windowDays * 86_400_000);
     const isMcx = exchange.toUpperCase() === 'MCX';
 
-    try {
+    const cacheKey: GreekHistoryKey = {
+      exchange,
+      asset: wsAssetRef.current || getChainAsset(inst),
+      expiries: [...new Set([...meta.values()].map((m) => m.exp))],
+      day: dateStr,
+      windowDays,
+      withIv: isIv,
+    };
+
+    /** Apply a reconstruction and report it through the status pill. Shared by both paths below. */
+    const apply = (value: { snapshots: Map<number, ChainSnapshot>; dropped: number }) => {
+      const added = commitHistory(value.snapshots);
+      // `added` is 0 on a re-apply of the same buckets — already committed is still loaded, so the
+      // pill must read off the reconstruction's own size, not off what this call happened to add.
+      const ok = value.snapshots.size > 0;
+      setDroppedLegs(value.dropped);
+      setHistState(ok ? (value.dropped > 0 ? 'partial' : 'ok') : 'nogreeks');
+      setHistGranularity(ok ? HIST_INTERVAL : '');
+      if (!ok) console.warn(`[${greekLabel}] no historical option/spot data for ${dateStr}.`);
+      if (value.dropped > 0)
+        console.warn(`[${greekLabel}] dropped ${value.dropped} unpriceable legs for ${dateStr}.`);
+      if (added || ok) requestDraw();
+    };
+
+    /** The expensive path: fetch the window and pivot it. Runs at most once per cache key. */
+    const reconstruct = async () => {
       const [perName, spot, observedFwd] = await Promise.all([
         requestHistory(names, 'OPT', exchange, startDate, endDate),
         fetchSpotHistory(exchange, startDate, endDate),
         isMcx
-          ? fetchMcxForwards(
-              wsAssetRef.current || '',
-              [...new Set([...meta.values()].map((m) => m.exp))],
-              startDate,
-              endDate,
-            )
+          ? fetchMcxForwards(wsAssetRef.current || '', cacheKey.expiries, startDate, endDate)
           : Promise.resolve(new Map<string, Map<number, number>>()),
       ]);
+      const { buckets, dropped } = buildHistorySnapshots(perName, spot, observedFwd);
+      return { snapshots: buckets, dropped };
+    };
 
+    // A hit is the whole point of the cache: the second and third measure, and every re-enable
+    // after a pane switch, land here and paint without touching the network.
+    const cached = getGreekHistory(cacheKey, istTodayKey());
+    if (cached) {
+      apply(cached);
+      // Today's window is still growing a bar a minute. Repaint from what we have — that is the
+      // instant part — and top up the tail behind the user only when the entry has gone stale.
+      if (dateStr !== istTodayKey() || cached.age < STALE_TODAY_MS) return;
+      try {
+        const fresh = await buildGreekHistory(cacheKey, reconstruct);
+        if (gen !== histGenRef.current) return;
+        apply(fresh);
+      } catch {
+        // The visible line already came from the cache; a failed top-up leaves it as it was.
+      }
+      return;
+    }
+
+    try {
+      const value = await buildGreekHistory(cacheKey, reconstruct);
       if (gen !== histGenRef.current) return; // a newer day was requested — discard
-
-      const { added, dropped } = mergeHistory(perName, spot, observedFwd);
-      const ok = added > 0;
-      setDroppedLegs(dropped);
-      setHistState(ok ? (dropped > 0 ? 'partial' : 'ok') : 'nogreeks');
-      setHistGranularity(ok ? HIST_INTERVAL : '');
-      if (!ok) console.warn(`[${greekLabel}] no historical option/spot data for ${dateStr}.`);
-      if (dropped > 0)
-        console.warn(`[${greekLabel}] dropped ${dropped} unpriceable legs for ${dateStr}.`);
-      requestDraw();
+      apply(value);
     } catch (e) {
       if (gen !== histGenRef.current) return;
       console.error(`[${greekLabel}] history fetch failed:`, e);
@@ -1193,13 +1339,6 @@ export function useGreekOverlay({
     }
   }
 
-  /**
-   * Pivot per-instrument field series into per-timestamp chain snapshots. Uses
-   * broker-served Greeks if present; otherwise reconstructs delta/vega/theta via
-   * Black-Scholes from option price (`close`) + spot at each timestamp. Each leg's
-   * own expiry (from meta) drives the time-to-expiry, so multiple expiries merge
-   * correctly into shared timestamp buckets. Returns # of historical snapshots added.
-   */
   /**
    * Per-expiry, per-timestamp market-implied forward from put-call parity, built out of the
    * `close` series already fetched. Picks the strike nearest that timestamp's spot which has
@@ -1274,7 +1413,19 @@ export function useGreekOverlay({
     return out;
   }
 
-  function mergeHistory(
+  /**
+   * The reconstruction itself: field series in, per-timestamp snapshots out.
+   *
+   * Pivots per-instrument field series into per-timestamp chain snapshots. Uses broker-served
+   * Greeks if present; otherwise reconstructs delta/vega/theta via Black-Scholes from option price
+   * (`close`) + spot at each timestamp. Each leg's own expiry (from meta) drives the
+   * time-to-expiry, so multiple expiries merge correctly into shared timestamp buckets.
+   *
+   * Split from the commit below so the result is a plain value that `greekHistoryCache` can hold
+   * and hand to the other measures — and to this same measure after a pane switch — instead of
+   * every hook instance pivoting the same payload into its own private map.
+   */
+  function buildHistorySnapshots(
     perName: Map<string, Record<string, TsV[]>>,
     spot: TsV[],
     /**
@@ -1282,7 +1433,7 @@ export function useGreekOverlay({
      * *is* the forward; empty elsewhere, where it has to be implied from parity.
      */
     observedFwd: Map<string, Map<number, number>> = new Map(),
-  ): { added: number; dropped: number } {
+  ): { buckets: Map<number, ChainSnapshot>; dropped: number } {
     const meta = metaRef.current;
     const exchange = currentInstRef.current?.exchange;
     const buckets = new Map<number, ChainSnapshot>();
@@ -1397,13 +1548,26 @@ export function useGreekOverlay({
       }
     }
 
+    return { buckets, dropped };
+  }
+
+  /**
+   * Fold a reconstruction into the live snapshot map.
+   *
+   * Existing entries win: a live tick may already have written this timestamp, and that reading is
+   * the current one — history is only ever filling in what is not there. Which is also why the
+   * cached buckets can be shared by reference across measures and mounts: they are read here and
+   * never written to.
+   */
+  function commitHistory(buckets: Map<number, ChainSnapshot>): number {
     let added = 0;
     for (const [ts, snap] of buckets)
       if (!snapshotsRef.current.has(ts)) {
         snapshotsRef.current.set(ts, snap);
         added++;
       }
-    return { added, dropped };
+    if (added) snapVersionRef.current++;
+    return added;
   }
 
   // ── IV rank baseline ──────────────────────────────────────────────────────
@@ -1481,7 +1645,7 @@ export function useGreekOverlay({
       destroyPanes();
       unsubscribeWsAll();
       liveLegsRef.current = new Map();
-      setIvLegend(null);
+      applyIvLegend(null);
     } else if (currentInstRef.current) {
       loadChain();
     }
@@ -1514,8 +1678,10 @@ export function useGreekOverlay({
     metaRef.current = new Map();
     greekDateRef.current = '';
     lastSnapMsRef.current = 0;
+    snapVersionRef.current++;
+    mapperRef.current = null; // the new instrument brings its own bar grid
     histGenRef.current++; // invalidate any in-flight history load
-    setIvLegend(null);
+    applyIvLegend(null);
     setIvObs([]); // baseline is per-underlying; refetched when re-enabled
     setIvRankNote('');
     setDroppedLegs(0);

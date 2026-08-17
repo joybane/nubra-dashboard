@@ -691,6 +691,54 @@ export default function StrategyAnalysisView({
   // same component (and hook, and maths) the Chart and Tracker views use.
   const [indicatorsVisible, setIndicatorsVisible] = useState(false);
   const [indicatorsHeight, setIndicatorsHeight] = useState(200);
+  /**
+   * Live ohlcv ticks `upsertBar` into `chartData.underlyingBars` **in place**, so neither the
+   * cache object nor that array ever changes identity and the price pane stays current only
+   * because it is updated imperatively through `seriesRef`. This pane is prop-driven instead: it
+   * re-runs `setData` off its `bars` dependency, which therefore never fired again after the
+   * initial load and left the underlying line frozen at whatever the session held when the view
+   * opened. Its greek overlays kept moving throughout, because the hook reads the same array
+   * lazily through a ref at draw time and so saw the mutations the effect could not.
+   *
+   * Same shape as `greeksDataRevision`: bump a counter the pane's prop is derived from, so an
+   * underlying tick redraws this one pane rather than re-applying every price and P&L series.
+   * Held off while the pane is closed — nothing would read it, and this is the busiest feed in
+   * the view. Read through a ref so toggling the pane does not tear down the WS subscriptions.
+   */
+  const [underlyingBarsRevision, setUnderlyingBarsRevision] = useState(0);
+  const indicatorsVisibleRef = useRef(indicatorsVisible);
+  indicatorsVisibleRef.current = indicatorsVisible;
+  /**
+   * Coalesce the bumps: one every 500 ms, not one per tick.
+   *
+   * Each bump re-renders this whole view — the largest component in the app — to tell one pane its
+   * bars moved. The underlying feed runs several ticks a second, and the pane's own redraw is
+   * throttled well below that anyway, so the extra renders bought nothing. Trailing-edge, so the
+   * last tick in a quiet-down is never the one that gets dropped.
+   */
+  const barsRevisionTimerRef = useRef<number | null>(null);
+  const bumpUnderlyingBars = useCallback(() => {
+    if (barsRevisionTimerRef.current != null) return;
+    barsRevisionTimerRef.current = window.setTimeout(() => {
+      barsRevisionTimerRef.current = null;
+      setUnderlyingBarsRevision((revision) => revision + 1);
+    }, 500);
+  }, []);
+  useEffect(
+    () => () => {
+      if (barsRevisionTimerRef.current != null) clearTimeout(barsRevisionTimerRef.current);
+    },
+    [],
+  );
+  // A shallow copy is the whole point: the bar objects stay shared (the trailing one is still
+  // mutated in place, so its values are current), but the array gets a fresh identity for the
+  // pane's `[bars]` effect to notice. Deriving it here rather than replacing `chartData` keeps
+  // every other consumer of that cache — the price and P&L series, pinned snapshots — untouched.
+  const indicatorBars = useMemo(
+    () => chartData?.underlyingBars.slice() ?? [],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [chartData, underlyingBarsRevision],
+  );
   const indicatorsChartRef = useRef<IChartApi | null>(null);
   const indicatorsSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   // The pane's own readout, driven from here: setCrosshairPosition draws the crosshair on that
@@ -1981,7 +2029,11 @@ export default function StrategyAnalysisView({
   useEffect(() => {
     if (isSnapshot) return;
     const unsub1 = subscribe('ohlcv', (msg: WsMessage) => {
-      if (msg.type !== 'ohlcv' || !chartUnderlying || !seriesRef.current.underlying) return;
+      // Deliberately not gated on the price series existing. Hiding the Charts pane tears that
+      // series down, and gating the whole handler on it stopped `underlyingBars` accumulating at
+      // all — which froze the Indicators pane a second way and truncated any snapshot saved with
+      // Charts closed. The series is null-checked at its own update call instead.
+      if (msg.type !== 'ohlcv' || !chartUnderlying) return;
       const data = msg.data as {
         indexes?: Array<{
           indexname?: string;
@@ -2011,8 +2063,12 @@ export default function StrategyAnalysisView({
         h = parseFloat(idx.high || '0') / 100;
       const l = parseFloat(idx.low || '0') / 100,
         c = parseFloat(idx.close || '0') / 100;
-      seriesRef.current.underlying.update({ time: t as any, open: o, high: h, low: l, close: c });
-      if (cached) upsertBar(cached.underlyingBars, { time: t, open: o, high: h, low: l, close: c });
+      seriesRef.current.underlying?.update({ time: t as any, open: o, high: h, low: l, close: c });
+      if (cached) {
+        upsertBar(cached.underlyingBars, { time: t, open: o, high: h, low: l, close: c });
+        // The mutation above is invisible to React. Tell the Indicators pane its bars moved.
+        if (indicatorsVisibleRef.current) bumpUnderlyingBars();
+      }
     });
 
     const processLtp = (ltpMap: Map<number, number>) => {
@@ -2103,7 +2159,7 @@ export default function StrategyAnalysisView({
       unsub2();
       unsub3();
     };
-  }, [subscribe, chartUnderlying, isSnapshot]);
+  }, [subscribe, chartUnderlying, isSnapshot, bumpUnderlyingBars]);
 
   // ── 6b. Polling fallback ──
   useEffect(() => {
@@ -3562,7 +3618,7 @@ export default function StrategyAnalysisView({
             >
               <GreekIndicatorPane
                 instrument={indicatorInstrument}
-                bars={chartData?.underlyingBars ?? []}
+                bars={indicatorBars}
                 theme={theme}
                 // One session at a time: the strategy ran on a day, and reconstructing a wider
                 // trailing window would be work nobody reads. The tray's HISTORIC DAY picker

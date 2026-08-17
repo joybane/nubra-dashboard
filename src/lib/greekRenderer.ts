@@ -341,34 +341,43 @@ export function createGreekPane(
 
   const all = [ceTotal, peTotal, ceDiff, peDiff];
 
+  // Last visibility pushed at each series, so a series that was hidden and is still hidden is not
+  // handed another empty array. `undefined` until the first setData, which is what makes that first
+  // call always write — a freshly created series is visible with no data, and skipping it would
+  // leave a pane the caller believes it has fed showing nothing.
+  const lastVisible = new Map<ISeriesApi<'Line'>, boolean>();
+
   return {
     setData(points, mode, showCalls, showPuts, mapTime = defaultMapper) {
       const showTotals = mode === 'totals' || mode === 'both';
       const showDiff = mode === 'diff' || mode === 'both';
 
-      const apply = (s: ISeriesApi<'Line'>, visible: boolean, line: LinePoint[]) => {
-        s.applyOptions({ visible });
-        s.setData(visible ? line : []);
+      // `build` is a thunk, not an array: `toLine` maps, sorts and re-colours every point, and
+      // four of them ran on every redraw even though at most two were ever wanted. On the default
+      // 'diff' that halved the per-draw work outright; with a side unticked it goes to zero.
+      const apply = (s: ISeriesApi<'Line'>, visible: boolean, build: () => LinePoint[]) => {
+        if (!visible) {
+          if (lastVisible.get(s) === false) return;
+          lastVisible.set(s, false);
+          s.applyOptions({ visible: false });
+          s.setData([]);
+          return;
+        }
+        lastVisible.set(s, true);
+        s.applyOptions({ visible: true });
+        s.setData(build());
       };
 
-      apply(
-        ceTotal,
-        showTotals && showCalls,
+      apply(ceTotal, showTotals && showCalls, () =>
         toLine(points, (p) => p.ceTotal, mapTime, opts.exchange?.()),
       );
-      apply(
-        peTotal,
-        showTotals && showPuts,
+      apply(peTotal, showTotals && showPuts, () =>
         toLine(points, (p) => p.peTotal, mapTime, opts.exchange?.()),
       );
-      apply(
-        ceDiff,
-        showDiff && showCalls,
+      apply(ceDiff, showDiff && showCalls, () =>
         toLine(points, (p) => p.ceDiff, mapTime, opts.exchange?.()),
       );
-      apply(
-        peDiff,
-        showDiff && showPuts,
+      apply(peDiff, showDiff && showPuts, () =>
         toLine(points, (p) => p.peDiff, mapTime, opts.exchange?.()),
       );
     },
