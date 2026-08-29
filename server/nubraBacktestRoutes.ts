@@ -553,6 +553,79 @@ export function registerNubraBacktestRoutes({
   // ─── Nubra Backtest — Routes ──────────────────────────────────────────────────
 
   fastify.get<{
+    Querystring: { underlying?: string; date?: string; expiry?: string; exchange?: string };
+  }>('/api/nubra-backtest/band-contracts', async (req, reply) => {
+    if (!requireAuth(reply)) return;
+    const { underlying = 'NIFTY', date, expiry } = req.query;
+    if (!date) {
+      reply.code(400);
+      return { ok: false, error: 'date is required.' };
+    }
+
+    try {
+      const exchange = nbResolveExchange(underlying, req.query.exchange);
+      // The Band can reach 24 OTM strikes, so this route always uses the exact dated master.
+      const refdata = await nbGetRefdataForDate(exchange, date);
+      const assetOptions = nbAssetOptions(refdata, underlying);
+      const expiries = nbExpiriesFor(assetOptions, date);
+      if (!expiries.length) {
+        return {
+          ok: false,
+          error: `No options found for ${underlying} on ${date}.`,
+          underlying,
+          date,
+          exchange,
+          expiry: '',
+          availableExpiries: [],
+          contracts: [],
+        };
+      }
+
+      const selectedExpiry = expiry && expiries.includes(expiry) ? expiry : expiries[0];
+      const targetExpiry = Number(selectedExpiry.replace(/-/g, ''));
+      const contracts = assetOptions
+        .filter((item) => Number(item.expiry) === targetExpiry)
+        .map((item) => {
+          const side = String(item.option_type || '').toUpperCase();
+          const name = String(item.stock_name || item.zanskar_name || item.nubra_name || '');
+          const strike = Number(item.strike_price) / 100;
+          const refId = Number(item.ref_id);
+          const lotSize = Number(item.lot_size);
+          return {
+            name,
+            strike,
+            side,
+            expiry: selectedExpiry,
+            ...(Number.isFinite(refId) ? { refId } : {}),
+            ...(Number.isFinite(lotSize) && lotSize > 0 ? { lotSize } : {}),
+          };
+        })
+        .filter(
+          (contract) =>
+            contract.name &&
+            Number.isFinite(contract.strike) &&
+            contract.strike > 0 &&
+            (contract.side === 'CE' || contract.side === 'PE'),
+        )
+        .sort((a, b) => a.strike - b.strike || a.side.localeCompare(b.side));
+
+      return {
+        ok: true,
+        underlying,
+        date,
+        exchange,
+        expiry: selectedExpiry,
+        availableExpiries: expiries,
+        contracts,
+      };
+    } catch (error) {
+      console.error('Band contracts error:', error);
+      reply.code(500);
+      return { ok: false, error: (error as Error).message };
+    }
+  });
+
+  fastify.get<{
     Querystring: {
       underlying?: string;
       date?: string;

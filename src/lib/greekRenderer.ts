@@ -146,11 +146,12 @@ function toLine<T extends { ts: number }>(
   mapTime: TimeMapper,
   exchange?: string,
 ): LinePoint[] {
-  const byTime = new Map<number, number>();
+  const byTime = new Map<number, number | undefined>();
   for (const p of points) {
     const t = mapTime(p.ts);
     if (t == null || !Number.isFinite(t) || !isMarketSessionChartTime(t, exchange)) continue;
-    byTime.set(t, pick(p));
+    const value = pick(p);
+    byTime.set(t, Number.isFinite(value) ? value : undefined);
   }
 
   const out: LinePoint[] = [];
@@ -160,7 +161,9 @@ function toLine<T extends { ts: number }>(
     const day = chartTimeDayKey(time);
     if (lastDay && day && day !== lastDay && lastTime != null)
       out.push({ time: (lastTime + 1) as UTCTimestamp });
-    out.push({ time: time as UTCTimestamp, value });
+    out.push(
+      value === undefined ? { time: time as UTCTimestamp } : { time: time as UTCTimestamp, value },
+    );
     lastDay = day;
     lastTime = time;
   }

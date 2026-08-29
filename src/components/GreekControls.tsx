@@ -348,9 +348,14 @@ export function GreekButton({ api, label }: { api: GreekOverlayApi; label: strin
                       ]}
                     />
                     <div className="text-[9px] text-[var(--text-muted)] mt-1.5 leading-relaxed">
-                      {api.composition === 'chained'
-                        ? 'Splices out the step a strike makes joining or leaving, so only Greek movement moves the line. The level is a chained figure, like a back-adjusted future.'
-                        : 'Plain sum of whatever is in the basket right now — the true level, but it steps whenever a strike joins or leaves.'}
+                      {api.composition === 'chained' &&
+                      api.method !== 'industry' &&
+                      api.basket === 'floating' &&
+                      api.baseline === 'session'
+                        ? 'Reference Band: each contract is measured from its own latest band-entry value; exit deletes the baseline and re-entry starts at zero.'
+                        : api.composition === 'chained'
+                          ? 'Splices out the step a strike makes joining or leaving, so only Greek movement moves the line. The level is a chained figure, like a back-adjusted future.'
+                          : 'Plain sum of whatever is in the basket right now — the true level, but it steps whenever a strike joins or leaves.'}
                     </div>
                   </div>
                   <div>
@@ -423,7 +428,7 @@ export function GreekButton({ api, label }: { api: GreekOverlayApi; label: strin
                   <div className="text-[10px] font-semibold tracking-wider text-[var(--text-muted)] mb-1.5">
                     EXPIRY{' '}
                     <span className="font-normal normal-case text-[9px]">
-                      · shift-click for a range
+                      {api.isIv ? '· shift-click for a range' : '· one expiry per Band run'}
                     </span>
                   </div>
                   <div className="flex flex-col gap-1 max-h-[120px] overflow-y-auto">
@@ -477,28 +482,12 @@ export function GreekButton({ api, label }: { api: GreekOverlayApi; label: strin
                 </div>
               </div>
 
-              {/*
-                Two very different causes reach 'nogreeks', and saying which beats a blank pane.
-                On a PAST day the usual one is structural: the basket is assembled from the
-                expiries the chain lists *today*, and none of them existed that far back, so
-                there are no prints to reconstruct from. Phrased as an inference because it is
-                one — the chain serves no contract listing dates, so we cannot assert the cause.
-
-                Compared against the real calendar day, NOT `latestDay`: in a backtest or a
-                position review the whole window is historical, so greekDate and latestDay are
-                both the trade day and comparing them would never fire — exactly the case this
-                message exists for.
-              */}
               {api.histState === 'nogreeks' &&
                 (api.greekDate && api.greekDate < istToday() ? (
                   <div className="text-[10px] text-amber-500 leading-relaxed">
-                    No prints on {api.greekDate} for any selected expiry
-                    {api.selExpiries.length
-                      ? ` (longest-dated: ${formatExpiry(api.selExpiries[api.selExpiries.length - 1])})`
-                      : ''}
-                    . The basket uses expiries listed today, so a day before those contracts were
-                    introduced has nothing to rebuild from — pick a later day, or a longer-dated
-                    expiry.
+                    No dated vendor values on {api.greekDate} for the selected expiry
+                    {api.selExpiries.length ? ` (${formatExpiry(api.selExpiries[0])})` : ''}. Try
+                    another expiry or session.
                   </div>
                 ) : (
                   <div className="text-[10px] text-amber-500">
@@ -511,7 +500,7 @@ export function GreekButton({ api, label }: { api: GreekOverlayApi; label: strin
               {(api.histState === 'ok' || api.histState === 'partial') && (
                 <div className="text-[10px] text-[var(--text-muted)]">
                   {api.greekDate === api.latestDay
-                    ? `${api.histGranularity} reconstructed (last sessions); live = per-tick`
+                    ? `${api.histGranularity} vendor history (last sessions); live = per-packet`
                     : `Through ${api.greekDate} (${api.histGranularity}, last sessions); past — no live`}
                 </div>
               )}

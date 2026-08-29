@@ -55,8 +55,8 @@ export type Composition = 'raw' | 'chained';
 
 // ─── Delta filter boundaries (Spec §1) ───────────────────────────────────────────
 export const CE_DELTA_MIN = 0.05;
-export const CE_DELTA_MAX = 0.609;
-export const PE_DELTA_MIN = -0.609;
+export const CE_DELTA_MAX = 0.6;
+export const PE_DELTA_MIN = -0.6;
 export const PE_DELTA_MAX = -0.05;
 
 // ─── Ingest-time prune band (Spec §1 support, |delta|) ───────────────────────────
@@ -76,7 +76,8 @@ export const PRUNE_DELTA_MAX = 0.7;
 /** True if a leg is worth storing at all. Unknown delta is kept — aggregation decides. */
 export function withinPruneBand(delta: number | undefined): boolean {
   if (delta == null || !Number.isFinite(delta)) return true;
-  const a = Math.abs(delta);
+  const normalized = Math.abs(delta) > 1 ? delta / 100 : delta;
+  const a = Math.abs(normalized);
   return a >= PRUNE_DELTA_MIN && a <= PRUNE_DELTA_MAX;
 }
 
@@ -98,7 +99,7 @@ export const CARRY_STALE_MS = 15 * 60_000;
 // ~30x apart: reconstructed history is 1m (HIST_INTERVAL) while the live tail is ~2s
 // (SNAP_MIN_GAP_MS), both in useGreekOverlay. A snapshot count would mean a 2-minute debounce
 // on history and a 4-second one live — i.e. essentially no protection exactly where the chart
-// is densest, and a splice every time a strike breathed across Δ=0.609. The series has to have
+// is densest, and a splice every time a strike breathed across Δ=0.60. The series has to have
 // the same shape regardless of how often it is sampled.
 //
 // 60s reproduces the old count of 2 exactly on the 1m path: back then a leg flipped on its
@@ -107,7 +108,11 @@ export const MEMBERSHIP_DWELL_MS = 60_000;
 
 /** One leg of an option-chain snapshot, reduced to the fields aggregation needs. */
 export interface AggLeg {
+  /** Stable contract identity. Falls back to side/strike/expiry when omitted. */
+  key?: string;
   sp: number; // strike price (rupees)
+  bid?: number; // rupees
+  ask?: number; // rupees
   delta?: number;
   vega?: number;
   theta?: number;
@@ -119,6 +124,9 @@ export interface AggLeg {
 /** A full option-chain snapshot at a single timestamp. */
 export interface ChainSnapshot {
   ts: number; // epoch ms
+  spot?: number;
+  /** Historical reference bars require a valid two-sided rolling ATM book. */
+  requireBook?: boolean;
   ce: AggLeg[];
   pe: AggLeg[];
 }
@@ -152,10 +160,11 @@ export interface SeriesPoint {
 
 /** True if a leg's delta places it inside the near-the-money band for its type. */
 export function qualifies(type: OptionType, delta: number | undefined): boolean {
-  if (delta == null || Number.isNaN(delta)) return false;
+  if (delta == null || !Number.isFinite(delta)) return false;
+  const normalized = Math.abs(delta) > 1 ? delta / 100 : delta;
   return type === 'CE'
-    ? delta >= CE_DELTA_MIN && delta <= CE_DELTA_MAX
-    : delta >= PE_DELTA_MIN && delta <= PE_DELTA_MAX;
+    ? normalized >= CE_DELTA_MIN && normalized <= CE_DELTA_MAX
+    : normalized >= PE_DELTA_MIN && normalized <= PE_DELTA_MAX;
 }
 
 /** Composite key locking a contract's identity across the timeline. */
@@ -249,6 +258,8 @@ function carryLeg(prev: AggLeg | undefined, next: AggLeg): AggLeg {
     ...prev,
     ...next,
     delta: keep(next.delta, prev.delta),
+    bid: keep(next.bid, prev.bid),
+    ask: keep(next.ask, prev.ask),
     vega: keep(next.vega, prev.vega),
     theta: keep(next.theta, prev.theta),
     oi: keep(next.oi, prev.oi),

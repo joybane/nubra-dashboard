@@ -26,6 +26,7 @@ function fakeChart() {
   const seriesOpts: Record<string, unknown>[] = [];
   /** Every `setData` push, in order, tagged with the series' title — see the laziness tests. */
   const setDataCalls: Array<{ title: string; points: number }> = [];
+  const setDataPayloads: Array<{ title: string; points: unknown[] }> = [];
   const scaleFor = (id: string) => {
     let s = scales.get(id);
     if (!s) scales.set(id, (s = { opts: {}, calls: 0 }));
@@ -48,13 +49,21 @@ function fakeChart() {
         applyOptions() {},
         setData(points: unknown[]) {
           setDataCalls.push({ title: opts.title ?? '', points: points.length });
+          setDataPayloads.push({ title: opts.title ?? '', points });
         },
       };
     },
     removeSeries() {},
     removePane() {},
   };
-  return { chart: chart as unknown as IChartApi, scales, seriesByScale, seriesOpts, setDataCalls };
+  return {
+    chart: chart as unknown as IChartApi,
+    scales,
+    seriesByScale,
+    seriesOpts,
+    setDataCalls,
+    setDataPayloads,
+  };
 }
 
 /**
@@ -194,6 +203,37 @@ describe('setData only builds the lines it is going to draw', () => {
       { title: 'Vega·mine PE Δ', points: 2 },
     ]);
   });
+});
+
+test('non-finite Band values become renderer gaps instead of plotted zeroes', () => {
+  const { chart, setDataPayloads } = fakeChart();
+  const pane = createGreekPane(chart, 'VegaÂ·mine', { inline: true, scaleKey: 'vega-mine' });
+  pane.setData(
+    [
+      {
+        ts: Date.UTC(2026, 6, 30, 3, 50),
+        ceTotal: 10,
+        peTotal: NaN,
+        ceDiff: 0,
+        peDiff: NaN,
+      },
+      {
+        ts: Date.UTC(2026, 6, 30, 3, 51),
+        ceTotal: NaN,
+        peTotal: NaN,
+        ceDiff: NaN,
+        peDiff: NaN,
+      },
+    ],
+    'diff',
+    true,
+    false,
+  );
+  const callDiff = setDataPayloads.find(
+    (entry) => entry.title.includes('CE') && entry.points.length === 2,
+  )!;
+  expect(callDiff.points[0]).toMatchObject({ value: 0 });
+  expect(callDiff.points[1]).not.toHaveProperty('value');
 });
 
 // The scaleKeys useGreekOverlay actually passes: `${greek}-${method}` for the Greek panes and

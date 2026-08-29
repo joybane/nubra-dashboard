@@ -34,9 +34,8 @@ export interface GreekHistoryKey {
   /**
    * Whether IV was solved per point.
    *
-   * The IV overlay inverts an implied vol for every leg it keeps; Vega and Theta never read that
-   * field and do not pay for it. The two therefore produce genuinely different snapshots and
-   * cannot share an entry — except one way round, see `getGreekHistory`.
+   * IV and the reference Vega/Theta Band use different vendor fields and bar-validity rules, so
+   * their snapshots are isolated even when every other key component is identical.
    */
   withIv: boolean;
 }
@@ -105,9 +104,8 @@ function touch(key: string, entry: Entry) {
  * `age` lets a caller paint immediately off a hit and still decide the tail is worth refreshing —
  * see `STALE_TODAY_MS`.
  *
- * A Vega/Theta lookup falls back to the IV variant of the same day: solving IV only ADDS a field
- * to legs that are otherwise identical, so the richer map answers the poorer question exactly. The
- * reverse is not true and is never attempted.
+ * IV and Band variants never substitute for one another. Band history requires bid/ask-gated
+ * snapshots, while IV history is a separate close/delta/iv_mid surface reconstruction.
  */
 export function getGreekHistory(
   k: GreekHistoryKey,
@@ -128,7 +126,7 @@ export function getGreekHistory(
     return { snapshots: hit.snapshots, dropped: hit.dropped, age };
   };
 
-  return tryKey(keyOf(k)) ?? (k.withIv ? null : tryKey(keyOf({ ...k, withIv: true })));
+  return tryKey(keyOf(k));
 }
 
 /**

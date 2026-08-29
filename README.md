@@ -720,89 +720,44 @@ the Chart and Tracker, so the distinction was invisible until a host charted a p
 where a loaded-day guard would clamp a `Date.now()` snapshot onto a historical session's last
 bar, printing today's greeks as that day's close. See `istTodayKey` in the hook.
 
-Aggregation lives in `src/lib/greekAggregator.ts` and plots a delta-filtered near-the-money
-basket, CE and PE as separate lines. The delta band is CE `[0.05, 0.609]` and PE
-`[-0.609, -0.05]`.
+The default Vega/Theta path lives in `src/lib/referenceBandGreeks.ts`. It is the reference
+QuantStack Band calculation, not a global opening-total subtraction:
 
-| Setting     | Options              | Meaning                                                                      |
-| ----------- | -------------------- | ---------------------------------------------------------------------------- |
-| Method      | `mine` / `industry`  | Raw per-contract Greek sum, vs. notional `greek × OI × lotSize`              |
-| Basket      | `fixed` / `floating` | Membership locked at t₀, vs. re-filtered every snapshot (default `floating`) |
-| Composition | `chained` / `raw`    | Splice out membership steps, vs. plain Σ (default `chained`)                 |
-| Baseline    | `session` / `window` | Where t₀ sits (default `session`)                                            |
-| Series      | totals / diff / both | Absolute sum (solid) vs. change-from-t₀ (dashed, overlay scale; default `diff`) |
+- One expiry per run; CE and PE remain separate.
+- Membership is inclusive: `0.05 <= abs(delta) <= 0.60`. Percent-form delta is normalized.
+- Every contract receives its own Vega and Theta entry baselines when it enters the band.
+- The dashed headline is `Σ(current Greek - that contract's latest entry Greek)`.
+- Exit deletes both baselines; re-entry starts again from zero.
+- Missing vendor Greeks remain missing and render as gaps.
 
-History loads a trailing window ending at the selected day — 7 days by default, matching the
-Chart and Tracker candle loads. Hosts reviewing a single trade pass `histDays={1}`, so a Nubra BT
-run or a position reconstructs just its own session and the `HISTORIC DAY` picker moves to
-another. Cost is linear in this, which is why a backtest's full multi-month range is not fetched.
+`mine + floating + session + chained` selects that reference path. `fixed`, `window`, `raw`, and
+the OI-weighted `industry` method remain available through `src/lib/greekAggregator.ts` as
+explicitly different analyses. The solid lines are current raw Band totals; dashed lines are the
+per-entry changes.
 
-**Basket** defaults to `floating`, so the line reads the near-the-money basket as it actually
-is, re-filtered on every snapshot. `fixed` locks membership at t₀ and keeps legs that have since
-drifted out of the delta band — the lens for following one day's cohort, and the one the diff
-series and the `session` baseline are built around. The toggle lives in `useGreekOverlay`'s state
-and is not persisted, so every fresh mount opens on `floating`.
+History loads a trailing window ending at the selected day — 7 days for Chart and Tracker, one
+session for Nubra BT and Strategy Analysis. The server route
+`/api/nubra-backtest/band-contracts` resolves the exact dated instrument master and one dated
+expiry. Spot is fetched first; the option download is restricted to ATM travel widened by the
+rolling-ATM candidate width, 24 OTM strikes and two ITM strikes per side.
 
-**Baseline** matters because of that trailing window. `session` (default)
-re-anchors t₀ at every IST trading day, so the fixed basket re-locks and the diff series
-returns to zero at that day's first snapshot — not at a fixed clock time, since a partial
-day starts late and MCX opens at 09:00. Each session is self-contained while the whole
-window stays on screen. `window` uses one t₀ for the entire range. Totals under a floating
-basket are baseline-independent; only diff and fixed-basket membership respond.
+Historical snapshots use Nubra's one-minute `l1bid`, `l1ask`, `delta`, `vega`, and `theta` fields
+directly. Ragged fields are carried independently by timestamp. Every accepted minute must have a
+positive two-sided ATM candidate in ATM ±2; the cheapest straddle supplies
+`F = K + CE_mid - PE_mid`, and that forward seeds the next minute. No valid candidate means no
+Band point and no entry-map mutation.
 
-**Composition** exists because the delta band's upper edge sits almost exactly on the vega
-peak. Vega ∝ φ(d₁) is maximal at Δ≈0.5, and `CE_DELTA_MAX = 0.609` is d₁ = +0.276, where vega
-is still 96% of that maximum — so a strike crossing the top edge takes a near-maximal
-contribution with it and the total steps for a reason that is not Greek movement. On NIFTY at
-~6 DTE that is roughly 15% of the CE total per crossing, triggered by about 50 index points.
+Live packets use vendor delta/Vega/Theta and are processed before display coalescing. History and
+packets buffered during loading are replayed through one machine so the seam does not re-baseline.
+The current live option-chain payload has no bid/ask fields, so live rolling-ATM rejection is
+applied only if a future payload supplies real book values; quotes are never fabricated.
 
-`chained` (default) removes it the way every other field does: evaluate the outgoing and the
-incoming basket at the **same** snapshot and carry the difference forward as an offset.
-Continuous-futures back-adjustment, the S&P divisor and CPI chain-linking are all this
-algorithm; the continuous-time form is the Divisia index. The offset is additive, not
-multiplicative — vega sums approach zero near expiry and a ratio would blow up there.
+IV is isolated from Band history and requests `close`, `delta`, and `iv_mid`. It may invert price
+when a usable vendor IV is absent; Vega and Theta never use that modeled fallback.
 
-Two supporting details. Membership only flips once a leg has disagreed with it for
-`MEMBERSHIP_DWELL_MS` (60 s), because the accumulated offset grows with the _number_ of splices
-(the well-known drift in back-adjusted futures); this is a dwell timer, not a retention band,
-so the 0.05 / 0.609 thresholds are untouched. It is denominated in **time, not snapshots**:
-history arrives at 1m and the live tail at ~2s, so a snapshot count would have meant a 2-minute
-debounce on history and a 4-second one live — no real protection exactly where the chart is
-densest. The series should have the same shape however often it is sampled. And
-`baseline: 'session'` zeroes the offset every day, which caps drift for free.
+See `docs/vega-theta-band-methodology.md` for the portable calculation contract.
 
-The trade is that a chained level is an artifact in the same sense as a back-adjusted futures
-price: it answers "what would this basket be worth had composition never changed", not "what is
-the current basket worth". `raw` gives the latter, and is what `buildSeries` returns by default
-when no `composition` is passed.
-
-Separately and always on, `buildSeries` carries each leg forward on its last known values. The
-broker's 1m timeseries is per-field, so a leg can print delta without vega; before this it
-still qualified for the basket (it has a delta) yet contributed zero, which read on the chart
-as a one-bar collapse of the whole total. A leg silent for longer than `CARRY_STALE_MS`
-(15 min) is dropped rather than carried indefinitely.
-
-### Historical Greek reconstruction
-
-History is reconstructed at 1-minute resolution (per-point IV inversion is too slow for 1s);
-the live tail stays true per-tick from the `option_chain` WS feed, with a 4-second REST
-fallback poll once WS has been silent for 6 seconds. Precedence in `buildHistorySnapshots` is:
-
-1. Broker-served `delta`/`vega`/`theta` if the timeseries carries them.
-2. Broker-served `iv` + Black-76.
-3. Invert IV from `close` + forward, then Black-76.
-
-**Probed live 2026-07-30:** the timeseries _does_ serve historical `delta`/`vega`/`theta`
-(values match the live chain), so path 1 normally wins — an older assumption that the broker
-stores no historical Greeks is out of date.
-
-**Corrected 2026-08-03: the timeseries also serves historical IV**, as `iv_bid` / `iv_mid` /
-`iv_ask`. The 2026-07-30 probe concluded otherwise, but it only tried `iv`,
-`implied_volatility`, `impliedVolatility`, `implied_vol`, `ivPct`, and `volatility` — never the
-`iv_*` names, which are the ones the V3 field list documents. Re-probed against
-`NIFTY2680424750CE` (1 DTE ATM CE) over a full session: 376/376 one-minute points populated on
-all three, no nulls or zeros, `iv_bid < iv_mid < iv_ask` throughout, range 0.1106–0.1201 —
-a genuine bid/ask volatility spread, matching `close` and `delta` point-for-point.
+### Historical IV reconstruction
 
 #### What `iv_*` actually is — measured 2026-08-03
 
@@ -835,16 +790,9 @@ vega). Our `close`-inverted IV lands inside it 41.6% of the time, and when outsi
 median 0.008 vol pts, biased above the mid 3.5:1 — last trade sits above mid more often than
 below, which is a price-selection artifact and not a model difference.
 
-`buildHistorySnapshots` still derives IV by inversion on the broker-Greek path (gated on the IV overlay
-being active, since Vega/Theta never read it). Given the above that is now a _choice_ rather
-than a necessity, and a cheap one to revisit — [useGreekOverlay.ts](src/hooks/useGreekOverlay.ts)
-requests `'iv'` in `HIST_FIELDS`, the one name that is never served, so a single-word change to
-`'iv_mid'` would switch history onto the vendor series. **Left as-is deliberately.** The
-~0.26 vol-point offset documented in `server/backtest/ivHistory.ts` is against the _parquet_
-`iv` column, which this measurement shows is a different product from the API series — so that
-offset neither justifies nor forbids the switch, and nothing has yet measured the parquet
-column against `iv_mid` on an overlapping date. Until that is done, one pipeline end to end
-beats two that agree to 0.057 vol points for reasons nobody has pinned down.
+IV history now requests `iv_mid` directly. `buildHistorySnapshots` uses price inversion only when
+that vendor field is absent or unusable. This fallback belongs to IV alone; the reference
+Vega/Theta path never models a missing Greek.
 
 One incidental constraint found while sampling: `charts/timeseries` rejects more than
 **10 symbols per query** (`"maximum 10 values allowed in one query"`), so wide ladders must be
@@ -882,8 +830,9 @@ coverage was 753/753 timestamps, since CE and PE close series share ~97.7% of th
 at a given strike. The basis **moves** intraday (median −8.9, range −41 to +64), so no static
 carry constant substitutes for parity.
 
-`useGreekOverlay` builds a per-expiry, per-timestamp parity forward from the `close` series it
-already fetches. `StrategyAnalysisView`, `NubraBacktest` and `backtest/TradeChartView` have no
+For IV fallback modeling, `useGreekOverlay` builds a per-expiry, per-timestamp parity forward from
+the `close` series it already fetches. `StrategyAnalysisView`, `NubraBacktest` and
+`backtest/TradeChartView` have no
 CE/PE pair to hand and so pass **spot** as the forward proxy — deliberately, per the table
 above. `server/backtest/greeks.ts` assumes `r ≈ 0`, where forward equals spot, and is unaffected.
 

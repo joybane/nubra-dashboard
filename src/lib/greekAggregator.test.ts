@@ -21,16 +21,16 @@ import {
 } from './greekAggregator.ts';
 
 // ─── §1  Delta filter boundaries ─────────────────────────────────────────────────
-test('qualifies: CE band is [0.05, 0.609], PE band is [-0.609, -0.05]', () => {
+test('qualifies: CE band is [0.05, 0.60], PE band is [-0.60, -0.05]', () => {
   // CE
   expect(qualifies('CE', 0.05)).toBe(true); // inclusive lower
-  expect(qualifies('CE', 0.609)).toBe(true); // inclusive upper
+  expect(qualifies('CE', 0.6)).toBe(true); // inclusive upper
   expect(qualifies('CE', 0.3)).toBe(true);
   expect(qualifies('CE', 0.049)).toBe(false); // too deep OTM
   expect(qualifies('CE', 0.61)).toBe(false); // too deep ITM
   // PE (mirrored sign)
   expect(qualifies('PE', -0.05)).toBe(true);
-  expect(qualifies('PE', -0.609)).toBe(true);
+  expect(qualifies('PE', -0.6)).toBe(true);
   expect(qualifies('PE', -0.3)).toBe(true);
   expect(qualifies('PE', -0.049)).toBe(false);
   expect(qualifies('PE', -0.61)).toBe(false);
@@ -575,7 +575,7 @@ test('dwell: a one-snapshot excursion across the edge does not flip membership',
  *
  * buildSeries is fed by two feeds ~30x apart in cadence — 1m reconstructed history and the
  * ~2s live tail. Under the old snapshot count of 2 the debounce was 2 minutes on history but
- * 4 seconds live, so a strike breathing across Δ=0.609 spliced the chain repeatedly on exactly
+ * 4 seconds live, so a strike breathing across Δ=0.60 spliced the chain repeatedly on exactly
  * the segment of chart with the most points. Six seconds of excursion is noise at any cadence
  * and must be absorbed at both.
  */

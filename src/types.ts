@@ -86,8 +86,13 @@ export interface VolBar {
 
 // ─── Option chain ─────────────────────────────────────────────────────────────
 export interface OptionLeg {
+  ref_id?: number;
+  refId?: number;
+  ts?: number | string;
   sp: number; // strike in rupees
   ltp?: number; // last traded price (paise)
+  l1bid?: number; // best bid (paise)
+  l1ask?: number; // best ask (paise)
   ltpchg?: number;
   iv?: number;
   delta?: number;

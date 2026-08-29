@@ -28,8 +28,75 @@ afterEach(async () => {
 
 test('registers the existing debug and Nubra historical-replay endpoints', () => {
   expect(app.hasRoute({ method: 'GET', url: '/api/debug-chart' })).toBe(true);
+  expect(app.hasRoute({ method: 'GET', url: '/api/nubra-backtest/band-contracts' })).toBe(true);
   expect(app.hasRoute({ method: 'GET', url: '/api/nubra-backtest/chain' })).toBe(true);
   expect(app.hasRoute({ method: 'POST', url: '/api/nubra-backtest/evaluate' })).toBe(true);
+});
+
+test('returns the exact dated expiry master for the Band without fetching option bars', async () => {
+  nubraGet.mockResolvedValue({
+    refdata: [
+      {
+        asset: 'NIFTY',
+        derivative_type: 'OPT',
+        expiry: 20260806,
+        strike_price: 2400000,
+        option_type: 'CE',
+        stock_name: 'NIFTY_20260806_24000_CE',
+        ref_id: 101,
+        lot_size: 65,
+      },
+      {
+        asset: 'NIFTY',
+        derivative_type: 'OPT',
+        expiry: 20260806,
+        strike_price: 2400000,
+        option_type: 'PE',
+        stock_name: 'NIFTY_20260806_24000_PE',
+        ref_id: 102,
+        lot_size: 65,
+      },
+      {
+        asset: 'NIFTY',
+        derivative_type: 'OPT',
+        expiry: 20260813,
+        strike_price: 2410000,
+        option_type: 'CE',
+        stock_name: 'NIFTY_20260813_24100_CE',
+      },
+    ],
+  });
+
+  const response = await app.inject({
+    method: 'GET',
+    url: '/api/nubra-backtest/band-contracts?underlying=NIFTY&date=2026-08-03&expiry=2026-08-06',
+  });
+
+  expect(response.statusCode).toBe(200);
+  expect(response.json()).toMatchObject({
+    ok: true,
+    underlying: 'NIFTY',
+    exchange: 'NSE',
+    expiry: '2026-08-06',
+    contracts: [
+      {
+        name: 'NIFTY_20260806_24000_CE',
+        strike: 24000,
+        side: 'CE',
+        refId: 101,
+        lotSize: 65,
+      },
+      {
+        name: 'NIFTY_20260806_24000_PE',
+        strike: 24000,
+        side: 'PE',
+        refId: 102,
+        lotSize: 65,
+      },
+    ],
+  });
+  expect(nubraGet).toHaveBeenCalledWith('/refdata/refdata/2026-08-03', { exchange: 'NSE' });
+  expect(nubraPost).not.toHaveBeenCalled();
 });
 
 test('preserves chain validation before making a broker request', async () => {

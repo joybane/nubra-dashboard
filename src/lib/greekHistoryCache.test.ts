@@ -70,12 +70,9 @@ describe('greekHistoryCache', () => {
     expect(a.snapshots).toBe(b.snapshots); // the same map, by reference
   });
 
-  it('lets Vega/Theta reuse the IV variant but never the other way round', async () => {
-    // Solving IV only ADDS a field to otherwise identical legs, so the richer map answers the
-    // poorer question exactly. The reverse would hand the IV overlay legs with no iv on them.
+  it('keeps reference Band and IV reconstruction variants isolated', async () => {
     await buildGreekHistory(key({ withIv: true }), async () => value(1));
-
-    expect(getGreekHistory(key({ withIv: false }), TODAY)).not.toBeNull();
+    expect(getGreekHistory(key({ withIv: false }), TODAY)).toBeNull();
 
     invalidateGreekHistory();
     await buildGreekHistory(key({ withIv: false }), async () => value(1));

@@ -16,6 +16,12 @@ type ChainResp = {
 type HistoricalResp = {
   result?: Array<{ values?: Array<Record<string, Record<string, TsV[]>>> }>;
 } | null;
+type BandContractsResp = {
+  ok?: boolean;
+  expiry?: string;
+  contracts?: BandContractMeta[];
+  error?: string;
+};
 /** `/api/iv-history` response, or `{ error }` when the underlying has no parquet baseline. */
 type IvHistoryResp = { observations?: IvObservation[]; from?: string; to?: string; error?: string };
 import { getChainAsset, getSymbol } from '../types';
@@ -59,6 +65,13 @@ import {
 } from '../lib/GexService';
 import { computeIvRank, dteFromExpiry, type IvObservation, type IvRankResult } from '../lib/ivRank';
 import { sharedJson } from '../lib/sharedRequest';
+import {
+  ReferenceBandMachine,
+  referenceBandPointToSeries,
+  referenceBandUniverse,
+  type BandContractMeta,
+  type ReferenceBandPoint,
+} from '../lib/referenceBandGreeks';
 import {
   buildGreekHistory,
   getGreekHistory,
@@ -116,17 +129,28 @@ function fetchHistoricalShared(body: unknown): Promise<HistoricalResp> {
   });
 }
 
-// The broker timeseries does NOT store historical Greeks (delta/vega/theta are
-// real-time analytics), so we reconstruct them via Black-Scholes from historical
-// option price (`close`) + spot. Per-point IV inversion makes 1s reconstruction
-// prohibitively expensive across a whole basket, so history is built at 1m; the
-// live WS path stays true per-tick. If a future API serves Greek fields directly,
-// they're used as-is (no reconstruction) — see buildHistorySnapshots.
+function fetchBandContractsShared(
+  underlying: string,
+  date: string,
+  expiry: string | undefined,
+  exchange: string,
+): Promise<BandContractsResp> {
+  const params = new URLSearchParams({ underlying, date, exchange });
+  if (expiry) params.set('expiry', expiry);
+  const url = `/api/nubra-backtest/band-contracts?${params.toString()}`;
+  return sharedJson<BandContractsResp>(`band-contracts:${url}`, 30 * 60_000, async () => {
+    const response = await fetch(url);
+    const body = (await response.json()) as BandContractsResp;
+    if (!response.ok) throw new Error(body.error || `band contracts ${response.status}`);
+    return body;
+  });
+}
+
+// Reference Vega/Theta history uses the vendor's stored book and Greek fields directly.
+// IV is a separate close/delta/iv_mid request and retains its own price-inversion fallback.
 const HIST_INTERVAL = '1m';
-// `iv` is requested on the same speculative basis as delta/vega/theta: the chain endpoint
-// serves it today, so if the timeseries does too we skip inversion entirely and land history
-// on the same volatility footing as the live tail. Absent, buildHistorySnapshots inverts as before.
-const HIST_FIELDS = ['close', 'cumulative_oi', 'delta', 'vega', 'theta', 'iv'];
+const BAND_HIST_FIELDS = ['l1bid', 'l1ask', 'cumulative_oi', 'delta', 'vega', 'theta'];
+const IV_HIST_FIELDS = ['close', 'delta', 'iv_mid'];
 
 type TsV = { ts: number; v: number };
 // The broker `/charts/timeseries` endpoint returns ts in NANOSECONDS (the candle
@@ -168,7 +192,9 @@ function nearestSpot(spot: TsV[], ts: number): number {
     b = spot[lo];
   return Math.abs(a.ts - ts) <= Math.abs(b.ts - ts) ? a.v : b.v;
 }
-const SNAP_MIN_GAP_MS = 2_000; // throttle live snapshot storage (tick-by-tick: ~2s greek points)
+// Legacy optional modes retain a 2-second snapshot tail. Reference Band state is updated first on
+// every packet and only its rendered output is coalesced.
+const SNAP_MIN_GAP_MS = 2_000;
 // Live fallback poll: the line is driven by per-tick `option_chain` WS pushes, but
 // the broker pushes only on change and can stay silent for minutes (and SIM relies
 // entirely on it). Like the Option Chain view, poll the REST chain on a cadence —
@@ -378,6 +404,10 @@ export function useGreekOverlay({
   // ── Refs ─────────────────────────────────────────────────────────────────
   const enabledRef = useRef(false);
   const snapshotsRef = useRef<Map<number, ChainSnapshot>>(new Map());
+  const referenceMachineRef = useRef(new ReferenceBandMachine());
+  const referencePointsRef = useRef<Map<number, ReferenceBandPoint>>(new Map());
+  const referenceLiveBufferRef = useRef<ChainSnapshot[]>([]);
+  const referenceRebuildingRef = useRef(false);
   const lastSnapMsRef = useRef(0);
   const lotSizeRef = useRef(1);
   const metaRef = useRef<Map<string, { sp: number; type: 'CE' | 'PE'; exp: string }>>(new Map());
@@ -389,7 +419,18 @@ export function useGreekOverlay({
   const wsAssetRef = useRef<string | null>(null);
   const wsExpiriesRef = useRef<Set<string>>(new Set());
   const wsExchRef = useRef('NSE');
-  const liveLegsRef = useRef<Map<string, { ce: AggLeg[]; pe: AggLeg[] }>>(new Map());
+  const liveLegsRef = useRef<
+    Map<
+      string,
+      {
+        ce: AggLeg[];
+        pe: AggLeg[];
+        ts: number;
+        spot?: number;
+        requireBook: boolean;
+      }
+    >
+  >(new Map());
   const anchorExpiryRef = useRef('');
   const greekDateRef = useRef(''); // selected reconstruction day (mirrors greekDate)
   // There is deliberately no "default day" ref here. The live guards below ask `istTodayKey()`
@@ -491,6 +532,10 @@ export function useGreekOverlay({
   // Plain click selects a single expiry; shift-click extends a range from the anchor.
   function toggleExpiry(exp: string, shift: boolean) {
     setSelExpiries(() => {
+      if (!isIv) {
+        anchorExpiryRef.current = exp;
+        return [exp];
+      }
       if (shift && anchorExpiryRef.current) {
         const a = expiries.indexOf(anchorExpiryRef.current);
         const b = expiries.indexOf(exp);
@@ -750,14 +795,19 @@ export function useGreekOverlay({
 
     const draw = (pane: GreekPane | null, mt: Method) => {
       if (!pane) return;
-      const pts = buildSeries(snaps, {
-        greek,
-        method: mt,
-        basket: b,
-        baseline: bl,
-        composition: cmp,
-        lotSize,
-      });
+      const reference = mt === 'mine' && b === 'floating' && bl === 'session' && cmp === 'chained';
+      const pts = reference
+        ? [...referencePointsRef.current.values()]
+            .sort((a, z) => a.ts - z.ts)
+            .map((point) => referenceBandPointToSeries(point, greek))
+        : buildSeries(snaps, {
+            greek,
+            method: mt,
+            basket: b,
+            baseline: bl,
+            composition: cmp,
+            lotSize,
+          });
       pane.setData(pts, mode, sc, sp, mapTime);
     };
 
@@ -767,12 +817,21 @@ export function useGreekOverlay({
 
   // ── Snapshot helpers ───────────────────────────────────────────────────────
   function legsFromChain(
-    data: { ce?: OptionLeg[]; pe?: OptionLeg[] },
+    data: OptionChainData,
     exp: string,
-  ): { ce: AggLeg[]; pe: AggLeg[] } {
-    const map = (legs: OptionLeg[] | undefined): AggLeg[] =>
+  ): {
+    ce: AggLeg[];
+    pe: AggLeg[];
+    ts: number;
+    spot?: number;
+    requireBook: boolean;
+  } {
+    const map = (legs: OptionLeg[] | undefined, side: 'CE' | 'PE'): AggLeg[] =>
       (legs || []).map((l) => ({
+        key: `${side}:${strikeRs(l)}:${exp}`,
         sp: strikeRs(l),
+        bid: Number.isFinite(l.l1bid) ? Number(l.l1bid) / 100 : undefined,
+        ask: Number.isFinite(l.l1ask) ? Number(l.l1ask) / 100 : undefined,
         delta: l.delta,
         vega: l.vega,
         theta: l.theta,
@@ -780,7 +839,25 @@ export function useGreekOverlay({
         iv: l.iv,
         exp,
       }));
-    return { ce: map(data.ce), pe: map(data.pe) };
+    const sourceLegs = [...(data.ce || []), ...(data.pe || [])];
+    const legTimes = sourceLegs.map((leg) => normTs(leg.ts ?? 0)).filter(Number.isFinite);
+    const rawSpot = Number(data.cp ?? data.currentprice);
+    const spot =
+      Number.isFinite(rawSpot) && rawSpot > 0
+        ? rawSpot > 10_000
+          ? rawSpot / 100
+          : rawSpot
+        : undefined;
+    const hasBook = sourceLegs.some(
+      (leg) => Number.isFinite(leg.l1bid) || Number.isFinite(leg.l1ask),
+    );
+    return {
+      ce: map(data.ce, 'CE'),
+      pe: map(data.pe, 'PE'),
+      ts: legTimes.length ? Math.max(...legTimes) : Date.now(),
+      spot,
+      requireBook: hasBook,
+    };
   }
 
   function mergeLegSide(prev: AggLeg[], updates: AggLeg[]): AggLeg[] {
@@ -791,12 +868,27 @@ export function useGreekOverlay({
     return [...byStrike.values()].sort((a, b) => a.sp - b.sp);
   }
 
-  function mergeLiveLegs(exp: string, update: { ce: AggLeg[]; pe: AggLeg[] }) {
+  function mergeLiveLegs(
+    exp: string,
+    update: {
+      ce: AggLeg[];
+      pe: AggLeg[];
+      ts: number;
+      spot?: number;
+      requireBook: boolean;
+    },
+  ) {
     const prev = liveLegsRef.current.get(exp);
     liveLegsRef.current.set(
       exp,
       prev
-        ? { ce: mergeLegSide(prev.ce, update.ce), pe: mergeLegSide(prev.pe, update.pe) }
+        ? {
+            ce: mergeLegSide(prev.ce, update.ce),
+            pe: mergeLegSide(prev.pe, update.pe),
+            ts: update.ts,
+            spot: update.spot ?? prev.spot,
+            requireBook: update.requireBook,
+          }
         : update,
     );
   }
@@ -805,12 +897,61 @@ export function useGreekOverlay({
   function storeCombinedLive(force = false) {
     const ce: AggLeg[] = [],
       pe: AggLeg[] = [];
+    let ts = 0;
+    let spot: number | undefined;
+    let requireBook = false;
     for (const v of liveLegsRef.current.values()) {
       ce.push(...v.ce);
       pe.push(...v.pe);
+      if (v.ts >= ts) {
+        ts = v.ts;
+        spot = v.spot ?? spot;
+      }
+      requireBook ||= v.requireBook;
     }
     if (!ce.length && !pe.length) return;
-    storeSnapshot({ ts: Date.now(), ce, pe }, force);
+    const snapshot: ChainSnapshot = { ts: ts || Date.now(), spot, requireBook, ce, pe };
+    ingestReferenceLive(snapshot);
+    storeSnapshot(snapshot, force);
+  }
+
+  function storeReferencePoint(point: ReferenceBandPoint, target = referencePointsRef.current) {
+    const second = Math.floor(point.ts / 1000) * 1000;
+    target.set(second, { ...point, ts: second });
+  }
+
+  function ingestReferenceLive(snapshot: ChainSnapshot) {
+    if (referenceRebuildingRef.current) {
+      referenceLiveBufferRef.current.push(snapshot);
+      return;
+    }
+    const point = referenceMachineRef.current.ingest(snapshot);
+    if (!point) return;
+    storeReferencePoint(point);
+    snapVersionRef.current++;
+  }
+
+  function rebuildReferenceHistory(history: Map<number, ChainSnapshot>) {
+    const machine = new ReferenceBandMachine();
+    const points = new Map<number, ReferenceBandPoint>();
+    const buffered = referenceLiveBufferRef.current;
+    referenceLiveBufferRef.current = [];
+    const ordered = [...history.values(), ...buffered].sort((a, b) => a.ts - b.ts);
+    for (const snapshot of ordered) {
+      const point = machine.ingest(snapshot);
+      if (point) storeReferencePoint(point, points);
+    }
+    referenceMachineRef.current = machine;
+    referencePointsRef.current = points;
+    referenceRebuildingRef.current = false;
+    snapVersionRef.current++;
+  }
+
+  function finishReferenceBuffer() {
+    const buffered = referenceLiveBufferRef.current;
+    referenceLiveBufferRef.current = [];
+    referenceRebuildingRef.current = false;
+    for (const snapshot of buffered.sort((a, b) => a.ts - b.ts)) ingestReferenceLive(snapshot);
   }
 
   function storeSnapshot(snap: ChainSnapshot, force = false) {
@@ -966,16 +1107,27 @@ export function useGreekOverlay({
   async function reloadAll(expiriesSel: string[]) {
     const inst = currentInstRef.current;
     if (!inst || !expiriesSel.length) return;
+    const selected = isIv ? expiriesSel : expiriesSel.slice(0, 1);
+    if (selected.length !== expiriesSel.length) setSelExpiries(selected);
     // On MCX the chain is keyed by the commodity, not by the futures contract that
     // underlies it; everywhere else the two are the same string.
     const sym = getChainAsset(inst);
     try {
       const meta = new Map<string, { sp: number; type: 'CE' | 'PE'; exp: string }>();
-      const liveLegs = new Map<string, { ce: AggLeg[]; pe: AggLeg[] }>();
+      const liveLegs = new Map<
+        string,
+        {
+          ce: AggLeg[];
+          pe: AggLeg[];
+          ts: number;
+          spot?: number;
+          requireBook: boolean;
+        }
+      >();
       const open = isMarketOpenNow(currentInstRef.current?.exchange);
       let asset = '';
 
-      for (const exp of expiriesSel) {
+      for (const exp of selected) {
         const data = await fetchChainShared(sym, exp, inst.exchange);
         if (!data.chain) continue;
         if (typeof data.chain.lot_size === 'number' && data.chain.lot_size > 0)
@@ -1001,6 +1153,10 @@ export function useGreekOverlay({
       liveLegsRef.current = liveLegs;
 
       snapshotsRef.current = new Map();
+      referenceMachineRef.current = new ReferenceBandMachine();
+      referencePointsRef.current = new Map();
+      referenceLiveBufferRef.current = [];
+      referenceRebuildingRef.current = !isIv;
       lastSnapMsRef.current = 0;
       snapVersionRef.current++;
 
@@ -1019,7 +1175,7 @@ export function useGreekOverlay({
       enabledRef.current = true;
       setOn(true);
       syncPanes(cfgRef.current.method);
-      subscribeWsMulti(sym.toUpperCase(), expiriesSel, inst.exchange || 'NSE');
+      subscribeWsMulti(sym.toUpperCase(), selected, inst.exchange || 'NSE');
       lastWsTickRef.current = Date.now(); // grace period before the fallback poll kicks in
       startLivePoll();
       requestDraw();
@@ -1071,6 +1227,10 @@ export function useGreekOverlay({
     setGreekDateState(dateStr);
     greekDateRef.current = dateStr;
     snapshotsRef.current = new Map();
+    referenceMachineRef.current = new ReferenceBandMachine();
+    referencePointsRef.current = new Map();
+    referenceLiveBufferRef.current = [];
+    referenceRebuildingRef.current = !isIv;
     lastSnapMsRef.current = 0;
     snapVersionRef.current++;
     // Re-seed the live point only when returning to TODAY during market hours — not merely to
@@ -1105,7 +1265,7 @@ export function useGreekOverlay({
     exchange: string,
     start: Date,
     end: Date,
-    fields: string[] = HIST_FIELDS,
+    fields: string[] = isIv ? IV_HIST_FIELDS : BAND_HIST_FIELDS,
   ) {
     const BATCH = 10;
     const chunks: string[][] = [];
@@ -1254,16 +1414,51 @@ export function useGreekOverlay({
    */
   async function fetchHistoryForDay(dateStr: string) {
     const inst = currentInstRef.current;
-    const meta = metaRef.current;
-    if (!inst || !meta.size || !dateStr) return;
+    if (!inst || !dateStr) return;
     // Take a ticket instead of bailing when another load is in flight: switching days twice
     // in quick succession used to clear the snapshots and then skip the refetch entirely,
     // leaving the popup reporting the previous day's status.
     const gen = ++histGenRef.current;
     setHistState('loading');
 
-    const names = [...meta.keys()];
     const exchange = inst.exchange || 'NSE';
+    let meta = metaRef.current;
+    let bandContracts: BandContractMeta[] = [];
+    if (!isIv) {
+      try {
+        const dated = await fetchBandContractsShared(
+          getChainAsset(inst),
+          dateStr,
+          [...wsExpiriesRef.current][0] || selExpiries[0],
+          exchange,
+        );
+        if (gen !== histGenRef.current) return;
+        bandContracts = dated.contracts ?? [];
+        if (!dated.ok || !dated.expiry || !bandContracts.length)
+          throw new Error(dated.error || `No dated Band contracts for ${dateStr}`);
+        meta = new Map(
+          bandContracts.map((contract) => [
+            contract.name,
+            { sp: contract.strike, type: contract.side, exp: contract.expiry },
+          ]),
+        );
+        metaRef.current = meta;
+        if (dated.expiry !== selExpiries[0]) {
+          setSelExpiries([dated.expiry]);
+          anchorExpiryRef.current = dated.expiry;
+        }
+        const lot = bandContracts.find((contract) => contract.lotSize)?.lotSize;
+        if (lot) lotSizeRef.current = lot;
+      } catch (error) {
+        if (gen !== histGenRef.current) return;
+        console.error(`[${greekLabel}] dated contract lookup failed:`, error);
+        rebuildReferenceHistory(new Map());
+        setHistState('nogreeks');
+        setHistGranularity('');
+        return;
+      }
+    }
+    if (!meta.size) return;
     // End the window at the exchange's own close, or an MCX day would be cut off at
     // 15:30 and lose its evening session.
     const endDate = new Date(expiryInstantMs(dateStr, exchange));
@@ -1285,6 +1480,7 @@ export function useGreekOverlay({
     /** Apply a reconstruction and report it through the status pill. Shared by both paths below. */
     const apply = (value: { snapshots: Map<number, ChainSnapshot>; dropped: number }) => {
       const added = commitHistory(value.snapshots);
+      if (!isIv) rebuildReferenceHistory(value.snapshots);
       // `added` is 0 on a re-apply of the same buckets — already committed is still loaded, so the
       // pill must read off the reconstruction's own size, not off what this call happened to add.
       const ok = value.snapshots.size > 0;
@@ -1299,8 +1495,29 @@ export function useGreekOverlay({
 
     /** The expensive path: fetch the window and pivot it. Runs at most once per cache key. */
     const reconstruct = async () => {
+      if (!isIv) {
+        const spot = await fetchSpotHistory(exchange, startDate, endDate);
+        const universe = referenceBandUniverse(
+          bandContracts,
+          spot.map((point) => point.v),
+        );
+        const selectedMeta = new Map([...meta].filter(([name]) => universe.has(name)));
+        const perName = await requestHistory(
+          [...selectedMeta.keys()],
+          'OPT',
+          exchange,
+          startDate,
+          endDate,
+          BAND_HIST_FIELDS,
+        );
+        return {
+          snapshots: buildReferenceHistorySnapshots(perName, spot, selectedMeta),
+          dropped: 0,
+        };
+      }
+      const names = [...meta.keys()];
       const [perName, spot, observedFwd] = await Promise.all([
-        requestHistory(names, 'OPT', exchange, startDate, endDate),
+        requestHistory(names, 'OPT', exchange, startDate, endDate, IV_HIST_FIELDS),
         fetchSpotHistory(exchange, startDate, endDate),
         isMcx
           ? fetchMcxForwards(wsAssetRef.current || '', cacheKey.expiries, startDate, endDate)
@@ -1318,12 +1535,17 @@ export function useGreekOverlay({
       // Today's window is still growing a bar a minute. Repaint from what we have — that is the
       // instant part — and top up the tail behind the user only when the entry has gone stale.
       if (dateStr !== istTodayKey() || cached.age < STALE_TODAY_MS) return;
+      if (!isIv) {
+        referenceRebuildingRef.current = true;
+        referenceLiveBufferRef.current = [];
+      }
       try {
         const fresh = await buildGreekHistory(cacheKey, reconstruct);
         if (gen !== histGenRef.current) return;
         apply(fresh);
       } catch {
         // The visible line already came from the cache; a failed top-up leaves it as it was.
+        if (!isIv) finishReferenceBuffer();
       }
       return;
     }
@@ -1335,6 +1557,10 @@ export function useGreekOverlay({
     } catch (e) {
       if (gen !== histGenRef.current) return;
       console.error(`[${greekLabel}] history fetch failed:`, e);
+      if (!isIv) {
+        if (referencePointsRef.current.size) finishReferenceBuffer();
+        else rebuildReferenceHistory(new Map());
+      }
       setHistState('idle');
     }
   }
@@ -1413,11 +1639,89 @@ export function useGreekOverlay({
     return out;
   }
 
+  /** Build exact one-minute Band snapshots from independently ragged vendor field arrays. */
+  function buildReferenceHistorySnapshots(
+    perName: Map<string, Record<string, TsV[]>>,
+    spot: TsV[],
+    meta: Map<string, { sp: number; type: 'CE' | 'PE'; exp: string }>,
+  ): Map<number, ChainSnapshot> {
+    type BandField = 'bid' | 'ask' | 'delta' | 'vega' | 'theta' | 'oi';
+    type Cursor = { values: TsV[]; index: number; last?: number; divisor: number };
+    const sourceName: Record<BandField, string> = {
+      bid: 'l1bid',
+      ask: 'l1ask',
+      delta: 'delta',
+      vega: 'vega',
+      theta: 'theta',
+      oi: 'cumulative_oi',
+    };
+    const fields: BandField[] = ['bid', 'ask', 'delta', 'vega', 'theta', 'oi'];
+    const prepared = [...meta].map(([name, contract]) => {
+      const series = perName.get(name) ?? {};
+      const cursors = {} as Record<BandField, Cursor>;
+      for (const field of fields) {
+        const values = (series[sourceName[field]] || [])
+          .map((point) => ({ ts: normTs(point.ts), v: point.v }))
+          .filter((point) => Number.isFinite(point.ts))
+          .sort((a, b) => a.ts - b.ts);
+        cursors[field] = {
+          values,
+          index: 0,
+          divisor: field === 'bid' || field === 'ask' ? 100 : 1,
+        };
+      }
+      return { name, contract, cursors };
+    });
+
+    const buckets = new Map<number, ChainSnapshot>();
+    for (const spotPoint of [...spot].sort((a, b) => a.ts - b.ts)) {
+      const ts = normTs(spotPoint.ts);
+      if (!Number.isFinite(ts) || !(spotPoint.v > 0)) continue;
+      if (
+        !isMarketSessionChartTime(
+          Math.floor(ts / 1000) + IST_OFFSET,
+          currentInstRef.current?.exchange,
+        )
+      )
+        continue;
+      const snapshot: ChainSnapshot = {
+        ts,
+        spot: spotPoint.v,
+        requireBook: true,
+        ce: [],
+        pe: [],
+      };
+      for (const item of prepared) {
+        const leg: AggLeg = {
+          key: `${item.contract.type}:${item.contract.sp}:${item.contract.exp}`,
+          sp: item.contract.sp,
+          exp: item.contract.exp,
+        };
+        let available = false;
+        for (const field of fields) {
+          const cursor = item.cursors[field];
+          while (cursor.index < cursor.values.length && cursor.values[cursor.index].ts <= ts) {
+            const value = cursor.values[cursor.index].v / cursor.divisor;
+            if (Number.isFinite(value)) cursor.last = value;
+            cursor.index++;
+          }
+          if (cursor.last !== undefined) {
+            leg[field] = cursor.last;
+            available = true;
+          }
+        }
+        if (available) (item.contract.type === 'CE' ? snapshot.ce : snapshot.pe).push(leg);
+      }
+      buckets.set(ts, snapshot);
+    }
+    return buckets;
+  }
+
   /**
    * The reconstruction itself: field series in, per-timestamp snapshots out.
    *
    * Pivots per-instrument field series into per-timestamp chain snapshots. Uses broker-served
-   * Greeks if present; otherwise reconstructs delta/vega/theta via Black-Scholes from option price
+   * IV/delta if present; otherwise reconstructs the surface via Black-Scholes from option price
    * (`close`) + spot at each timestamp. Each leg's own expiry (from meta) drives the
    * time-to-expiry, so multiple expiries merge correctly into shared timestamp buckets.
    *
@@ -1462,7 +1766,7 @@ export function useGreekOverlay({
       const oiByTs = new Map<number, number>();
       for (const e of series.cumulative_oi || []) oiByTs.set(normTs(e.ts), e.v);
       const ivByTs = new Map<number, number>();
-      for (const e of series.iv || []) ivByTs.set(normTs(e.ts), e.v);
+      for (const e of series.iv_mid || series.iv || []) ivByTs.set(normTs(e.ts), e.v);
       const hasGreeks = !!(series.delta?.length || series.vega?.length || series.theta?.length);
 
       if (hasGreeks) {
@@ -1477,15 +1781,8 @@ export function useGreekOverlay({
         put('vega', series.vega);
         put('theta', series.theta);
 
-        // The timeseries serves historical delta/vega/theta, and `HIST_FIELDS` requests `iv`,
-        // which is the one name it does NOT serve — the real fields are `iv_bid`/`iv_mid`/
-        // `iv_ask` (confirmed live 2026-08-03). So `ivByTs` is empty in practice and this
-        // branch derives IV by inversion from the `close` series instead. Switching
-        // HIST_FIELDS to `iv_mid` would take the vendor's own series; deliberately not done,
-        // see the IV section of README.md.
-        //
-        // Gated on `isIv`: the Vega/Theta overlays never read `iv`, and per-point inversion
-        // across a whole basket is the expensive path we deliberately keep off the 1s route.
+        // IV requests vendor `iv_mid`. Price inversion remains a fallback for an absent or
+        // unusable point and is isolated from the reference Vega/Theta path.
         const closeByTs = new Map<number, number>();
         if (isIv) for (const e of series.close || []) closeByTs.set(normTs(e.ts), e.v / 100);
 
@@ -1675,6 +1972,10 @@ export function useGreekOverlay({
     unsubscribeWsAll();
     liveLegsRef.current = new Map();
     snapshotsRef.current = new Map();
+    referenceMachineRef.current = new ReferenceBandMachine();
+    referencePointsRef.current = new Map();
+    referenceLiveBufferRef.current = [];
+    referenceRebuildingRef.current = false;
     metaRef.current = new Map();
     greekDateRef.current = '';
     lastSnapMsRef.current = 0;
