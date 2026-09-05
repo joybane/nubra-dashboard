@@ -21,6 +21,7 @@ import type {
 import { fmtPrice, IST_OFFSET, markSessionBreaks, marketSession, toChartTime } from '../lib/utils';
 import { useWs } from '../hooks/useWsContext';
 import { chartFrame, isChartLive, removeChart } from '../lib/chartLifecycle';
+import { syncChartPanes } from '../lib/syncChartPanes';
 import { blackScholes, impliedVolatility, RISK_FREE } from '../lib/GexService';
 import {
   resolveMcxStrategyFuture,
@@ -1213,10 +1214,21 @@ export default function StrategyAnalysisView({
     if (cached) {
       for (const leg of legMetasRef.current) {
         const data = cached.legPnlData.get(leg.refId);
-        if (data) seriesRef.current.legPnl.get(leg.refId)?.setData(markSessionBreaks(data));
+        if (data)
+          seriesRef.current.legPnl.get(leg.refId)?.setData(
+            fillPnlToGrid(
+              cached.underlyingBars.map((b) => b.time),
+              data,
+            ),
+          );
       }
       if (cached.basketPnlData.length > 0)
-        basketSeries.setData(markSessionBreaks(cached.basketPnlData));
+        basketSeries.setData(
+          fillPnlToGrid(
+            cached.underlyingBars.map((b) => b.time),
+            cached.basketPnlData,
+          ),
+        );
       cancelFit = chartFrame(chart, (c) => c.timeScale().fitContent());
     }
 
@@ -1774,43 +1786,7 @@ export default function StrategyAnalysisView({
       });
     }
 
-    const master = pc || charts[0];
-    if (master) {
-      try {
-        const masterRange = master.timeScale().getVisibleLogicalRange();
-        if (masterRange) {
-          for (const c of charts) {
-            if (c !== master) safeSetVisibleLogicalRange(c, masterRange);
-          }
-        }
-      } catch (e) {}
-    }
-
-    const unsubs: (() => void)[] = [];
-    let isSyncingRange = false;
-
-    for (const c of charts) {
-      const onRangeChange = (range: any) => {
-        if (isSyncingRange || !range) return;
-        isSyncingRange = true;
-        try {
-          for (const target of charts) {
-            if (target !== c) safeSetVisibleLogicalRange(target, range);
-          }
-        } catch (e) {
-        } finally {
-          isSyncingRange = false;
-        }
-      };
-      try {
-        c.timeScale().subscribeVisibleLogicalRangeChange(onRangeChange);
-        unsubs.push(() => {
-          try {
-            c.timeScale().unsubscribeVisibleLogicalRangeChange(onRangeChange);
-          } catch (e) {}
-        });
-      } catch (e) {}
-    }
+    const unsubs: (() => void)[] = [syncChartPanes(charts)];
 
     // Single-owner crosshair sync (mirrors NubraBacktest): the hovered pane drives all
     // three tooltips (data + position + visibility) and pushes the crosshair onto the
@@ -1988,42 +1964,6 @@ export default function StrategyAnalysisView({
       hoveredChartRef.current = null;
     };
   }, [priceVisible, pnlVisible, greeksVisible, indicatorsVisible, chartEpoch]);
-
-  // ── 5. Resize observer & persistent layout range sync ──
-  useEffect(() => {
-    const syncAll = () => {
-      try {
-        const pc = priceChartRef.current;
-        if (!pc) return;
-        const r = pc.timeScale().getVisibleLogicalRange();
-        if (!r) return;
-        safeSetVisibleLogicalRange(pnlChartRef.current, r);
-        safeSetVisibleLogicalRange(greeksChartRef.current, r);
-      } catch (e) {}
-    };
-
-    const ro = new ResizeObserver(() => {
-      try {
-        syncAll();
-      } catch (e) {}
-    });
-
-    if (priceChartContainerRef.current) ro.observe(priceChartContainerRef.current);
-    if (pnlChartContainerRef.current) ro.observe(pnlChartContainerRef.current);
-    if (greeksChartContainerRef.current) ro.observe(greeksChartContainerRef.current);
-
-    let count = 0;
-    const pollTimer = setInterval(() => {
-      syncAll();
-      count++;
-      if (count > 10) clearInterval(pollTimer);
-    }, 30);
-
-    return () => {
-      clearInterval(pollTimer);
-      ro.disconnect();
-    };
-  }, [priceVisible, pnlVisible, greeksVisible, chartEpoch]);
 
   // ── 6. Live WebSocket updates ──
   useEffect(() => {

@@ -1,0 +1,122 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Chart pane alignment regression</title>
+  </head>
+  <body style="margin: 0">
+    <pre id="result">Running pane alignment regression…</pre>
+    <div id="charts"></div>
+    <script type="module">
+      // Run npm run dev, then open /scripts/pane-alignment-check.html.
+      // Tests use real lightweight-charts canvases; timestamps must agree within 0.1 CSS pixels.
+      import { createChart, LineSeries } from 'lightweight-charts';
+      import { syncChartPanes } from '/src/lib/syncChartPanes.ts';
+      const result = document.querySelector('#result');
+      const errors = [];
+      window.addEventListener('error', (e) => errors.push(e.message));
+      const settle = async () => {
+        for (let i = 0; i < 12; i++) await new Promise(requestAnimationFrame);
+      };
+      const t = 1788600000;
+      const reports = [];
+      const make = (offsets, value) => {
+        const el = document.createElement('div');
+        el.style.cssText = 'width:960px;height:160px';
+        document.querySelector('#charts').append(el);
+        const c = createChart(el, {
+          width: 960,
+          height: 160,
+          layout: { fontSize: 11 },
+          leftPriceScale: { visible: true, minimumWidth: 60 },
+          rightPriceScale: { minimumWidth: 75 },
+          timeScale: { timeVisible: true },
+        });
+        const s = c.addSeries(LineSeries);
+        s.setData(offsets.map((n, i) => ({ time: t + n * 60, value: value + i })));
+        return { c, s, el };
+      };
+      const panes = [
+        make([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 8571),
+        make([3, 4, 6, 7, 8], -12345678),
+        make([0, 2, 4, 6, 8], 0),
+        make([0, 1, 4, 6, 8], 8571),
+      ];
+      let stop;
+      const check = (label, active = panes) => {
+        const times = [t, t + 240, t + 480];
+        for (const time of times) {
+          const xs = active.map(
+            ({ c }) => c.timeScale().timeToCoordinate(time) + c.priceScale('left').width(),
+          );
+          if (Math.max(...xs) - Math.min(...xs) > 0.1)
+            throw Error(label + ': x mismatch ' + JSON.stringify(xs));
+        }
+        if (errors.length) throw Error(errors.join('\n'));
+        reports.push('PASS ' + label);
+        result.textContent = reports.join('\n');
+      };
+      try {
+        stop = syncChartPanes(panes.map((p) => p.c));
+        panes[0].c.timeScale().setVisibleLogicalRange({ from: -2, to: 14 });
+        await settle();
+        check('sparse histories and wide P&L axis');
+        for (let i = 0; i < 4; i++) {
+          panes[i].c.timeScale().setVisibleLogicalRange({ from: i - 2, to: 16 - i });
+          await settle();
+          check('pan/zoom driven by pane ' + i);
+        }
+        panes[0].s.update({ time: t + 660, value: 8600 });
+        await settle();
+        check('underlying advances before other feeds');
+        panes[1].s.update({ time: t + 720, value: -123456789 });
+        await settle();
+        check('option/P&L advances and axis widens');
+        const extra = panes[3].c.addSeries(LineSeries);
+        extra.setData([
+          { time: t - 60, value: 2 },
+          { time: t + 300, value: 3 },
+          { time: t + 780, value: 4 },
+        ]);
+        await settle();
+        check('indicator overlay adds timestamps');
+        for (const p of panes) {
+          p.el.style.width = '730px';
+          p.c.resize(730, 160);
+        }
+        await settle();
+        check('resize all panes');
+        stop();
+        stop = syncChartPanes(panes.slice(1).map((p) => p.c));
+        panes[1].c.timeScale().setVisibleLogicalRange({ from: 0, to: 15 });
+        await settle();
+        check('price pane hidden', panes.slice(1));
+        stop();
+        stop = syncChartPanes(panes.map((p) => p.c));
+        await settle();
+        check('price pane restored');
+        for (let mask = 1; mask < 16; mask++) {
+          stop();
+          const active = panes.filter((_, i) => mask & (1 << i));
+          stop = syncChartPanes(active.map((p) => p.c));
+          active[0].c.timeScale().setVisibleLogicalRange({ from: -1, to: 16 });
+          await settle();
+          check('visible pane combination ' + mask, active);
+        }
+        stop();
+        stop = syncChartPanes([panes[3].c]);
+        await settle();
+        reports.push('PASS indicator alone');
+        panes[3].s.update({ time: t + 840, value: 8572 });
+        stop();
+        for (const p of panes) p.c.remove();
+        await settle();
+        if (errors.length) throw Error(errors.join('\n'));
+        reports.push('PASS cleanup with pending frames');
+        result.textContent = reports.join('\n') + '\nALL PASSED';
+      } catch (e) {
+        result.textContent = reports.join('\n') + '\nFAIL ' + e.stack;
+      }
+    </script>
+  </body>
+</html>
