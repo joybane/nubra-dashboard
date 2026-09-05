@@ -66,6 +66,34 @@
           await settle();
           check('pan/zoom driven by pane ' + i);
         }
+        // Public animated scrolling uses the same animation engine as kinetic dragging.
+        // Synchronization must not write ranges back to the source and cancel it.
+        for (let source = 0; source < panes.length; source++) {
+          const scale = panes[source].c.timeScale();
+          const original = scale.setVisibleLogicalRange;
+          let sourceWrites = 0;
+          scale.setVisibleLogicalRange = function (range) {
+            sourceWrites++;
+            return original.call(this, range);
+          };
+          // The library finishes on its last frame before the duration expires, so
+          // allow one frame of residual distance (0.1 bar), not an exact endpoint.
+          const destination = scale.scrollPosition() - 2;
+          scale.scrollToPosition(destination, true);
+          const started = performance.now();
+          while (performance.now() - started < 1200) await new Promise(requestAnimationFrame);
+          scale.setVisibleLogicalRange = original;
+          if (sourceWrites !== 0)
+            throw Error('Scroll source ' + source + ' was overwritten ' + sourceWrites + ' times');
+          if (Math.abs(scale.scrollPosition() - destination) > 0.1)
+            throw Error(
+              'Scroll animation stopped early: ' +
+                scale.scrollPosition() +
+                ' expected ' +
+                destination,
+            );
+          check('uninterrupted animated scrolling from pane ' + source);
+        }
         panes[0].s.update({ time: t + 660, value: 8600 });
         await settle();
         check('underlying advances before other feeds');
