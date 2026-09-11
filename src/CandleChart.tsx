@@ -605,25 +605,43 @@ export default function CandleChart({ instrument, theme }: Props) {
 
   function applyBucket(b: Record<string, string>) {
     try {
-      const tsStr =
-        b.bucket_timestamp && b.bucket_timestamp !== '0' ? b.bucket_timestamp : b.timestamp;
+      const isBucket = b.bucket_timestamp && b.bucket_timestamp !== '0';
+      const tsStr = isBucket ? b.bucket_timestamp : b.timestamp;
       if (!tsStr || tsStr === '0' || !/^\d+$/.test(tsStr)) return;
       const utcSec = Number(BigInt(tsStr) / 1_000_000_000n);
       const barTime = snapToCandle(utcSec, intervalRef.current);
-      const oVal = Number(b.open) / 100;
-      const hVal = Number(b.high) / 100;
-      const lVal = Number(b.low) / 100;
+      
       const cVal = Number(b.close) / 100;
-      if (isNaN(oVal) || isNaN(hVal) || isNaN(lVal) || isNaN(cVal) || oVal <= 0 || cVal <= 0)
-        return;
-      const candle = {
-        time: barTime,
-        open: oVal,
-        high: Math.max(hVal, oVal, cVal),
-        low: Math.min(lVal, oVal, hVal, cVal),
-        close: cVal,
-      };
-      commitCandle(candle, Number(b.cumulative_volume) || undefined);
+      if (isNaN(cVal) || cVal <= 0) return;
+      const vol = Number(b.cumulative_volume) || undefined;
+
+      if (isBucket) {
+        const oVal = Number(b.open) / 100;
+        const hVal = Number(b.high) / 100;
+        const lVal = Number(b.low) / 100;
+        if (isNaN(oVal) || isNaN(hVal) || isNaN(lVal) || oVal <= 0) return;
+        const candle = {
+          time: barTime,
+          open: oVal,
+          high: Math.max(hVal, oVal, cVal),
+          low: Math.min(lVal, oVal, hVal, cVal),
+          close: cVal,
+        };
+        commitCandle(candle, vol);
+      } else {
+        const last = lastBarRef.current;
+        const candle =
+          last && sortKey(last.time) === sortKey(barTime)
+            ? {
+                time: barTime,
+                open: last.open,
+                high: Math.max(last.high, cVal),
+                low: Math.min(last.low, cVal),
+                close: cVal,
+              }
+            : { time: barTime, open: cVal, high: cVal, low: cVal, close: cVal };
+        commitCandle(candle, vol);
+      }
     } catch (e) {
       console.warn('[Chart] applyBucket error:', e);
     }
