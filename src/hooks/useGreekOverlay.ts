@@ -129,6 +129,22 @@ function fetchHistoricalShared(body: unknown): Promise<HistoricalResp> {
   });
 }
 
+/**
+ * Expiries have two spellings in this app: the option chain (and the WS feed, and the popup's
+ * expiry list) use '20260915', the band-contracts route uses '2026-09-15'. Everything the hook
+ * stores is the chain spelling — `/api/optionchain?expiry=2026-09-15` is a 500, so a dashed value
+ * leaking into `selExpiries` made every later enable fail until a page reload.
+ */
+function toChainExpiry(expiry: string): string {
+  return expiry.replace(/-/g, '');
+}
+
+function toDashedExpiry(expiry: string): string {
+  return /^\d{8}$/.test(expiry)
+    ? `${expiry.slice(0, 4)}-${expiry.slice(4, 6)}-${expiry.slice(6, 8)}`
+    : expiry;
+}
+
 function fetchBandContractsShared(
   underlying: string,
   date: string,
@@ -136,7 +152,9 @@ function fetchBandContractsShared(
   exchange: string,
 ): Promise<BandContractsResp> {
   const params = new URLSearchParams({ underlying, date, exchange });
-  if (expiry) params.set('expiry', expiry);
+  // The route matches against its own 'YYYY-MM-DD' list; a chain-style '20260915' never matches
+  // and silently falls back to the nearest expiry.
+  if (expiry) params.set('expiry', toDashedExpiry(expiry));
   const url = `/api/nubra-backtest/band-contracts?${params.toString()}`;
   return sharedJson<BandContractsResp>(`band-contracts:${url}`, 30 * 60_000, async () => {
     const response = await fetch(url);
@@ -1093,7 +1111,11 @@ export function useGreekOverlay({
       if (!data.chain) return;
       const exps = data.chain.all_expiries || [];
       setExpiries(exps);
-      const initial = selExpiries.length ? selExpiries : exps[0] ? [exps[0]] : [];
+      // Keep the previous pick only while the chain still lists it. A selection that has since
+      // expired (or was ever stored in a spelling the chain rejects) would otherwise 500 every
+      // reload, and the toggle could never turn back on.
+      const kept = selExpiries.filter((e) => exps.includes(e));
+      const initial = kept.length ? kept : exps[0] ? [exps[0]] : [];
       setSelExpiries(initial);
       anchorExpiryRef.current = initial[0] || '';
       if (typeof data.chain.lot_size === 'number' && data.chain.lot_size > 0)
@@ -1433,9 +1455,14 @@ export function useGreekOverlay({
           exchange,
         );
         if (gen !== histGenRef.current) return;
-        bandContracts = dated.contracts ?? [];
+        // Normalised to the chain spelling so history legs, live legs and `selExpiries` all agree.
+        bandContracts = (dated.contracts ?? []).map((contract) => ({
+          ...contract,
+          expiry: toChainExpiry(contract.expiry),
+        }));
         if (!dated.ok || !dated.expiry || !bandContracts.length)
           throw new Error(dated.error || `No dated Band contracts for ${dateStr}`);
+        const datedExpiry = toChainExpiry(dated.expiry);
         meta = new Map(
           bandContracts.map((contract) => [
             contract.name,
@@ -1443,9 +1470,9 @@ export function useGreekOverlay({
           ]),
         );
         metaRef.current = meta;
-        if (dated.expiry !== selExpiries[0]) {
-          setSelExpiries([dated.expiry]);
-          anchorExpiryRef.current = dated.expiry;
+        if (datedExpiry !== selExpiries[0]) {
+          setSelExpiries([datedExpiry]);
+          anchorExpiryRef.current = datedExpiry;
         }
         const lot = bandContracts.find((contract) => contract.lotSize)?.lotSize;
         if (lot) lotSizeRef.current = lot;

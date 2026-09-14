@@ -15,6 +15,7 @@ import { fmtPrice, markSessionBreaks } from './lib/utils';
 import { logicalAtTime } from './lib/greekTooltip';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
 import { defaultBacktestDate } from './lib/tradingDay';
+import { clearNubraBtHandoff, peekNubraBtHandoff } from './lib/nubraBtHandoff';
 import {
   PriceTooltip,
   PnlTooltip,
@@ -333,12 +334,21 @@ const CHAIN_RELOAD_DEBOUNCE_MS = 350;
 
 export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const { loadInstrumentInActivePane } = useWorkspaceState();
+  // A hand-off from the Analysis tab opens this view on that case — date, expiry, times and legs —
+  // instead of the defaults. Peeked (not taken) during render; cleared once mounted. The expiry and
+  // legs refs are consumed by the first chain load and the first chain result respectively.
+  const [handoff] = useState(peekNubraBtHandoff);
+  const handoffExpiryRef = useRef<string | null>(handoff?.expiry ?? null);
+  const handoffLegsRef = useRef(handoff?.legs ?? null);
+  const autoSimulateRef = useRef(false);
+  useEffect(() => clearNubraBtHandoff(handoff), [handoff]);
+
   // Config state
-  const [underlying, setUnderlying] = useState<string>('NIFTY');
-  const [date, setDate] = useState(defaultBacktestDate);
-  const [entryTime, setEntryTime] = useState('09:20');
-  const [exitTime, setExitTime] = useState('15:15');
-  const [expiry, setExpiry] = useState('');
+  const [underlying, setUnderlying] = useState<string>(handoff?.underlying ?? 'NIFTY');
+  const [date, setDate] = useState(() => handoff?.date ?? defaultBacktestDate());
+  const [entryTime, setEntryTime] = useState(handoff?.entryTime ?? '09:20');
+  const [exitTime, setExitTime] = useState(handoff?.exitTime ?? '15:15');
+  const [expiry, setExpiry] = useState(handoff?.expiry ?? '');
 
   // Chain state
   const [chain, setChain] = useState<ChainRow[]>([]);
@@ -883,10 +893,15 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     // instrument.exchange updates one render before the mirrored underlying state.
     // Do not issue the transient, invalid combination (for example NIFTY + MCX).
     if (!(date && (!selectedInstrumentAsset || selectedInstrumentAsset === underlying))) return;
-    const timer = window.setTimeout(
-      () => loadChain(underlying, date, entryTime),
-      CHAIN_RELOAD_DEBOUNCE_MS,
-    );
+    const timer = window.setTimeout(() => {
+      // The first load after a hand-off asks for the hand-off's expiry rather than the default one.
+      // Consumed inside the timer, not the effect body, so StrictMode's discarded first effect run
+      // (whose timer is cleared before it fires) cannot use it up.
+      const handoffExpiry = handoffExpiryRef.current;
+      handoffExpiryRef.current = null;
+      if (handoffExpiry) setExpiry(handoffExpiry);
+      loadChain(underlying, date, entryTime, handoffExpiry ?? undefined);
+    }, CHAIN_RELOAD_DEBOUNCE_MS);
     reloadTimerRef.current = timer;
     return () => {
       window.clearTimeout(timer);
@@ -936,6 +951,31 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     setLegs((prev) => [...prev, { id: genId(), strike, optionType, side, lots: 1, ltp }]);
   }
 
+  // Hand-off legs land once the chain they need for entry prices has arrived, and are simulated
+  // once, so the view opens on the same chart the Analysis case showed.
+  useEffect(() => {
+    const pending = handoffLegsRef.current;
+    if (!pending || chainLoading || !chain.length) return;
+    handoffLegsRef.current = null;
+    const next: Leg[] = [];
+    for (const l of pending) {
+      const row = chain.find((r) => r.strike === l.strike);
+      if (!row) continue;
+      const ltp = l.optionType === 'CE' ? row.ceLtp : row.peLtp;
+      next.push({
+        id: genId(),
+        strike: l.strike,
+        optionType: l.optionType,
+        side: l.side,
+        lots: l.lots,
+        ltp,
+      });
+    }
+    if (!next.length) return;
+    setLegs(next);
+    autoSimulateRef.current = true;
+  }, [chain, chainLoading]);
+
   function removeLeg(id: string) {
     setLegs((prev) => prev.filter((l) => l.id !== id));
   }
@@ -983,6 +1023,12 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       setEvalLoading(false);
     }
   }
+
+  useEffect(() => {
+    if (!autoSimulateRef.current || !legs.length) return;
+    autoSimulateRef.current = false;
+    void simulate();
+  });
 
   // Re-simulate when entry/exit time changes and we already have a result
   async function resimulate(newEntry: string, newExit: string) {

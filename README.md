@@ -233,6 +233,25 @@ option 35.
 `server/nubraBacktestRoutes.ts` additionally exposes Nubra broker-history chain/evaluation
 routes used for single-day replay and comparison.
 
+### Analysis (profit mismatch scanner)
+
+| Method | Path                       | Purpose                                                        |
+| ------ | -------------------------- | -------------------------------------------------------------- |
+| GET    | `/api/analysis/status`     | Cached coverage per source, sync progress, validation verdict  |
+| POST   | `/api/analysis/sync`       | Download missing days (Nubra 1m + local parquet) and re-verify |
+| GET    | `/api/analysis/validation` | Full local-vs-Nubra report, per day                            |
+| POST   | `/api/analysis/scan`       | Find CE/PE ΔP&L mismatch cases at the same NIFTY close, by day |
+| GET    | `/api/analysis/day`        | One day's spot and leg series for the case chart               |
+
+Code lives in `server/analysis/`. Each day is stored once, as a 375-minute grid of spot and an
+OTM±2-wide strike ladder, under `.analysis-cache/<UND>/{nubra,local}/<date>.json.gz` (git-ignored;
+a day with no data is `<date>.empty.json.gz`). Nubra wins for any date it holds; local-only years
+are included by default only while `validation.json` passes. Measured limits: NIFTY index 1m bars
+start 2025-03-17 and option bars 2025-03-24. Expiries come from the local folders, cached instrument
+masters and probing — weekend folder names are ignored (the tree has a bogus `2026-05-02`), and a
+day whose every option name 404s re-probes its expiry. `scripts/analysisSync.ts` runs the same sync
+from the command line against a running server.
+
 ### Paper trading
 
 | Method       | Path                           | Purpose                                               |
@@ -424,6 +443,7 @@ dynamic position sizing, position adjustments, Monte Carlo analysis, and strateg
 | `src/NubraBacktest.tsx` | Broker-history single-day replay, three-pane chart             |
 | `src/Watchlist.tsx`     | Instrument watchlist and prices                                |
 | `src/Tracker.tsx`       | Position tracking                                              |
+| `src/Analysis.tsx`      | Profit-mismatch scan, per-case charts, hand-off to Nubra BT    |
 
 ### Important components and hooks
 

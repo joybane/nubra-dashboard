@@ -20,6 +20,7 @@ import {
 import { buildBasketSnapshot, istDateString, type SnapPosition } from './snapshotBuilder.ts';
 import { registerBacktestRoutes } from './backtest/routes.ts';
 import { registerNubraBacktestRoutes } from './nubraBacktestRoutes.ts';
+import { registerAnalysisRoutes } from './analysis/routes.ts';
 import { createBacktestRefdataStore } from './backtestRefdataStore.ts';
 import { createBacktestBarStore } from './backtestBarStore.ts';
 import { registerMarketDataRoutes } from './marketDataRoutes.ts';
@@ -1570,6 +1571,20 @@ registerNubraBacktestRoutes({
   getSessionToken: () => authState.sessionToken,
   refdataStore: backtestRefdata,
   barStore: backtestBars,
+});
+
+// ─── Analysis (profit-mismatch scenarios) ────────────────────────────────────
+// Serves from .analysis-cache; only a sync talks to the broker, and only while a session exists.
+registerAnalysisRoutes({
+  fastify,
+  rootDir: path.join(__dirname, '..'),
+  getPost: () =>
+    authState.status === 'authenticated' && authState.sessionToken
+      ? (body) =>
+          nubraPost('/charts/timeseries', body, {
+            Authorization: `Bearer ${authState.sessionToken!}`,
+          })
+      : null,
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────

@@ -39,6 +39,10 @@ _archive/
 # Per-date historical bars, re-downloadable from the broker (see backtestBarStore.ts)
 .bars-cache/
 
+# Analysis tab dataset: per-day spot + option ladders from Nubra and the parquet tree, rebuildable
+# with scripts/analysisSync.ts (see server/analysis/sync.ts)
+.analysis-cache/
+
 # Runtime logs & editor scratch files
 *.log
 *.bak

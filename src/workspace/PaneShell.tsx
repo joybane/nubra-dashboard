@@ -15,6 +15,7 @@ const Backtest = lazy(() => import('../Backtest'));
 const NubraBacktest = lazy(() => import('../NubraBacktest'));
 const Watchlist = lazy(() => import('../Watchlist'));
 const Tracker = lazy(() => import('../Tracker'));
+const Analysis = lazy(() => import('../Analysis'));
 
 function PaneLoading() {
   return (
@@ -67,6 +68,8 @@ export default function PaneShell({
         return <Watchlist onNavigateToChart={onNavigateToChart} />;
       case 'tracker':
         return <Tracker instrument={pane.instrument} theme={theme} />;
+      case 'analysis':
+        return <Analysis theme={theme} onChangeView={onViewChange} />;
     }
   })();
 

@@ -233,7 +233,8 @@ export type ViewType =
   | 'backtest'
   | 'nubrabacktest'
   | 'watchlist'
-  | 'tracker';
+  | 'tracker'
+  | 'analysis';
 
 export type LayoutType = 'single' | 'hsplit' | 'vsplit' | 'grid' | 'tleft' | 'tright';
 

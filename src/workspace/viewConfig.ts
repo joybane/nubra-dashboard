@@ -15,6 +15,7 @@ export const VIEW_LABELS: Record<ViewType, string> = {
   nubrabacktest: 'Nubra BT',
   watchlist: 'Watchlist',
   tracker: 'Tracker',
+  analysis: 'Analysis',
 };
 
 export const VIEW_ORDER = Object.keys(VIEW_LABELS) as ViewType[];

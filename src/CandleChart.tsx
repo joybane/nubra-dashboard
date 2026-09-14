@@ -46,6 +46,11 @@ import {
 } from './lib/utils';
 
 const INTERVALS = ['1m', '2m', '3m', '5m', '10m', '15m', '30m', '1h', '1d', '1w', '1mt'] as const;
+/**
+ * Wider lookbacks (days) tried in turn when an intraday load returns no bars. 7 covers a weekend
+ * past the short windows; 14 covers a long exchange holiday on top of one.
+ */
+const EMPTY_RETRY_DAYS = [7, 14];
 type Interval = (typeof INTERVALS)[number];
 
 // The OI slider spans one trading session. Its length is exchange-specific: NSE is
@@ -723,15 +728,26 @@ export default function CandleChart({ instrument, theme }: Props) {
       // either — which leaves the series holding rows the renderer cannot resolve.
       const ticket = ++loadTicketRef.current;
 
+      // A timeframe switch reloads the same instrument. The greek overlays reconstruct their own
+      // 1m history independent of the candle interval and re-snap onto whatever bar grid is loaded,
+      // so they stay on and are repainted below once the new bars land.
+      const prev = currentInstRef.current;
+      const sameInstrument =
+        !!prev &&
+        getSymbol(prev) === getSymbol(inst) &&
+        (prev.exchange || 'NSE') === (inst.exchange || 'NSE');
+
       if (currentInstRef.current) {
         const oldSym = getSymbol(currentInstRef.current);
         unsubscribeChart({ indexes: [oldSym] }, iv, currentInstRef.current.exchange || 'NSE');
         if (nubraType(currentInstRef.current) === 'OPT') unsubscribeOptTickWs();
       }
       oi.clearForInstrumentChange();
-      vega.clearForInstrumentChange();
-      theta.clearForInstrumentChange();
-      ivOverlay.clearForInstrumentChange();
+      if (!sameInstrument) {
+        vega.clearForInstrumentChange();
+        theta.clearForInstrumentChange();
+        ivOverlay.clearForInstrumentChange();
+      }
 
       currentInstRef.current = inst;
       if (nubraType(inst) === 'OPT') {
@@ -767,8 +783,17 @@ export default function CandleChart({ instrument, theme }: Props) {
 
       try {
         const end = new Date();
-        const start = new Date(end.getTime() - historyDays(iv) * 86400000);
-        const { bars, volBars } = await fetchRange(inst, iv, start, end);
+        let start = new Date(end.getTime() - historyDays(iv) * 86400000);
+        let { bars, volBars } = await fetchRange(inst, iv, start, end);
+        // A fixed trailing window can miss the last session entirely: 1m looks back 3 days, so on
+        // a Monday after ~15:30, or after a holiday, it lands on nothing but the weekend and the
+        // chart reads "No historical data". Widen until the last session is inside the window.
+        for (const days of EMPTY_RETRY_DAYS) {
+          if (bars.length || !isIntradayInterval(iv) || days <= historyDays(iv)) continue;
+          if (!isChartLive(chartRef.current) || ticket !== loadTicketRef.current) return;
+          start = new Date(end.getTime() - days * 86400000);
+          ({ bars, volBars } = await fetchRange(inst, iv, start, end));
+        }
         // The pane can be closed (or the whole workspace swapped out for the strategy
         // view) while this is in flight — re-check rather than write to a dead chart.
         if (!isChartLive(chartRef.current) || !candleRef.current || !volRef.current) return;
@@ -781,7 +806,8 @@ export default function CandleChart({ instrument, theme }: Props) {
           // empty pane with no message at all while it runs would be worse than a vague one.
           setLoading('No historical data available.');
           if (nubraType(inst) === 'OPT') {
-            const detail = await describeEmptyOptionHistory(inst, iv);
+            const searchedDays = Math.round((end.getTime() - start.getTime()) / 86400000);
+            const detail = await describeEmptyOptionHistory(inst, iv, searchedDays);
             // A newer load may have started during the probe; it owns the message now.
             if (ticket === loadTicketRef.current) setLoading(detail);
           }
@@ -819,6 +845,11 @@ export default function CandleChart({ instrument, theme }: Props) {
           .timeScale()
           .setVisibleLogicalRange({ from: Math.max(0, len - 60), to: len + 5 });
         setLoading(null);
+        // No-ops unless an overlay survived a timeframe switch; the new bar grid changes each
+        // overlay's draw signature, so this re-snaps their lines onto it.
+        vega.refresh();
+        theta.refresh();
+        ivOverlay.refresh();
         startCountdown();
         updatePriceDisplay(lastBarRef.current.close, dayOpenRef.current);
         setOhlc({
@@ -1372,8 +1403,9 @@ const EMPTY_PROBE_DAYS = 365;
 async function describeEmptyOptionHistory(
   instrument: Instrument,
   interval: string,
+  /** Lookback the load actually searched — wider than `historyDays` once an empty load retried. */
+  windowDays: number = historyDays(interval),
 ): Promise<string> {
-  const windowDays = historyDays(interval);
   // Nothing to learn from probing at the same resolution the request already used.
   if (!isIntradayInterval(interval)) return 'No historical data available.';
   try {
