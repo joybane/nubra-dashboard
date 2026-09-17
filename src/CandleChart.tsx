@@ -1,5 +1,6 @@
 import { chartTheme } from './lib/chartTheme';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   createChart,
   CandlestickSeries,
@@ -53,6 +54,15 @@ const INTERVALS = ['1m', '2m', '3m', '5m', '10m', '15m', '30m', '1h', '1d', '1w'
  * past the short windows; 14 covers a long exchange holiday on top of one.
  */
 const EMPTY_RETRY_DAYS = [7, 14];
+/**
+ * Consecutive days of empty history before scrolling back concludes the data has run out. Longer
+ * than any exchange closure, so a weekend or holiday never ends the scroll-back — which is what a
+ * single empty page-in used to do.
+ */
+const EMPTY_GAP_LIMIT_DAYS = 45;
+/** Request size when "Go to" fills the gap back to a date. The broker returns 90 days of 1m in ~0.3 s. */
+const GOTO_INTRADAY_PIECE_DAYS = 60;
+const GOTO_DAILY_PIECE_DAYS = 1825;
 type Interval = (typeof INTERVALS)[number];
 
 // The OI slider spans one trading session. Its length is exchange-specific: NSE is
@@ -266,6 +276,8 @@ export default function CandleChart({ instrument, theme }: Props) {
     up: boolean;
   } | null>(null);
   const [loadMore, setLoadMore] = useState(false);
+  const [goToOpen, setGoToOpen] = useState(false);
+  const goToBtnRef = useRef<HTMLButtonElement>(null);
 
   const { wsReady, subscribe, subscribeChart, unsubscribeChart, subscribeOC, unsubscribeOC } = useWs();
   const intervalRef = useRef(interval);
@@ -455,6 +467,11 @@ export default function CandleChart({ instrument, theme }: Props) {
       }
       if (e.key === 'Home' || e.key === 'End') {
         resetZoom();
+        e.preventDefault();
+      }
+      // TradingView's "Go to" shortcut.
+      if (e.altKey && (e.key === 'g' || e.key === 'G')) {
+        setGoToOpen(true);
         e.preventDefault();
       }
     };
@@ -841,6 +858,110 @@ export default function CandleChart({ instrument, theme }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [instrument, interval]);
 
+  /** Prepend older bars to the loaded series and repaint. Shared by scroll-back and "Go to". */
+  function mergeOlderBars(bars: OhlcBar[], volBars: VolBar[]) {
+    const mergedBars = dedupeAndSortBars([...sanitizeCandles(bars), ...allBarsRef.current]);
+    const mergedVolBars = dedupeAndSortBars([...volBars, ...allVolBarsRef.current]);
+    allBarsRef.current = mergedBars;
+    allVolBarsRef.current = mergedVolBars;
+    if (mergedBars.length > 0) dayOpenRef.current = mergedBars[0].open;
+    // Guarded because callers resume after an await — the pane may be gone by now.
+    if (!isChartLive(chartRef.current)) return;
+    candleRef.current?.setData(
+      mergedBars.map((b) => ({
+        time: b.time,
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+      })) as Parameters<typeof candleRef.current.setData>[0],
+    );
+    volRef.current?.setData(
+      mergedVolBars.map((v) => ({
+        time: v.time,
+        value: v.value,
+        color: v.color,
+      })) as Parameters<typeof volRef.current.setData>[0],
+    );
+    // The bar grid grew to the left; greek points that fell before it can now be placed.
+    vega.refresh();
+    theta.refresh();
+    ivOverlay.refresh();
+  }
+
+  /**
+   * Jump to a date (and, on intraday charts, a time) in IST — TradingView's "Go to".
+   *
+   * Everything between the target and what is already loaded is fetched, so the series stays
+   * contiguous back to the present and scrolling either way keeps working. Resolves to a note for
+   * the popover when the data does not reach that far, or '' when the jump landed.
+   */
+  async function goToDate(dateStr: string, timeStr: string): Promise<string> {
+    const inst = currentInstRef.current;
+    if (!inst || !isChartLive(chartRef.current) || !earliestRef.current) {
+      return 'Load a symbol first.';
+    }
+    const iv = intervalRef.current;
+    const intraday = isIntradayInterval(iv);
+    const hhmm = intraday && /^\d{2}:\d{2}$/.test(timeStr) ? timeStr : '00:00';
+    // Chart times carry IST baked in, so the IST wall clock read as UTC is already a chart time.
+    const wallMs = Date.parse(`${dateStr}T${hhmm}:00Z`);
+    if (!Number.isFinite(wallMs)) return 'Enter a valid date.';
+    const targetKey = intraday ? wallMs / 1000 : Number(dateStr.replace(/-/g, ''));
+    const targetUtcMs = wallMs - IST_OFFSET * 1000;
+
+    // Never interleave with a scroll-triggered page-in: both write earliestRef and the series.
+    const ticket = loadTicketRef.current;
+    while (isLoadingRef.current) {
+      await new Promise((r) => setTimeout(r, 50));
+      if (ticket !== loadTicketRef.current) return '';
+    }
+    isLoadingRef.current = true;
+    setLoadMore(true);
+    try {
+      // One chunk of context to the left of the target, so it does not sit on the edge of the data.
+      const want = targetUtcMs - chunkDays(iv) * 86400000;
+      const pieceMs = (intraday ? GOTO_INTRADAY_PIECE_DAYS : GOTO_DAILY_PIECE_DAYS) * 86400000;
+      const bars: OhlcBar[] = [];
+      const volBars: VolBar[] = [];
+      let end = earliestRef.current.getTime() - 60000;
+      while (end > want) {
+        const start = Math.max(want, end - pieceMs);
+        const piece = await fetchRange(inst, iv, new Date(start), new Date(end));
+        if (ticket !== loadTicketRef.current) return '';
+        earliestRef.current = new Date(start);
+        bars.push(...piece.bars);
+        volBars.push(...piece.volBars);
+        // A whole empty piece is longer than any closure: the data has run out before the target.
+        if (!piece.bars.length && end - start >= EMPTY_GAP_LIMIT_DAYS * 86400000) {
+          hasReachedEarliestRef.current = true;
+          break;
+        }
+        end = start - 60000;
+      }
+      if (bars.length) mergeOlderBars(bars, volBars);
+
+      const chart = chartRef.current;
+      const all = allBarsRef.current;
+      if (!isChartLive(chart) || !all.length) return 'No candles loaded for this symbol.';
+      let idx = all.findIndex((b) => sortKey(b.time) >= targetKey);
+      if (idx < 0) idx = all.length - 1;
+      const range = chart.timeScale().getVisibleLogicalRange();
+      const span = Math.max(30, range ? range.to - range.from : 120);
+      chart.timeScale().setVisibleLogicalRange({ from: idx - span / 2, to: idx + span / 2 });
+      candleRef.current?.priceScale().applyOptions({ autoScale: true });
+      containerRef.current?.focus();
+      return sortKey(all[0].time) > targetKey
+        ? `${iv} data only goes back to ${fmtCrosshairTime(all[0].time)} — showing the earliest candles.`
+        : '';
+    } catch (e) {
+      return `Could not load history: ${(e as Error).message}`;
+    } finally {
+      isLoadingRef.current = false;
+      setLoadMore(false);
+    }
+  }
+
   async function loadMoreHistory() {
     const now = Date.now();
     if (
@@ -856,47 +977,30 @@ export default function CandleChart({ instrument, theme }: Props) {
     const ticket = loadTicketRef.current;
     setLoadMore(true);
     try {
-      const end = new Date(earliestRef.current.getTime() - 60000);
-      const start = new Date(end.getTime() - chunkDays(intervalRef.current) * 86400000);
-      const { bars, volBars } = await fetchRange(
-        currentInstRef.current,
-        intervalRef.current,
-        start,
-        end,
-      );
-      // A symbol/interval switch during this fetch invalidates the page-in entirely:
-      // allBarsRef now belongs to a different instrument, so merging into it would
-      // splice two symbols' bars together.
-      if (ticket !== loadTicketRef.current) return;
-      earliestRef.current = start;
-      if (bars.length > 0) {
-        const sanitizedNew = sanitizeCandles(bars);
-        const mergedBars = dedupeAndSortBars([...sanitizedNew, ...allBarsRef.current]);
-        const mergedVolBars = dedupeAndSortBars([...volBars, ...allVolBarsRef.current]);
-        allBarsRef.current = mergedBars;
-        allVolBarsRef.current = mergedVolBars;
-        if (mergedBars.length > 0) dayOpenRef.current = mergedBars[0].open;
-        // Guarded because this resumes after an await — the pane may be gone by now.
-        if (isChartLive(chartRef.current)) {
-          candleRef.current?.setData(
-            mergedBars.map((b) => ({
-              time: b.time,
-              open: b.open,
-              high: b.high,
-              low: b.low,
-              close: b.close,
-            })) as Parameters<typeof candleRef.current.setData>[0],
-          );
-          volRef.current?.setData(
-            mergedVolBars.map((v) => ({
-              time: v.time,
-              value: v.value,
-              color: v.color,
-            })) as Parameters<typeof volRef.current.setData>[0],
-          );
+      const inst = currentInstRef.current;
+      const iv = intervalRef.current;
+      const step = chunkDays(iv);
+      // An empty page is usually a weekend or a holiday, not the start of history, so keep stepping
+      // back; only a gap longer than any market closure means the data has actually run out.
+      const maxGapDays = Math.max(EMPTY_GAP_LIMIT_DAYS, step * 2);
+      let end = new Date(earliestRef.current.getTime() - 60000);
+      for (let gapDays = 0; ; gapDays += step) {
+        if (gapDays >= maxGapDays) {
+          hasReachedEarliestRef.current = true;
+          break;
         }
-      } else {
-        hasReachedEarliestRef.current = true;
+        const start = new Date(end.getTime() - step * 86400000);
+        const { bars, volBars } = await fetchRange(inst, iv, start, end);
+        // A symbol/interval switch during this fetch invalidates the page-in entirely:
+        // allBarsRef now belongs to a different instrument, so merging into it would
+        // splice two symbols' bars together.
+        if (ticket !== loadTicketRef.current) return;
+        earliestRef.current = start;
+        if (bars.length > 0) {
+          mergeOlderBars(bars, volBars);
+          break;
+        }
+        end = new Date(start.getTime() - 60000);
       }
     } catch (e) {
       console.warn('[Chart] loadMoreHistory failed:', e);
@@ -1196,6 +1300,24 @@ export default function CandleChart({ instrument, theme }: Props) {
       </div>
       <div className="chart-tools-row chart-navigation-row">
         <button className="shell-button" title="Fit all loaded candles" onClick={() => { chartRef.current?.timeScale().fitContent(); candleRef.current?.priceScale().applyOptions({ autoScale: true }); }}>Fit</button>
+        <button
+          ref={goToBtnRef}
+          className="shell-button"
+          title="Go to a date (Alt+G)"
+          aria-expanded={goToOpen}
+          onClick={() => setGoToOpen((v) => !v)}
+        >
+          Go to
+        </button>
+        {goToOpen && goToBtnRef.current && (
+          <GoToDatePopover
+            anchor={goToBtnRef.current}
+            intraday={isIntradayInterval(interval)}
+            defaultTime={minToHHMM(marketSession(instrument?.exchange).openMin)}
+            onGo={goToDate}
+            onClose={() => setGoToOpen(false)}
+          />
+        )}
 
         {/* Interval buttons */}
         <div className="chart-timeframes" role="group" aria-label="Chart timeframe">
@@ -1357,6 +1479,139 @@ export default function CandleChart({ instrument, theme }: Props) {
         <span className="chart-shortcuts">Scroll to zoom · Drag to pan · Double-click to reset</span>
       </div>
     </div>
+  );
+}
+
+// ── Go to date ────────────────────────────────────────────────────────────────
+function minToHHMM(min: number): string {
+  return `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+}
+
+/** Today's IST calendar day — the date picker's default and its max. */
+function istToday(): string {
+  return new Date(Date.now() + IST_OFFSET * 1000).toISOString().slice(0, 10);
+}
+
+/**
+ * TradingView-style "Go to" tray: a date and, on intraday charts, a time, both IST.
+ *
+ * Portalled to document.body and placed from the anchor's rect: the chart panes sit inside several
+ * `overflow-hidden` ancestors (see GreekControls), which would clip an in-flow dropdown.
+ */
+function GoToDatePopover({
+  anchor,
+  intraday,
+  defaultTime,
+  onGo,
+  onClose,
+}: {
+  anchor: HTMLElement;
+  intraday: boolean;
+  defaultTime: string;
+  onGo: (date: string, time: string) => Promise<string>;
+  onClose: () => void;
+}) {
+  const [date, setDate] = useState(istToday);
+  const [time, setTime] = useState(defaultTime);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState('');
+  const ref = useRef<HTMLFormElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const onPointerDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (ref.current?.contains(t) || anchor.contains(t)) return;
+      onCloseRef.current();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCloseRef.current();
+    };
+    // Fixed-position and measured once, so close rather than drift away from the button.
+    const onMove = () => onCloseRef.current();
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', onMove);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('resize', onMove);
+    };
+  }, [anchor]);
+
+  const rect = anchor.getBoundingClientRect();
+  const width = 272;
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!date || busy) return;
+    setBusy(true);
+    setNote('');
+    const result = await onGo(date, time);
+    setBusy(false);
+    if (result) setNote(result);
+    else onCloseRef.current();
+  }
+
+  const field =
+    'w-full px-2 py-1.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-[12px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]';
+
+  return createPortal(
+    <form
+      ref={ref}
+      onSubmit={submit}
+      role="dialog"
+      aria-label="Go to date"
+      className="fixed bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl p-3 flex flex-col gap-2.5"
+      style={{ left, top: rect.bottom + 6, width, zIndex: 150 }}
+    >
+      <div className="text-[13px] font-semibold text-[var(--text-primary)]">Go to</div>
+      <div className="flex gap-2">
+        <label className="flex-1 flex flex-col gap-1 text-[10px] text-[var(--text-muted)]">
+          DATE
+          <input
+            type="date"
+            autoFocus
+            required
+            value={date}
+            max={istToday()}
+            onChange={(e) => setDate(e.target.value)}
+            className={field}
+          />
+        </label>
+        {intraday && (
+          <label className="w-[92px] flex flex-col gap-1 text-[10px] text-[var(--text-muted)]">
+            TIME (IST)
+            <input
+              type="time"
+              value={time}
+              onChange={(e) => setTime(e.target.value)}
+              className={field}
+            />
+          </label>
+        )}
+      </div>
+      {note && <div className="text-[11px] text-amber-500 leading-relaxed">{note}</div>}
+      <div className="flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => onCloseRef.current()}
+          className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={busy || !date}
+          className="px-4 py-1.5 rounded-lg bg-[var(--accent)] text-white text-[12px] font-medium hover:bg-[var(--accent-dim)] disabled:opacity-50"
+        >
+          {busy ? 'Loading…' : 'Go to'}
+        </button>
+      </div>
+    </form>,
+    document.body,
   );
 }
 

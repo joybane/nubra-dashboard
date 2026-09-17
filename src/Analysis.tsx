@@ -9,15 +9,18 @@ import {
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
-import type { Instrument, Theme, ViewType } from './types';
+import type { Instrument, OhlcBar, Theme, ViewType } from './types';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
 import { syncChartPanes } from './lib/syncChartPanes';
 import { bindPinTrigger, usePinnedTimes } from './lib/chartPins';
 import { setNubraBtHandoff } from './lib/nubraBtHandoff';
+import { blackScholes, impliedVolatility, RISK_FREE } from './lib/GexService';
 import PinnedCrosshairLayer from './components/PinnedCrosshairLayer';
 import PinCompareStrip, { type CompareRow } from './components/PinCompareStrip';
-import { PnlTooltipBody, PriceTooltipBody } from './components/ChartTooltips';
+import PaneDivider, { type PaneSpec } from './components/PaneDivider';
+import GreekIndicatorPane from './components/GreekIndicatorPane';
+import { GreeksTooltipBody, PnlTooltipBody, PriceTooltipBody } from './components/ChartTooltips';
 
 // ── Server shapes — mirrors of server/analysis/*.ts (the two tsconfigs are disjoint) ─────────
 
@@ -209,6 +212,19 @@ const NIFTY_INSTRUMENT: Instrument = {
 const CE_COLOR = '#22c55e';
 const PE_COLOR = '#ef4444';
 const SESSION_OPEN_MIN = 9 * 60 + 15;
+const YEAR_SECS = 365 * 86400;
+const GREEK_COLORS: Record<'delta' | 'gamma' | 'theta' | 'vega', string> = {
+  delta: '#3b82f6',
+  gamma: '#a78bfa',
+  theta: '#22c55e',
+  vega: '#f59e0b',
+};
+
+/** 15:30 IST on `expiry` ("YYYY-MM-DD"), expressed the same IST-wall-clock-as-UTC way as sessionStart. */
+function expirySeconds(expiry: string): number {
+  const [y, mo, d] = expiry.split('-').map(Number);
+  return Date.UTC(y, (mo || 1) - 1, d, 15, 30) / 1000;
+}
 
 const SETTINGS_KEY = 'nubra-analysis-settings';
 /** v2: ranking defaults to the CE/PE gap. Older saves carry the old `total` default, so it is dropped. */
@@ -1183,6 +1199,20 @@ function CaseChart({
     const cePnlAt: Grid = [];
     const pePnlAt: Grid = [];
     const totalAt: Grid = [];
+    // Net position Greeks (per unit — direction-signed, not scaled by qty), reconstructed via
+    // Black-76 the same way TradeChartView does for a backtested day: the broker keeps no
+    // historical Greeks feed for these dates, so IV is back-solved from each leg's traded
+    // premium and delta/gamma/theta/vega computed off that.
+    const expirySec = expirySeconds(data.expiry);
+    const legSign = params.side === 'SELL' ? -1 : 1;
+    const greekDelta: Array<{ time: UTCTimestamp; value: number }> = [];
+    const greekGamma: Array<{ time: UTCTimestamp; value: number }> = [];
+    const greekTheta: Array<{ time: UTCTimestamp; value: number }> = [];
+    const greekVega: Array<{ time: UTCTimestamp; value: number }> = [];
+    const deltaAt: Grid = [];
+    const gammaAt: Grid = [];
+    const thetaAt: Grid = [];
+    const vegaAt: Grid = [];
     for (let i = 0; i < data.minutes.length; i++) {
       const time = (start + i * 60) as UTCTimestamp;
       const s = data.spot[i];
@@ -1223,16 +1253,93 @@ function CaseChart({
       cePnlAt.push(cp);
       pePnlAt.push(pp);
       totalAt.push(tp);
+
+      let dg: number | null = null;
+      let gg: number | null = null;
+      let tg: number | null = null;
+      let vg: number | null = null;
+      if (i >= entryIdx && i <= exitIdx && s != null && s > 0 && c != null && p != null) {
+        const T = Math.max((expirySec - time) / YEAR_SECS, 1e-6);
+        let ivC = impliedVolatility(c, s, data.legs.ceStrike, T, RISK_FREE, 'CE');
+        if (!Number.isFinite(ivC) || ivC <= 0) ivC = 0.2;
+        let ivP = impliedVolatility(p, s, data.legs.peStrike, T, RISK_FREE, 'PE');
+        if (!Number.isFinite(ivP) || ivP <= 0) ivP = 0.2;
+        const gC = blackScholes(s, data.legs.ceStrike, T, RISK_FREE, ivC, 'CE', true);
+        const gP = blackScholes(s, data.legs.peStrike, T, RISK_FREE, ivP, 'PE', true);
+        dg = legSign * (gC.delta + gP.delta);
+        gg = legSign * (gC.gamma + gP.gamma);
+        tg = legSign * (gC.theta + gP.theta);
+        vg = legSign * (gC.vega + gP.vega);
+        greekDelta.push({ time, value: dg });
+        greekGamma.push({ time, value: gg });
+        greekTheta.push({ time, value: tg });
+        greekVega.push({ time, value: vg });
+      }
+      deltaAt.push(dg);
+      gammaAt.push(gg);
+      thetaAt.push(tg);
+      vegaAt.push(vg);
     }
-    return { start, candles, spotLine, ce, pe, cePnl, pePnl, total, cePnlAt, pePnlAt, totalAt };
+    return {
+      start,
+      candles,
+      spotLine,
+      ce,
+      pe,
+      cePnl,
+      pePnl,
+      total,
+      cePnlAt,
+      pePnlAt,
+      totalAt,
+      greekDelta,
+      greekGamma,
+      greekTheta,
+      greekVega,
+      deltaAt,
+      gammaAt,
+      thetaAt,
+      vegaAt,
+    };
   }, [data, params.side, params.qty, params.exitTime]);
 
+  const pricePaneRef = useRef<HTMLDivElement>(null);
   const priceEl = useRef<HTMLDivElement>(null);
+  const pnlPaneRef = useRef<HTMLDivElement>(null);
   const pnlEl = useRef<HTMLDivElement>(null);
-  const [charts, setCharts] = useState<{ price: IChartApi; pnl: IChartApi } | null>(null);
+  const greeksPaneRef = useRef<HTMLDivElement>(null);
+  const greeksEl = useRef<HTMLDivElement>(null);
+  const indicatorsPaneRef = useRef<HTMLDivElement>(null);
+  const [charts, setCharts] = useState<{
+    price: IChartApi;
+    pnl: IChartApi;
+    greeks: IChartApi | null;
+  } | null>(null);
   const [epoch, setEpoch] = useState(0);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const hoverTimeRef = useRef<number | null>(null);
+
+  // ── Greeks / Indicators panes — resizable, toggled independently of price/P&L ──
+  const [greeksVisible, setGreeksVisible] = useState(false);
+  const [greeksHeight, setGreeksHeight] = useState(150);
+  const [indicatorsVisible, setIndicatorsVisible] = useState(false);
+  const [indicatorsHeight, setIndicatorsHeight] = useState(200);
+  const [pnlHeight, setPnlHeight] = useState(200);
+  const indicatorsChartRef = useRef<IChartApi | null>(null);
+  // Bumped whenever any pane's chart is created or destroyed (price/pnl/greeks here, Indicators
+  // via its own onChartReady below) — the cross-pane sync effect re-runs off this.
+  const [chartEpoch, setChartEpoch] = useState(0);
+  const indicatorBars = useMemo<OhlcBar[]>(() => {
+    if (!built) return [];
+    if (built.candles.length) return built.candles;
+    return built.spotLine.map((p) => ({
+      time: p.time,
+      open: p.value,
+      high: p.value,
+      low: p.value,
+      close: p.value,
+    }));
+  }, [built]);
 
   const { pins, togglePinAt, removePin, clearPins } = usePinnedTimes(2);
   const togglePinRef = useRef(togglePinAt);
@@ -1244,6 +1351,8 @@ function CaseChart({
     if (!built || !priceBox || !pnlBox) return;
     const price = createChart(priceBox, chartOptions(theme));
     const pnl = createChart(pnlBox, chartOptions(theme));
+    const greeksBox = greeksVisible ? greeksEl.current : null;
+    const greeks = greeksBox ? createChart(greeksBox, chartOptions(theme)) : null;
 
     if (built.candles.length) {
       price
@@ -1284,35 +1393,90 @@ function CaseChart({
         priceScaleId: 'right',
       })
       .setData(built.total);
+    if (greeks) {
+      const greekSeriesData = {
+        delta: built.greekDelta,
+        gamma: built.greekGamma,
+        theta: built.greekTheta,
+        vega: built.greekVega,
+      } as const;
+      (['delta', 'gamma', 'theta', 'vega'] as const).forEach((gk) => {
+        const s = greeks.addSeries(LineSeries, {
+          color: GREEK_COLORS[gk],
+          lineWidth: 1,
+          priceScaleId: `gk-${gk}`,
+          title: gk,
+          lastValueVisible: true,
+          priceLineVisible: false,
+        });
+        s.setData(greekSeriesData[gk]);
+      });
+    }
     price.timeScale().fitContent();
     pnl.timeScale().fitContent();
+    greeks?.timeScale().fitContent();
 
-    const unsync = syncChartPanes([price, pnl]);
+    setCharts({ price, pnl, greeks });
+    setEpoch((e) => e + 1);
+    setChartEpoch((e) => e + 1);
+    return () => {
+      setCharts(null);
+      setChartEpoch((e) => e + 1);
+      removeChart(price);
+      removeChart(pnl);
+      if (greeks) removeChart(greeks);
+    };
+  }, [built, theme, greeksVisible]);
+
+  /**
+   * Cross-pane scroll sync, crosshair→hoverIdx, and pin binding — for every pane currently on
+   * screen, Indicators included. Kept in its own effect, re-run off `chartEpoch`, because the
+   * Indicators chart is created by GreekIndicatorPane (a child component) some renders after the
+   * price/pnl/greeks effect above already ran, so it cannot join `syncChartPanes` from inside
+   * that effect. `syncChartPanes` (not a raw time-range copy) is what StrategyAnalysisView uses
+   * for the same four-pane layout: it equalises each pane's ACTUAL price-scale gutter width, not
+   * just the `minimumWidth` floor, so panes with differently-sized axis labels still line their
+   * plot areas up — a raw time-range copy does not, and pins visibly drift out of alignment.
+   */
+  useEffect(() => {
+    const pc = charts?.price ?? null;
+    const nc = charts?.pnl ?? null;
+    const gc = charts?.greeks ?? null;
+    const ic = indicatorsChartRef.current;
+    const panes = [pc, nc, gc, ic].filter(isChartLive) as IChartApi[];
+    if (panes.length === 0) return;
+
+    const unsync = syncChartPanes(panes);
     const onMove = (param: MouseEventParams<Time>) => {
       const t = typeof param.time === 'number' ? param.time : null;
       hoverTimeRef.current = t;
-      setHoverIdx(t == null ? null : Math.round((t - built.start) / 60));
+      setHoverIdx(t == null || !built ? null : Math.round((t - built.start) / 60));
     };
-    price.subscribeCrosshairMove(onMove);
-    pnl.subscribeCrosshairMove(onMove);
+    for (const c of panes) c.subscribeCrosshairMove(onMove);
+
     const resolve = () => hoverTimeRef.current;
     const onPin = (t: number | null) => togglePinRef.current(t);
-    const unbindPrice = bindPinTrigger(priceBox.parentElement, resolve, onPin);
-    const unbindPnl = bindPinTrigger(pnlBox.parentElement, resolve, onPin);
+    // Indicators binds its own pin trigger (passed as onTogglePin below) on its own container —
+    // binding it again here would fire both capture-phase handlers on one middle-click and the
+    // pin would toggle straight back off. See StrategyAnalysisView's identical note.
+    const pinTargets: Array<[IChartApi | null, HTMLDivElement | null]> = [
+      [pc, pricePaneRef.current],
+      [nc, pnlPaneRef.current],
+      [gc, greeksPaneRef.current],
+    ];
+    const unbinds = pinTargets
+      .filter(([chart, el]) => chart && el)
+      .map(([, el]) => bindPinTrigger(el, resolve, onPin));
 
-    setCharts({ price, pnl });
-    setEpoch((e) => e + 1);
     return () => {
-      unbindPrice();
-      unbindPnl();
+      unbinds.forEach((u) => u());
       unsync();
-      if (isChartLive(price)) price.unsubscribeCrosshairMove(onMove);
-      if (isChartLive(pnl)) pnl.unsubscribeCrosshairMove(onMove);
-      setCharts(null);
-      removeChart(price);
-      removeChart(pnl);
+      for (const c of panes) if (isChartLive(c)) c.unsubscribeCrosshairMove(onMove);
     };
-  }, [built, theme]);
+    // built is read only for its stable `.start`; re-running this effect when it changes would
+    // tear down the sync mid-scroll for no benefit, so it is intentionally left out of the deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartEpoch]);
 
   // Pin the selected case's two minutes, so its cards and Δ strips are up without a click.
   useEffect(() => {
@@ -1343,6 +1507,10 @@ function CaseChart({
         cePnl: built.cePnlAt[i],
         pePnl: built.pePnlAt[i],
         total: built.totalAt[i],
+        delta: built.deltaAt[i],
+        gamma: built.gammaAt[i],
+        theta: built.thetaAt[i],
+        vega: built.vegaAt[i],
       };
     },
     [data, built],
@@ -1379,10 +1547,41 @@ function CaseChart({
         [peName, diff(a.pePnl, b.pePnl), 'money'],
         [ceName, diff(a.cePnl, b.cePnl), 'money'],
       ]),
+      greeks: (
+        [
+          ['Delta', diff(a.delta, b.delta), 2],
+          ['Gamma', diff(a.gamma, b.gamma), 4],
+          ['Theta', diff(a.theta, b.theta), 2],
+          ['Vega', diff(a.vega, b.vega), 2],
+        ] as Array<[string, number | null, number]>
+      )
+        .filter((p): p is [string, number, number] => p[1] != null)
+        .map(([label, value, digits]) => ({ label, value, kind: 'plain' as const, digits })),
     };
   }, [pins, valuesAt, indexOfTime, ceName, peName]);
 
   const hover = hoverIdx != null ? valuesAt(hoverIdx) : null;
+
+  // Price is always the primary pane (flexes to fill); P&L, Greeks and Indicators keep fixed,
+  // draggable heights — see PaneDivider.
+  const chartPanes: PaneSpec[] = [
+    { ref: pricePaneRef, min: 120 },
+    { ref: pnlPaneRef, min: 40, height: pnlHeight, onCommit: setPnlHeight },
+  ];
+  if (greeksVisible)
+    chartPanes.push({
+      ref: greeksPaneRef,
+      min: 40,
+      height: greeksHeight,
+      onCommit: setGreeksHeight,
+    });
+  if (indicatorsVisible)
+    chartPanes.push({
+      ref: indicatorsPaneRef,
+      min: 80,
+      height: indicatorsHeight,
+      onCommit: setIndicatorsHeight,
+    });
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -1416,9 +1615,33 @@ function CaseChart({
         )}
         <button
           type="button"
+          onClick={() => setGreeksVisible((v) => !v)}
+          title="Net position Greeks (Black-76), reconstructed per minute from each leg's traded premium"
+          className={`rounded px-2 py-1 text-[11px] font-semibold border transition-colors ${
+            greeksVisible
+              ? 'bg-[#a78bfa]/15 border-[#a78bfa]/40 text-[#a78bfa]'
+              : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+          }`}
+        >
+          Greeks
+        </button>
+        <button
+          type="button"
+          onClick={() => setIndicatorsVisible((v) => !v)}
+          title="Aggregate Vega / Theta / IV for the near-the-money basket"
+          className={`rounded px-2 py-1 text-[11px] font-semibold border transition-colors ${
+            indicatorsVisible
+              ? 'bg-[#38bdf8]/15 border-[#38bdf8]/40 text-[#38bdf8]'
+              : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+          }`}
+        >
+          Indicators
+        </button>
+        <button
+          type="button"
           disabled={!nubraAvailable}
           onClick={onOpenNubraBt}
-          className="ml-auto rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-semibold text-white disabled:opacity-40"
+          className="rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-semibold text-white disabled:opacity-40"
           title={
             nubraAvailable
               ? 'Open this day in Nubra BT with these legs'
@@ -1446,6 +1669,14 @@ function CaseChart({
             <span>
               Total <span className={pnlClass(hover.total)}>{inr(hover.total)}</span>
             </span>
+            {greeksVisible && (
+              <>
+                <span style={{ color: GREEK_COLORS.delta }}>Δ {num(hover.delta, 3)}</span>
+                <span style={{ color: GREEK_COLORS.gamma }}>Γ {num(hover.gamma, 4)}</span>
+                <span style={{ color: GREEK_COLORS.theta }}>Θ {num(hover.theta, 2)}</span>
+                <span style={{ color: GREEK_COLORS.vega }}>V {num(hover.vega, 2)}</span>
+              </>
+            )}
           </>
         ) : (
           <span>
@@ -1456,75 +1687,170 @@ function CaseChart({
 
       {error && <div className="px-3 py-2 text-[12px] text-[#ef4444]">{error}</div>}
 
-      <div className="relative min-h-0 flex-[3]">
-        <div ref={priceEl} className="absolute inset-0" />
-        {loading && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center">
-            <div className="spinner" />
-          </div>
-        )}
-        <PinnedCrosshairLayer
-          pins={pins}
-          chart={charts?.price ?? null}
-          epoch={epoch}
-          onRemove={removePin}
-          renderCard={(pin) => {
-            const v = valuesAt(indexOfTime(pin.time));
-            if (!v) return null;
-            return (
-              <PriceTooltipBody
-                timeStr={v.hhmm}
-                ohlc={v.ohlc}
-                legPrices={[
-                  ...(v.pe != null ? [{ name: peName, color: PE_COLOR, value: v.pe }] : []),
-                  ...(v.ce != null ? [{ name: ceName, color: CE_COLOR, value: v.ce }] : []),
-                ]}
-                underlying={UNDERLYING}
-              />
-            );
-          }}
-          compare={
-            compare && (
-              <PinCompareStrip
-                dtSeconds={compare.dt}
-                rows={compare.price}
-                colors={compare.colors}
-              />
-            )
-          }
-        />
-      </div>
-      <div className="h-px shrink-0 bg-[var(--border)]" />
-      <div className="relative min-h-0 flex-[2]">
-        <div ref={pnlEl} className="absolute inset-0" />
-        <PinnedCrosshairLayer
-          pins={pins}
-          chart={charts?.pnl ?? null}
-          epoch={epoch}
-          onRemove={removePin}
-          renderCard={(pin) => {
-            const v = valuesAt(indexOfTime(pin.time));
-            if (!v) return null;
-            return (
-              <PnlTooltipBody
-                timeStr={v.hhmm}
-                values={{
-                  legs: [
-                    ...(v.pePnl != null ? [{ name: peName, color: PE_COLOR, value: v.pePnl }] : []),
-                    ...(v.cePnl != null ? [{ name: ceName, color: CE_COLOR, value: v.cePnl }] : []),
-                  ],
-                  total: v.total ?? 0,
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div ref={pricePaneRef} className="relative min-h-[120px] flex-1">
+          <div ref={priceEl} className="absolute inset-0" />
+          {loading && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center">
+              <div className="spinner" />
+            </div>
+          )}
+          <PinnedCrosshairLayer
+            pins={pins}
+            chart={charts?.price ?? null}
+            epoch={epoch}
+            onRemove={removePin}
+            renderCard={(pin) => {
+              const v = valuesAt(indexOfTime(pin.time));
+              if (!v) return null;
+              return (
+                <PriceTooltipBody
+                  timeStr={v.hhmm}
+                  ohlc={v.ohlc}
+                  legPrices={[
+                    ...(v.pe != null ? [{ name: peName, color: PE_COLOR, value: v.pe }] : []),
+                    ...(v.ce != null ? [{ name: ceName, color: CE_COLOR, value: v.ce }] : []),
+                  ]}
+                  underlying={UNDERLYING}
+                />
+              );
+            }}
+            compare={
+              compare && (
+                <PinCompareStrip
+                  dtSeconds={compare.dt}
+                  rows={compare.price}
+                  colors={compare.colors}
+                />
+              )
+            }
+          />
+        </div>
+
+        <PaneDivider panes={chartPanes} target={pnlPaneRef} title="Drag to resize the P&L pane" />
+        <div
+          ref={pnlPaneRef}
+          style={{ height: pnlHeight, flexShrink: 0, minHeight: 40, position: 'relative' }}
+        >
+          <div ref={pnlEl} className="absolute inset-0" />
+          <PinnedCrosshairLayer
+            pins={pins}
+            chart={charts?.pnl ?? null}
+            epoch={epoch}
+            onRemove={removePin}
+            renderCard={(pin) => {
+              const v = valuesAt(indexOfTime(pin.time));
+              if (!v) return null;
+              return (
+                <PnlTooltipBody
+                  timeStr={v.hhmm}
+                  values={{
+                    legs: [
+                      ...(v.pePnl != null
+                        ? [{ name: peName, color: PE_COLOR, value: v.pePnl }]
+                        : []),
+                      ...(v.cePnl != null
+                        ? [{ name: ceName, color: CE_COLOR, value: v.cePnl }]
+                        : []),
+                    ],
+                    total: v.total ?? 0,
+                  }}
+                  strategyMargin={0}
+                />
+              );
+            }}
+            compare={
+              compare && (
+                <PinCompareStrip
+                  dtSeconds={compare.dt}
+                  rows={compare.pnl}
+                  colors={compare.colors}
+                />
+              )
+            }
+          />
+        </div>
+
+        {greeksVisible && (
+          <>
+            <PaneDivider
+              panes={chartPanes}
+              target={greeksPaneRef}
+              accent="#a78bfa"
+              title="Drag to resize the Greeks pane"
+            />
+            <div
+              ref={greeksPaneRef}
+              style={{ height: greeksHeight, flexShrink: 0, minHeight: 40, position: 'relative' }}
+            >
+              <div ref={greeksEl} className="absolute inset-0" />
+              <PinnedCrosshairLayer
+                pins={pins}
+                chart={charts?.greeks ?? null}
+                epoch={epoch}
+                onRemove={removePin}
+                renderCard={(pin) => {
+                  const v = valuesAt(indexOfTime(pin.time));
+                  if (!v) return null;
+                  return (
+                    <GreeksTooltipBody
+                      timeStr={v.hhmm}
+                      values={{
+                        net: { delta: v.delta, gamma: v.gamma, theta: v.theta, vega: v.vega },
+                      }}
+                      selectedGreeks={new Set(['delta', 'gamma', 'theta', 'vega'])}
+                      greeksLegFilter={new Set(['net'])}
+                      colors={GREEK_COLORS}
+                    />
+                  );
                 }}
-                strategyMargin={0}
+                compare={
+                  compare &&
+                  compare.greeks.length > 0 && (
+                    <PinCompareStrip
+                      dtSeconds={compare.dt}
+                      rows={compare.greeks}
+                      colors={compare.colors}
+                    />
+                  )
+                }
               />
-            );
-          }}
-          compare={
-            compare && (
-              <PinCompareStrip dtSeconds={compare.dt} rows={compare.pnl} colors={compare.colors} />
-            )
-          }
-        />
+            </div>
+          </>
+        )}
+
+        {indicatorsVisible && (
+          <>
+            <PaneDivider
+              panes={chartPanes}
+              target={indicatorsPaneRef}
+              accent="#38bdf8"
+              title="Drag to resize the Indicators pane"
+            />
+            <div
+              ref={indicatorsPaneRef}
+              style={{ height: indicatorsHeight, flexShrink: 0, minHeight: 80 }}
+              className="bg-[var(--bg-primary)]"
+            >
+              <GreekIndicatorPane
+                instrument={NIFTY_INSTRUMENT}
+                bars={indicatorBars}
+                theme={theme}
+                // One session: this is a single backtested day, the same as TradeChartView.
+                histDays={1}
+                initialDay={day.date}
+                axisMetrics={{ leftWidth: 70, rightWidth: 75, fontSize: 12 }}
+                onChartReady={(chart) => {
+                  indicatorsChartRef.current = chart;
+                  setChartEpoch((e) => e + 1);
+                }}
+                pins={pins}
+                onTogglePin={togglePinAt}
+                onRemovePin={removePin}
+              />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
