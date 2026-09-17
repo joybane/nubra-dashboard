@@ -379,3 +379,35 @@ export function evaluateAndFire(
 export function sweepTimeExits(broker: RuleBroker, nowMs: number = Date.now()): RuleFireEvent[] {
   return evaluateAndFire(broker, null, nowMs, false);
 }
+
+// ── Seeding from a history replay (backdated paper trades only) ──────────────
+// A backdated entry's trailing stop has already lived through the minutes between its entry and
+// now; server/positionRuleReplay.ts works out where it got to. These hand that state to the live
+// engine so trailing continues from the best price since entry instead of restarting at entry.
+// Nothing in the live path calls them. `entryTime` must be the position's entry_time (or, for a
+// group, the earliest member's), exactly the marker applyLiveTrail compares against.
+
+export function seedLegTrailState(
+  refId: number,
+  basketGroupId: string | undefined,
+  entryTime: number | undefined,
+  state: { slPriceRs: number | null; favExtremeRs: number },
+): void {
+  trailStates.set(legRuleKey(refId, basketGroupId), {
+    entryTimeSeen: entryTime ?? 0,
+    slPriceRs: state.slPriceRs,
+    favExtremeRs: state.favExtremeRs,
+  });
+}
+
+export function seedGroupTrailState(
+  basketGroupId: string,
+  anchorEntryTime: number,
+  state: { slPriceRs: number | null; favExtremeRs: number },
+): void {
+  trailStates.set(groupTrailKey(basketGroupId), {
+    entryTimeSeen: anchorEntryTime,
+    slPriceRs: state.slPriceRs,
+    favExtremeRs: state.favExtremeRs,
+  });
+}

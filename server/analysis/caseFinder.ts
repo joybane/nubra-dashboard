@@ -7,13 +7,20 @@
  *
  *   |close(t2) − close(t1)| ≤ closeTolerance     (the same level: NIFTY closes almost identical)
  *   t2 − t1 ≥ minGapMinutes                      (enough time has passed to mean something)
+ *   |ΔCE − ΔPE| ≥ legMismatchPct% · max(|ΔCE|, |ΔPE|)   (the two legs' P&L did not move together)
  *
  * The tolerance must stay tight (default 1 point). Ranking by the biggest mismatch drives pairs to
  * the edge of whatever band is allowed, and a real spot move inside the band shows up as mismatch:
  * ±5 points put 61% of cases 3–5 points apart, and "same ATM strike" allowed pairs 26–46 points
  * apart. Both were rejected on sight.
  *
- * and its size is the change in P&L between the two instants — exactly the Δ strip Nubra BT shows
+ * The mismatch is the point: the CE and PE legs' P&L changes must disagree. At the default 50% the
+ * legs either moved in opposite directions or one moved at least twice as much as the other. Ranking
+ * by the total alone was the first version and surfaced PE −₹552 / CE −₹478 on 2026-09-16 at the top
+ * of the day — both legs losing alike, the opposite of what was asked for. 100% keeps only legs that
+ * moved in opposite directions; 0 turns the rule off.
+ *
+ * Each leg's size is the change in P&L between the two instants — exactly the Δ strip Nubra BT shows
  * between two pinned crosshairs. For a leg that change does not depend on the entry price:
  *
  *   ΔP&L = sign · (price(t1) − price(t2)) · qty         sign = +1 SELL, −1 BUY
@@ -28,6 +35,11 @@
  * Forbidding overlap outright was tried first and is too strict: the strongest pair of a day tends
  * to span most of the session, so it blocked everything inside it — on NIFTY 2026-09-09 it left one
  * case and hid 12:41→14:08, the very scenario that prompted this feature.
+ *
+ * That start-or-end rule still hid good pairs: on 2026-09-16 it listed 7 cases and hid 09:55→11:49
+ * (PE −₹406, CE +₹1,086) because 09:59→15:28 started 4 minutes later. So the free slots up to
+ * `maxCasesPerDay` are then filled by a looser second pass that only rejects a pair whose start and
+ * end are both near a kept case. The second pass only adds; the first pass's cases always stay.
  */
 import { STRIKE_STEP, hhmmAt, minuteIndex, round2, type DaySeries } from './daySeries.ts';
 
@@ -49,6 +61,8 @@ export interface FinderParams {
   strikeOffset: number;
   /** `total`: |ΔCE + ΔPE|. `legGap`: |ΔCE − ΔPE|, how far apart the two legs moved. */
   rankBy: RankBy;
+  /** How far apart the legs must move, as a % of the bigger leg's change. 0 = no requirement. */
+  legMismatchPct: number;
 }
 
 export const DEFAULT_FINDER_PARAMS: FinderParams = {
@@ -62,7 +76,8 @@ export const DEFAULT_FINDER_PARAMS: FinderParams = {
   qty: 65,
   side: 'SELL',
   strikeOffset: 2,
-  rankBy: 'total',
+  rankBy: 'legGap',
+  legMismatchPct: 50,
 };
 
 export interface DayLegs {
@@ -152,6 +167,7 @@ export function findCases(day: DaySeries, params: FinderParams): DayScan {
   const k = sign * params.qty;
   const gap = Math.max(1, Math.round(params.minGapMinutes));
   const band = Math.max(0, params.closeTolerance);
+  const mismatch = Math.max(0, params.legMismatchPct) / 100;
 
   // Flat [score, i, j] triples: a busy day has tens of thousands of candidate pairs.
   const cand: number[] = [];
@@ -168,7 +184,14 @@ export function findCases(day: DaySeries, params: FinderParams): DayScan {
       if (Math.abs(day.spot[j]! - s1) > band) continue;
       const dCe = (c1 - ce[j]!) * k;
       const dPe = (p1 - pe[j]!) * k;
-      const score = params.rankBy === 'legGap' ? Math.abs(dCe - dPe) : Math.abs(dCe + dPe);
+      const legGap = Math.abs(dCe - dPe);
+      if (
+        mismatch > 0 &&
+        (legGap === 0 || legGap < mismatch * Math.max(Math.abs(dCe), Math.abs(dPe)))
+      ) {
+        continue;
+      }
+      const score = params.rankBy === 'legGap' ? legGap : Math.abs(dCe + dPe);
       if (score < params.minAbsPnl) continue;
       cand.push(score, i, j);
     }
@@ -179,15 +202,31 @@ export function findCases(day: DaySeries, params: FinderParams): DayScan {
 
   const spacing = Math.max(0, params.spacingMinutes);
   const picked: Array<[number, number]> = [];
-  for (const n of order) {
-    if (picked.length >= params.maxCasesPerDay) break;
-    const i = cand[n * 3 + 1];
-    const j = cand[n * 3 + 2];
-    if (picked.some(([pi, pj]) => Math.abs(i - pi) < spacing || Math.abs(j - pj) < spacing)) {
-      continue;
+  const pickedN = new Set<number>();
+  // Pass 1: no kept case may start, or end, within `spacing` of another.
+  // Pass 2 only fills the slots pass 1 left empty, and drops a pair only when both its start and its
+  // end are near a kept case. It never removes a pass-1 case.
+  for (const bothEnds of [false, true]) {
+    for (const n of order) {
+      if (picked.length >= params.maxCasesPerDay) break;
+      if (pickedN.has(n)) continue;
+      const i = cand[n * 3 + 1];
+      const j = cand[n * 3 + 2];
+      const clash = picked.some(([pi, pj]) =>
+        bothEnds
+          ? Math.abs(i - pi) < spacing && Math.abs(j - pj) < spacing
+          : Math.abs(i - pi) < spacing || Math.abs(j - pj) < spacing,
+      );
+      if (clash) continue;
+      picked.push([i, j]);
+      pickedN.add(n);
     }
-    picked.push([i, j]);
   }
+  // Strongest first, whichever pass kept it. `order` is already sorted.
+  const rank = new Map([...pickedN].map((n) => [n, order.indexOf(n)]));
+  const keptOrder = [...pickedN].sort((x, y) => rank.get(x)! - rank.get(y)!);
+  picked.length = 0;
+  for (const n of keptOrder) picked.push([cand[n * 3 + 1], cand[n * 3 + 2]]);
 
   const cases = picked.map(([i, j]) => {
     const ceDelta = round2((ce[i]! - ce[j]!) * k);

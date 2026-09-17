@@ -16,6 +16,8 @@ import {
   totalPrice as sumPrice,
 } from './lib/basketMath';
 import OptionChain from './OptionChain';
+import BackdatedEntryControl from './components/BackdatedEntryControl';
+import { defaultBackdatedEntry, type BackdatedEntry } from './lib/backdatedEntry';
 
 // Interfaces
 
@@ -61,6 +63,7 @@ function miniPayoff(
 
 export default function BasketOrder({ instrument }: Props) {
   const [placed, setPlaced] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [backdate, setBackdate] = useState<BackdatedEntry>(defaultBackdatedEntry);
   const [viewMode, setViewMode] = useState<ViewMode>('prebuilt');
   const [sentimentFilter, setSentimentFilter] = useState<Sentiment | 'All'>('All');
   const [saveName, setSaveName] = useState('');
@@ -94,6 +97,7 @@ export default function BasketOrder({ instrument }: Props) {
     marginError,
     persistence,
     placeBasket,
+    placeBasketBackdated,
     setBasketMode,
     registerViewer,
   } = useBasket();
@@ -408,7 +412,9 @@ export default function BasketOrder({ instrument }: Props) {
   async function placeOrders() {
     if (!legs.length) return;
     setPlaced(null);
-    const result = await placeBasket({ symbol: sym, expiry: chain.expiry });
+    const result = backdate.enabled
+      ? await placeBasketBackdated(backdate, { symbol: sym, expiry: chain.expiry })
+      : await placeBasket({ symbol: sym, expiry: chain.expiry });
     setPlaced(result);
     if (result.ok) setTimeout(() => setPlaced(null), 5000);
   }
@@ -1730,6 +1736,10 @@ export default function BasketOrder({ instrument }: Props) {
               </div>
             )}
 
+            <div style={{ padding: '10px 0 0', color: 'var(--text-primary)' }}>
+              <BackdatedEntryControl value={backdate} onChange={setBackdate} />
+            </div>
+
             <div style={{ display: 'flex', gap: 10, padding: '10px 0' }}>
               <button
                 onClick={() => {
@@ -1766,7 +1776,7 @@ export default function BasketOrder({ instrument }: Props) {
                   opacity: !legs.length ? 0.5 : 1,
                 }}
               >
-                Trade
+                {backdate.enabled ? `Trade @ ${backdate.time}` : 'Trade'}
               </button>
             </div>
           </div>
@@ -2033,11 +2043,19 @@ export default function BasketOrder({ instrument }: Props) {
 
         {/* RESIZE HANDLE */}
         <div
-          onMouseDown={(e) => {
+          onPointerDown={(e) => {
+            if (e.button !== 0) return;
             e.preventDefault();
             resizeRef.current = { startX: e.clientX, startW: leftWidth };
-            const onMove = (ev: MouseEvent) => {
-              if (!resizeRef.current) return;
+            const handle = e.currentTarget;
+            const pointerId = e.pointerId;
+            handle.setPointerCapture(pointerId);
+            const previousCursor = document.body.style.cursor;
+            const previousSelection = document.body.style.userSelect;
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            const onMove = (ev: PointerEvent) => {
+              if (!resizeRef.current || ev.pointerId !== pointerId) return;
               setLeftWidth(
                 Math.max(
                   320,
@@ -2045,15 +2063,26 @@ export default function BasketOrder({ instrument }: Props) {
                 ),
               );
             };
-            const onUp = () => {
+            let finished = false;
+            const finish = (ev?: Event) => {
+              if (ev instanceof PointerEvent && ev.pointerId !== pointerId) return;
+              if (finished) return;
+              finished = true;
               resizeRef.current = null;
-              document.removeEventListener('mousemove', onMove);
-              document.removeEventListener('mouseup', onUp);
+              window.removeEventListener('pointermove', onMove, true);
+              window.removeEventListener('pointerup', finish, true);
+              window.removeEventListener('pointercancel', finish, true);
+              window.removeEventListener('blur', finish);
+              if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+              document.body.style.cursor = previousCursor;
+              document.body.style.userSelect = previousSelection;
             };
-            document.addEventListener('mousemove', onMove);
-            document.addEventListener('mouseup', onUp);
+            window.addEventListener('pointermove', onMove, true);
+            window.addEventListener('pointerup', finish, true);
+            window.addEventListener('pointercancel', finish, true);
+            window.addEventListener('blur', finish);
           }}
-          style={{ width: 5, cursor: 'col-resize', background: 'var(--border)', flexShrink: 0 }}
+          style={{ width: 5, cursor: 'col-resize', background: 'var(--border)', flexShrink: 0, touchAction: 'none' }}
           onMouseEnter={(e) => (e.currentTarget.style.background = '#5865f2')}
           onMouseLeave={(e) => {
             if (!resizeRef.current) e.currentTarget.style.background = 'var(--border)';

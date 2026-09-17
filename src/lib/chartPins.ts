@@ -53,6 +53,21 @@ export function usePinnedTimes(max = 2) {
     setPins((prev) => (prev.length ? [] : prev));
   }, []);
 
+  /** Replace every pin with these times, oldest first (the live mismatch strips pin both ends). */
+  const pinTimes = useCallback(
+    (times: number[]) => {
+      const next = times
+        .filter((time) => Number.isFinite(time))
+        .slice(-max)
+        .map((time) => {
+          idRef.current += 1;
+          return { id: idRef.current, time, color: PIN_COLORS[0] };
+        });
+      setPins(recolor(next));
+    },
+    [max],
+  );
+
   const hasPins = pins.length > 0;
   useEffect(() => {
     if (!hasPins) return;
@@ -63,7 +78,7 @@ export function usePinnedTimes(max = 2) {
     return () => window.removeEventListener('keydown', onKey);
   }, [hasPins, clearPins]);
 
-  return { pins, togglePinAt, removePin, clearPins };
+  return { pins, togglePinAt, removePin, clearPins, pinTimes };
 }
 
 /**

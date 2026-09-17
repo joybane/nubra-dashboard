@@ -252,29 +252,42 @@ masters and probing — weekend folder names are ignored (the tree has a bogus `
 day whose every option name 404s re-probes its expiry. `scripts/analysisSync.ts` runs the same sync
 from the command line against a running server.
 
+A case is two minutes at least `minGapMinutes` apart whose NIFTY closes are within `closeTolerance`
+(1 pt), where the CE and PE legs' P&L changes disagree: opposite directions, or one leg at least
+twice the other (`legMismatchPct` 50). Pairs rank by the gap between the legs. Each day keeps up to
+`maxCasesPerDay`: first pairs whose start and end are both `spacingMinutes` from every kept case,
+then free slots go to pairs that are near a kept case at one end only.
+
 ### Paper trading
 
-| Method       | Path                           | Purpose                                               |
-| ------------ | ------------------------------ | ----------------------------------------------------- |
-| GET / POST   | `/paper/orders`                | List or place orders                                  |
-| POST         | `/paper/orders/multi`          | Place independent orders                              |
-| POST         | `/paper/orders/basket`         | Place grouped basket legs and snapshot margin         |
-| POST         | `/paper/orders/modify/:id`     | Amend an open order's price, trigger or quantity      |
-| DELETE       | `/paper/orders/:id`            | Cancel an order                                       |
-| GET          | `/paper/positions`             | Get open positions and unrealised PnL                 |
-| GET          | `/paper/positions/closed`      | Get closed positions and realised PnL                 |
-| GET          | `/paper/holdings`              | Return holdings (empty for this derivatives-only app) |
-| GET          | `/paper/pnl`                   | Get realised, unrealised, and total PnL               |
-| POST         | `/paper/margin`                | Calculate single-leg margin                           |
-| POST         | `/paper/margin/basket`         | Calculate basket margin with local SPAN fallback      |
-| GET / POST   | `/paper/baskets`               | List or save baskets                                  |
-| PUT / DELETE | `/paper/baskets/:id`           | Update or delete a basket                             |
-| PUT          | `/paper/strategy/rename`       | Rename a grouped strategy                             |
-| POST         | `/paper/strategy/snapshot`     | Save or update a frozen strategy snapshot             |
-| GET          | `/paper/strategy/snapshots`    | List snapshots                                        |
-| GET / DELETE | `/paper/strategy/snapshot/:id` | Get or delete one snapshot                            |
-| GET          | `/paper/auth/status`           | Return paper-trading auth status                      |
-| GET          | `/paper/debug`                 | Return subscription, position, and WS diagnostics     |
+| Method       | Path                            | Purpose                                               |
+| ------------ | ------------------------------- | ----------------------------------------------------- |
+| GET / POST   | `/paper/orders`                 | List or place orders                                  |
+| POST         | `/paper/orders/multi`           | Place independent orders                              |
+| POST         | `/paper/orders/basket`          | Place grouped basket legs and snapshot margin         |
+| POST         | `/paper/orders/modify/:id`      | Amend an open order's price, trigger or quantity      |
+| DELETE       | `/paper/orders/:id`             | Cancel an order                                       |
+| GET          | `/paper/positions`              | Get open positions and unrealised PnL                 |
+| GET          | `/paper/positions/closed`       | Get closed positions and realised PnL                 |
+| GET          | `/paper/holdings`               | Return holdings (empty for this derivatives-only app) |
+| GET          | `/paper/pnl`                    | Get realised, unrealised, and total PnL               |
+| POST         | `/paper/margin`                 | Calculate single-leg margin                           |
+| POST         | `/paper/margin/basket`          | Calculate basket margin with local SPAN fallback      |
+| GET / POST   | `/paper/baskets`                | List or save baskets                                  |
+| PUT / DELETE | `/paper/baskets/:id`            | Update or delete a basket                             |
+| PUT          | `/paper/strategy/rename`        | Rename a grouped strategy                             |
+| POST         | `/paper/strategy/snapshot`      | Save or update a frozen strategy snapshot             |
+| GET          | `/paper/strategy/snapshots`     | List snapshots                                        |
+| GET / DELETE | `/paper/strategy/snapshot/:id`  | Get or delete one snapshot                            |
+| GET          | `/paper/auth/status`            | Return paper-trading auth status                      |
+| GET          | `/paper/debug`                  | Return subscription, position, and WS diagnostics     |
+| GET          | `/paper/backdated/price`        | Preview one second's O/H/L/C and minute VWAP today    |
+| POST         | `/paper/backdated/order`        | Enter a single leg at an earlier second today         |
+| POST         | `/paper/backdated/basket`       | Enter a basket at an earlier second today             |
+| POST         | `/paper/backdated/replay-rules` | Check a newly saved rule over a backdated history     |
+| GET          | `/paper/backdated`              | List today's backdated entries (Positions badge)      |
+| GET / POST   | `/paper/mismatch/trackers`      | List strategies' mismatch-tracker state, or toggle it |
+| GET          | `/paper/mismatch/cases`         | One strategy's live mismatch cases, every version     |
 
 Every route above is behind `requireAuth` except `/paper/auth/status` and `/paper/debug`, which
 are the two that have to answer while logged out. The four `/paper/strategy/snapshot*` routes
@@ -287,6 +300,42 @@ zero or fractional quantity. It answers `{ ok, order }` with the amended order, 
 a standing market and fill on the spot — a bare ack would leave the client polling to find out.
 The Orders tab drives it from an inline editor on any open, unfilled row; `src/lib/orderAmendment.ts`
 holds the rupees→paise conversion and the change detection, so only edited fields are sent.
+
+**Backdated entries** ("it is 10:00; I entered at 09:25:30") live in `server/backdatedRoutes.ts`
+and are purely additive: the routes above are unchanged, and the order ticket and basket only take
+this path when "Entry: Earlier today" is picked. The fill price is read off today's 1-second bars
+(`server/intradayBars.ts`) — that second's open, high, low or close, or the VWAP of its minute up to
+that second — and a second with no trade uses the last earlier trade, never a later one. The order
+and fill are stamped with that second (`SimBroker.placeBackdated`), after which the position is an
+ordinary live one. SL/target/trailing/time rules sent with the entry are first replayed over the
+seconds since entry (`server/positionRuleReplay.ts`): adverse extreme before favourable, exit at the
+level or at the open on a gap, group thresholds on carried-forward closes. A hit closes the
+position at that second (`SimBroker.closeBackdated`); otherwise the live trail is seeded from the
+replay. Entries are recorded in `backdated_trades`, a table created on first use rather than in
+`initDb`. Entries are today only, within the exchange session (NSE/BSE 09:15–15:30, MCX
+09:00–23:30), and cannot be averaged into an already-open position.
+
+Nubra BT drives the same route when its date is today: **Live** pins the exit to the current minute
+(capped at the session close) and re-simulates every 30 s, and **Execute from HH:MM → live**
+resolves each leg to today's contract through `/api/optionchain` and posts the legs to
+`/paper/backdated/basket`. Open fills at the entry candle's first second and Close/VWAP at its last
+(`candleSecond` in `src/lib/backdatedEntry.ts`), so the fill equals the candle price Nubra BT shows.
+The trade lands in Positions as its own strategy, whose chart draws P&L from the entry.
+
+**Live mismatch tracker** (the ≠ toggle on an open strategy row) runs the Analysis rule live on a
+strategy of exactly one CE and one PE: the underlying back within ±1 point of an earlier minute's
+close since entry, at least 30 minutes later, with the legs' P&L changes disagreeing (opposite
+directions, or one leg at least twice the other). The underlying is the index, or on MCX the future
+the options are written on. It runs on the server (`server/mismatchTracker.ts`, pure; wired in
+`server/mismatchRoutes.ts`) on every option-chain tick, with earlier minutes from Nubra 1m closes
+refreshed each minute. A later match near a case at both ends (30 minutes) becomes a new version
+only when its CE-vs-PE gap is wider; a case 30 minutes past its latest version is frozen, and a
+match near two cases at once is ignored so cases never converge. Every version is stored in
+`mismatch_versions` (with `mismatch_trackers`, both created on first use). The strategy chart shows
+each case as two strips in its colour on the time axis; clicking one pins both minutes and opens a
+card listing every version. Expired MCX series cannot be tracked. Replaying 2026-09-16's 1-second
+data gave 33 cases on NIFTY 23150 PE / 23350 CE and 64 on CRUDEOIL 8600 PE / 8800 CE, with no rule
+violations and no near-duplicate cases.
 
 ---
 

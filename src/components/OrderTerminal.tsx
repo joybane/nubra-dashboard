@@ -28,6 +28,12 @@ import { useWorkspaceState } from '../workspace/useWorkspaceState';
 import { useWs } from '../hooks/useWsContext';
 import SavedStrategiesTab from './SavedStrategiesTab';
 import PositionRuleEditor from './PositionRuleEditor';
+import { istHmsFromNs, type BackdatedTrade } from '../lib/backdatedEntry';
+import {
+  fetchMismatchTrackers,
+  setMismatchTracker,
+  type MismatchTrackerState,
+} from '../lib/mismatchCases';
 import ConfirmDialog from './ConfirmDialog';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -871,6 +877,68 @@ interface PositionsTabProps {
 
 function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: PositionsTabProps) {
   const [positions, setPositions] = useState<PaperPosition[]>([]);
+  // Backdated entries ("↺ 09:25:30"), read on their own so the positions payload stays untouched.
+  const [backdated, setBackdated] = useState<BackdatedTrade[]>([]);
+  useEffect(() => {
+    if (!uatAuth) return;
+    let alive = true;
+    const load = () =>
+      fetch('/paper/backdated')
+        .then((r) => (r.ok ? (r.json() as Promise<{ trades?: BackdatedTrade[] }>) : null))
+        .then((d) => {
+          if (alive && d?.trades) setBackdated(d.trades);
+        })
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 5000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [uatAuth]);
+  // Live mismatch tracker per strategy (≠ toggle), read on its own like the backdated badges.
+  const [mismatchTrackers, setMismatchTrackers] = useState<Map<string, MismatchTrackerState>>(
+    new Map(),
+  );
+  const [mismatchBusy, setMismatchBusy] = useState<string | null>(null);
+  const [mismatchError, setMismatchError] = useState<{ gid: string; error: string } | null>(null);
+  const loadMismatchTrackers = useCallback(() => {
+    fetchMismatchTrackers()
+      .then((list) => setMismatchTrackers(new Map(list.map((t) => [t.basket_group_id, t]))))
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!uatAuth) return;
+    loadMismatchTrackers();
+    const id = setInterval(loadMismatchTrackers, 5000);
+    return () => clearInterval(id);
+  }, [uatAuth, loadMismatchTrackers]);
+  const toggleMismatch = useCallback(
+    async (gid: string, enabled: boolean) => {
+      setMismatchBusy(gid);
+      const res = await setMismatchTracker(gid, enabled);
+      setMismatchBusy(null);
+      if (!res.ok) {
+        setMismatchError({ gid, error: res.error });
+        setTimeout(() => setMismatchError((e) => (e?.gid === gid ? null : e)), 5000);
+      } else {
+        setMismatchError(null);
+      }
+      loadMismatchTrackers();
+    },
+    [loadMismatchTrackers],
+  );
+  /** The backdated entry this open position came from, matched on its entry second. */
+  const backdatedFor = useCallback(
+    (p: PaperPosition): BackdatedTrade | null =>
+      backdated.find(
+        (t) =>
+          t.ref_id === p.ref_id &&
+          (t.basket_group_id || '') === (p.basket_group_id || '') &&
+          t.entry_time === istHmsFromNs(p.entry_time),
+      ) ?? null,
+    [backdated],
+  );
   const [closedPositions, setClosedPositions] = useState<PaperPosition[]>([]);
   const [subTab, setSubTab] = useState<'open' | 'closed'>('open');
   const [loading, setLoading] = useState(false);
@@ -952,6 +1020,26 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
       console.warn('[Positions] fetch failed:', e);
     }
   }, [uatAuth]);
+
+  /**
+   * After a rule is saved on a backdated position, check it once over the history between entry
+   * and now. Normal positions never reach this: the callers gate on `backdatedFor`.
+   */
+  const replayBackdatedRules = useCallback(
+    async (refId: number, basketGroupId: string) => {
+      try {
+        await fetch('/paper/backdated/replay-rules', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ref_id: refId, basket_group_id: basketGroupId }),
+        });
+      } catch (e) {
+        console.warn('[Positions] backdated rule replay failed:', e);
+      }
+      fetch_();
+    },
+    [fetch_],
+  );
 
   const toggleExitAllOnLegHit = useCallback(
     async (gid: string, current: GroupPositionRule | null, checked: boolean) => {
@@ -1227,6 +1315,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
         : 0;
     const ek = posExitKey(p);
     const legRule = legRuleFor(p);
+    const bt = backdatedFor(p);
     return (
       <tr
         key={ek}
@@ -1240,6 +1329,14 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
           {legRule && (
             <span className="text-[var(--accent)] ml-1" title={legRuleTitle(p, legRule)}>
               ●
+            </span>
+          )}
+          {bt && (
+            <span
+              className="ml-1 text-[10px] font-normal text-[var(--text-muted)]"
+              title={`Backdated entry at ${bt.entry_time}, filled at that second's ${bt.price_source === 'vwap' ? 'VWAP' : bt.price_source}${bt.exact ? '' : ' (nearest earlier trade)'}`}
+            >
+              ↺ {bt.entry_time}
             </span>
           )}
         </td>
@@ -1690,6 +1787,46 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                                   📈
                                 </button>
                               )}
+                              {(() => {
+                                const mt = mismatchTrackers.get(g.basket_group_id);
+                                if (!mt || (!mt.eligible && !mt.enabled)) return null;
+                                const err =
+                                  mismatchError?.gid === g.basket_group_id
+                                    ? mismatchError.error
+                                    : null;
+                                const on = mt.enabled;
+                                return (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void toggleMismatch(g.basket_group_id, !on);
+                                    }}
+                                    disabled={mismatchBusy === g.basket_group_id}
+                                    className={`px-1 py-0.5 rounded text-[10px] font-semibold border transition-colors ml-1 ${
+                                      err
+                                        ? 'border-[var(--red)]/60 text-[var(--red)] bg-[var(--red)]/10'
+                                        : on
+                                          ? 'border-[#a78bfa]/60 text-[#a78bfa] bg-[#a78bfa]/15 hover:bg-[#a78bfa]/25'
+                                          : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                                    }`}
+                                    title={
+                                      err
+                                        ? `Mismatch tracker: ${err}`
+                                        : on
+                                          ? `Mismatch tracker on${
+                                              mt.tracking
+                                                ? ''
+                                                : ' (waiting — not tracking right now)'
+                                            } · ${mt.case_count} case${
+                                              mt.case_count === 1 ? '' : 's'
+                                            } · click to turn off. Cases show as colour strips on the strategy chart.`
+                                          : 'Track live CE/PE profit mismatch at the same NIFTY close (±1 pt, ≥30 min apart, legs differ ≥50%)'
+                                    }
+                                  >
+                                    ≠{on ? ` ${mt.case_count}` : ''}
+                                  </button>
+                                );
+                              })()}
                             </>
                           )}
                           <span className="text-[10px] text-[var(--text-muted)] font-normal">
@@ -2020,7 +2157,11 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                 ) as LegPositionRule | undefined) ?? null
               }
               onClose={() => setRuleEditor(null)}
-              onSaved={fetch_}
+              onSaved={
+                rp && backdatedFor(rp)
+                  ? () => replayBackdatedRules(ruleEditor.refId, ruleEditor.basketGroupId)
+                  : fetch_
+              }
             />
           );
         })()}
@@ -2035,7 +2176,14 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
             ) as GroupPositionRule | undefined) ?? null
           }
           onClose={() => setRuleEditor(null)}
-          onSaved={fetch_}
+          onSaved={(() => {
+            const member = positions.find(
+              (p) => p.basket_group_id === ruleEditor.basketGroupId && backdatedFor(p),
+            );
+            return member
+              ? () => replayBackdatedRules(member.ref_id, ruleEditor.basketGroupId)
+              : fetch_;
+          })()}
         />
       )}
       <ConfirmDialog
@@ -2178,30 +2326,50 @@ export default function OrderTerminal({
   const [preFullH, setPreFullH] = useState(DEFAULT_H);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // ── resize drag (direct DOM for smoothness, sync state on mouseup) ────
-  function onHandleMouseDown(e: React.MouseEvent) {
+  // ── resize drag (pointer capture survives charts, live renders and leaving the handle) ────
+  function onHandlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
     e.preventDefault();
     const startY = e.clientY;
     const el = containerRef.current;
     if (!el) return;
+    const handle = e.currentTarget;
+    const pointerId = e.pointerId;
     const startH = el.getBoundingClientRect().height;
     el.style.transition = 'none';
+    handle.setPointerCapture(pointerId);
+    const previousCursor = document.body.style.cursor;
+    const previousSelection = document.body.style.userSelect;
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    let finalH = startH;
+    let finished = false;
 
-    const onMove = (ev: MouseEvent) => {
-      const newH = Math.max(MIN_H, startH + (startY - ev.clientY));
-      el.style.height = `${newH}px`;
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return;
+      finalH = Math.max(MIN_H, startH + (startY - ev.clientY));
+      el.style.height = `${finalH}px`;
     };
 
-    const onUp = () => {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      const final = parseInt(el.style.height, 10);
+    const finish = (ev?: Event) => {
+      if (ev instanceof PointerEvent && ev.pointerId !== pointerId) return;
+      if (finished) return;
+      finished = true;
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pointerup', finish, true);
+      window.removeEventListener('pointercancel', finish, true);
+      window.removeEventListener('blur', finish);
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
       el.style.transition = '';
-      if (!isNaN(final)) setHeight(final);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousSelection;
+      setHeight(finalH);
     };
 
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pointerup', finish, true);
+    window.addEventListener('pointercancel', finish, true);
+    window.addEventListener('blur', finish);
   }
 
   function toggleCollapse() {
@@ -2283,8 +2451,9 @@ export default function OrderTerminal({
       {/* drag handle — hidden when collapsed */}
       {!collapsed && (
         <div
-          onMouseDown={onHandleMouseDown}
+          onPointerDown={onHandlePointerDown}
           className="h-1.5 bg-[var(--border)] hover:bg-[var(--accent)] cursor-row-resize shrink-0 transition-colors"
+          style={{ touchAction: 'none' }}
         />
       )}
 

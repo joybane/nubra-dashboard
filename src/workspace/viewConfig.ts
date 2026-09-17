@@ -8,8 +8,6 @@ import type { LayoutType, ViewType } from '../types';
 export const VIEW_LABELS: Record<ViewType, string> = {
   chart: 'Chart',
   optionchain: 'Option Chain',
-  straddle: 'Straddle',
-  strategy: 'Strategy',
   basket: 'Basket',
   backtest: 'Backtest',
   nubrabacktest: 'Nubra BT',

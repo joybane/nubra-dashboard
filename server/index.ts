@@ -26,6 +26,8 @@ import { createBacktestBarStore } from './backtestBarStore.ts';
 import { registerMarketDataRoutes } from './marketDataRoutes.ts';
 import { registerAuthRoutes } from './authRoutes.ts';
 import { registerPaperRoutes } from './paperRoutes.ts';
+import { registerBackdatedRoutes } from './backdatedRoutes.ts';
+import { registerMismatchRoutes } from './mismatchRoutes.ts';
 import { SimBroker, type SimPosition } from './simBroker.ts';
 import {
   feedKey,
@@ -1315,6 +1317,13 @@ function routeTickToSim(decoded: { type: string; data: unknown }): void {
         if (changes.length) fireRules(Number(refId));
       }
     }
+    // Live mismatch tracker (mismatchRoutes.ts). After everything above, and isolated from it: a
+    // failure here must never reach fills, position P&L or SL/target evaluation.
+    try {
+      mismatchTracker?.onChain(decoded.data as Parameters<MismatchOnChain>[0]);
+    } catch (e) {
+      console.warn('[Mismatch] tick failed:', (e as Error).message);
+    }
   } else if (decoded.type === 'index_tick') {
     const d = decoded.data as { indexes?: unknown[]; instruments?: unknown[] };
     for (const tick of [...(d.indexes ?? []), ...(d.instruments ?? [])]) {
@@ -1398,6 +1407,49 @@ registerPaperRoutes({
   nubraGet,
   nubraPostAt,
   marginBaseUrl: MARGIN_BASE_URL,
+});
+
+// Backdated paper entries ("I entered at 09:25:30"): new routes only, see backdatedRoutes.ts.
+registerBackdatedRoutes({
+  fastify,
+  requireAuth,
+  simBroker,
+  subscribeForSim,
+  getTimeseriesPost: () =>
+    authState.status === 'authenticated' && authState.sessionToken
+      ? (body) =>
+          nubraPost('/charts/timeseries', body, {
+            Authorization: `Bearer ${authState.sessionToken!}`,
+          })
+      : null,
+  broadcastRuleEvents,
+});
+
+type MismatchOnChain = ReturnType<typeof registerMismatchRoutes>['onChain'];
+const mismatchTracker: { onChain: MismatchOnChain } | null = registerMismatchRoutes({
+  fastify,
+  requireAuth,
+  simBroker,
+  getTimeseriesPost: () =>
+    authState.status === 'authenticated' && authState.sessionToken
+      ? (body) =>
+          nubraPost('/charts/timeseries', body, {
+            Authorization: `Bearer ${authState.sessionToken!}`,
+          })
+      : null,
+  broadcast,
+  getMcxFuture: async (asset, optionExpiry) => {
+    const expiries = (await getRefdata('MCX'))
+      .filter(
+        (i) =>
+          String(i.derivative_type).toUpperCase() === 'FUT' &&
+          String(i.asset).toUpperCase() === asset.toUpperCase(),
+      )
+      .map((i) => String(i.expiry))
+      .filter((e) => /^\d{8}$/.test(e) && e >= optionExpiry)
+      .sort();
+    return expiries.length ? `FUT_${asset.toUpperCase()}_${expiries[0]}` : null;
+  },
 });
 
 /** Per-date instrument master for the historical backtest routes. Hoisted out of the route

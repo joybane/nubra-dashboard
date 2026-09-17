@@ -1,3 +1,4 @@
+import { chartTheme } from '../lib/chartTheme';
 // ─── Aggregate Vega / Theta / IV as a self-contained chart pane ──────────────────
 //
 // The Tracker draws these overlays on the chart it already owns. Nubra BT and the position
@@ -12,7 +13,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
-  CrosshairMode,
   LineSeries,
   type AutoscaleInfoProvider,
   type IChartApi,
@@ -20,7 +20,7 @@ import {
   type LineSeriesOptions,
   type MouseEventParams,
 } from 'lightweight-charts';
-import type { Instrument, OhlcBar } from '../types';
+import type { Instrument, OhlcBar, Theme } from '../types';
 import { getSymbol } from '../types';
 import { useGreekOverlay } from '../hooks/useGreekOverlay';
 import { GreekButton } from './GreekControls';
@@ -57,8 +57,8 @@ function GreekPinCard({ time, rows }: { time: number; rows: GreekRow[] }) {
   // Same chrome as PANEL_TOOLTIP_STYLE and the ChartTooltips `*Body` cards — a pin and a hover
   // reading sit side by side in this pane, so they must be the same object in two states.
   return (
-    <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
-      <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">
+    <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
+      <div className="text-[10px] text-[var(--text-muted)] border-b border-[var(--border)] pb-1 mb-1.5 font-mono tracking-wide">
         {fmtCrosshairTime(time)}
       </div>
       {rows.length === 0 ? (
@@ -136,7 +136,7 @@ export interface GreekIndicatorPaneProps {
   instrument: Instrument | null;
   /** The host's underlying bars — the time grid greek points are snapped onto. */
   bars: OhlcBar[];
-  theme: 'dark' | 'light';
+  theme: Theme;
   /** Trailing reconstruction window. Hosts reviewing a single trade pass 1. */
   histDays?: number;
   /** Trading day to open on ('YYYY-MM-DD') — e.g. the session the trade ran in. */
@@ -331,35 +331,22 @@ export default function GreekIndicatorPane({
   // Theme is applied by `applyOptions` below instead, exactly as the Tracker does.
   useEffect(() => {
     if (!containerRef.current) return;
-    const isDark = theme === 'dark';
+    const isDark = theme !== 'light';
 
     const chart = createChart(containerRef.current, {
-      layout: {
-        background: { color: isDark ? '#0d0f11' : '#ffffff' },
-        textColor: isDark ? '#c9d1d9' : '#131722',
-        fontSize: axisMetrics.fontSize,
-        fontFamily: "'Inter', 'Segoe UI', sans-serif",
-      },
-      grid: {
-        vertLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-        horzLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-      },
-      crosshair: { mode: CrosshairMode.Normal },
-      // Both gutters, at the host's widths — see `axisMetrics`. The left one carries the
-      // overlays' totals; it stays visible even with every overlay switched off, exactly as the
-      // host's P&L pane keeps an empty left gutter, because the alignment is what it is for.
+      ...chartTheme(theme, axisMetrics.fontSize),
       leftPriceScale: {
         visible: true,
-        borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+        borderColor: isDark ? '#2b3340' : '#dce2ec',
         minimumWidth: axisMetrics.leftWidth,
       },
       rightPriceScale: {
         visible: true,
-        borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+        borderColor: isDark ? '#2b3340' : '#dce2ec',
         minimumWidth: axisMetrics.rightWidth,
       },
       timeScale: {
-        borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+        borderColor: isDark ? '#2b3340' : '#dce2ec',
         timeVisible: true,
         secondsVisible: false,
         minBarSpacing: 0.05,
@@ -487,17 +474,7 @@ export default function GreekIndicatorPane({
   // ── Theme sync (options only — never a rebuild; see above) ──────────────────
   useEffect(() => {
     if (!chartRef.current) return;
-    const isDark = theme === 'dark';
-    chartRef.current.applyOptions({
-      layout: {
-        background: { color: isDark ? '#0d0f11' : '#ffffff' },
-        textColor: isDark ? '#c9d1d9' : '#131722',
-      },
-      grid: {
-        vertLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-        horzLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-      },
-    });
+    chartRef.current.applyOptions(chartTheme(theme, axisMetrics.fontSize));
   }, [theme]);
 
   // ── Underlying line + greek re-snap whenever the host's bars change ─────────
@@ -947,7 +924,7 @@ export default function GreekIndicatorPane({
         <div ref={containerRef} className="absolute inset-0" />
         <div
           ref={tooltipRef}
-          className="absolute z-30 hidden pointer-events-none bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]"
+          className="absolute z-30 hidden pointer-events-none bg-[var(--bg-card)] border border-[var(--border)] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]"
         />
         {pins && (
           <PinnedCrosshairLayer

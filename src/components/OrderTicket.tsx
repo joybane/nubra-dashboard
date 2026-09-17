@@ -5,6 +5,15 @@ import { formatInstrumentName } from '../lib/instrumentDisplay';
 import { getSymbol } from '../types';
 import { usePaperTrading } from '../hooks/usePaperTrading';
 import InstrumentSearch from './InstrumentSearch';
+import BackdatedEntryControl from './BackdatedEntryControl';
+import {
+  defaultBackdatedEntry,
+  describeReplay,
+  timeseriesSymbol,
+  timeseriesType,
+  type BackdatedEntry,
+  type BackdatedReplayExit,
+} from '../lib/backdatedEntry';
 
 type Side = 'BUY' | 'SELL';
 type ProductUI = 'NRML' | 'MIS';
@@ -47,6 +56,7 @@ export default function OrderTicket() {
   const [ltp, setLtp] = useState<number | undefined>();
   const [ltpChg, setLtpChg] = useState<number | undefined>();
   const [pos, setPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [backdate, setBackdate] = useState<BackdatedEntry>(defaultBackdatedEntry);
   const marginTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(
     null,
@@ -69,6 +79,7 @@ export default function OrderTicket() {
       setMargin(null);
       setMarginErr('');
       setPos({ x: 0, y: 0 });
+      setBackdate(defaultBackdatedEntry());
     }
   }, [ticketOpen, ticketConfig]);
 
@@ -180,6 +191,10 @@ export default function OrderTicket() {
       setResult({ ok: false, msg: 'Enter a valid quantity.' });
       return;
     }
+    if (backdate.enabled) {
+      await placeBackdatedOrder(nubraName);
+      return;
+    }
 
     const apiPrice = orderType !== 'MKT' && price ? Math.round(Number(price) * 100) : undefined;
     const apiTrigger =
@@ -221,6 +236,64 @@ export default function OrderTicket() {
       if (!res.ok || d.error) throw new Error(d.error || 'Order failed');
       setResult({ ok: true, msg: `Order placed! ID: ${d.order_id}` });
       setTimeout(closeTicket, 1800);
+    } catch (e) {
+      setResult({ ok: false, msg: (e as Error).message });
+    } finally {
+      setPlacing(false);
+    }
+  }
+
+  /**
+   * "Earlier today": fill at the chosen second's price, then track live. The ticket's Stoploss /
+   * Target price is sent as a rule so the history between entry and now is checked against it.
+   */
+  async function placeBackdatedOrder(nubraName: string) {
+    if (!instrument) return;
+    const level = Number(triggerPx);
+    const armed = (showSl || showTgt) && Number.isFinite(level) && level > 0;
+    const rules = armed
+      ? showSl
+        ? { stopLoss: { type: 'PREMIUM_PRICE', value: level } }
+        : { target: { type: 'PREMIUM_PRICE', value: level } }
+      : undefined;
+    setPlacing(true);
+    setResult(null);
+    try {
+      const lbl = instrumentLabel(instrument);
+      const res = await fetch('/paper/backdated/order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nubraName,
+          liveRefId: instrument.ref_id,
+          display_name: lbl || nubraName,
+          order_qty: orderQty,
+          order_side: side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
+          order_delivery_type: productToApi(product),
+          asset: instrument.asset,
+          expiry: instrument.expiry,
+          exchange: instrument.exchange,
+          derivative_type: instrument.derivative_type,
+          symbol: timeseriesSymbol(instrument),
+          instrument_type: timeseriesType(instrument),
+          entry_time: backdate.time,
+          price_source: backdate.source,
+          rules,
+        }),
+      });
+      const d = (await res.json()) as {
+        orders?: Array<{ order_id: number; fill_price: number; actual_time: string }>;
+        replay?: { exits: BackdatedReplayExit[] };
+        error?: string;
+      };
+      if (!res.ok || d.error) throw new Error(d.error || 'Order failed');
+      const fill = d.orders?.[0];
+      const replay = describeReplay(d.replay?.exits ?? []);
+      setResult({
+        ok: true,
+        msg: `Entered at ${fill?.actual_time ?? backdate.time} @ ₹${((fill?.fill_price ?? 0) / 100).toFixed(2)}${replay ? ` · ${replay}` : ''}`,
+      });
+      setTimeout(closeTicket, replay ? 4000 : 1800);
     } catch (e) {
       setResult({ ok: false, msg: (e as Error).message });
     } finally {
@@ -373,6 +446,22 @@ export default function OrderTicket() {
                 ))}
               </div>
 
+              {/* ── Entry: now, or earlier today ── */}
+              <div className="px-4 py-3" style={{ borderBottom: '1px solid #2a2d3e' }}>
+                <BackdatedEntryControl
+                  value={backdate}
+                  onChange={(next) => {
+                    setBackdate(next);
+                    if (next.enabled) setOrderType('MKT');
+                  }}
+                  preview={{
+                    exchange: instrument.exchange,
+                    type: timeseriesType(instrument),
+                    symbol: timeseriesSymbol(instrument),
+                  }}
+                />
+              </div>
+
               {/* ── Qty + Price ── */}
               <div className="px-4 pt-4 pb-3">
                 <div className="flex gap-3 mb-3">
@@ -438,7 +527,9 @@ export default function OrderTicket() {
                         <button
                           key={t}
                           onClick={() => setOrderType(t)}
+                          disabled={backdate.enabled && t !== 'MKT'}
                           style={{
+                            opacity: backdate.enabled && t !== 'MKT' ? 0.35 : 1,
                             flex: 1,
                             borderRadius: 4,
                             fontSize: 11,
@@ -493,7 +584,9 @@ export default function OrderTicket() {
                     marginBottom: 4,
                   }}
                 >
-                  At Market
+                  {backdate.enabled
+                    ? `At ${backdate.source === 'vwap' ? 'VWAP' : backdate.source} of ${backdate.time}`
+                    : 'At Market'}
                 </div>
                 {orderType === 'MKT' && (
                   <p style={{ fontSize: 10, color: '#666', textAlign: 'center' }}>
@@ -543,7 +636,15 @@ export default function OrderTicket() {
                     step="0.05"
                     value={triggerPx}
                     onChange={(e) => setTriggerPx(e.target.value)}
-                    placeholder={showSl ? 'Stoploss price' : 'Target price'}
+                    placeholder={
+                      backdate.enabled
+                        ? showSl
+                          ? 'Stoploss price — checked since entry, then live'
+                          : 'Target price — checked since entry, then live'
+                        : showSl
+                          ? 'Stoploss price'
+                          : 'Target price'
+                    }
                     style={{
                       width: '100%',
                       padding: '8px 12px',
@@ -702,7 +803,9 @@ export default function OrderTicket() {
                     background: isBuy ? '#16a34a' : '#dc2626',
                   }}
                 >
-                  {placing ? 'Placing…' : isBuy ? 'BUY' : 'SELL'}
+                  {placing
+                    ? 'Placing…'
+                    : `${isBuy ? 'BUY' : 'SELL'}${backdate.enabled ? ` @ ${backdate.time}` : ''}`}
                 </button>
               </div>
 

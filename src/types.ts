@@ -227,8 +227,6 @@ export interface BacktestResult {
 export type ViewType =
   | 'chart'
   | 'optionchain'
-  | 'straddle'
-  | 'strategy'
   | 'basket'
   | 'backtest'
   | 'nubrabacktest'
@@ -265,7 +263,8 @@ export interface WatchlistItem {
 }
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
-export type Theme = 'dark' | 'light';
+export type Theme = 'dark' | 'light' | 'bloomberg' | 'graphite';
+export type ShellLayout = 'classic' | 'workspace';
 
 // ─── Paper Trading ────────────────────────────────────────────────────────────
 export type PaperOrderType =

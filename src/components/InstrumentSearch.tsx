@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import type { Instrument, InstrumentType } from '../types';
 import { getInstrumentType } from '../types';
 import { formatInstrumentName, instrumentSearchAlias } from '../lib/instrumentDisplay';
@@ -46,6 +46,8 @@ export default function InstrumentSearch({
   const [filter, setFilter] = useState('All');
   const [workerReady, setWorkerReady] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [activeResult, setActiveResult] = useState(0);
+  const resultsId = useId();
   const handleRef = useRef<SearchWorkerHandle | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -150,6 +152,7 @@ export default function InstrumentSearch({
   );
 
   function handleInput(e: React.ChangeEvent<HTMLInputElement>) {
+    setActiveResult(0);
     const q = e.target.value;
     setQuery(q);
     queryRef.current = q;
@@ -203,6 +206,12 @@ export default function InstrumentSearch({
     if (filter === 'F&O') return !isMcx;
     return true;
   });
+  const visibleResults = filtered.slice(0, 15);
+  const selectedIndex = Math.min(activeResult, Math.max(0, visibleResults.length - 1));
+
+  useEffect(() => {
+    if (open) document.getElementById(`${resultsId}-${selectedIndex}`)?.scrollIntoView({ block: 'nearest' });
+  }, [open, resultsId, selectedIndex]);
 
   return (
     <div className="relative w-full">
@@ -212,11 +221,26 @@ export default function InstrumentSearch({
       <input
         ref={inputRef}
         type="text"
+        role="combobox"
+        aria-label="Search instruments"
+        aria-expanded={open}
+        aria-controls={resultsId}
+        aria-autocomplete="list"
+        aria-activedescendant={open && visibleResults.length ? `${resultsId}-${selectedIndex}` : undefined}
         value={query}
         onChange={handleInput}
         onFocus={handleFocus}
         onKeyDown={(e) => {
           if (e.key === 'Escape') setOpen(false);
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            if (!open) handleFocus();
+            setActiveResult((selectedIndex + (e.key === 'ArrowDown' ? 1 : -1) + visibleResults.length) % (visibleResults.length || 1));
+          }
+          if (e.key === 'Enter' && open && visibleResults[selectedIndex]) {
+            e.preventDefault(); handleSelect(visibleResults[selectedIndex]);
+          }
+          if (e.key === 'Tab') setOpen(false);
         }}
         placeholder={placeholder}
         autoComplete="off"
@@ -226,7 +250,7 @@ export default function InstrumentSearch({
       {open && (
         <div
           ref={dropRef}
-          className="absolute top-[calc(100%+6px)] left-[-60px] right-0 min-w-[340px] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl max-h-[420px] overflow-y-auto z-[200]"
+          className="absolute top-[calc(100%+8px)] left-0 w-[min(460px,calc(100vw-32px))] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl max-h-[min(420px,70vh)] overflow-y-auto z-[200]"
         >
           {/* Filter tabs */}
           <div className="flex gap-1 px-2.5 pt-2.5 pb-2 border-b border-[var(--border)] sticky top-0 bg-[var(--bg-card)] z-10 overflow-x-auto">
@@ -236,6 +260,7 @@ export default function InstrumentSearch({
                 onMouseDown={(e) => {
                   e.preventDefault();
                   setFilter(label);
+                  setActiveResult(0);
                 }}
                 className={`px-2.5 py-1 rounded-full text-xs font-medium transition-all ${
                   label === filter
@@ -249,12 +274,13 @@ export default function InstrumentSearch({
           </div>
 
           {/* Results */}
+          <div id={resultsId} role="listbox" aria-label="Instruments">
           {!filtered.length ? (
             <div className="px-4 py-5 text-center text-[var(--text-muted)] text-[13px]">
-              {searching ? 'Searching…' : 'No results'}
+              {searching ? 'Searching instruments…' : 'No matches. Try a symbol or a different category.'}
             </div>
           ) : (
-            filtered.slice(0, 15).map((item, i) => {
+            visibleResults.map((item, i) => {
               const name = formatInstrumentName(item);
               const alias = instrumentSearchAlias(item);
               const exch = (item.exchange || 'NSE').toUpperCase();
@@ -262,10 +288,13 @@ export default function InstrumentSearch({
               return (
                 <div
                   key={i}
-                  tabIndex={0}
+                  id={`${resultsId}-${i}`}
+                  role="option"
+                  aria-selected={i === selectedIndex}
+                  onMouseMove={() => setActiveResult(i)}
                   onClick={() => handleSelect(item)}
                   onKeyDown={(e) => e.key === 'Enter' && handleSelect(item)}
-                  className="flex items-center justify-between px-3.5 py-2.5 cursor-pointer border-b border-[var(--border)]/60 hover:bg-[var(--bg-hover)] focus:bg-[var(--bg-hover)] focus:outline-none transition-colors last:border-0"
+                  className={`flex items-center justify-between px-3.5 py-2.5 cursor-pointer border-b border-[var(--border)]/60 hover:bg-[var(--bg-hover)] transition-colors last:border-0 ${i === selectedIndex ? 'bg-[var(--bg-hover)]' : ''}`}
                 >
                   <div className="flex items-center gap-2 flex-1 min-w-0">
                     <span className="font-semibold text-[var(--text-primary)] text-[13px] truncate">
@@ -287,6 +316,8 @@ export default function InstrumentSearch({
               );
             })
           )}
+          </div>
+          <div className="px-3 py-2 border-t border-[var(--border)] text-[11px] text-[var(--text-muted)]">↑ ↓ Navigate · Enter Select · Esc Close</div>
         </div>
       )}
     </div>

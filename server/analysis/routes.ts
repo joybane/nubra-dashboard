@@ -105,6 +105,7 @@ export function parseFinderParams(raw: unknown): FinderParams | string {
     ['minAbsPnl', 0, 1e9],
     ['qty', 1, 1e6],
     ['strikeOffset', -20, 20],
+    ['legMismatchPct', 0, 200],
   ];
   for (const [key, min, max] of numeric) {
     const v = Number(p[key]);

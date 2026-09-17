@@ -673,3 +673,173 @@ export function dbLoadPositionRules(): PositionRuleRow[] {
 export function dbDeletePositionRule(ruleKey: string): boolean {
   return db.prepare('DELETE FROM position_rules WHERE rule_key = ?').run(ruleKey).changes > 0;
 }
+
+// ── Backdated paper trades ──────────────────────────────────────────────────
+// One row per order entered "earlier today" (server/backdatedRoutes.ts): the second and price
+// source it was filled from, and which rules have already been replayed over its history.
+// Created on first use instead of in initDb, so adding the feature leaves the schema bootstrap
+// that every other part of the book depends on exactly as it was.
+
+export interface BackdatedTradeRow {
+  order_id: number;
+  ref_id: number;
+  basket_group_id: string;
+  entry_time_ns: number;
+  entry_label: string;
+  price_source: string;
+  exact: number;
+  fill_price: number;
+  symbol: string;
+  exchange: string;
+  instrument_type: string;
+  /** JSON object: rule key → the rule JSON that was replayed. */
+  replayed_json: string;
+  created_at: number;
+}
+
+let backdatedTableReady = false;
+function ensureBackdatedTable(): void {
+  if (backdatedTableReady) return;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS backdated_trades (
+      order_id         INTEGER PRIMARY KEY,
+      ref_id           INTEGER NOT NULL,
+      basket_group_id  TEXT NOT NULL DEFAULT '',
+      entry_time_ns    INTEGER NOT NULL,
+      entry_label      TEXT NOT NULL,
+      price_source     TEXT NOT NULL,
+      exact            INTEGER NOT NULL,
+      fill_price       INTEGER NOT NULL,
+      symbol           TEXT NOT NULL,
+      exchange         TEXT NOT NULL,
+      instrument_type  TEXT NOT NULL,
+      replayed_json    TEXT NOT NULL DEFAULT '{}',
+      created_at       INTEGER NOT NULL
+    );
+  `);
+  backdatedTableReady = true;
+}
+
+export function dbInsertBackdatedTrade(
+  row: Omit<BackdatedTradeRow, 'replayed_json' | 'created_at'> & { replayed_json?: string },
+): void {
+  ensureBackdatedTable();
+  db.prepare(
+    `INSERT OR REPLACE INTO backdated_trades (order_id, ref_id, basket_group_id, entry_time_ns,
+      entry_label, price_source, exact, fill_price, symbol, exchange, instrument_type,
+      replayed_json, created_at)
+    VALUES (@order_id, @ref_id, @basket_group_id, @entry_time_ns, @entry_label, @price_source,
+      @exact, @fill_price, @symbol, @exchange, @instrument_type, @replayed_json, @created_at)`,
+  ).run({ ...row, replayed_json: row.replayed_json ?? '{}', created_at: Date.now() });
+}
+
+export function dbListBackdatedTrades(sinceEntryNs: number): BackdatedTradeRow[] {
+  ensureBackdatedTable();
+  return db
+    .prepare('SELECT * FROM backdated_trades WHERE entry_time_ns >= ? ORDER BY entry_time_ns')
+    .all(sinceEntryNs) as BackdatedTradeRow[];
+}
+
+export function dbSetBackdatedReplayed(orderId: number, replayedJson: string): void {
+  ensureBackdatedTable();
+  db.prepare('UPDATE backdated_trades SET replayed_json = ? WHERE order_id = ?').run(
+    replayedJson,
+    orderId,
+  );
+}
+
+// ── Live mismatch tracker ───────────────────────────────────────────────────
+// Which strategies are tracked (server/mismatchRoutes.ts), and every version of every case found.
+// Cases are rebuilt from their versions. Created on first use, like backdated_trades.
+
+export interface MismatchVersionRow {
+  id?: number;
+  basket_group_id: string;
+  case_no: number;
+  color_idx: number;
+  t1_ns: number;
+  t2_ns: number;
+  spot1: number;
+  spot2: number;
+  ce1: number;
+  ce2: number;
+  pe1: number;
+  pe2: number;
+  ce_delta: number;
+  pe_delta: number;
+  gap: number;
+  created_at?: number;
+}
+
+let mismatchTablesReady = false;
+function ensureMismatchTables(): void {
+  if (mismatchTablesReady) return;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mismatch_trackers (
+      basket_group_id  TEXT PRIMARY KEY,
+      enabled          INTEGER NOT NULL,
+      created_at       INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS mismatch_versions (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      basket_group_id  TEXT NOT NULL,
+      case_no          INTEGER NOT NULL,
+      color_idx        INTEGER NOT NULL,
+      t1_ns            INTEGER NOT NULL,
+      t2_ns            INTEGER NOT NULL,
+      spot1            REAL NOT NULL,
+      spot2            REAL NOT NULL,
+      ce1              REAL NOT NULL,
+      ce2              REAL NOT NULL,
+      pe1              REAL NOT NULL,
+      pe2              REAL NOT NULL,
+      ce_delta         REAL NOT NULL,
+      pe_delta         REAL NOT NULL,
+      gap              REAL NOT NULL,
+      created_at       INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_mismatch_versions_group
+      ON mismatch_versions (basket_group_id, case_no, t2_ns);
+  `);
+  mismatchTablesReady = true;
+}
+
+export function dbSetMismatchTracker(basketGroupId: string, enabled: boolean): void {
+  ensureMismatchTables();
+  db.prepare(
+    `INSERT INTO mismatch_trackers (basket_group_id, enabled, created_at) VALUES (?, ?, ?)
+     ON CONFLICT(basket_group_id) DO UPDATE SET enabled = excluded.enabled`,
+  ).run(basketGroupId, enabled ? 1 : 0, Date.now());
+}
+
+export function dbListMismatchTrackers(): Array<{ basket_group_id: string; enabled: number }> {
+  ensureMismatchTables();
+  return db
+    .prepare('SELECT basket_group_id, enabled FROM mismatch_trackers ORDER BY created_at')
+    .all() as Array<{ basket_group_id: string; enabled: number }>;
+}
+
+export function dbInsertMismatchVersion(row: MismatchVersionRow): void {
+  ensureMismatchTables();
+  db.prepare(
+    `INSERT INTO mismatch_versions (basket_group_id, case_no, color_idx, t1_ns, t2_ns, spot1, spot2,
+      ce1, ce2, pe1, pe2, ce_delta, pe_delta, gap, created_at)
+    VALUES (@basket_group_id, @case_no, @color_idx, @t1_ns, @t2_ns, @spot1, @spot2, @ce1, @ce2,
+      @pe1, @pe2, @ce_delta, @pe_delta, @gap, @created_at)`,
+  ).run({ ...row, created_at: Date.now() });
+}
+
+export function dbListMismatchVersions(basketGroupId?: string): MismatchVersionRow[] {
+  ensureMismatchTables();
+  return (
+    basketGroupId
+      ? db
+          .prepare(
+            'SELECT * FROM mismatch_versions WHERE basket_group_id = ? ORDER BY case_no, t2_ns, id',
+          )
+          .all(basketGroupId)
+      : db
+          .prepare('SELECT * FROM mismatch_versions ORDER BY basket_group_id, case_no, t2_ns, id')
+          .all()
+  ) as MismatchVersionRow[];
+}

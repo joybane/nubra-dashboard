@@ -62,7 +62,7 @@ export default function PinCompareStrip({
   // measures the wrapped height and keeps the pinned cards above it.
   return (
     <div className="pointer-events-none">
-      <div className="flex items-center gap-x-2 gap-y-0.5 flex-wrap whitespace-nowrap bg-[#1a1e24]/80 border border-[#ffffff10] rounded-md px-2 py-1 shadow-lg backdrop-blur-md text-[10px]">
+      <div className="flex items-center gap-x-2 gap-y-0.5 flex-wrap whitespace-nowrap bg-[var(--bg-card)] border border-[var(--border)] rounded-md px-2 py-1 shadow-lg backdrop-blur-md text-[10px]">
         <span className="flex items-center gap-1 font-semibold text-[var(--text-muted)]">
           <span className="w-1.5 h-1.5 rounded-full" style={{ background: colors[0] }} />
           <span>→</span>

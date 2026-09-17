@@ -1,10 +1,10 @@
+import { chartTheme } from '../lib/chartTheme';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
   createSeriesMarkers,
   LineSeries,
   CandlestickSeries,
-  CrosshairMode,
   type IChartApi,
   type ISeriesApi,
   type CandlestickSeriesOptions,
@@ -17,6 +17,7 @@ import type {
   WsMessage,
   OptionChainData,
   OptionLeg,
+  Theme,
 } from '../types';
 import { fmtPrice, IST_OFFSET, markSessionBreaks, marketSession, toChartTime } from '../lib/utils';
 import { useWs } from '../hooks/useWsContext';
@@ -35,7 +36,7 @@ import GreekIndicatorPane from './GreekIndicatorPane';
 interface StrategyAnalysisViewProps {
   basketGroupId: string;
   strategyName: string;
-  theme: 'dark' | 'light';
+  theme: Theme;
   onBack: () => void;
   // When set, render a frozen saved snapshot instead of fetching/streaming live data.
   snapshotId?: string;
@@ -73,6 +74,9 @@ function fmtChartTime(chartTime: number): string {
   const m = d.getUTCMinutes().toString().padStart(2, '0');
   return `${h}:${m}`;
 }
+
+/** `index_bucket` interval code for 1-minute bars (nubra.proto `Interval`). */
+const INTERVAL_1_MINUTE = 3;
 
 function nowChartTime(): number {
   const s = Math.floor(Date.now() / 1000) + IST_OFFSET;
@@ -397,58 +401,24 @@ async function fetchHistorical(
   }
 }
 
-function chartOpts(
-  isDark: boolean,
-  hideTimeScale: boolean = false,
-  showLeftScale: boolean = false,
-) {
+function chartOpts(theme: Theme, hideTimeScale: boolean = false, showLeftScale: boolean = false) {
+  const isDark = theme !== 'light';
   return {
     autoSize: true,
-    devicePixelRatio: Math.max(window.devicePixelRatio, 2),
-    layout: {
-      background: { color: isDark ? '#0d0f11' : '#ffffff' },
-      textColor: isDark ? '#c9d1d9' : '#131722',
-      fontSize: 11,
-      fontFamily: "'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif",
-    },
-    grid: {
-      vertLines: {
-        color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)',
-        style: 1 as const,
-      },
-      horzLines: {
-        color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)',
-        style: 1 as const,
-      },
-    },
-    crosshair: {
-      mode: CrosshairMode.Normal,
-      vertLine: {
-        color: isDark ? '#4b5563' : '#9ca3af',
-        width: 1 as const,
-        style: 2 as const,
-        labelBackgroundColor: isDark ? '#22262b' : '#e8ecf5',
-      },
-      horzLine: {
-        color: isDark ? '#3b82f6' : '#2563eb',
-        width: 1 as const,
-        style: 2 as const,
-        labelBackgroundColor: '#2563eb',
-      },
-    },
+    ...chartTheme(theme),
     leftPriceScale: {
       visible: showLeftScale,
-      borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+      borderColor: isDark ? '#2b3340' : '#dce2ec',
       minimumWidth: 60,
     },
     rightPriceScale: {
       visible: true,
-      borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+      borderColor: isDark ? '#2b3340' : '#dce2ec',
       minimumWidth: 75,
     },
     timeScale: {
       visible: !hideTimeScale,
-      borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+      borderColor: isDark ? '#2b3340' : '#dce2ec',
       timeVisible: !hideTimeScale,
       secondsVisible: false,
     },
@@ -521,6 +491,16 @@ import {
 import PinnedCrosshairLayer from './PinnedCrosshairLayer';
 import PaneDivider, { type PaneSpec } from './PaneDivider';
 import PinCompareStrip, { type CompareRow } from './PinCompareStrip';
+import MismatchStripLayer, { MismatchCaseCard } from './MismatchStripLayer';
+import {
+  fetchMismatchCases,
+  fetchMismatchTrackers,
+  nsToChartMinute,
+  setMismatchTracker,
+  upsertMismatchCase,
+  type MismatchCaseDto,
+  type MismatchTrackerState,
+} from '../lib/mismatchCases';
 import { usePinnedTimes, bindPinTrigger, PIN_COLORS } from '../lib/chartPins';
 
 // Nearest sample at or before `targetTime`. Shared by the hover tooltips and the pinned cards,
@@ -1102,8 +1082,7 @@ export default function StrategyAnalysisView({
   // ── 1. Create price chart ──
   useEffect(() => {
     if (!priceChartContainerRef.current || !priceVisible) return;
-    const isDark = theme === 'dark';
-    const chart = createChart(priceChartContainerRef.current, chartOpts(isDark, false, true));
+    const chart = createChart(priceChartContainerRef.current, chartOpts(theme, false, true));
     priceChartRef.current = chart;
     setChartEpoch((e) => e + 1);
 
@@ -1178,8 +1157,7 @@ export default function StrategyAnalysisView({
   // ── 2. Create P&L chart ──
   useEffect(() => {
     if (!pnlChartContainerRef.current || !pnlVisible) return;
-    const isDark = theme === 'dark';
-    const chart = createChart(pnlChartContainerRef.current, chartOpts(isDark, false, true));
+    const chart = createChart(pnlChartContainerRef.current, chartOpts(theme, false, true));
     pnlChartRef.current = chart;
     setChartEpoch((e) => e + 1);
 
@@ -1632,7 +1610,112 @@ export default function StrategyAnalysisView({
   // ── Pinned crosshairs (middle-click) ──
   // Entirely additive: pins never touch lightweight-charts' crosshair state, so the hover sync
   // below behaves exactly as it did before when no pin exists.
-  const { pins, togglePinAt, removePin, clearPins } = usePinnedTimes(2);
+  const { pins, togglePinAt, removePin, clearPins, pinTimes } = usePinnedTimes(2);
+
+  // ── Live mismatch cases (server/mismatchRoutes.ts) ──
+  // Read-only: strips on the time axis and a versions card. Empty for any strategy the tracker
+  // never ran on, in which case nothing below renders.
+  const [mismatchCases, setMismatchCases] = useState<MismatchCaseDto[]>([]);
+  const [mismatchPick, setMismatchPick] = useState<{ caseNo: number; version: number } | null>(
+    null,
+  );
+  useEffect(() => {
+    setMismatchCases([]);
+    setMismatchPick(null);
+    const ctrl = new AbortController();
+    fetchMismatchCases(basketGroupId, ctrl.signal)
+      .then((cases) => {
+        if (!ctrl.signal.aborted) setMismatchCases(cases);
+      })
+      .catch(() => {});
+    if (isSnapshot) return () => ctrl.abort();
+    const unsub = subscribe('*', (msg: WsMessage) => {
+      const m = msg as unknown as {
+        type?: string;
+        data?: { basket_group_id?: string; case?: MismatchCaseDto };
+      };
+      const incoming = m.data?.case;
+      if (m.type !== 'mismatch_case' || m.data?.basket_group_id !== basketGroupId || !incoming) {
+        return;
+      }
+      setMismatchCases((prev) => upsertMismatchCase(prev, incoming));
+    });
+    return () => {
+      ctrl.abort();
+      unsub();
+    };
+  }, [basketGroupId, isSnapshot, subscribe]);
+  // The same ≠ switch as the Positions row, so tracking can be turned on or off from the chart.
+  const [mismatchTracker, setMismatchTrackerState] = useState<MismatchTrackerState | null>(null);
+  const [mismatchBusy, setMismatchBusy] = useState(false);
+  const [mismatchToggleError, setMismatchToggleError] = useState<string | null>(null);
+  const loadMismatchTracker = useCallback(() => {
+    fetchMismatchTrackers()
+      .then((list) =>
+        setMismatchTrackerState(list.find((t) => t.basket_group_id === basketGroupId) ?? null),
+      )
+      .catch(() => {});
+  }, [basketGroupId]);
+  useEffect(() => {
+    setMismatchTrackerState(null);
+    setMismatchToggleError(null);
+    if (isSnapshot) return;
+    loadMismatchTracker();
+    const id = setInterval(loadMismatchTracker, 5000);
+    return () => clearInterval(id);
+  }, [isSnapshot, loadMismatchTracker]);
+  const toggleMismatchTracker = useCallback(async () => {
+    const on = !mismatchTracker?.enabled;
+    setMismatchBusy(true);
+    const res = await setMismatchTracker(basketGroupId, on);
+    setMismatchBusy(false);
+    if (res.ok) {
+      setMismatchToggleError(null);
+    } else {
+      setMismatchToggleError(res.error);
+      setTimeout(() => setMismatchToggleError(null), 5000);
+    }
+    loadMismatchTracker();
+  }, [basketGroupId, mismatchTracker, loadMismatchTracker]);
+  const pickedMismatch = mismatchPick
+    ? mismatchCases.find((c) => c.case_no === mismatchPick.caseNo)
+    : undefined;
+  const pinMismatch = useCallback(
+    (caseNo: number, version?: number) => {
+      const c = mismatchCases.find((x) => x.case_no === caseNo);
+      if (!c || c.versions.length === 0) return;
+      const idx = version ?? c.versions.length - 1;
+      const v = c.versions[idx];
+      if (!v) return;
+      setMismatchPick({ caseNo, version: idx });
+      pinTimes([nsToChartMinute(v.t1_ns), nsToChartMinute(v.t2_ns)]);
+    },
+    [mismatchCases, pinTimes],
+  );
+  // A picked case's two pins and its card are one thing: removing either pin, closing the card, or
+  // clicking the case's strip again clears all of it. Pins set by hand keep removing one at a time.
+  const clearMismatchPick = useCallback(() => {
+    setMismatchPick(null);
+    clearPins();
+  }, [clearPins]);
+  const removePinOrCase = useCallback(
+    (id: number) => {
+      if (mismatchPick) clearMismatchPick();
+      else removePin(id);
+    },
+    [mismatchPick, clearMismatchPick, removePin],
+  );
+  const pickMismatchStrip = useCallback(
+    (caseNo: number) => {
+      if (mismatchPick?.caseNo === caseNo) clearMismatchPick();
+      else pinMismatch(caseNo);
+    },
+    [mismatchPick, clearMismatchPick, pinMismatch],
+  );
+  // Esc (or anything else) clearing the pins closes the card with them.
+  useEffect(() => {
+    if (mismatchPick && pins.length === 0) setMismatchPick(null);
+  }, [mismatchPick, pins.length]);
   const togglePinRef = useRef(togglePinAt);
   togglePinRef.current = togglePinAt;
   // Time under the cursor as of the last crosshair move — already snapped to a bar, so a pin
@@ -1977,6 +2060,7 @@ export default function StrategyAnalysisView({
       const data = msg.data as {
         indexes?: Array<{
           indexname?: string;
+          interval?: number | string;
           timestamp?: string;
           open?: string;
           high?: string;
@@ -1985,6 +2069,7 @@ export default function StrategyAnalysisView({
         }>;
         instruments?: Array<{
           indexname?: string;
+          interval?: number | string;
           timestamp?: string;
           open?: string;
           high?: string;
@@ -1992,8 +2077,16 @@ export default function StrategyAnalysisView({
           close?: string;
         }>;
       };
+      // Buckets are broadcast to every tab for every interval anyone subscribed. Only this chart's
+      // own 1-minute stream (proto INTERVAL_1_MINUTE = 3) may touch its candles: with a 5-minute
+      // NIFTY chart open elsewhere, both streams landed on the live minute and it flipped between
+      // the 1m and 5m ranges every second (seen 2026-09-17, 11:49: 23,271–23,277 vs 23,264–23,281).
       const idx = [...(data.indexes || []), ...(data.instruments || [])].find(
-        (item) => (item.indexname || '').toUpperCase() === chartUnderlying.toUpperCase(),
+        (item) =>
+          (item.indexname || '').toUpperCase() === chartUnderlying.toUpperCase() &&
+          (item.interval == null ||
+            Number(item.interval) === INTERVAL_1_MINUTE ||
+            item.interval === 'INTERVAL_1_MINUTE'),
       );
       if (!idx?.timestamp) return;
       const t = Math.floor((Number(BigInt(idx.timestamp)) / 1e9 + IST_OFFSET) / 60) * 60;
@@ -2349,8 +2442,7 @@ export default function StrategyAnalysisView({
   // ── 10. Greeks chart ──
   useEffect(() => {
     if (!greeksChartContainerRef.current || !greeksVisible) return;
-    const isDark = theme === 'dark';
-    const chart = createChart(greeksChartContainerRef.current, chartOpts(isDark, false, true));
+    const chart = createChart(greeksChartContainerRef.current, chartOpts(theme, false, true));
     greeksChartRef.current = chart;
     setChartEpoch((e) => e + 1);
     const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
@@ -3345,6 +3437,47 @@ export default function StrategyAnalysisView({
           Indicators
         </button>
 
+        {/* ── Live mismatch tracker switch (same as the ≠ on the Positions row) ── */}
+        {!isSnapshot &&
+          (() => {
+            const on = !!mismatchTracker?.enabled;
+            const canTurnOn = !!mismatchTracker?.eligible;
+            const disabled = mismatchBusy || (!on && !canTurnOn);
+            const count = mismatchCases.length;
+            const why = mismatchTracker?.reason
+              ? mismatchTracker.reason
+              : 'the strategy is no longer open';
+            const title = mismatchToggleError
+              ? `Mismatch tracker: ${mismatchToggleError}`
+              : on
+                ? `Mismatch tracker on${
+                    mismatchTracker?.tracking ? '' : ' (not tracking right now: ' + why + ')'
+                  } · ${count} case${count === 1 ? '' : 's'} · click to turn off`
+                : canTurnOn
+                  ? 'Track live CE/PE profit mismatch at the same underlying close (±1 pt, ≥30 min apart, legs differ ≥50%). Cases appear as colour strips on the time axis.'
+                  : `Can't track: ${why}. Only an open strategy of one CE and one PE can be tracked.${
+                      count ? ' Recorded cases still show on the chart.' : ''
+                    }`;
+            return (
+              <button
+                onClick={() => void toggleMismatchTracker()}
+                disabled={disabled}
+                title={title}
+                className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-semibold border transition-colors ${
+                  mismatchToggleError
+                    ? 'border-[var(--red)]/50 bg-[var(--red)]/15 text-[var(--red)]'
+                    : on
+                      ? 'bg-[#a78bfa]/15 border-[#a78bfa]/40 text-[#a78bfa] hover:bg-[#a78bfa]/25'
+                      : disabled
+                        ? 'border-[var(--border)] bg-transparent text-[var(--text-muted)] opacity-50 cursor-not-allowed'
+                        : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                ≠ Mismatch{on || count ? ` · ${count}` : ''}
+              </button>
+            );
+          })()}
+
         <div className="ml-auto flex items-center gap-3">
           {isSnapshot ? (
             <span className="text-[10px] font-semibold px-2 py-0.5 rounded bg-[#3b82f6]/15 text-[#3b82f6] border border-[#3b82f6]/40">
@@ -3392,11 +3525,26 @@ export default function StrategyAnalysisView({
               {/* fallback removed */}
             </div>
             <PriceTooltip ref={priceTooltipRef} />
+            <MismatchStripLayer
+              cases={mismatchCases}
+              chart={priceChartRef.current}
+              epoch={chartEpoch}
+              activeCase={mismatchPick?.caseNo ?? null}
+              onPick={pickMismatchStrip}
+            />
+            {pickedMismatch && mismatchPick && (
+              <MismatchCaseCard
+                c={pickedMismatch}
+                pinnedVersion={mismatchPick.version}
+                onPinVersion={(i) => pinMismatch(pickedMismatch.case_no, i)}
+                onClose={clearMismatchPick}
+              />
+            )}
             <PinnedCrosshairLayer
               pins={pins}
               chart={priceChartRef.current}
               epoch={chartEpoch}
-              onRemove={removePin}
+              onRemove={removePinOrCase}
               renderCard={(pin) => {
                 const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
                 if (!snap) return null;
@@ -3446,11 +3594,26 @@ export default function StrategyAnalysisView({
                 ref={pnlTooltipRef}
                 strategyMargin={strategyMargin > 0 ? strategyMargin : 0}
               />
+              <MismatchStripLayer
+                cases={mismatchCases}
+                chart={pnlChartRef.current}
+                epoch={chartEpoch}
+                activeCase={mismatchPick?.caseNo ?? null}
+                onPick={pickMismatchStrip}
+              />
+              {!priceVisible && pickedMismatch && mismatchPick && (
+                <MismatchCaseCard
+                  c={pickedMismatch}
+                  pinnedVersion={mismatchPick.version}
+                  onPinVersion={(i) => pinMismatch(pickedMismatch.case_no, i)}
+                  onClose={clearMismatchPick}
+                />
+              )}
               <PinnedCrosshairLayer
                 pins={pins}
                 chart={pnlChartRef.current}
                 epoch={chartEpoch}
-                onRemove={removePin}
+                onRemove={removePinOrCase}
                 renderCard={(pin) => {
                   const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
                   if (!snap) return null;
@@ -3508,7 +3671,7 @@ export default function StrategyAnalysisView({
                 pins={pins}
                 chart={greeksChartRef.current}
                 epoch={chartEpoch}
-                onRemove={removePin}
+                onRemove={removePinOrCase}
                 renderCard={(pin) => {
                   const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
                   if (!snap) return null;
@@ -3568,7 +3731,7 @@ export default function StrategyAnalysisView({
                 // Must track chartOpts' leftPriceScale / rightPriceScale minimumWidth and layout
                 // fontSize, or this pane's plot area starts and ends somewhere the other three
                 // panes' do not and the shared logical range lands at a different x in each.
-                axisMetrics={{ leftWidth: 60, rightWidth: 75, fontSize: 11 }}
+                axisMetrics={{ leftWidth: 60, rightWidth: 75, fontSize: 12 }}
                 onChartReady={handleIndicatorsChart}
                 pins={pins}
                 onTogglePin={togglePinAt}

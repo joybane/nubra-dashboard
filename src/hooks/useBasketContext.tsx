@@ -4,6 +4,11 @@ import { generateId } from '../lib/utils';
 import { useWs } from './useWsContext';
 import { useMarginCalc, type MarginData } from './useMarginCalc';
 import { useBasketPersistence, type BasketPersistenceApi } from './useBasketPersistence';
+import {
+  describeReplay,
+  type BackdatedPriceSource,
+  type BackdatedReplayExit,
+} from '../lib/backdatedEntry';
 
 /**
  * The single basket shared by the Option Chain drawer and the Basket tab builder.
@@ -94,6 +99,11 @@ interface BasketContextValue {
   marginError: string;
   persistence: BasketPersistenceApi;
   placeBasket: (opts?: PlaceBasketOptions) => Promise<{ ok: boolean; msg: string }>;
+  /** Enter the basket as if it filled at an earlier second today, then track it live. */
+  placeBasketBackdated: (
+    entry: { time: string; source: BackdatedPriceSource },
+    opts?: PlaceBasketOptions,
+  ) => Promise<{ ok: boolean; msg: string }>;
 }
 
 const ORDER_TYPE_MAP: Record<BasketLeg['orderType'], string> = {
@@ -455,6 +465,82 @@ export function BasketProvider({ children }: { children: React.ReactNode }) {
     [legs, strategyName, margin, persistence, fetchMarginRequiredPaise],
   );
 
+  // Separate from placeBasket on purpose: the live path above stays exactly as it was.
+  const placeBasketBackdated = useCallback(
+    async (
+      entry: { time: string; source: BackdatedPriceSource },
+      opts?: PlaceBasketOptions,
+    ): Promise<{ ok: boolean; msg: string }> => {
+      if (!legs.length) return { ok: false, msg: 'Basket is empty' };
+      const missing = legs.filter((l) => !l.refId);
+      if (missing.length)
+        return { ok: false, msg: `${missing.length} leg(s) missing instrument IDs.` };
+      const finalName =
+        strategyName && strategyName !== DEFAULT_STRATEGY_NAME
+          ? strategyName
+          : persistence.getNextCustomName();
+      try {
+        const marginRequired =
+          margin?.total && margin.total > 0
+            ? Math.round(margin.total * 100)
+            : await fetchMarginRequiredPaise(legs);
+        const res = await fetch('/paper/backdated/basket', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            entry_time: entry.time,
+            price_source: entry.source,
+            strategy_name: finalName,
+            margin_required: marginRequired,
+            orders: legs.map((l) => {
+              const name = l.nubraName || `${l.symbol}${l.strike}${l.optionType}`;
+              return {
+                nubraName: name,
+                liveRefId: l.refId,
+                display_name: `${l.symbol} ${l.strike} ${l.optionType}`,
+                order_side: l.side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
+                order_qty: l.lots * l.lotSize,
+                order_delivery_type:
+                  l.deliveryType === 'IDAY'
+                    ? 'ORDER_DELIVERY_TYPE_IDAY'
+                    : 'ORDER_DELIVERY_TYPE_CNC',
+                asset: l.asset,
+                expiry: l.expiry,
+                exchange: l.exchange,
+                derivative_type: 'OPT',
+                symbol: name,
+                instrument_type: 'OPT',
+              };
+            }),
+          }),
+        });
+        const d = (await res.json()) as {
+          orders?: Array<{ order_id: number }>;
+          basket_group_id?: string;
+          replay?: { exits: BackdatedReplayExit[] };
+          error?: string;
+        };
+        if (!res.ok || d.error) throw new Error(d.error || 'Basket placement failed');
+        persistence.saveBasket(
+          finalName,
+          opts?.symbol ?? legs[0].asset,
+          opts?.expiry ?? legs[0].expiry,
+          legs,
+          d.basket_group_id,
+        );
+        setStrategyName(DEFAULT_STRATEGY_NAME);
+        const replay = describeReplay(d.replay?.exits ?? []);
+        return {
+          ok: true,
+          msg: `${d.orders?.length ?? legs.length} leg(s) entered at ${entry.time} & saved as "${finalName}"${replay ? ` · ${replay}` : ''}`,
+        };
+      } catch (e) {
+        return { ok: false, msg: (e as Error).message };
+      }
+    },
+    [legs, strategyName, margin, persistence, fetchMarginRequiredPaise],
+  );
+
   return (
     <BasketContext.Provider
       value={{
@@ -478,6 +564,7 @@ export function BasketProvider({ children }: { children: React.ReactNode }) {
         marginError,
         persistence,
         placeBasket,
+        placeBasketBackdated,
       }}
     >
       {children}

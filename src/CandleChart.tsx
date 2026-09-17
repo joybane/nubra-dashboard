@@ -1,9 +1,9 @@
+import { chartTheme } from './lib/chartTheme';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createChart,
   CandlestickSeries,
   HistogramSeries,
-  CrosshairMode,
   type IChartApi,
   type ISeriesApi,
   type CandlestickSeriesOptions,
@@ -15,7 +15,8 @@ import { useWatchlist } from './hooks/useWatchlistContext';
 import { useOIProfile } from './hooks/useOIProfile';
 import { useGreekOverlay } from './hooks/useGreekOverlay';
 import { GreekButton } from './components/GreekControls';
-import { bindCandleCrosshair } from './lib/greekTooltip';
+import { bindCandleCrosshair, fmtCrosshairTime } from './lib/greekTooltip';
+import UiIcon from './components/UiIcon';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
 import { emptyHistoryMessage } from './lib/emptyHistory';
 import type {
@@ -24,6 +25,7 @@ import type {
   OhlcvData,
   OptionChainData,
   OptionLeg,
+  Theme,
   VolBar,
   WsMessage,
 } from './types';
@@ -204,7 +206,7 @@ function normalizeChartName(name: string): string {
 
 interface Props {
   instrument: Instrument | null;
-  theme: 'dark' | 'light';
+  theme: Theme;
 }
 
 export default function CandleChart({ instrument, theme }: Props) {
@@ -265,7 +267,7 @@ export default function CandleChart({ instrument, theme }: Props) {
   } | null>(null);
   const [loadMore, setLoadMore] = useState(false);
 
-  const { subscribe, subscribeChart, unsubscribeChart, subscribeOC, unsubscribeOC } = useWs();
+  const { wsReady, subscribe, subscribeChart, unsubscribeChart, subscribeOC, unsubscribeOC } = useWs();
   const intervalRef = useRef(interval);
   intervalRef.current = interval;
 
@@ -297,43 +299,13 @@ export default function CandleChart({ instrument, theme }: Props) {
   // ── Chart initialization ──────────────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current) return;
-    const isDark = theme === 'dark';
+    const isDark = theme !== 'light';
 
     const chart = createChart(containerRef.current, {
-      layout: {
-        background: { color: isDark ? '#0d0f11' : '#ffffff' },
-        textColor: isDark ? '#c9d1d9' : '#131722',
-        fontSize: 13,
-        fontFamily: "'Inter', 'Segoe UI', sans-serif",
-      },
-      grid: {
-        vertLines: {
-          color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)',
-          style: 1 as const,
-        },
-        horzLines: {
-          color: isDark ? 'rgba(255, 255, 255, 0.04)' : 'rgba(0, 0, 0, 0.04)',
-          style: 1 as const,
-        },
-      },
-      crosshair: {
-        mode: CrosshairMode.Normal,
-        vertLine: {
-          color: isDark ? '#4b5563' : '#9ca3af',
-          width: 1,
-          style: 2 as const,
-          labelBackgroundColor: isDark ? '#22262b' : '#e8ecf5',
-        },
-        horzLine: {
-          color: isDark ? '#3b82f6' : '#2563eb',
-          width: 1,
-          style: 2 as const,
-          labelBackgroundColor: '#2563eb',
-        },
-      },
-      rightPriceScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', minimumWidth: 72 },
+      ...chartTheme(theme),
+      rightPriceScale: { borderColor: isDark ? '#2b3340' : '#dce2ec', minimumWidth: 72 },
       timeScale: {
-        borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+        borderColor: isDark ? '#2b3340' : '#dce2ec',
         timeVisible: true,
         secondsVisible: false,
         shiftVisibleRangeOnNewBar: true,
@@ -457,7 +429,7 @@ export default function CandleChart({ instrument, theme }: Props) {
     const el = containerRef.current;
     if (!el) return;
     el.tabIndex = 0;
-    el.style.outline = 'none';
+    el.setAttribute('aria-label', 'Price chart. Arrow keys pan, plus and minus zoom, Home resets the view.');
     const onKey = (e: KeyboardEvent) => {
       const ts = chartRef.current?.timeScale();
       if (!ts) return;
@@ -493,19 +465,7 @@ export default function CandleChart({ instrument, theme }: Props) {
   // ── Theme sync ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!chartRef.current) return;
-    const isDark = theme === 'dark';
-    chartRef.current.applyOptions({
-      layout: {
-        background: { color: isDark ? '#0d0f11' : '#ffffff' },
-        textColor: isDark ? '#c9d1d9' : '#131722',
-      },
-      grid: {
-        vertLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-        horzLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-      },
-      rightPriceScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb' },
-      timeScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb' },
-    });
+    chartRef.current.applyOptions(chartTheme(theme));
   }, [theme]);
 
   // ── Volume toggle ─────────────────────────────────────────────────────────
@@ -513,9 +473,9 @@ export default function CandleChart({ instrument, theme }: Props) {
     if (!volRef.current || !candleRef.current) return;
     volRef.current.applyOptions({ visible: showVol });
     if (showVol) {
-      candleRef.current.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.25 } });
+      candleRef.current.priceScale().applyOptions({ scaleMargins: { top: 0.12, bottom: 0.25 } });
     } else {
-      candleRef.current.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.05 } });
+      candleRef.current.priceScale().applyOptions({ scaleMargins: { top: 0.12, bottom: 0.08 } });
     }
   }, [showVol]);
 
@@ -1016,7 +976,8 @@ export default function CandleChart({ instrument, theme }: Props) {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Toolbar */}
-      <div className="h-10 bg-[var(--bg-secondary)] border-b border-[var(--border)] flex items-center gap-2 px-3 shrink-0">
+      <div className="chart-toolbar">
+      <div className="chart-quote-row">
         <span className="text-base font-bold text-[var(--text-primary)]">{sym}</span>
         {priceDisplay && (
           <>
@@ -1072,17 +1033,20 @@ export default function CandleChart({ instrument, theme }: Props) {
           </div>
         )}
 
+        <div className="chart-inline-tools" aria-label="Chart indicators">
         {/* Volume toggle */}
         <div className="relative ml-1">
           <button
             onClick={() => setShowVol((v) => !v)}
+            aria-pressed={showVol}
+            title="Show traded volume below the price chart"
             className={`px-2.5 py-1 rounded text-xs font-medium border transition-all ${
               showVol
                 ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
                 : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
             }`}
           >
-            Vol
+            Volume
           </button>
         </div>
 
@@ -1090,6 +1054,7 @@ export default function CandleChart({ instrument, theme }: Props) {
         <div className="relative flex items-stretch">
           <button
             onClick={oi.toggleOI}
+            aria-pressed={oi.oiOn}
             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-l text-xs font-medium border border-r-0 transition-all ${
               oi.oiOn
                 ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
@@ -1105,6 +1070,7 @@ export default function CandleChart({ instrument, theme }: Props) {
           </button>
           <button
             onClick={oi.openSettings}
+            aria-label="Open interest profile settings"
             className={`px-1.5 py-1 rounded-r text-xs font-medium border border-l-0 transition-all ${
               oi.oiOn
                 ? 'bg-[var(--accent)] border-[var(--accent)] text-white hover:opacity-80'
@@ -1220,16 +1186,24 @@ export default function CandleChart({ instrument, theme }: Props) {
           onClick={resetZoom}
           className="px-2 py-1 rounded text-[11px] font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all ml-1"
           title="Reset zoom to latest candles"
+          aria-label="Reset chart to latest candles"
         >
-          ⊞
+          <UiIcon name="reset" size={14} />
         </button>
+        </div>
+
+        <span className="chart-market-label text-[11px] text-[var(--text-muted)]">{instrument?.exchange || 'NSE'} <span className="mx-1">·</span> {interval} candles</span>
+      </div>
+      <div className="chart-tools-row chart-navigation-row">
+        <button className="shell-button" title="Fit all loaded candles" onClick={() => { chartRef.current?.timeScale().fitContent(); candleRef.current?.priceScale().applyOptions({ autoScale: true }); }}>Fit</button>
 
         {/* Interval buttons */}
-        <div className="flex gap-0.5 ml-auto">
+        <div className="chart-timeframes" role="group" aria-label="Chart timeframe">
           {INTERVALS.map((iv) => (
             <button
               key={iv}
               onClick={() => setInterval(iv)}
+              aria-pressed={interval === iv}
               className={`px-2 py-1 rounded text-[12px] font-medium transition-all ${
                 interval === iv
                   ? 'bg-[var(--accent)] text-white'
@@ -1241,11 +1215,12 @@ export default function CandleChart({ instrument, theme }: Props) {
           ))}
         </div>
       </div>
+      </div>
 
       {/* Chart container */}
       <div
         ref={containerRef}
-        className="relative flex-1 bg-[var(--bg-primary)]"
+        className="relative flex-1 min-h-0 bg-[var(--bg-primary)]"
         onMouseDown={oi.handleMouseDown}
         onMouseMove={oi.handleMouseMove}
         onMouseLeave={oi.handleMouseLeave}
@@ -1275,8 +1250,8 @@ export default function CandleChart({ instrument, theme }: Props) {
 
         {/* OHLC overlay */}
         {ohlc && (
-          <div className="absolute top-2 left-3 z-10 pointer-events-none">
-            <div className="flex items-center gap-1 text-[12px]">
+          <div className="chart-legend">
+            <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[12px]">
               <span className="text-[var(--text-muted)] text-[11px]">O</span>
               <span className="text-[var(--text-primary)] font-medium">{ohlc.o.toFixed(2)}</span>
               <span className="text-[var(--text-muted)] text-[11px]">H</span>
@@ -1298,7 +1273,12 @@ export default function CandleChart({ instrument, theme }: Props) {
         {/* Loading overlay */}
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-primary)] text-[var(--text-secondary)] text-[14px] z-10">
-            {loading}
+            <div className="chart-empty" role="status">
+              {loading.startsWith('Loading') ? <div className="spinner" /> : <UiIcon name="trade" size={28} />}
+              <p>{loading}</p>
+              {loading.startsWith('Error') && instrument && <button className="shell-button border border-[var(--border)]" onClick={() => loadInstrument(instrument, interval)}>Retry loading chart</button>}
+              {!instrument && <span className="text-[12px] text-[var(--text-muted)]">Press / to find an instrument.</span>}
+            </div>
           </div>
         )}
 
@@ -1371,6 +1351,10 @@ export default function CandleChart({ instrument, theme }: Props) {
             {countdown}
           </div>
         )}
+      </div>
+      <div className="chart-status">
+        <span>{!wsReady ? 'Reconnecting · prices may be out of date' : lastBarRef.current ? `Latest candle: ${fmtCrosshairTime(lastBarRef.current.time)}${isIntradayInterval(interval) ? ' IST' : ''}` : 'Waiting for chart data'}</span>
+        <span className="chart-shortcuts">Scroll to zoom · Drag to pan · Double-click to reset</span>
       </div>
     </div>
   );

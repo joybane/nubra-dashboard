@@ -117,16 +117,23 @@ export default function PaneDivider({
       // lag behind the cursor.
       let plan = planResize(0, start, fixed, flexGive, slack);
       const onMove = (ev: PointerEvent) => {
+        if (ev.pointerId !== e.pointerId) return;
         plan = planResize(startY - ev.clientY, start, fixed, flexGive, slack);
         pane.style.height = `${plan.target}px`;
         fixed.forEach((p, i) => {
           p.el.style.height = `${plan.above[i]}px`;
         });
       };
-      const finish = () => {
-        handle.removeEventListener('pointermove', onMove);
-        handle.removeEventListener('pointerup', finish);
-        handle.removeEventListener('pointercancel', finish);
+      let finished = false;
+      const finish = (ev?: Event) => {
+        if (ev instanceof PointerEvent && ev.pointerId !== e.pointerId) return;
+        if (finished) return;
+        finished = true;
+        window.removeEventListener('pointermove', onMove, true);
+        window.removeEventListener('pointerup', finish, true);
+        window.removeEventListener('pointercancel', finish, true);
+        window.removeEventListener('blur', finish);
+        if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
         document.body.style.cursor = restore.cursor;
         document.body.style.userSelect = restore.userSelect;
         setDragging(false);
@@ -135,9 +142,12 @@ export default function PaneDivider({
           if (plan.above[i] !== p.height) p.spec.onCommit?.(plan.above[i]);
         });
       };
-      handle.addEventListener('pointermove', onMove);
-      handle.addEventListener('pointerup', finish);
-      handle.addEventListener('pointercancel', finish);
+      // Window capture is a deliberate fallback for live view re-renders that replace or detach
+      // the visual handle while the pointer is still physically held down.
+      window.addEventListener('pointermove', onMove, true);
+      window.addEventListener('pointerup', finish, true);
+      window.addEventListener('pointercancel', finish, true);
+      window.addEventListener('blur', finish);
     },
     [panes, target],
   );

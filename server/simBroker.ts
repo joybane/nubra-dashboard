@@ -256,11 +256,12 @@ export class SimBroker {
     }
   }
 
-  private fill(order: SimOrder, fillPaise: number): void {
+  /** `timeNs` is only passed by the backdated methods below; every live fill is stamped now. */
+  private fill(order: SimOrder, fillPaise: number, timeNs?: number): void {
     order.filled_qty = order.order_qty;
     order.avg_filled_price = Math.round(fillPaise);
     order.order_status = 'ORDER_STATUS_FILLED';
-    order.filled_time = Date.now() * 1_000_000;
+    order.filled_time = timeNs ?? Date.now() * 1_000_000;
 
     const isBuy = order.order_side === 'ORDER_SIDE_BUY';
     const delta = isBuy ? order.order_qty : -order.order_qty;
@@ -420,6 +421,84 @@ export class SimBroker {
       this.tryFill(order, ltp - half, ltp + half);
     }
     return order;
+  }
+
+  /**
+   * A market order that filled earlier today, at a price the caller read off that second's history
+   * (server/backdatedRoutes.ts). No spread is applied: the user picked the price outright.
+   *
+   * Additive by design. It builds its own order record instead of going through `placeOrder`, so
+   * the live path — auto-fill against the last tick, spread, fill checks — is untouched. From the
+   * fill onward the position is an ordinary one: ticks update it and rules act on it.
+   */
+  placeBackdated(
+    p: {
+      nubraName: string;
+      liveRefId: number;
+      display_name?: string;
+      order_side: string;
+      order_qty: number;
+      order_delivery_type: string;
+      tag?: string;
+      basket_group_id?: string;
+      strategy_name?: string;
+      margin_required?: number;
+    },
+    at: { timeNs: number; pricePaise: number },
+  ): SimOrder {
+    const id = this.nextId++;
+    const order: SimOrder = {
+      order_id: id,
+      ref_id: p.liveRefId,
+      nubraName: p.nubraName,
+      display_name: p.display_name || p.nubraName,
+      order_type: 'ORDER_TYPE_MARKET',
+      order_side: p.order_side,
+      order_price: 0,
+      trigger_price: 0,
+      order_qty: p.order_qty,
+      filled_qty: 0,
+      avg_filled_price: 0,
+      order_status: 'ORDER_STATUS_OPEN',
+      order_time: at.timeNs,
+      filled_time: null,
+      order_delivery_type: p.order_delivery_type,
+      validity_type: 'DAY',
+      tag: p.tag,
+      sl_triggered: false,
+      basket_group_id: p.basket_group_id,
+      strategy_name: p.strategy_name,
+      margin_required: p.margin_required,
+    };
+    this.orders.set(id, order);
+    this.registerName(p.nubraName, p.liveRefId);
+    dbInsertOrder(order);
+    dbSetMeta('nextOrderId', String(this.nextId));
+    this.fill(order, at.pricePaise, at.timeNs);
+    return order;
+  }
+
+  /** Square off an open position at a past second and price — a rule that history says fired. */
+  closeBackdated(
+    refId: number,
+    basketGroupId: string | undefined,
+    at: { timeNs: number; pricePaise: number },
+  ): SimOrder | null {
+    const pos = this.positions.get(this.posKey(refId, basketGroupId));
+    if (!pos || pos.qty === 0) return null;
+    return this.placeBackdated(
+      {
+        nubraName: pos.nubraName,
+        liveRefId: pos.ref_id,
+        display_name: pos.display_name,
+        order_side: pos.qty > 0 ? 'ORDER_SIDE_SELL' : 'ORDER_SIDE_BUY',
+        order_qty: Math.abs(pos.qty),
+        order_delivery_type: pos.order_delivery_type,
+        basket_group_id: pos.basket_group_id || undefined,
+        strategy_name: pos.strategy_name,
+      },
+      at,
+    );
   }
 
   cancelOrder(id: number): boolean {

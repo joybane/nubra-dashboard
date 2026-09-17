@@ -1,9 +1,10 @@
+import { chartTheme } from '../lib/chartTheme';
+import { useAppearanceTheme } from '../hooks/useAppearanceTheme';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
   LineSeries,
   CandlestickSeries,
-  CrosshairMode,
   type IChartApi,
   type Time,
 } from 'lightweight-charts';
@@ -101,37 +102,14 @@ function fmtInr(v: number): string {
   return `${sign}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`;
 }
 
-function chartOpts(isDark = false, hideTimeScale = false, hideLeftScale = false) {
+function chartOpts(theme = (document.documentElement.dataset.theme || 'dark'), hideTimeScale = false, hideLeftScale = false) {
   return {
     autoSize: true,
-    layout: {
-      background: { color: '#0d0f11' },
-      textColor: '#9ca3af',
-      fontSize: 12,
-      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, Roboto, sans-serif",
-    },
-    grid: {
-      vertLines: { color: 'rgba(255, 255, 255, 0.03)', style: 0 as const },
-      horzLines: { color: 'rgba(255, 255, 255, 0.03)', style: 0 as const },
-    },
-    crosshair: {
-      mode: CrosshairMode.Normal,
-      vertLine: {
-        color: 'rgba(156, 163, 175, 0.4)',
-        width: 1 as const,
-        style: 0 as const,
-        labelBackgroundColor: '#374151',
-      },
-      horzLine: {
-        color: 'rgba(156, 163, 175, 0.4)',
-        width: 1 as const,
-        style: 0 as const,
-        labelBackgroundColor: '#374151',
-      },
-    },
+    ...chartTheme(theme === 'light' || theme === 'bloomberg' || theme === 'graphite' ? theme : 'dark'),
     leftPriceScale: { visible: !hideLeftScale, borderVisible: false, minimumWidth: 75 },
     rightPriceScale: { visible: true, borderVisible: false, minimumWidth: 75 },
     timeScale: {
+      visible: !hideTimeScale,
       borderVisible: false,
       timeVisible: true,
       secondsVisible: false,
@@ -257,6 +235,8 @@ export default function TradeChartView({
   const priceRef = useRef<HTMLDivElement>(null);
   const pnlRef = useRef<HTMLDivElement>(null);
   const greeksRef = useRef<HTMLDivElement>(null);
+  const appearance = useAppearanceTheme();
+  const themedCharts = useRef<IChartApi[]>([]);
 
   // ── Indicators pane: aggregate Vega / Theta / IV ──
   // The Net Greeks pane below is this trade's own position greeks; these are the market's
@@ -403,8 +383,9 @@ export default function TradeChartView({
       return;
 
     const pc = createChart(priceRef.current, chartOpts());
-    const nc = createChart(pnlRef.current, chartOpts(false, false, true));
+    const nc = createChart(pnlRef.current, chartOpts(undefined, false, true));
     const gc = createChart(greeksRef.current, chartOpts());
+    themedCharts.current = [pc, nc, gc];
     priceChartRef.current = pc;
     setIndicatorsEpoch((e) => e + 1);
 
@@ -607,8 +588,15 @@ export default function TradeChartView({
       removeChart(pc);
       removeChart(nc);
       removeChart(gc);
+      themedCharts.current = [];
     };
   }, [bars, series, legs, frames, trade.date, underlying]);
+
+  useEffect(() => {
+    for (const chart of themedCharts.current) {
+      if (isChartLive(chart)) chart.applyOptions(chartTheme(appearance));
+    }
+  }, [appearance]);
 
   /**
    * Keep the Indicators pane on the same time window as the price pane. Standalone, because the
@@ -695,7 +683,7 @@ export default function TradeChartView({
         </div>
         <div
           ref={priceRef}
-          className="h-[300px] w-full border border-[var(--border)] rounded bg-[#0d0f11]"
+          className="h-[300px] w-full border border-[var(--border)] rounded bg-[var(--chart-bg)]"
         />
       </div>
 
@@ -703,7 +691,7 @@ export default function TradeChartView({
       <div>
         <div className="flex items-center gap-3 text-[10px] mb-1 flex-wrap">
           <span className="text-[var(--text-muted)] uppercase tracking-wide">P&amp;L</span>
-          <span className="text-white font-semibold">
+          <span className="text-[var(--text-primary)] font-semibold">
             Total {fmtInr(hf && Number.isFinite(hf.total) ? hf.total : trade.grossPnl)}
           </span>
           {legs.map((l) => (
@@ -714,7 +702,7 @@ export default function TradeChartView({
         </div>
         <div
           ref={pnlRef}
-          className="h-[170px] w-full border border-[var(--border)] rounded bg-[#0d0f11]"
+          className="h-[170px] w-full border border-[var(--border)] rounded bg-[var(--chart-bg)]"
           style={{ paddingLeft: 75, boxSizing: 'border-box' }}
         />
       </div>
@@ -746,7 +734,7 @@ export default function TradeChartView({
         </div>
         <div
           ref={greeksRef}
-          className="h-[150px] w-full border border-[var(--border)] rounded bg-[#0d0f11]"
+          className="h-[150px] w-full border border-[var(--border)] rounded bg-[var(--chart-bg)]"
         />
       </div>
 
@@ -770,8 +758,7 @@ export default function TradeChartView({
             <GreekIndicatorPane
               instrument={{ asset: underlying, nubra_name: underlying, exchange: 'NSE' }}
               bars={indicatorBars}
-              // This view is dark-only — every pane above hardcodes #0d0f11.
-              theme="dark"
+              theme={appearance}
               // One session: the trade has a date, and that is the only day worth rebuilding.
               histDays={1}
               initialDay={trade.date}

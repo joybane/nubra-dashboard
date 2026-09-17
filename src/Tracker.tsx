@@ -1,8 +1,8 @@
+import { chartTheme } from './lib/chartTheme';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createChart,
   LineSeries,
-  CrosshairMode,
   type IChartApi,
   type ISeriesApi,
   type LineSeriesOptions,
@@ -13,7 +13,7 @@ import { GreekButton } from './components/GreekControls';
 import { bindGreekCrosshair } from './lib/greekTooltip';
 import { fetchRange, nubraType } from './CandleChart';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
-import type { Instrument, OhlcBar, OhlcvData, WsMessage } from './types';
+import type { Instrument, OhlcBar, OhlcvData, Theme, WsMessage } from './types';
 import { getSymbol } from './types';
 import {
   IST_OFFSET,
@@ -138,7 +138,7 @@ function isTrackableUnderlying(inst: Instrument): boolean {
 
 interface Props {
   instrument: Instrument | null;
-  theme: 'dark' | 'light';
+  theme: Theme;
 }
 
 export default function Tracker({ instrument, theme }: Props) {
@@ -195,23 +195,13 @@ export default function Tracker({ instrument, theme }: Props) {
   // ── Chart init ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current) return;
-    const isDark = theme === 'dark';
+    const isDark = theme !== 'light';
 
     const chart = createChart(containerRef.current, {
-      layout: {
-        background: { color: isDark ? '#0d0f11' : '#ffffff' },
-        textColor: isDark ? '#c9d1d9' : '#131722',
-        fontSize: 13,
-        fontFamily: "'Inter', 'Segoe UI', sans-serif",
-      },
-      grid: {
-        vertLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-        horzLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-      },
-      crosshair: { mode: CrosshairMode.Normal },
-      rightPriceScale: { borderColor: isDark ? '#2a2d32' : '#e0e3eb', minimumWidth: 72 },
+      ...chartTheme(theme),
+      rightPriceScale: { borderColor: isDark ? '#2b3340' : '#dce2ec', minimumWidth: 72 },
       timeScale: {
-        borderColor: isDark ? '#2a2d32' : '#e0e3eb',
+        borderColor: isDark ? '#2b3340' : '#dce2ec',
         timeVisible: true,
         secondsVisible: true,
         shiftVisibleRangeOnNewBar: true,
@@ -303,17 +293,7 @@ export default function Tracker({ instrument, theme }: Props) {
   // ── Theme sync ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!chartRef.current) return;
-    const isDark = theme === 'dark';
-    chartRef.current.applyOptions({
-      layout: {
-        background: { color: isDark ? '#0d0f11' : '#ffffff' },
-        textColor: isDark ? '#c9d1d9' : '#131722',
-      },
-      grid: {
-        vertLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-        horzLines: { color: isDark ? '#1a1d21' : '#f0f3fa' },
-      },
-    });
+    chartRef.current.applyOptions(chartTheme(theme));
   }, [theme]);
 
   function updatePrice(close: number, open: number | null) {

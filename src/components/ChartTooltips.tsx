@@ -19,9 +19,9 @@ export interface PriceTooltipData {
 
 export function PriceTooltipBody({ timeStr, ohlc, legPrices, underlying }: PriceTooltipData) {
   return (
-    <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
+    <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
       {timeStr && (
-        <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">
+        <div className="text-[10px] text-[var(--text-muted)] border-b border-[var(--border)] pb-1 mb-1.5 font-mono tracking-wide">
           {timeStr}
         </div>
       )}
@@ -123,9 +123,9 @@ export function PnlTooltipBody({
   strategyMargin: number;
 }) {
   return (
-    <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
+    <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md min-w-[190px]">
       {timeStr && (
-        <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-1.5 font-mono tracking-wide">
+        <div className="text-[10px] text-[var(--text-muted)] border-b border-[var(--border)] pb-1 mb-1.5 font-mono tracking-wide">
           {timeStr}
         </div>
       )}
@@ -148,7 +148,7 @@ export function PnlTooltipBody({
         ))}
       {values && (
         <>
-          <div className="flex items-center justify-between gap-4 text-[11px] pt-1 mt-1 border-t border-[#ffffff0a] font-semibold">
+          <div className="flex items-center justify-between gap-4 text-[11px] pt-1 mt-1 border-t border-[var(--border)] font-semibold">
             <span className="text-[var(--text-secondary)]">Total P&L</span>
             <span className={values.total >= 0 ? 'text-[var(--green)]' : 'text-[var(--red)]'}>
               {values.total >= 0 ? '+' : '-'}₹{fmtPrice(Math.abs(values.total))}
@@ -232,9 +232,9 @@ export function GreeksTooltipBody({
   colors: Record<string, string>;
 }) {
   return (
-    <div className="bg-[#1a1e24]/75 border border-[#ffffff08] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md">
+    <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg px-3 py-2 shadow-xl backdrop-blur-md">
       {timeStr && (
-        <div className="text-[10px] text-[var(--text-muted)] border-b border-[#ffffff0a] pb-1 mb-2 font-mono tracking-wide">
+        <div className="text-[10px] text-[var(--text-muted)] border-b border-[var(--border)] pb-1 mb-2 font-mono tracking-wide">
           {timeStr}
         </div>
       )}
@@ -242,7 +242,7 @@ export function GreeksTooltipBody({
         (greeksLegFilter.size > 1 ? (
           <table className="w-full text-left border-collapse text-[10px]">
             <thead>
-              <tr className="border-b border-[#ffffff0a] text-[var(--text-muted)]">
+              <tr className="border-b border-[var(--border)] text-[var(--text-muted)]">
                 <th className="font-normal pb-1">Src</th>
                 {['delta', 'gamma', 'theta', 'vega'].map(
                   (h) =>

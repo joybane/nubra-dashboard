@@ -1,14 +1,14 @@
+import { chartTheme } from './lib/chartTheme';
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   createChart,
   LineSeries,
   CandlestickSeries,
-  CrosshairMode,
   MismatchDirection,
 } from 'lightweight-charts';
 import type { IChartApi, ISeriesApi, MouseEventParams, Time } from 'lightweight-charts';
 import SvgChart from './components/SvgChart';
-import type { Instrument } from './types';
+import type { Instrument, Theme } from './types';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
 import { payoffAtExpiry, blackScholes, impliedVolatility, RISK_FREE } from './lib/GexService';
 import { fmtPrice, markSessionBreaks } from './lib/utils';
@@ -16,6 +16,14 @@ import { logicalAtTime } from './lib/greekTooltip';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
 import { defaultBacktestDate } from './lib/tradingDay';
 import { clearNubraBtHandoff, peekNubraBtHandoff } from './lib/nubraBtHandoff';
+import {
+  candleSecond,
+  describeReplay,
+  istToday,
+  matchChainLegs,
+  type BackdatedReplayExit,
+  type LiveChainRow,
+} from './lib/backdatedEntry';
 import {
   PriceTooltip,
   PnlTooltip,
@@ -136,7 +144,7 @@ interface EvalResponse {
 
 interface Props {
   instrument: Instrument | null;
-  theme?: 'light' | 'dark';
+  theme?: Theme;
 }
 
 /**
@@ -162,41 +170,10 @@ type HostTooltipUpdate = (
 
 const IST_OFFSET = 19800; // 5h 30m
 
-function chartOpts(isDark: boolean, hideLeftScale: boolean = false) {
+function chartOpts(theme: Theme, hideLeftScale: boolean = false) {
   return {
     autoSize: true,
-    devicePixelRatio: Math.max(window.devicePixelRatio, 2),
-    layout: {
-      background: { color: isDark ? '#0d0f11' : '#ffffff' },
-      textColor: isDark ? '#9ca3af' : '#4b5563',
-      fontSize: 12,
-      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, Roboto, sans-serif",
-    },
-    grid: {
-      vertLines: {
-        color: isDark ? 'rgba(255, 255, 255, 0.03)' : 'rgba(0, 0, 0, 0.03)',
-        style: 0 as const,
-      },
-      horzLines: {
-        color: isDark ? 'rgba(255, 255, 255, 0.03)' : 'rgba(0, 0, 0, 0.03)',
-        style: 0 as const,
-      },
-    },
-    crosshair: {
-      mode: CrosshairMode.Normal,
-      vertLine: {
-        color: isDark ? 'rgba(156, 163, 175, 0.4)' : 'rgba(75, 85, 99, 0.4)',
-        width: 1 as const,
-        style: 0 as const,
-        labelBackgroundColor: isDark ? '#374151' : '#e5e7eb',
-      },
-      horzLine: {
-        color: isDark ? 'rgba(156, 163, 175, 0.4)' : 'rgba(75, 85, 99, 0.4)',
-        width: 1 as const,
-        style: 0 as const,
-        labelBackgroundColor: isDark ? '#374151' : '#e5e7eb',
-      },
-    },
+    ...chartTheme(theme),
     leftPriceScale: { visible: !hideLeftScale, borderVisible: false, minimumWidth: 75 },
     rightPriceScale: { visible: true, borderVisible: false, minimumWidth: 75 },
     timeScale: {
@@ -392,6 +369,15 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const [evalResult, setEvalResult] = useState<EvalResponse | null>(null);
   const [evalLoading, setEvalLoading] = useState(false);
   const [evalError, setEvalError] = useState<string | null>(null);
+
+  // Today → live. Only shown when the date is today: "Live" keeps the exit at the current time, and
+  // "Execute" places the legs as a backdated paper basket entered at the entry candle's price.
+  const isToday = date === istToday();
+  const [exitLive, setExitLive] = useState(false);
+  const [liveSource, setLiveSource] = useState<'open' | 'close' | 'vwap'>('close');
+  const [liveConfirm, setLiveConfirm] = useState(false);
+  const [livePlacing, setLivePlacing] = useState(false);
+  const [liveResult, setLiveResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
   // Chart hover & crosshair states
 
@@ -1069,6 +1055,111 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     }
   }
 
+  // ── Live exit (today only) ────────────────────────────────────────────────
+  /** The current IST minute, capped at the session close — what "Live" sets the exit to. */
+  function liveExitTime(): string {
+    const now = new Date(Date.now() + 19_800_000).toISOString().slice(11, 16);
+    const close = activeExchange === 'MCX' ? '23:30' : '15:30';
+    return now < close ? now : close;
+  }
+  const liveTickRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    liveTickRef.current = () => {
+      const t = liveExitTime();
+      setExitTime(t);
+      if (evalResult && legs.length) void resimulate(entryTime, t);
+    };
+  });
+  useEffect(() => {
+    if (!exitLive || !isToday) return;
+    liveTickRef.current();
+    const id = window.setInterval(() => liveTickRef.current(), 30_000);
+    return () => window.clearInterval(id);
+  }, [exitLive, isToday]);
+
+  /**
+   * Place these legs as a paper basket entered at the entry candle (Open = its first second, Close
+   * or VWAP = its last, so the fill is the price this view shows), then track it live. It lands in
+   * the Positions tab as its own strategy, with the strategy chart drawing from the entry.
+   */
+  async function executeLive() {
+    if (!legs.length) return;
+    if (!liveConfirm) {
+      setLiveConfirm(true);
+      setLiveResult(null);
+      window.setTimeout(() => setLiveConfirm(false), 6000);
+      return;
+    }
+    setLiveConfirm(false);
+    setLivePlacing(true);
+    setLiveResult(null);
+    try {
+      const chainExpiry = activeExpiry.replace(/-/g, '');
+      const params = new URLSearchParams({ exchange: activeExchange });
+      if (chainExpiry) params.set('expiry', chainExpiry);
+      const res = await fetch(`/api/optionchain/${encodeURIComponent(underlying)}?${params}`);
+      const data = (await res.json()) as {
+        chain?: { ce?: LiveChainRow[]; pe?: LiveChainRow[] };
+        ce?: LiveChainRow[];
+        pe?: LiveChainRow[];
+        error?: string;
+      };
+      if (!res.ok || data.error) throw new Error(data.error || "Couldn't load today's live chain");
+      const { matched, missing } = matchChainLegs(data.chain ?? data, legs);
+      if (missing.length) {
+        throw new Error(
+          `Not in today's live chain: ${missing.map((l) => `${l.strike} ${l.optionType}`).join(', ')}`,
+        );
+      }
+      const name = `NBT ${underlying} ${entryTime}`;
+      const place = await fetch('/paper/backdated/basket', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          entry_time: candleSecond(entryTime, liveSource),
+          price_source: liveSource,
+          strategy_name: name,
+          orders: matched.map(({ leg, refId, symbol }) => ({
+            nubraName: symbol,
+            liveRefId: refId,
+            display_name: `${underlying} ${leg.strike} ${leg.optionType}`,
+            order_side: leg.side === 'BUY' ? 'ORDER_SIDE_BUY' : 'ORDER_SIDE_SELL',
+            order_qty: leg.lots * lotSize,
+            order_delivery_type: 'ORDER_DELIVERY_TYPE_IDAY',
+            asset: underlying,
+            expiry: chainExpiry,
+            exchange: activeExchange,
+            derivative_type: 'OPT',
+            symbol,
+            instrument_type: 'OPT',
+          })),
+        }),
+      });
+      const d = (await place.json()) as {
+        orders?: Array<{ fill_price: number }>;
+        replay?: { exits: BackdatedReplayExit[] };
+        error?: string;
+      };
+      if (!place.ok || d.error) throw new Error(d.error || 'Placement failed');
+      const fills = (d.orders ?? [])
+        .map(
+          (o, i) =>
+            `${matched[i].leg.strike} ${matched[i].leg.optionType} ₹${(o.fill_price / 100).toFixed(2)}`,
+        )
+        .join(' · ');
+      const replay = describeReplay(d.replay?.exits ?? []);
+      setLiveResult({
+        ok: true,
+        msg: `In Positions as "${name}" — ${fills}${replay ? ` · ${replay}` : ''}`,
+      });
+      setExitLive(true);
+    } catch (e) {
+      setLiveResult({ ok: false, msg: (e as Error).message });
+    } finally {
+      setLivePlacing(false);
+    }
+  }
+
   function activeGreekSource(filter: Set<string>): 'net' | 'CE' | 'PE' {
     if (filter.has('CE')) return 'CE';
     if (filter.has('PE')) return 'PE';
@@ -1270,7 +1361,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   // ── Lightweight Charts Synchronization & Lifecycle ─────────────────────────
   useEffect(() => {
     if (!evalResult) return;
-    const isDark = theme === 'dark';
+    const isDark = theme !== 'light';
     const activeCharts: IChartApi[] = [];
 
     // 1. Create Price Chart if container is visible
@@ -1279,7 +1370,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     const legPriceSeriesList: Array<{ legIndex: number; series: ISeriesApi<'Line'> }> = [];
 
     if (priceContainerRef.current) {
-      priceChart = createChart(priceContainerRef.current, chartOpts(isDark));
+      priceChart = createChart(priceContainerRef.current, chartOpts(theme));
       priceChartRef.current = priceChart;
       activeCharts.push(priceChart);
 
@@ -1353,7 +1444,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     const legPnlSeriesList: Array<{ legIndex: number; series: ISeriesApi<'Line'> }> = [];
 
     if (pnlContainerRef.current) {
-      pnlChart = createChart(pnlContainerRef.current, chartOpts(isDark, true));
+      pnlChart = createChart(pnlContainerRef.current, chartOpts(theme, true));
       pnlChartRef.current = pnlChart;
       activeCharts.push(pnlChart);
 
@@ -1404,7 +1495,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     const greeksSeriesMap: Record<string, ISeriesApi<'Line'>> = {};
 
     if (greeksVisible && greeksContainerRef.current && greeksData) {
-      greeksChart = createChart(greeksContainerRef.current, chartOpts(isDark));
+      greeksChart = createChart(greeksContainerRef.current, chartOpts(theme));
       greeksChartRef.current = greeksChart;
       activeCharts.push(greeksChart);
 
@@ -2084,7 +2175,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
   // ── Render ─────────────────────────────────────────────────────────────────
 
-  const isDark = theme === 'dark';
+  const isDark = theme !== 'light';
 
   /**
    * The topmost visible pane, which is the one that flexes to fill the chart column; every pane
@@ -2361,6 +2452,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
             <input
               type="time"
               value={exitTime}
+              disabled={exitLive && isToday}
               onChange={(e) => {
                 setExitTime(e.target.value);
                 if (evalResult) resimulate(entryTime, e.target.value);
@@ -2424,6 +2516,26 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
             </div>
           </div>
         </label>
+
+        {isToday && (
+          <button
+            type="button"
+            onClick={() => setExitLive((v) => !v)}
+            title="Keep the exit at the current time, refreshing every 30 seconds"
+            style={{
+              padding: '4px 8px',
+              borderRadius: 6,
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: 'pointer',
+              border: `1px solid ${exitLive ? 'var(--green)' : 'var(--border)'}`,
+              background: exitLive ? 'rgba(34,197,94,.15)' : 'var(--bg-card)',
+              color: exitLive ? 'var(--green)' : 'var(--text-muted)',
+            }}
+          >
+            {exitLive ? '● Live' : 'Live'}
+          </button>
+        )}
 
         {/* Lot Size */}
         <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -3404,6 +3516,89 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                       {evalError}
                     </div>
                   )}
+                  {isToday && legs.length > 0 && (
+                    <div
+                      style={{
+                        marginTop: 8,
+                        paddingTop: 8,
+                        borderTop: '1px dashed var(--border)',
+                      }}
+                    >
+                      <div
+                        style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6 }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 10,
+                            color: 'var(--text-muted)',
+                            textTransform: 'uppercase',
+                            fontWeight: 600,
+                            marginRight: 4,
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          Fill {entryTime} at
+                        </span>
+                        {(['open', 'close', 'vwap'] as const).map((s) => (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => setLiveSource(s)}
+                            style={{
+                              flex: 1,
+                              padding: '3px 0',
+                              borderRadius: 4,
+                              fontSize: 11,
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                              background: liveSource === s ? 'rgba(59,130,246,.15)' : 'transparent',
+                              color: liveSource === s ? '#60a5fa' : 'var(--text-muted)',
+                              border: `1px solid ${liveSource === s ? 'rgba(59,130,246,.4)' : 'var(--border)'}`,
+                            }}
+                          >
+                            {s === 'vwap' ? 'VWAP' : s === 'open' ? 'Open' : 'Close'}
+                          </button>
+                        ))}
+                      </div>
+                      <button
+                        onClick={executeLive}
+                        disabled={livePlacing}
+                        title="Place these legs as a paper trade entered at the entry candle, then track it live in Positions"
+                        style={{
+                          width: '100%',
+                          padding: '10px 0',
+                          borderRadius: 8,
+                          border: 'none',
+                          background: liveConfirm ? '#dc2626' : '#16a34a',
+                          color: '#fff',
+                          fontWeight: 600,
+                          fontSize: 13,
+                          cursor: livePlacing ? 'wait' : 'pointer',
+                          opacity: livePlacing ? 0.5 : 1,
+                        }}
+                      >
+                        {livePlacing
+                          ? 'Placing…'
+                          : liveConfirm
+                            ? `Confirm: paper trade from ${entryTime} → live`
+                            : `⏵ Execute from ${entryTime} → live`}
+                      </button>
+                      {liveResult && (
+                        <div
+                          style={{
+                            marginTop: 6,
+                            padding: '6px 10px',
+                            borderRadius: 6,
+                            fontSize: 11,
+                            background: liveResult.ok ? 'rgba(34,197,94,.1)' : 'var(--red-dim)',
+                            color: liveResult.ok ? 'var(--green)' : 'var(--red)',
+                          }}
+                        >
+                          {liveResult.msg}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </div>
@@ -3707,6 +3902,9 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                   flexDirection: 'column',
                   padding: '4px',
                   gap: 0,
+                  overflow: 'hidden',
+                  position: 'relative',
+                  isolation: 'isolate',
                 }}
               >
                 {/* Price Chart Container */}
@@ -3717,6 +3915,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                       flex: 1,
                       minHeight: 120,
                       position: 'relative',
+                      overflow: 'hidden',
                       borderBottom: '1px solid var(--border)',
                     }}
                   >
@@ -3773,6 +3972,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                         : { height: pnlHeight, flexShrink: 0 }),
                       minHeight: 80,
                       position: 'relative',
+                      overflow: 'hidden',
                       borderBottom: greeksVisible ? '1px solid var(--border)' : 'none',
                     }}
                   >
@@ -3838,6 +4038,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                       : { height: greeksHeight, flexShrink: 0 }),
                     minHeight: 80,
                     position: 'relative',
+                    overflow: 'hidden',
                     display: greeksVisible ? 'block' : 'none',
                   }}
                 >
@@ -3908,6 +4109,8 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                         ? { flex: 1 }
                         : { height: indicatorsHeight, flexShrink: 0 }),
                       minHeight: 80,
+                      overflow: 'hidden',
+                      position: 'relative',
                     }}
                   >
                     <GreekIndicatorPane
@@ -3952,6 +4155,8 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                     borderTop: '1px solid var(--border)',
                     background: 'var(--bg-secondary)',
                     overflow: 'hidden',
+                    position: 'relative',
+                    zIndex: 2,
                   }}
                 >
                   <div

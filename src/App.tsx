@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
-import type { Instrument } from './types';
+import type { Instrument, ShellLayout, Theme } from './types';
 import { WsProvider, useWs } from './hooks/useWsContext';
 import { PaperTradingProvider } from './hooks/usePaperTrading';
 import { WatchlistProvider } from './hooks/useWatchlistContext';
@@ -12,6 +12,7 @@ import WorkspaceRoot from './workspace/WorkspaceRoot';
 import ErrorBoundary from './components/ErrorBoundary';
 import { WorkspaceProvider } from './workspace/WorkspaceProvider';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
+import WorkspaceShell from './components/WorkspaceShell';
 
 // The strategy analysis view is the single largest module and is only shown when
 // a saved strategy is opened — load it on demand.
@@ -26,10 +27,12 @@ export interface StrategyChartTarget {
 type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
 
 function AppInner() {
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    return (localStorage.getItem('nubra-theme') as 'dark' | 'light') || 'dark';
+  const [theme, setTheme] = useState<Theme>(() => {
+    const saved = localStorage.getItem('nubra-theme');
+    return saved === 'light' || saved === 'bloomberg' || saved === 'graphite' ? saved : 'dark';
   });
   const [auth, setAuth] = useState<AuthStatus>('unknown');
+  const [shellLayout, setShellLayout] = useState<ShellLayout>(() => localStorage.getItem('nubra-shell-layout') === 'workspace' ? 'workspace' : 'classic');
   const [strategyChart, setStrategyChart] = useState<StrategyChartTarget | null>(null);
 
   const { loadInstrumentInActivePane } = useWorkspaceState();
@@ -53,6 +56,10 @@ function AppInner() {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('nubra-theme', theme);
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem('nubra-shell-layout', shellLayout);
+  }, [shellLayout]);
 
   useEffect(() => {
     fetch('/auth/status')
@@ -112,16 +119,25 @@ function AppInner() {
       <Navbar
         onInstrumentSelect={selectInstrument}
         theme={theme}
-        onThemeToggle={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+        onThemeChange={setTheme}
+        shellLayout={shellLayout}
+        onShellLayoutChange={setShellLayout}
       />
-      <main className="flex-1 overflow-hidden min-h-0">
+      {shellLayout === 'workspace' ? <WorkspaceShell>
+        <main className="flex-1 overflow-hidden min-h-0">
+          <div className="flex flex-col h-full">
+            <div className="flex-1 min-h-0 overflow-hidden"><WorkspaceRoot theme={theme} /></div>
+            <OrderTerminal onOpenStrategyChart={openStrategyChart} />
+          </div>
+        </main>
+      </WorkspaceShell> : <main className="flex-1 overflow-hidden min-h-0">
         <div className="flex flex-col h-full">
           <div className="flex-1 min-h-0 overflow-hidden">
             <WorkspaceRoot theme={theme} />
           </div>
           <OrderTerminal onOpenStrategyChart={openStrategyChart} />
         </div>
-      </main>
+      </main>}
       <OrderTicket />
       {auth === 'unauthenticated' && (
         <LoginOverlay onAuthenticated={() => setAuth('authenticated')} />

@@ -1,15 +1,15 @@
+import { chartTheme } from './lib/chartTheme';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
   CandlestickSeries,
-  CrosshairMode,
   LineSeries,
   type IChartApi,
   type MouseEventParams,
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts';
-import type { Instrument, ViewType } from './types';
+import type { Instrument, Theme, ViewType } from './types';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
 import { syncChartPanes } from './lib/syncChartPanes';
@@ -37,6 +37,8 @@ interface FinderParams {
   side: 'SELL' | 'BUY';
   strikeOffset: number;
   rankBy: RankBy;
+  /** How far apart the legs must move, as a % of the bigger leg's change. */
+  legMismatchPct: number;
 }
 
 interface DayLegs {
@@ -192,7 +194,8 @@ const DEFAULT_PARAMS: FinderParams = {
   qty: 65,
   side: 'SELL',
   strikeOffset: 2,
-  rankBy: 'total',
+  rankBy: 'legGap',
+  legMismatchPct: 50,
 };
 
 const NIFTY_INSTRUMENT: Instrument = {
@@ -208,6 +211,8 @@ const PE_COLOR = '#ef4444';
 const SESSION_OPEN_MIN = 9 * 60 + 15;
 
 const SETTINGS_KEY = 'nubra-analysis-settings';
+/** v2: ranking defaults to the CE/PE gap. Older saves carry the old `total` default, so it is dropped. */
+const SETTINGS_VERSION = 2;
 
 interface Settings {
   params: FinderParams;
@@ -216,6 +221,7 @@ interface Settings {
   /** null = follow the data check's verdict. */
   localOnly: boolean | null;
   sort: 'date' | 'biggest';
+  version?: number;
 }
 
 function loadSettings(): Settings {
@@ -225,15 +231,19 @@ function loadSettings(): Settings {
     to: '',
     localOnly: null,
     sort: 'date',
+    version: SETTINGS_VERSION,
   };
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (!raw) return fallback;
     const saved = JSON.parse(raw) as Partial<Settings>;
+    const savedParams: Partial<FinderParams> = { ...(saved.params ?? {}) };
+    if ((saved.version ?? 1) < SETTINGS_VERSION) delete savedParams.rankBy;
     return {
       ...fallback,
       ...saved,
-      params: { ...DEFAULT_PARAMS, ...(saved.params ?? {}) },
+      version: SETTINGS_VERSION,
+      params: { ...DEFAULT_PARAMS, ...savedParams },
     };
   } catch {
     return fallback;
@@ -303,7 +313,7 @@ const lblCls = 'text-[9px] uppercase tracking-wide text-[var(--text-muted)]';
 // ── View ──────────────────────────────────────────────────────────────────────
 
 interface Props {
-  theme: 'dark' | 'light';
+  theme: Theme;
   onChangeView?: (view: ViewType) => void;
 }
 
@@ -639,6 +649,14 @@ export default function Analysis({ theme, onChangeView }: Props) {
           step={100}
           min={0}
           onChange={(v) => updateParam('minAbsPnl', v)}
+        />
+        <NumberField
+          label="Legs differ ≥ %"
+          value={params.legMismatchPct}
+          step={10}
+          min={0}
+          title="CE and PE P&L changes must be at least this far apart, as a % of the bigger leg's change. 50 = opposite directions, or one leg moved at least twice the other. 100 = opposite directions only. 0 = off."
+          onChange={(v) => updateParam('legMismatchPct', Math.max(0, v))}
         />
         <label className="flex flex-col gap-0.5">
           <span className={lblCls}>Rank by</span>
@@ -1081,23 +1099,10 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 // ── Case chart ────────────────────────────────────────────────────────────────
 
-function chartOptions(isDark: boolean) {
-  const line = isDark ? 'rgba(156, 163, 175, 0.4)' : 'rgba(75, 85, 99, 0.4)';
-  const grid = isDark ? 'rgba(255, 255, 255, 0.03)' : 'rgba(0, 0, 0, 0.03)';
+function chartOptions(theme: Theme) {
   return {
     autoSize: true,
-    layout: {
-      background: { color: isDark ? '#0d0f11' : '#ffffff' },
-      textColor: isDark ? '#9ca3af' : '#4b5563',
-      fontSize: 11,
-      fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, Roboto, sans-serif",
-    },
-    grid: { vertLines: { color: grid }, horzLines: { color: grid } },
-    crosshair: {
-      mode: CrosshairMode.Normal,
-      vertLine: { color: line, labelBackgroundColor: isDark ? '#374151' : '#e5e7eb' },
-      horzLine: { color: line, labelBackgroundColor: isDark ? '#374151' : '#e5e7eb' },
-    },
+    ...chartTheme(theme),
     leftPriceScale: { visible: true, borderVisible: false, minimumWidth: 70 },
     rightPriceScale: { visible: true, borderVisible: false, minimumWidth: 75 },
     timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
@@ -1105,7 +1110,7 @@ function chartOptions(isDark: boolean) {
 }
 
 interface CaseChartProps {
-  theme: 'dark' | 'light';
+  theme: Theme;
   day: ScanDay;
   selected: AnalysisCase | null;
   params: FinderParams;
@@ -1121,7 +1126,7 @@ function CaseChart({
   nubraAvailable,
   onOpenNubraBt,
 }: CaseChartProps) {
-  const isDark = theme === 'dark';
+  const isDark = theme !== 'light';
   const [data, setData] = useState<DayResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1237,8 +1242,8 @@ function CaseChart({
     const priceBox = priceEl.current;
     const pnlBox = pnlEl.current;
     if (!built || !priceBox || !pnlBox) return;
-    const price = createChart(priceBox, chartOptions(isDark));
-    const pnl = createChart(pnlBox, chartOptions(isDark));
+    const price = createChart(priceBox, chartOptions(theme));
+    const pnl = createChart(pnlBox, chartOptions(theme));
 
     if (built.candles.length) {
       price
@@ -1307,7 +1312,7 @@ function CaseChart({
       removeChart(price);
       removeChart(pnl);
     };
-  }, [built, isDark]);
+  }, [built, theme]);
 
   // Pin the selected case's two minutes, so its cards and Δ strips are up without a click.
   useEffect(() => {

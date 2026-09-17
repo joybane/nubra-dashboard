@@ -1,11 +1,11 @@
 import { useCallback, useState } from 'react';
-import type { Instrument, ViewType } from '../types';
+import type { Instrument, Theme, ViewType } from '../types';
 import { useWorkspaceState } from './useWorkspaceState';
 import PaneShell from './PaneShell';
 import SplitDivider from './SplitDivider';
 
 interface WorkspaceRootProps {
-  theme: 'dark' | 'light';
+  theme: Theme;
 }
 
 export default function WorkspaceRoot({ theme }: WorkspaceRootProps) {
@@ -38,7 +38,7 @@ export default function WorkspaceRoot({ theme }: WorkspaceRootProps) {
     const pane = panes[idx];
     if (!pane) return null;
     return (
-      <div key={pane.id} className="flex-1 overflow-hidden min-w-0 min-h-0">
+      <div key={pane.id} className="flex flex-col flex-1 h-full overflow-hidden min-w-0 min-h-0">
         <PaneShell
           pane={pane}
           theme={theme}
@@ -164,7 +164,7 @@ export default function WorkspaceRoot({ theme }: WorkspaceRootProps) {
         </div>
       )}
 
-      <div id="workspace-root" className="flex-1 overflow-hidden">
+      <div id="workspace-root" className="flex-1 min-h-0 overflow-hidden">
         {renderLayout()}
       </div>
     </div>
