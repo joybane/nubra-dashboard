@@ -772,6 +772,495 @@ body {
   border-radius: var(--radius-sm);
 }
 
+/* ─── Bloomberg terminal interface ───────────────────────
+   This is deliberately a complete component treatment rather than a colour
+   preset: compact command chrome, hard edges and an information-first data
+   hierarchy. It remains fully scoped so the other themes keep their shape. */
+[data-theme='bloomberg'] {
+  color-scheme: dark;
+  --bg-primary: #000000;
+  --bg-secondary: #050505;
+  --bg-card: #090909;
+  --bg-hover: #241900;
+  --border: #493400;
+  --text-primary: #fff7d6;
+  --text-secondary: #ffc83d;
+  --text-muted: #a47d24;
+  --accent: #ffb000;
+  --accent-dim: #c87900;
+  --green: #19c982;
+  --red: #ef5651;
+  --green-dim: rgba(25, 201, 130, 0.055);
+  --red-dim: rgba(239, 86, 81, 0.055);
+  --yellow: #ffd400;
+  --scrollbar-thumb: #8c6200;
+  --chart-grid: rgba(255, 176, 0, 0.105);
+  --chart-bg: #000000;
+  --control-height: 27px;
+  --table-padding-y: 3px;
+}
+
+[data-theme='bloomberg'] body {
+  background: #000;
+  color: var(--text-primary);
+  font-family: 'Roboto Mono', 'Cascadia Mono', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  letter-spacing: -0.02em;
+  transition: none;
+}
+
+[data-theme='bloomberg'] #root,
+[data-theme='bloomberg'] main {
+  background: #000;
+}
+
+[data-theme='bloomberg'] :is(button, input, select, textarea, kbd, .badge, .tooltip,
+  .theme-menu, .classic-layout-menu, .command-dialog, .pane-loading-grid,
+  [role='dialog'], [role='menu']) {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+[data-theme='bloomberg'] :is(button, a, input, select, textarea) {
+  transition-duration: 0ms !important;
+}
+
+[data-theme='bloomberg'] :is(input, select, textarea) {
+  background-color: #020202;
+  border-color: #5a4000;
+  color: var(--text-primary);
+  caret-color: var(--accent);
+}
+
+[data-theme='bloomberg'] :is(input, select, textarea):focus {
+  border-color: var(--accent) !important;
+}
+
+[data-theme='bloomberg'] input::placeholder {
+  color: #8b681e;
+  opacity: 1;
+}
+
+[data-theme='bloomberg'] ::selection {
+  background: #ffb000;
+  color: #000;
+}
+
+[data-theme='bloomberg'] * {
+  scrollbar-color: #8c6200 #090909;
+}
+
+[data-theme='bloomberg'] ::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+[data-theme='bloomberg'] ::-webkit-scrollbar-track {
+  background: #090909;
+}
+
+[data-theme='bloomberg'] ::-webkit-scrollbar-thumb,
+[data-theme='bloomberg'] ::-webkit-scrollbar-thumb:hover {
+  background: #8c6200;
+  border-radius: 0;
+}
+
+/* Global command/navigation chrome */
+[data-theme='bloomberg'] .classic-navbar {
+  height: 42px;
+  gap: 10px;
+  padding: 0 10px;
+  background: #000;
+  border-bottom: 1px solid #b37b00;
+}
+
+[data-theme='bloomberg'] .classic-brand {
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: -0.07em;
+  text-shadow: 1px 0 0 #ffcf40;
+}
+
+[data-theme='bloomberg'] .classic-search {
+  width: 280px;
+}
+
+[data-theme='bloomberg'] .classic-search input {
+  height: 32px;
+  background: #020202;
+  border-color: #6a4a00;
+  color: #ffe7a0;
+}
+
+[data-theme='bloomberg'] .classic-view-tabs {
+  gap: 0;
+}
+
+[data-theme='bloomberg'] .classic-view-tab {
+  min-height: 28px;
+  padding: 5px 10px;
+  border-left: 1px solid transparent;
+  border-right: 1px solid transparent;
+  border-radius: 0;
+  color: #d69b13;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+[data-theme='bloomberg'] .classic-view-tab:hover {
+  color: #fff4cf;
+  background: #211700;
+  border-color: #5c4100;
+}
+
+[data-theme='bloomberg'] .classic-view-tab.is-active {
+  color: #000;
+  background: var(--accent);
+  border-color: var(--accent);
+  box-shadow: none;
+}
+
+[data-theme='bloomberg'] .classic-actions {
+  gap: 2px;
+}
+
+[data-theme='bloomberg'] .classic-actions .shell-icon-button {
+  width: 28px;
+  height: 28px;
+  color: #e6a900;
+}
+
+[data-theme='bloomberg'] .shell-button:hover,
+[data-theme='bloomberg'] .shell-icon-button:hover {
+  color: #000;
+  background: var(--accent);
+}
+
+[data-theme='bloomberg'] .mode-badge {
+  padding: 3px 7px;
+  border-color: var(--accent);
+  background: #1a1200;
+  color: #ffc400;
+  border-radius: 0;
+}
+
+[data-theme='bloomberg'] .connection-dot {
+  width: 6px;
+  height: 6px;
+  box-shadow: 0 0 5px var(--green);
+}
+
+[data-theme='bloomberg'] :is(.theme-menu, .classic-layout-menu) {
+  top: calc(100% + 1px);
+  padding: 3px;
+  background: #050505;
+  border-color: #9b6c00;
+}
+
+[data-theme='bloomberg'] :is(.theme-option, .shell-layout-choice, .classic-layout-option) {
+  border-radius: 0;
+}
+
+[data-theme='bloomberg'] .theme-option:hover,
+[data-theme='bloomberg'] .theme-option.is-active,
+[data-theme='bloomberg'] .shell-layout-choice:hover,
+[data-theme='bloomberg'] .shell-layout-choice.is-active {
+  background: var(--accent);
+  color: #000;
+}
+
+[data-theme='bloomberg'] .theme-option:is(:hover, .is-active) small,
+[data-theme='bloomberg'] .shell-layout-choice:is(:hover, .is-active) small {
+  color: #2b1d00;
+}
+
+/* Alternate workspace layout keeps the same terminal grammar. */
+[data-theme='bloomberg'] .workspace-rail {
+  width: 70px;
+  gap: 0;
+  padding: 5px 3px;
+  background: #000;
+  border-right-color: #6b4a00;
+}
+
+[data-theme='bloomberg'] .workspace-rail-label {
+  color: var(--accent);
+  font-weight: 800;
+}
+
+[data-theme='bloomberg'] .workspace-rail-item,
+[data-theme='bloomberg'] .workspace-rail-hint {
+  min-height: 49px;
+  border-radius: 0;
+  color: #b9891b;
+}
+
+[data-theme='bloomberg'] .workspace-rail-item.is-active {
+  color: #000;
+  background: var(--accent);
+}
+
+[data-theme='bloomberg'] .workspace-view-tabs {
+  height: 38px;
+  gap: 0;
+  padding: 0 8px;
+  background: #000;
+  border-bottom-color: #654700;
+}
+
+[data-theme='bloomberg'] .workspace-view-tabs button {
+  color: #bf8b17;
+  text-transform: uppercase;
+}
+
+[data-theme='bloomberg'] .workspace-view-tabs button.is-active {
+  color: #000;
+  background: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* Convert inherited blue/violet application accents to terminal amber. */
+[data-theme='bloomberg'] :is([class*='text-indigo'], [class*='text-violet'], [class*='text-blue']) {
+  color: var(--accent) !important;
+}
+
+[data-theme='bloomberg'] :is([class*='border-indigo'], [class*='border-violet'], [class*='border-blue']) {
+  border-color: var(--accent) !important;
+}
+
+[data-theme='bloomberg'] :is([class*='bg-indigo'], [class*='bg-violet'], [class*='bg-blue']) {
+  background-color: var(--accent) !important;
+  color: #000 !important;
+}
+
+[data-theme='bloomberg'] [class*='bg-[var(--accent)]'] {
+  color: #000 !important;
+}
+
+/* Chart command strip and market canvas */
+[data-theme='bloomberg'] .chart-toolbar {
+  background: #000;
+  border-bottom-color: #725000;
+}
+
+[data-theme='bloomberg'] .chart-quote-row {
+  min-height: 39px;
+  padding: 4px 12px;
+}
+
+[data-theme='bloomberg'] .chart-tools-row {
+  gap: 4px;
+  padding: 4px 12px;
+  border-top-color: #3e2c00;
+}
+
+[data-theme='bloomberg'] .chart-navigation-row {
+  min-height: 33px;
+}
+
+[data-theme='bloomberg'] .chart-inline-tools button,
+[data-theme='bloomberg'] .chart-tools-row button,
+[data-theme='bloomberg'] .chart-timeframes button {
+  min-height: 25px;
+  border: 1px solid #4c3600;
+  background: #070707;
+  color: #e0a51b;
+}
+
+[data-theme='bloomberg'] .chart-inline-tools button:hover,
+[data-theme='bloomberg'] .chart-tools-row button:hover,
+[data-theme='bloomberg'] .chart-timeframes button:hover,
+[data-theme='bloomberg'] .chart-timeframes button[class*='bg-[var(--accent)]'] {
+  background: var(--accent) !important;
+  border-color: var(--accent);
+  color: #000 !important;
+}
+
+[data-theme='bloomberg'] .chart-market-label {
+  color: #d69d17;
+  text-transform: uppercase;
+}
+
+[data-theme='bloomberg'] .chart-legend {
+  padding: 3px 5px;
+  border: 1px solid #3d2b00;
+  border-radius: 0;
+  background: rgba(0, 0, 0, .88);
+}
+
+[data-theme='bloomberg'] .chart-status {
+  min-height: 21px;
+  padding: 2px 12px;
+  border-color: #3e2c00;
+  background: #050505;
+  color: #a77b1a;
+  font-size: 9px;
+}
+
+[data-theme='bloomberg'] .pane-focus-button {
+  background: #000;
+  border-color: #725000;
+  opacity: .8;
+}
+
+/* Bloomberg's primary surface is the data grid. */
+[data-theme='bloomberg'] main table {
+  font-family: 'Roboto Mono', 'Cascadia Mono', Consolas, monospace;
+  font-variant-numeric: tabular-nums slashed-zero;
+  border-collapse: collapse;
+}
+
+[data-theme='bloomberg'] main table th {
+  background: #080808;
+  color: #e2a71c;
+  border-color: #493400;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .035em;
+  text-transform: uppercase;
+}
+
+[data-theme='bloomberg'] main table td {
+  border-color: #312500;
+}
+
+[data-theme='bloomberg'] main table tbody tr:hover td {
+  background-color: #211700;
+}
+
+[data-theme='bloomberg'] .oc-table {
+  font-size: 11px;
+  background: #000;
+}
+
+[data-theme='bloomberg'] .oc-table th {
+  padding: 3px 5px;
+  background: #050505;
+  color: #f2b41f;
+  border-bottom-color: #785500;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+[data-theme='bloomberg'] .oc-table td {
+  height: 35px;
+  padding: 2px 5px;
+  border-bottom-color: #3c2b00;
+  color: #fff5cc;
+  font-weight: 600;
+}
+
+[data-theme='bloomberg'] .oc-table .ce-side {
+  background: #030706;
+}
+
+[data-theme='bloomberg'] .oc-table .pe-side {
+  background: #080404;
+}
+
+[data-theme='bloomberg'] .oc-table tr:hover .ce-side {
+  background: #1b1608;
+}
+
+[data-theme='bloomberg'] .oc-table tr:hover .pe-side {
+  background: #1b1608;
+}
+
+[data-theme='bloomberg'] .oc-table .oc-calls-th {
+  background: #070907;
+  color: #77cba3;
+  border-bottom-color: #287c5a;
+}
+
+[data-theme='bloomberg'] .oc-table .oc-puts-th {
+  background: #0a0707;
+  color: #dc827d;
+  border-bottom-color: #8d3734;
+}
+
+[data-theme='bloomberg'] .oc-table td.strike-col,
+[data-theme='bloomberg'] .oc-table td.strike-cell,
+[data-theme='bloomberg'] .oc-table td.iv-cell {
+  background: #0b0b09;
+  border-color: #654800;
+  color: #ffc021;
+  font-weight: 800;
+}
+
+[data-theme='bloomberg'] .oc-table tr.atm-row td {
+  border-top: 1px solid #ffb000;
+  border-bottom: 1px solid #ffb000;
+}
+
+[data-theme='bloomberg'] .oc-table tr.atm-row td.strike-cell,
+[data-theme='bloomberg'] .oc-table tr.atm-row td.strike-col,
+[data-theme='bloomberg'] .oc-table tr.atm-row td.iv-cell {
+  background: #3b2a00;
+  color: #ffd44f;
+}
+
+[data-theme='bloomberg'] .oi-bar {
+  height: 3px;
+  border-radius: 0;
+  opacity: .75;
+}
+
+/* Orders, strategy panes and overlays use hard separator bars. */
+[data-theme='bloomberg'] .command-overlay,
+[data-theme='bloomberg'] .login-overlay {
+  background: rgba(0, 0, 0, .86);
+  backdrop-filter: none;
+}
+
+[data-theme='bloomberg'] .command-dialog {
+  border: 1px solid var(--accent);
+  background: #050505;
+}
+
+[data-theme='bloomberg'] .command-input-row,
+[data-theme='bloomberg'] .command-footer,
+[data-theme='bloomberg'] .shortcut-guide {
+  border-color: #634600;
+}
+
+[data-theme='bloomberg'] .command-result {
+  border-radius: 0;
+  border-bottom: 1px solid #312400;
+}
+
+[data-theme='bloomberg'] .command-result.is-active {
+  background: var(--accent);
+  color: #000;
+}
+
+[data-theme='bloomberg'] .command-result.is-active :is(strong, small) {
+  color: #000;
+}
+
+[data-theme='bloomberg'] .tooltip,
+[data-theme='bloomberg'] [class*='shadow-xl'],
+[data-theme='bloomberg'] [class*='shadow-2xl'] {
+  box-shadow: none !important;
+}
+
+[data-theme='bloomberg'] .tooltip {
+  background: #000;
+  border-color: var(--accent);
+  color: #ffe4a0;
+}
+
+[data-theme='bloomberg'] .spinner {
+  border-radius: 50% !important;
+}
+
+[data-theme='bloomberg'] :where(button, a, input, select, textarea, [tabindex], [role='button']):focus-visible {
+  outline: 1px solid #ffd34d;
+  outline-offset: 1px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

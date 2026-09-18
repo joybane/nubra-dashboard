@@ -18,6 +18,11 @@ interface StripProps {
   epoch?: number;
   activeCase: number | null;
   onPick: (caseNo: number) => void;
+  /**
+   * Jump straight to one of the active case's earlier (superseded) versions. Optional: when
+   * omitted, the open case's history simply isn't drawn on the axis.
+   */
+  onPickVersion?: (caseNo: number, versionIdx: number) => void;
 }
 
 const STRIP_W = 10;
@@ -39,6 +44,7 @@ export default function MismatchStripLayer({
   epoch = 0,
   activeCase,
   onPick,
+  onPickVersion,
 }: StripProps) {
   const [, setTick] = useState(0);
 
@@ -82,32 +88,98 @@ export default function MismatchStripLayer({
   } catch {
     leftScale = 0;
   }
-  const xOf = (ns: number): number | null => {
+  // Coordinate of a chart-minute (already the IST-baked seconds nsToChartMinute produces), not a
+  // raw ns instant — callers round to the minute themselves so cases sharing a minute group up.
+  const xOfMinute = (minuteSec: number): number | null => {
     try {
-      const c = chart.timeScale().timeToCoordinate(nsToChartMinute(ns) as UTCTimestamp);
+      const c = chart.timeScale().timeToCoordinate(minuteSec as UTCTimestamp);
       return c == null || !Number.isFinite(c) ? null : c + leftScale;
     } catch {
       return null;
     }
   };
 
-  const strips: Array<{ key: string; x: number; c: MismatchCaseDto; v: MismatchVersionDto }> = [];
+  type Member = { c: MismatchCaseDto; v: MismatchVersionDto };
+  // Two cases' strongest versions often round to the same chart minute (a live tick every second
+  // vs. a 1-minute bar), which would stack their tabs on the identical pixel. Group by minute so
+  // a stack renders as one clickable tab that cycles through its members instead of only ever
+  // reaching whichever case was drawn last.
+  const groups = new Map<number, Member[]>();
   for (const c of cases) {
     const v = strongestVersion(c);
     if (!v) continue;
-    for (const [end, ns] of [
-      ['a', v.t1_ns],
-      ['b', v.t2_ns],
-    ] as const) {
-      const x = xOf(ns);
-      if (x != null) strips.push({ key: `${c.case_no}${end}`, x, c, v });
+    for (const ns of [v.t1_ns, v.t2_ns]) {
+      const minute = nsToChartMinute(ns);
+      const list = groups.get(minute);
+      if (list) list.push({ c, v });
+      else groups.set(minute, [{ c, v }]);
     }
+  }
+
+  const strips: Array<{ key: string; x: number; members: Member[] }> = [];
+  for (const [minute, members] of groups) {
+    const x = xOfMinute(minute);
+    if (x != null) strips.push({ key: String(minute), x, members });
+  }
+
+  // The active case's whole trail, so a reading you saw earlier (before a stronger near-copy
+  // took over its tab) never just vanishes — it stays as a faint mark you can click back to.
+  const activeCaseObj = activeCase != null ? cases.find((c) => c.case_no === activeCase) : undefined;
+  const historyTicks: Array<{ key: string; x: number; versionIdx: number }> = [];
+  if (activeCaseObj && onPickVersion) {
+    const strongestIdx = activeCaseObj.versions.length - 1;
+    const seen = new Set<number>();
+    activeCaseObj.versions.forEach((v, idx) => {
+      if (idx === strongestIdx) return; // already drawn as the bold tab above
+      for (const ns of [v.t1_ns, v.t2_ns]) {
+        const minute = nsToChartMinute(ns);
+        if (seen.has(minute)) continue;
+        seen.add(minute);
+        const x = xOfMinute(minute);
+        if (x != null) historyTicks.push({ key: `hist-${minute}`, x, versionIdx: idx });
+      }
+    });
   }
 
   return (
     <div className="absolute inset-0 pointer-events-none z-30 overflow-hidden">
-      {strips.map(({ key, x, c, v }) => {
-        const active = activeCase === c.case_no;
+      {activeCaseObj &&
+        onPickVersion &&
+        historyTicks.map(({ key, x, versionIdx }) => {
+          const v = activeCaseObj.versions[versionIdx];
+          return (
+            <button
+              key={key}
+              type="button"
+              className="absolute pointer-events-auto"
+              style={{
+                left: x - 3,
+                bottom: 0,
+                width: 6,
+                height: 2,
+                background: mismatchColor(activeCaseObj.color_idx),
+                opacity: 0.5,
+              }}
+              title={`Mismatch #${activeCaseObj.case_no} · superseded reading · ${mismatchClock(
+                v.t1_ns,
+              ).slice(0, 5)} → ${mismatchClock(v.t2_ns)} · gap ${inr(v.gap).slice(1)} — click to view`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onPickVersion(activeCaseObj.case_no, versionIdx);
+              }}
+            />
+          );
+        })}
+      {strips.map(({ key, x, members }) => {
+        const topIdx = members.length - 1;
+        const activeIdx = members.findIndex((m) => m.c.case_no === activeCase);
+        const shownIdx = activeIdx === -1 ? topIdx : activeIdx;
+        const shown = members[shownIdx];
+        const active = activeCase === shown.c.case_no;
+        const stacked = members.length > 1;
+        const baseTitle = `Mismatch #${shown.c.case_no} · ${mismatchClock(shown.v.t1_ns).slice(0, 5)} → ${mismatchClock(
+          shown.v.t2_ns,
+        )} · PE ${inr(shown.v.pe_delta)} · CE ${inr(shown.v.ce_delta)}`;
         return (
           <button
             key={key}
@@ -118,18 +190,36 @@ export default function MismatchStripLayer({
               bottom: 0,
               width: STRIP_W,
               height: active ? STRIP_H + 4 : STRIP_H,
-              background: mismatchColor(c.color_idx),
-              outline: active ? '1px solid var(--text-primary)' : undefined,
+              background: mismatchColor(shown.c.color_idx),
+              outline: active
+                ? '1px solid var(--text-primary)'
+                : stacked
+                  ? '1px dashed rgba(255,255,255,0.6)'
+                  : undefined,
               opacity: activeCase == null || active ? 1 : 0.55,
             }}
-            title={`Mismatch #${c.case_no} · ${mismatchClock(v.t1_ns).slice(0, 5)} → ${mismatchClock(
-              v.t2_ns,
-            )} · PE ${inr(v.pe_delta)} · CE ${inr(v.ce_delta)}`}
+            title={
+              stacked
+                ? `${members.length} cases stacked here — showing #${shown.c.case_no} (${
+                    shownIdx + 1
+                  }/${members.length}), click to cycle · ${baseTitle}`
+                : baseTitle
+            }
             onClick={(e) => {
               e.stopPropagation();
-              onPick(c.case_no);
+              const nextIdx = activeIdx === -1 ? topIdx : (activeIdx - 1 + members.length) % members.length;
+              onPick(members[nextIdx].c.case_no);
             }}
-          />
+          >
+            {stacked && (
+              <span
+                className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-black/70 text-white leading-none px-1"
+                style={{ fontSize: 8 }}
+              >
+                {members.length}
+              </span>
+            )}
+          </button>
         );
       })}
     </div>

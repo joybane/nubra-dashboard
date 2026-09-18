@@ -210,9 +210,10 @@ function nearestSpot(spot: TsV[], ts: number): number {
     b = spot[lo];
   return Math.abs(a.ts - ts) <= Math.abs(b.ts - ts) ? a.v : b.v;
 }
-// Legacy optional modes retain a 2-second snapshot tail. Reference Band state is updated first on
-// every packet and only its rendered output is coalesced.
-const SNAP_MIN_GAP_MS = 2_000;
+// Legacy (non-reference) modes bucket live ticks into a rolling tail no finer than the chart's own
+// 1-second time resolution — anything tighter would create points buildTimeMapper collapses onto
+// the same bar anyway. Reference Band state is updated on every packet, unthrottled.
+const SNAP_MIN_GAP_MS = 1_000;
 // Live fallback poll: the line is driven by per-tick `option_chain` WS pushes, but
 // the broker pushes only on change and can stay silent for minutes (and SIM relies
 // entirely on it). Like the Option Chain view, poll the REST chain on a cadence —
@@ -460,8 +461,6 @@ export function useGreekOverlay({
   const histGenRef = useRef(0);
   const dayFetchTimerRef = useRef<number | null>(null);
   const drawPendingRef = useRef(false);
-  const lastDrawMsRef = useRef(0);
-  const drawTimerRef = useRef<number | null>(null);
   const drawRafRef = useRef<number | null>(null);
   const lastWsTickRef = useRef(0); // last time a live WS option_chain tick was applied
   const pollTimerRef = useRef<number | null>(null);
@@ -650,22 +649,11 @@ export function useGreekOverlay({
   }
 
   // ── Redraw: recompute series from snapshots and push to panes ───────────────
-  // Each redraw rebuilds the full series over every snapshot (can be ~22.5k points
-  // at 1s granularity), so coalesce via rAF and throttle to MIN_DRAW_MS — live
-  // ticks don't need sub-second refresh of an intraday line.
-  const MIN_DRAW_MS = 750;
+  // Tick-by-tick, matching the underlying price line: every live packet requests a
+  // redraw, coalesced only by rAF's one-pending-frame rule (drawPendingRef) so a burst
+  // of ticks between two frames collapses into a single rebuild rather than one per tick.
   function requestDraw() {
     if (!enabledRef.current || drawPendingRef.current) return;
-    const since = Date.now() - lastDrawMsRef.current;
-    if (since < MIN_DRAW_MS) {
-      if (drawTimerRef.current == null) {
-        drawTimerRef.current = window.setTimeout(() => {
-          drawTimerRef.current = null;
-          runDraw();
-        }, MIN_DRAW_MS - since);
-      }
-      return;
-    }
     drawPendingRef.current = true;
     drawRafRef.current = requestAnimationFrame(runDraw);
   }
@@ -673,7 +661,6 @@ export function useGreekOverlay({
   function runDraw() {
     drawRafRef.current = null;
     drawPendingRef.current = false;
-    lastDrawMsRef.current = Date.now();
     redraw();
   }
 
@@ -1944,13 +1931,9 @@ export function useGreekOverlay({
 
   // ── Public actions ──────────────────────────────────────────────────────
   function cancelDraw() {
-    if (drawTimerRef.current != null) {
-      clearTimeout(drawTimerRef.current);
-      drawTimerRef.current = null;
-    }
-    // The rAF has to go too. It calls setData on series owned by the host chart, so
-    // one landing after that chart was removed throws from inside lightweight-charts
-    // on the following frame (see lib/chartLifecycle).
+    // The rAF has to go. It calls setData on series owned by the host chart, so one
+    // landing after that chart was removed throws from inside lightweight-charts on
+    // the following frame (see lib/chartLifecycle).
     if (drawRafRef.current != null) {
       cancelAnimationFrame(drawRafRef.current);
       drawRafRef.current = null;

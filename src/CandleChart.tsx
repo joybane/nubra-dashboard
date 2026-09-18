@@ -16,6 +16,7 @@ import { useWatchlist } from './hooks/useWatchlistContext';
 import { useOIProfile } from './hooks/useOIProfile';
 import { useGreekOverlay } from './hooks/useGreekOverlay';
 import { GreekButton } from './components/GreekControls';
+import ChartPaneResizer from './components/ChartPaneResizer';
 import { bindCandleCrosshair, fmtCrosshairTime } from './lib/greekTooltip';
 import UiIcon from './components/UiIcon';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
@@ -1350,6 +1351,13 @@ export default function CandleChart({ instrument, theme }: Props) {
         onDoubleClick={resetZoom}
       >
         <canvas ref={canvasRef} className="absolute inset-0 pointer-events-none z-[5]" />
+
+        {/* Widened drag handles over the price/Greek pane boundaries — see ChartPaneResizer */}
+        <ChartPaneResizer
+          chartRef={chartRef}
+          containerRef={containerRef}
+          refreshKey={`${vega.on}:${vega.method}:${theta.on}:${theta.method}:${ivOverlay.on}`}
+        />
 
         {/* Crosshair tooltip — positioned imperatively by bindCandleCrosshair */}
         <div

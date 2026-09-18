@@ -39,7 +39,6 @@ const TICK_IV = '1s'; // today's session loads at 1s, stitched onto the 1m histo
 const HIST_DAYS = 7; // last 7 days of 1-minute history
 const CHUNK_DAYS = 5; // load-more chunk when scrolling further back
 const TICK_VIEW_BARS = 5_400; // initial visible window when today is 1s (~90 min)
-const DETAIL_WINDOW_SEC = 2 * 60 * 60;
 type Resolution = '1m' | '1s';
 
 function normalizeChartName(name: string): string {
@@ -317,11 +316,14 @@ export default function Tracker({ instrument, theme }: Props) {
     >[0];
   }
 
-  function rangeTouchesToday(from: number, to: number): boolean {
+  /** True only when BOTH ends of the range fall on today — never a past day, never spilling
+   * into a past day. `secondBarsRef` holds nothing but today's ticks, so this is exactly the
+   * condition under which showing 1s resolution is possible at all. */
+  function rangeWithinToday(from: number, to: number): boolean {
     const today = new Date(Date.now() + IST_OFFSET * 1000).toISOString().slice(0, 10);
     const fromDay = new Date(from * 1000).toISOString().slice(0, 10);
     const toDay = new Date(to * 1000).toISOString().slice(0, 10);
-    return fromDay <= today && today <= toDay;
+    return fromDay === today && toDay === today;
   }
 
   function refreshGreekGrid() {
@@ -334,15 +336,25 @@ export default function Tracker({ instrument, theme }: Props) {
     const bars =
       res === '1s' && secondBarsRef.current.length ? secondBarsRef.current : minuteBarsRef.current;
     if (!bars.length || activeResRef.current === res) return;
+    // This now fires for a plain zoom/pan (not just crossing into/out of today), so it can
+    // land on the same request-animation-frame tick the pane's own teardown is scheduled on
+    // if the view closes mid-gesture. `setData`/`setVisibleRange` on a chart past that point
+    // throw from inside the library rather than from this file's own try/catch.
+    if (!isChartLive(chartRef.current) || !lineRef.current) return;
     switchingRef.current = true;
     activeResRef.current = res;
     allBarsRef.current = bars;
     lineRef.current?.setData(toLine(bars));
+    // Force a rescale: the 1s and 1m datasets cover very different price ranges (a
+    // session's worth of tick noise vs. a week of daily swings), and switching between
+    // them must not leave the price axis frozen at whichever range was current before —
+    // see the identical note in `load()`, which the resolution switch shares the bug with.
+    lineRef.current?.priceScale().applyOptions({ autoScale: true });
     refreshGreekGrid();
     if (visibleRange && chartRef.current) {
       requestAnimationFrame(() => {
         try {
-          chartRef.current?.timeScale().setVisibleRange(visibleRange as any);
+          if (isChartLive(chartRef.current)) chartRef.current?.timeScale().setVisibleRange(visibleRange as any);
         } catch {
           /* ignore */
         }
@@ -358,15 +370,16 @@ export default function Tracker({ instrument, theme }: Props) {
     const from = Number(range.from);
     const to = Number(range.to);
     if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return;
-    const span = to - from;
-    if (activeResRef.current === '1s' && span > DETAIL_WINDOW_SEC) {
+    if (!secondBarsRef.current.length) return; // no 1s data loaded — nothing to switch to
+    // Resolution follows the CALENDAR DAY the view is showing, not how many hours are on
+    // screen: today's whole session (09:15–15:30, well past the old 2-hour cutoff this
+    // replaced) has real per-second data, so zooming out to see it from the open must not
+    // fall back to 1-minute bars. Only a range that actually reaches a past day — where
+    // `secondBarsRef` has nothing — has any reason to.
+    const withinToday = rangeWithinToday(from, to);
+    if (activeResRef.current === '1s' && !withinToday) {
       setActiveResolution('1m', range);
-    } else if (
-      activeResRef.current === '1m' &&
-      span <= DETAIL_WINDOW_SEC &&
-      secondBarsRef.current.length &&
-      rangeTouchesToday(from, to)
-    ) {
+    } else if (activeResRef.current === '1m' && withinToday) {
       setActiveResolution('1s', range);
     }
   }

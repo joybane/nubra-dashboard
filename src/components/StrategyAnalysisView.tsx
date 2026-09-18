@@ -495,8 +495,11 @@ import MismatchStripLayer, { MismatchCaseCard } from './MismatchStripLayer';
 import {
   fetchMismatchCases,
   fetchMismatchTrackers,
+  mismatchClock,
+  mismatchColor,
   nsToChartMinute,
   setMismatchTracker,
+  strongestVersion,
   upsertMismatchCase,
   type MismatchCaseDto,
   type MismatchTrackerState,
@@ -729,6 +732,7 @@ export default function StrategyAnalysisView({
   const [orderBookCollapsed, setOrderBookCollapsed] = useState(false);
   const [chartsPopupOpen, setChartsPopupOpen] = useState(false);
   const [pnlPopupOpen, setPnlPopupOpen] = useState(false);
+  const [mismatchPopupOpen, setMismatchPopupOpen] = useState(false);
 
   const [strategyMarginPaise, setStrategyMarginPaise] = useState(0);
 
@@ -2746,17 +2750,20 @@ export default function StrategyAnalysisView({
   const chartsPopupRef = useRef<HTMLDivElement>(null);
   const pnlPopupRef = useRef<HTMLDivElement>(null);
   const greeksPopupRef = useRef<HTMLDivElement>(null);
+  const mismatchPopupRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    if (!chartsPopupOpen && !pnlPopupOpen && !greeksPopupOpen) return;
+    if (!chartsPopupOpen && !pnlPopupOpen && !greeksPopupOpen && !mismatchPopupOpen) return;
     const handler = (e: MouseEvent) => {
       const t = e.target as Node;
       if (chartsPopupRef.current && !chartsPopupRef.current.contains(t)) setChartsPopupOpen(false);
       if (pnlPopupRef.current && !pnlPopupRef.current.contains(t)) setPnlPopupOpen(false);
       if (greeksPopupRef.current && !greeksPopupRef.current.contains(t)) setGreeksPopupOpen(false);
+      if (mismatchPopupRef.current && !mismatchPopupRef.current.contains(t))
+        setMismatchPopupOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [chartsPopupOpen, pnlPopupOpen, greeksPopupOpen]);
+  }, [chartsPopupOpen, pnlPopupOpen, greeksPopupOpen, mismatchPopupOpen]);
 
   /**
    * The pane owns its chart's lifecycle, so it hands the handle up here rather than the other
@@ -3458,23 +3465,84 @@ export default function StrategyAnalysisView({
                   : `Can't track: ${why}. Only an open strategy of one CE and one PE can be tracked.${
                       count ? ' Recorded cases still show on the chart.' : ''
                     }`;
+            const toneClass = mismatchToggleError
+              ? 'border-[var(--red)]/50 bg-[var(--red)]/15 text-[var(--red)]'
+              : on
+                ? 'bg-[#a78bfa]/15 border-[#a78bfa]/40 text-[#a78bfa] hover:bg-[#a78bfa]/25'
+                : disabled
+                  ? 'border-[var(--border)] bg-transparent text-[var(--text-muted)] opacity-50 cursor-not-allowed'
+                  : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]';
             return (
-              <button
-                onClick={() => void toggleMismatchTracker()}
-                disabled={disabled}
-                title={title}
-                className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-semibold border transition-colors ${
-                  mismatchToggleError
-                    ? 'border-[var(--red)]/50 bg-[var(--red)]/15 text-[var(--red)]'
-                    : on
-                      ? 'bg-[#a78bfa]/15 border-[#a78bfa]/40 text-[#a78bfa] hover:bg-[#a78bfa]/25'
-                      : disabled
-                        ? 'border-[var(--border)] bg-transparent text-[var(--text-muted)] opacity-50 cursor-not-allowed'
-                        : 'border-[var(--border)] bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]'
-                }`}
-              >
-                ≠ Mismatch{on || count ? ` · ${count}` : ''}
-              </button>
+              <div ref={mismatchPopupRef} className="relative flex items-stretch">
+                <button
+                  onClick={() => void toggleMismatchTracker()}
+                  disabled={disabled}
+                  title={title}
+                  className={`flex items-center gap-1.5 px-2.5 py-0.5 text-[11px] font-semibold border transition-colors ${
+                    count > 0 ? 'rounded-l border-r-0' : 'rounded'
+                  } ${toneClass}`}
+                >
+                  ≠ Mismatch{on || count ? ` · ${count}` : ''}
+                </button>
+                {count > 0 && (
+                  <button
+                    onClick={() => setMismatchPopupOpen((v) => !v)}
+                    title="List every mismatch case — jump straight to one instead of hunting for its strip on the chart"
+                    className={`px-1 py-0.5 rounded-r text-[11px] font-semibold border border-l-0 transition-colors ${toneClass}`}
+                  >
+                    ▾
+                  </button>
+                )}
+                {mismatchPopupOpen && count > 0 && (
+                  <div className="absolute top-full left-0 mt-1 z-50 w-[300px] max-h-[70vh] overflow-y-auto bg-[var(--bg-card,var(--bg-secondary))] border border-[var(--border)] rounded-xl shadow-2xl">
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] sticky top-0 bg-[var(--bg-card,var(--bg-secondary))]">
+                      <span className="text-[11px] font-semibold text-[var(--text-primary)]">
+                        Mismatch cases
+                      </span>
+                      <button
+                        onClick={() => setMismatchPopupOpen(false)}
+                        className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm leading-none"
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div className="py-1">
+                      {mismatchCases.map((mc) => {
+                        const v = strongestVersion(mc);
+                        if (!v) return null;
+                        const color = mismatchColor(mc.color_idx);
+                        const activeRow = mismatchPick?.caseNo === mc.case_no;
+                        return (
+                          <button
+                            key={mc.case_no}
+                            onClick={() => {
+                              pinMismatch(mc.case_no);
+                              setMismatchPopupOpen(false);
+                            }}
+                            className={`w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-left hover:bg-[var(--bg-hover)] transition-colors ${
+                              activeRow ? 'bg-[var(--bg-hover)]' : ''
+                            }`}
+                          >
+                            <span
+                              className="w-2 h-2 rounded-full shrink-0"
+                              style={{ background: color }}
+                            />
+                            <span className="font-semibold shrink-0" style={{ color }}>
+                              #{mc.case_no}
+                            </span>
+                            <span className="text-[var(--text-muted)] whitespace-nowrap">
+                              {mismatchClock(v.t1_ns).slice(0, 5)} → {mismatchClock(v.t2_ns).slice(0, 5)}
+                            </span>
+                            <span className="ml-auto font-semibold text-[var(--text-secondary)]">
+                              ₹{fmtPrice(v.gap)}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
             );
           })()}
 
@@ -3531,6 +3599,7 @@ export default function StrategyAnalysisView({
               epoch={chartEpoch}
               activeCase={mismatchPick?.caseNo ?? null}
               onPick={pickMismatchStrip}
+              onPickVersion={pinMismatch}
             />
             {pickedMismatch && mismatchPick && (
               <MismatchCaseCard
@@ -3600,6 +3669,7 @@ export default function StrategyAnalysisView({
                 epoch={chartEpoch}
                 activeCase={mismatchPick?.caseNo ?? null}
                 onPick={pickMismatchStrip}
+                onPickVersion={pinMismatch}
               />
               {!priceVisible && pickedMismatch && mismatchPick && (
                 <MismatchCaseCard

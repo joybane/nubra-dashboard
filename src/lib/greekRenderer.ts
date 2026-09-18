@@ -340,6 +340,23 @@ export function createGreekPane(
     ceDiff
       .priceScale()
       .applyOptions({ autoScale: true, scaleMargins: { top: 0.15, bottom: 0.15 } });
+
+    // A dedicated pane has room to read a Theta/Vega line against zero, which the inline
+    // Tracker overlay (sharing the price pane) does not. Put it on both CE and PE of each
+    // scale — a price line rides its host series' visibility, so it survives either side
+    // being toggled off and only vanishes if both are (nothing left to reference then).
+    const zeroLine = {
+      price: 0,
+      color: 'rgba(148, 163, 184, 0.55)',
+      lineWidth: 1 as const,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: '',
+    };
+    ceTotal.createPriceLine(zeroLine);
+    peTotal.createPriceLine(zeroLine);
+    ceDiff.createPriceLine(zeroLine);
+    peDiff.createPriceLine(zeroLine);
   }
 
   const all = [ceTotal, peTotal, ceDiff, peDiff];

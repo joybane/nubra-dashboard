@@ -15,7 +15,9 @@ export function chartTheme(appearance: boolean | Theme, fontSize = 12) {
       background: { type: ColorType.Solid, color: isBloomberg ? '#000000' : isGraphite ? '#0b0e0f' : isDark ? '#101318' : '#ffffff' },
       textColor: isBloomberg ? '#ffb000' : isGraphite ? '#c1c7d0' : isDark ? '#aebbd0' : '#4b5c73',
       fontSize,
-      fontFamily: "'Inter', 'Segoe UI', sans-serif",
+      fontFamily: isBloomberg
+        ? "'Roboto Mono', 'Cascadia Mono', Consolas, monospace"
+        : "'Inter', 'Segoe UI', sans-serif",
     },
     grid: {
       vertLines: { color: grid, style: LineStyle.Solid },
