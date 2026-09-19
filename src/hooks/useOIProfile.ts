@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ISeriesApi } from 'lightweight-charts';
 import type { Instrument, OhlcBar, OptionChainData, WsMessage } from '../types';
 import { getChainAsset } from '../types';
-import { IST_OFFSET, marketSession } from '../lib/utils';
+import { IST_OFFSET, isMarketOpenNow, marketSession, toChartTime } from '../lib/utils';
 import {
   drawOI as renderOI,
   hitTestOIBar,
@@ -19,6 +19,8 @@ export interface OIProfileApi {
   oiExpiries: string[];
   selExpiries: string[];
   oiMode: 'oi' | 'oi_change';
+  showStrikeProfile: boolean;
+  showTotalOi: boolean;
   showCalls: boolean;
   showPuts: boolean;
   oiFromTime: string;
@@ -28,6 +30,8 @@ export interface OIProfileApi {
   setShowOiPopup: (v: boolean | ((p: boolean) => boolean)) => void;
   setSelExpiries: (v: string[] | ((p: string[]) => string[])) => void;
   setOiMode: (v: 'oi' | 'oi_change') => void;
+  setShowStrikeProfile: (v: boolean) => void;
+  setShowTotalOi: (v: boolean) => void;
   setShowCalls: (v: boolean) => void;
   setShowPuts: (v: boolean) => void;
   setOiFromTime: (v: string) => void;
@@ -46,14 +50,17 @@ export interface OIProfileApi {
   handleMouseMove: (e: React.MouseEvent) => void;
   handleMouseLeave: () => void;
   handleSliderChange: (fromMin: number, toMin: number, sliderMax: number) => void;
-  handleFromTimeChange: (v: string) => void;
-  handleToTimeChange: (v: string) => void;
   resetTimeRange: () => void;
   clearForInstrumentChange: () => void;
   // refs exposed for chart init listeners
   oiEnabledRef: React.RefObject<boolean>;
   drawOIRef: React.RefObject<() => void>;
   oiDrawPendingRef: React.RefObject<boolean>;
+  /** Mirrors showTotalOi for use inside listeners registered once at chart-init time
+   * (e.g. subscribeCrosshairMove) — those closures never see a later render's state. */
+  showTotalOiRef: React.RefObject<boolean>;
+  /** Per-minute call/put totals behind the Total histogram, keyed by chart-time. */
+  oiTotalDetailRef: React.RefObject<Map<number, { ce: number; pe: number }>>;
 }
 
 interface Deps {
@@ -62,6 +69,9 @@ interface Deps {
   candleRef: React.RefObject<ISeriesApi<'Candlestick'> | null>;
   currentInstRef: React.RefObject<Instrument | null>;
   allBarsRef: React.RefObject<OhlcBar[]>;
+  /** Net (total CE − total PE) OI histogram, drawn as a native series instead of on the canvas. */
+  oiTotalSeriesRef: React.RefObject<ISeriesApi<'Histogram'> | null>;
+  interval: string;
 }
 
 export function useOIProfile({
@@ -70,6 +80,8 @@ export function useOIProfile({
   candleRef,
   currentInstRef,
   allBarsRef,
+  oiTotalSeriesRef,
+  interval,
 }: Deps): OIProfileApi {
   const { subscribe, subscribeOC, unsubscribeOC } = useWs();
 
@@ -97,6 +109,9 @@ export function useOIProfile({
     ce: new Map(),
     pe: new Map(),
   });
+  // Per-minute call/put totals behind the net histogram, keyed by the same chart-time
+  // the series points use — lets the hover box break the net figure back into its two legs.
+  const oiTotalDetailRef = useRef<Map<number, { ce: number; pe: number }>>(new Map());
   const oiDrawPendingRef = useRef(false);
   const oiHistDateRef = useRef<string>('');
   const oiHistFailedRef = useRef(false);
@@ -107,6 +122,8 @@ export function useOIProfile({
   const [oiExpiries, setOiExpiries] = useState<string[]>([]);
   const [selExpiries, setSelExpiries] = useState<string[]>([]);
   const [oiMode, setOiMode] = useState<'oi' | 'oi_change'>('oi');
+  const [showStrikeProfile, setShowStrikeProfile] = useState(true);
+  const [showTotalOi, setShowTotalOi] = useState(false);
   const [showCalls, setShowCalls] = useState(true);
   const [showPuts, setShowPuts] = useState(true);
   const [oiFromTime, setOiFromTime] = useState('');
@@ -121,6 +138,12 @@ export function useOIProfile({
 
   const oiModeRef = useRef(oiMode);
   oiModeRef.current = oiMode;
+  // Mirrored for the WS-tick handler below, whose closure is only rebuilt when
+  // `subscribe` changes — not on every render — so it can't see fresh state directly.
+  const showTotalOiRef = useRef(showTotalOi);
+  showTotalOiRef.current = showTotalOi;
+  const intervalRef = useRef(interval);
+  intervalRef.current = interval;
 
   // ── WS helpers ───────────────────────────────────────────────────────────
   function subscribeOiWs(asset: string, expiry: string, exchange: string) {
@@ -189,8 +212,14 @@ export function useOIProfile({
         }),
       };
       requestDraw();
+      updateLiveTotalPoint();
     });
     return unsub;
+    // Deliberately narrow: re-subscribing to the WS channel on every render (which
+    // including updateLiveTotalPoint here would cause, since it's a plain function
+    // recreated each render) would thrash the subscription. It only touches refs
+    // internally, so the stale closure this effect keeps across renders is fine.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subscribe]);
 
   // Release the OI snapshot interval and server-side OI subscription on unmount —
@@ -234,7 +263,14 @@ export function useOIProfile({
       if (!canvas || !cont || !series || !oiChainRef.current) return;
 
       const today = new Date().toISOString().slice(0, 10);
-      const isToday = !oiHistDateRef.current || oiHistDateRef.current === today;
+      const sameCalendarDay = !oiHistDateRef.current || oiHistDateRef.current === today;
+      // "to at the right edge" reads the live WS snapshot instead of the fetched
+      // 1m history so the bar stays fresh while the session is running. Once the
+      // session has closed that snapshot can keep moving (late prints/settlement)
+      // while the history table is already final — so past close, fall back to the
+      // history series for both ends of the range, or "9:20→15:30" silently turns
+      // into "9:20→whatever the live feed says right now" instead of the close print.
+      const isToday = sameCalendarDay && isMarketOpenNow(currentInstRef.current?.exchange);
 
       renderOI({
         canvas,
@@ -242,7 +278,7 @@ export function useOIProfile({
         containerH: cont.clientHeight,
         priceToCoordinate: (p) => safePriceToCoordinate(series, p),
         oiChain: oiChainRef.current,
-        enabled: oiEnabledRef.current,
+        enabled: oiEnabledRef.current && showStrikeProfile,
         widthScale: oiWidthScaleRef.current,
         showCalls,
         showPuts,
@@ -363,6 +399,7 @@ export function useOIProfile({
     }
     oiHistoricalRef.current = new Map();
     oiHistFetchedRef.current = false;
+    oiHistFailedRef.current = false;
     oiEnabledRef.current = true;
     setOiOn(true);
     if (expiries.length === 1 && currentInstRef.current) {
@@ -376,6 +413,9 @@ export function useOIProfile({
     }
     startSnapshotTimer();
     requestDraw();
+    // Expiry selection changed — the per-symbol history above was just invalidated,
+    // so the net-OI series needs a fresh fetch too, not just the per-strike bars.
+    if (showTotalOiRef.current) fetchOIHistory();
   }
 
   function getChartDate(): Date {
@@ -476,6 +516,7 @@ export function useOIProfile({
       oiHistFetchedRef.current = true;
       oiHistDateRef.current = chartDate.toISOString().slice(0, 10);
       requestDraw();
+      computeTotalSeries();
     } catch (e) {
       console.error('[OI] Historical fetch failed:', e);
       oiHistFailedRef.current = true;
@@ -483,6 +524,117 @@ export function useOIProfile({
       oiHistLoadingRef.current = false;
     }
   }
+
+  // ── Total view (net CE − PE OI, summed across every strike) ────────────────
+  /**
+   * Builds the whole-session net-OI histogram from the already-fetched 1m history:
+   * one point per minute bucket, value = (sum of every included CE strike's OI) minus
+   * (sum of every included PE strike's OI) at that minute. Strikes don't all report on
+   * identical minute grids, so each strike is forward-filled to the union of timestamps
+   * rather than assuming they line up.
+   */
+  function computeTotalSeries() {
+    const seriesApi = oiTotalSeriesRef.current;
+    if (!seriesApi) return;
+    const symMap = oiSymbolMapRef.current;
+    const hist = oiHistoricalRef.current;
+    const ceSeriesList = Array.from(symMap.ce.values())
+      .map((sym) => hist.get(sym))
+      .filter((s): s is { ts: number; v: number }[] => !!s?.length);
+    const peSeriesList = Array.from(symMap.pe.values())
+      .map((sym) => hist.get(sym))
+      .filter((s): s is { ts: number; v: number }[] => !!s?.length);
+    if (!ceSeriesList.length && !peSeriesList.length) {
+      oiTotalDetailRef.current = new Map();
+      seriesApi.setData([]);
+      return;
+    }
+
+    const tsSet = new Set<number>();
+    for (const s of ceSeriesList) for (const pt of s) tsSet.add(pt.ts);
+    for (const s of peSeriesList) for (const pt of s) tsSet.add(pt.ts);
+    const allTs = Array.from(tsSet).sort((a, b) => a - b);
+
+    const cePtrs = new Array(ceSeriesList.length).fill(0);
+    const pePtrs = new Array(peSeriesList.length).fill(0);
+    const iv = intervalRef.current;
+    const points: { time: number; value: number; color: string }[] = [];
+    const detail = new Map<number, { ce: number; pe: number }>();
+    for (const ts of allTs) {
+      let sumCe = 0;
+      for (let i = 0; i < ceSeriesList.length; i++) {
+        const s = ceSeriesList[i];
+        while (cePtrs[i] + 1 < s.length && s[cePtrs[i] + 1].ts <= ts) cePtrs[i]++;
+        if (s[cePtrs[i]].ts <= ts) sumCe += s[cePtrs[i]].v;
+      }
+      let sumPe = 0;
+      for (let i = 0; i < peSeriesList.length; i++) {
+        const s = peSeriesList[i];
+        while (pePtrs[i] + 1 < s.length && s[pePtrs[i] + 1].ts <= ts) pePtrs[i]++;
+        if (s[pePtrs[i]].ts <= ts) sumPe += s[pePtrs[i]].v;
+      }
+      const net = sumCe - sumPe;
+      const chartTime = toChartTime(ts, iv) as number;
+      points.push({ time: chartTime, value: net, color: net >= 0 ? '#22c55e' : '#ef4444' });
+      detail.set(chartTime, { ce: sumCe, pe: sumPe });
+    }
+    oiTotalDetailRef.current = detail;
+    seriesApi.setData(points as Parameters<typeof seriesApi.setData>[0]);
+  }
+
+  /**
+   * Keeps the histogram's last (current-minute) bar live between history refetches —
+   * the 1m history is only pulled on demand, but the WS chain feed already updates
+   * `oiChainRef` every tick, so the running total can track it without re-fetching.
+   */
+  function updateLiveTotalPoint() {
+    const seriesApi = oiTotalSeriesRef.current;
+    if (!seriesApi || !oiChainRef.current || !showTotalOiRef.current) return;
+    let sumCe = 0;
+    for (const leg of oiChainRef.current.ce) sumCe += Number(leg.oi) || 0;
+    let sumPe = 0;
+    for (const leg of oiChainRef.current.pe) sumPe += Number(leg.oi) || 0;
+    const net = sumCe - sumPe;
+    // Snapped to the minute so live ticks update the forming bar in place instead of
+    // spawning a new one-per-tick bar next to the minute-granularity historical bars.
+    const chartTimeSec = Math.floor(Date.now() / 1000) + IST_OFFSET;
+    const bucket = Math.floor(chartTimeSec / 60) * 60;
+    oiTotalDetailRef.current.set(bucket, { ce: sumCe, pe: sumPe });
+    seriesApi.update({
+      time: bucket,
+      value: net,
+      color: net >= 0 ? '#22c55e' : '#ef4444',
+    } as Parameters<typeof seriesApi.update>[0]);
+  }
+
+  /** Shows/hides the Total histogram to match whether OI is on and whether it's checked. */
+  function syncTotalVisibility() {
+    oiTotalSeriesRef.current?.applyOptions({
+      visible: oiEnabledRef.current && showTotalOiRef.current,
+    });
+  }
+
+  // Strike Profile and Total are independent toggles (both, either, or neither can be
+  // on at once) — this only reacts to Total specifically: fetch history the first time
+  // it's checked, otherwise just re-show the already-computed series; unchecking hides it.
+  useEffect(() => {
+    syncTotalVisibility();
+    if (!showTotalOi) return;
+    if (oiHistFetchedRef.current) {
+      computeTotalSeries();
+    } else if (!oiHistLoadingRef.current && !oiHistFailedRef.current && oiChainRef.current) {
+      fetchOIHistory();
+    }
+    requestDraw();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showTotalOi]);
+
+  // Strike Profile's canvas bars don't redraw themselves purely from a state change —
+  // they're only repainted on the next crosshair move / pan / WS tick. Force one here so
+  // toggling the checkbox (or Calls/Puts) reflects immediately instead of on next mouse move.
+  useEffect(() => {
+    requestDraw();
+  }, [showStrikeProfile, showCalls, showPuts]);
 
   // ── Snapshot timer (replaces the old 10fps OI loop) ──────────────────────
   function startSnapshotTimer() {
@@ -515,7 +667,7 @@ export function useOIProfile({
 
   // ── Mouse handlers ──────────────────────────────────────────────────────
   function handleMouseDown(e: React.MouseEvent) {
-    if (!oiEnabledRef.current || !containerRef.current) return;
+    if (!oiEnabledRef.current || !containerRef.current || !showStrikeProfile) return;
     const rect = containerRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const priceScaleW = 72;
@@ -559,11 +711,17 @@ export function useOIProfile({
     const maxBarW = (w - priceScaleW) * 0.35 * oiWidthScaleRef.current;
     const handleX = w - priceScaleW - maxBarW;
 
-    if (oiEnabledRef.current) {
+    if (oiEnabledRef.current && showStrikeProfile) {
       containerRef.current.style.cursor = Math.abs(x - handleX) <= 15 ? 'ew-resize' : '';
     }
 
-    if (oiEnabledRef.current && oiChainRef.current && candleRef.current && x >= handleX - 5) {
+    if (
+      oiEnabledRef.current &&
+      showStrikeProfile &&
+      oiChainRef.current &&
+      candleRef.current &&
+      x >= handleX - 5
+    ) {
       const hit = hitTestOIBar({
         x,
         y,
@@ -625,24 +783,6 @@ export function useOIProfile({
     drawOIRef.current();
   }
 
-  function handleFromTimeChange(v: string) {
-    setOiFromTime(v);
-    setOiMode('oi_change');
-    oiModeRef.current = 'oi_change';
-    oiFromMsRef.current = v ? timeToMs(v) : null;
-    if (!oiHistFetchedRef.current && !oiHistLoadingRef.current) fetchOIHistory();
-    drawOIRef.current();
-  }
-
-  function handleToTimeChange(v: string) {
-    setOiToTime(v);
-    setOiMode('oi_change');
-    oiModeRef.current = 'oi_change';
-    oiToMsRef.current = v ? timeToMs(v) : null;
-    if (!oiHistFetchedRef.current && !oiHistLoadingRef.current) fetchOIHistory();
-    drawOIRef.current();
-  }
-
   function resetTimeRange() {
     setOiFromTime('');
     setOiToTime('');
@@ -664,11 +804,17 @@ export function useOIProfile({
       stopSnapshotTimer();
       unsubscribeOiWs();
       drawOI();
+      syncTotalVisibility();
     } else if (oiChainRef.current) {
       oiEnabledRef.current = true;
       setOiOn(true);
       startSnapshotTimer();
       requestDraw();
+      syncTotalVisibility();
+      if (showTotalOiRef.current) {
+        if (oiHistFetchedRef.current) computeTotalSeries();
+        else if (!oiHistLoadingRef.current && !oiHistFailedRef.current) fetchOIHistory();
+      }
     } else if (currentInstRef.current) {
       loadOIChain();
     }
@@ -699,6 +845,12 @@ export function useOIProfile({
     oiBaselineRef.current = null;
     oiToSnapRef.current = null;
     unsubscribeOiWs();
+    setShowStrikeProfile(true);
+    setShowTotalOi(false);
+    showTotalOiRef.current = false;
+    oiTotalDetailRef.current = new Map();
+    oiTotalSeriesRef.current?.setData([]);
+    oiTotalSeriesRef.current?.applyOptions({ visible: false });
   }
 
   return {
@@ -707,6 +859,8 @@ export function useOIProfile({
     oiExpiries,
     selExpiries,
     oiMode,
+    showStrikeProfile,
+    showTotalOi,
     showCalls,
     showPuts,
     oiFromTime,
@@ -715,6 +869,8 @@ export function useOIProfile({
     setShowOiPopup,
     setSelExpiries,
     setOiMode,
+    setShowStrikeProfile,
+    setShowTotalOi,
     setShowCalls,
     setShowPuts,
     setOiFromTime,
@@ -730,12 +886,12 @@ export function useOIProfile({
     handleMouseMove,
     handleMouseLeave,
     handleSliderChange,
-    handleFromTimeChange,
-    handleToTimeChange,
     resetTimeRange,
     clearForInstrumentChange,
     oiEnabledRef,
     drawOIRef,
     oiDrawPendingRef,
+    showTotalOiRef,
+    oiTotalDetailRef,
   };
 }

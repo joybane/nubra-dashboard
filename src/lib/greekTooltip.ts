@@ -646,10 +646,13 @@ export interface CandleCrosshairOpts {
   candleSeries: () => ISeriesApi<'Candlestick'> | null;
   /** Volume histogram. Its row is skipped whenever the series is switched off. */
   volumeSeries: () => ISeriesApi<'Histogram'> | null;
+  /** OI Profile's Total histogram (net call OI − put OI). Row skipped when off/hidden. */
+  netOiSeries?: () => ISeriesApi<'Histogram'> | null;
   /** Symbol shown in the header, beside the timestamp. */
   symbol: () => string;
   formatPrice: (v: number) => string;
   formatVolume: (v: number) => string;
+  formatNetOi?: (v: number) => string;
 }
 
 /**
@@ -663,8 +666,8 @@ export interface CandleCrosshairOpts {
  * cannot say which bar the crosshair snapped to.
  */
 export function bindCandleCrosshair(opts: CandleCrosshairOpts): () => void {
-  const { chart, container, tooltip, candleSeries, volumeSeries, symbol } = opts;
-  const { formatPrice, formatVolume } = opts;
+  const { chart, container, tooltip, candleSeries, volumeSeries, netOiSeries, symbol } = opts;
+  const { formatPrice, formatVolume, formatNetOi } = opts;
 
   let cursor: { x: number; y: number } | null = null;
   let lastParam: MouseEventParams | null = null;
@@ -714,6 +717,16 @@ export function bindCandleCrosshair(opts: CandleCrosshairOpts): () => void {
       const exactVol = (param.seriesData.get(vol) as { value?: number } | undefined)?.value;
       const v = typeof exactVol === 'number' ? exactVol : seriesValueAt(vol, logical);
       if (v != null) parts.push(metaRow('Vol', formatVolume(v), 'var(--text-primary)'));
+    }
+
+    const netOi = netOiSeries?.();
+    if (netOi && netOi.options().visible !== false) {
+      const exactNetOi = (param.seriesData.get(netOi) as { value?: number } | undefined)?.value;
+      const v = typeof exactNetOi === 'number' ? exactNetOi : seriesValueAt(netOi, logical);
+      if (v != null) {
+        const color = v >= 0 ? 'var(--green)' : 'var(--red)';
+        parts.push(metaRow('Net OI', (formatNetOi ?? String)(v), color));
+      }
     }
 
     const greeks = greekRowsAllPanes(

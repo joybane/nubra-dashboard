@@ -361,15 +361,15 @@ export default function GreekIndicatorPane({
     // to the default because `setCrosshairPosition` prices a synced crosshair off the pane's
     // default scale, and that has to be the scale this line actually lives on.
     const line = chart.addSeries(LineSeries, {
-      color: '#2962ff',
+      color: 'rgba(148, 163, 184, 0.32)',
       lineWidth: 1,
       priceScaleId: 'right',
       priceLineVisible: false,
-      lastValueVisible: true,
+      lastValueVisible: false,
       // barsToSessionLine paints each session's last point SESSION_BREAK_COLOR to stop the line
       // running into the next session; without this the hover dot would vanish on that bar, since
       // its colour otherwise follows the point's.
-      crosshairMarkerBackgroundColor: '#2962ff',
+      crosshairMarkerBackgroundColor: '#94a3b8',
     } as Partial<LineSeriesOptions>);
     line.priceScale().applyOptions({ autoScale: true, scaleMargins: { top: 0.08, bottom: 0.1 } });
     // The overlays' own axis. Its margins MUST match the ones `createGreekPane` applies to an

@@ -2,84 +2,15 @@
 //
 // One component, mounted by Chart, Tracker, Nubra BT and the position views alike, so a change
 // to a control or a caption reaches all of them at once.
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import type { GreekOverlayApi } from '../hooks/useGreekOverlay';
 import { formatExpiry, IST_OFFSET } from '../lib/utils';
-import { placePopup, type Placement } from '../lib/popupPlacement';
+import { SETTINGS_POPUP_Z, useAnchoredPopup } from '../hooks/useAnchoredPopup';
 
 /** Today's IST calendar day. Chart/greek days are all IST, so wall-clock UTC would be off by one. */
 function istToday(): string {
   return new Date(Date.now() + IST_OFFSET * 1000).toISOString().slice(0, 10);
-}
-
-/** Fixed tray width — also the fallback used before the portal has been measured. */
-const POPUP_WIDTH = 300;
-/**
- * Above every in-pane layer (the highest is OptionChain's z-[100]) but below the app's modals —
- * ConfirmDialog z-[200], OrderTicket z-[500], LoginOverlay z-[1000], Navbar z-[9999]. A settings
- * tray floating over a confirmation dialog would be worse than the clipping this replaces.
- */
-const POPUP_Z = 150;
-
-/**
- * Viewport-fixed position for a portalled popup, tracking its anchor.
- *
- * The tray is portalled to document.body because it was being clipped by four nested
- * `overflow-hidden` ancestors — see lib/popupPlacement for why z-index could not fix that.
- * Leaving its own box means it no longer follows the anchor for free, so scroll and resize have
- * to be re-measured by hand.
- */
-function useAnchoredPopup(
-  open: boolean,
-  anchorRef: React.RefObject<HTMLElement | null>,
-  popupRef: React.RefObject<HTMLElement | null>,
-): Placement | null {
-  const [pos, setPos] = useState<Placement | null>(null);
-
-  useLayoutEffect(() => {
-    if (!open) {
-      setPos(null);
-      return;
-    }
-    let frame: number | null = null;
-    const measure = () => {
-      frame = null;
-      const anchor = anchorRef.current?.getBoundingClientRect();
-      if (!anchor) return;
-      const el = popupRef.current;
-      setPos(
-        placePopup(
-          anchor,
-          {
-            width: el?.offsetWidth || POPUP_WIDTH,
-            // scrollHeight, NOT offsetHeight: offsetHeight is already capped by the maxHeight a
-            // previous pass applied, so measuring it would ratchet the tray smaller every time
-            // the user scrolled. scrollHeight stays the natural content height throughout.
-            height: el?.scrollHeight || 0,
-          },
-          { width: window.innerWidth, height: window.innerHeight },
-        ),
-      );
-    };
-
-    // Scroll listens in CAPTURE phase: scroll events from an ancestor container (the positions
-    // table, a chart pane) do not bubble to window, and those are exactly the ones that move
-    // the anchor out from under a fixed-position tray.
-    const schedule = () => {
-      if (frame == null) frame = requestAnimationFrame(measure);
-    };
-    measure();
-    window.addEventListener('resize', schedule);
-    window.addEventListener('scroll', schedule, true);
-    return () => {
-      if (frame != null) cancelAnimationFrame(frame);
-      window.removeEventListener('resize', schedule);
-      window.removeEventListener('scroll', schedule, true);
-    };
-  }, [open, anchorRef, popupRef]);
-
-  return pos;
 }
 
 export function Segmented<T extends string>({
@@ -256,10 +187,15 @@ export function GreekButton({ api, label }: { api: GreekOverlayApi; label: strin
             className="fixed w-[300px] overflow-y-auto bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl"
             style={
               pos
-                ? { left: pos.left, top: pos.top, maxHeight: pos.maxHeight, zIndex: POPUP_Z }
+                ? {
+                    left: pos.left,
+                    top: pos.top,
+                    maxHeight: pos.maxHeight,
+                    zIndex: SETTINGS_POPUP_Z,
+                  }
                 : // First paint, before useLayoutEffect has measured the content. Hidden rather
                   // than placed at 0,0, so the tray never flashes in the corner.
-                  { left: 0, top: 0, visibility: 'hidden', zIndex: POPUP_Z }
+                  { left: 0, top: 0, visibility: 'hidden', zIndex: SETTINGS_POPUP_Z }
             }
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">

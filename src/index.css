@@ -213,14 +213,14 @@ input::placeholder { color: var(--text-muted); opacity: .85; }
 .chart-inline-tools button:not([aria-label="Reset chart to latest candles"]) { padding-left: 6px; padding-right: 6px; }
 .chart-inline-tools button span.w-3 { width: 10px; height: 10px; }
 .chart-market-label { flex-shrink: 0; margin-left: 4px; white-space: nowrap; }
-.chart-tools-row { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 7px 14px; border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
-.chart-tools-row button { white-space: nowrap; }
-.chart-navigation-row { min-height: 39px; justify-content: flex-end; }
-.chart-timeframes { display: flex; flex-wrap: wrap; gap: 2px; margin-left: auto; }
-.chart-timeframes button { min-width: 30px; }
+.chart-market-timeframe { min-height: 26px; padding: 3px 6px; border-radius: 4px; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.chart-market-timeframe:hover, .chart-market-timeframe[aria-expanded='true'] { color: var(--text-primary); background: var(--bg-hover); }
 .chart-legend { position: absolute; top: 10px; left: 14px; z-index: 10; pointer-events: none; max-width: calc(100% - 94px); display: flex; flex-wrap: wrap; gap: 5px 10px; padding: 4px 7px; border-radius: 5px; background: color-mix(in srgb, var(--chart-bg) 85%, transparent); font-variant-numeric: tabular-nums; }
 .chart-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 14px; min-height: 24px; border-top: 1px solid var(--border); color: var(--text-muted); background: var(--bg-secondary); font-size: 10px; flex-shrink: 0; }
 .chart-status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-status-primary { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.chart-status-button { flex-shrink: 0; min-height: 18px; padding: 0 6px; border-left: 1px solid var(--border); color: var(--text-secondary); font-size: 10px; line-height: 18px; }
+.chart-status-button:hover, .chart-status-button[aria-expanded='true'] { color: var(--text-primary); background: var(--bg-hover); }
 .chart-empty { max-width: 380px; text-align: center; padding: 24px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
 .chart-empty p { line-height: 1.7; font-size: 13px; }
 .svg-chart-legend { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 18px; padding: 6px 8px; font-size: 11px; color: var(--text-secondary); }
@@ -231,7 +231,7 @@ input::placeholder { color: var(--text-muted); opacity: .85; }
   .chart-quote-row::-webkit-scrollbar { display: none; }
   .chart-inline-tools { margin-left: 10px; }
 }
-@container (max-width: 700px) { .chart-timeframes { margin-left: 0; flex-basis: 100%; } .chart-status .chart-shortcuts { display: none; } }
+@container (max-width: 700px) { .chart-status .chart-shortcuts { display: none; } }
 /* ─── CSS variable palette ──────────────────────────────── */
 :root,
 [data-theme='dark'] {
@@ -1051,19 +1051,8 @@ body {
   padding: 4px 12px;
 }
 
-[data-theme='bloomberg'] .chart-tools-row {
-  gap: 4px;
-  padding: 4px 12px;
-  border-top-color: #3e2c00;
-}
-
-[data-theme='bloomberg'] .chart-navigation-row {
-  min-height: 33px;
-}
-
 [data-theme='bloomberg'] .chart-inline-tools button,
-[data-theme='bloomberg'] .chart-tools-row button,
-[data-theme='bloomberg'] .chart-timeframes button {
+[data-theme='bloomberg'] .chart-market-timeframe {
   min-height: 25px;
   border: 1px solid #4c3600;
   background: #070707;
@@ -1071,9 +1060,8 @@ body {
 }
 
 [data-theme='bloomberg'] .chart-inline-tools button:hover,
-[data-theme='bloomberg'] .chart-tools-row button:hover,
-[data-theme='bloomberg'] .chart-timeframes button:hover,
-[data-theme='bloomberg'] .chart-timeframes button[class*='bg-[var(--accent)]'] {
+[data-theme='bloomberg'] .chart-market-timeframe:hover,
+[data-theme='bloomberg'] .chart-market-timeframe[aria-expanded='true'] {
   background: var(--accent) !important;
   border-color: var(--accent);
   color: #000 !important;

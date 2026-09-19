@@ -137,6 +137,18 @@ test('CE and PE share a scale; totals and Δ do not', () => {
   expect(seriesByScale).toEqual(['gt-vega-mine', 'gt-vega-mine', 'gd-vega-mine', 'gd-vega-mine']);
 });
 
+test('all indicator lines use the solid, readable Greeks-pane treatment', () => {
+  const { chart, seriesOpts } = fakeChart();
+  createGreekPane(chart, 'Vega·mine', { inline: true, scaleKey: 'vega-mine' });
+
+  for (const options of seriesOpts) {
+    expect(options.lineWidth).toBe(2);
+    expect(options.lineStyle).toBe(0); // lightweight-charts LineStyle.Solid
+    expect(options.lastValueVisible).toBe(true);
+    expect(options.crosshairMarkerRadius).toBe(4);
+  }
+});
+
 /**
  * `setData` used to build all four lines and then discard the ones nobody could see. `toLine` maps,
  * sorts and re-colours every point in the series, so on the default 'diff' that was double the

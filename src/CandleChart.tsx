@@ -16,6 +16,7 @@ import { useWatchlist } from './hooks/useWatchlistContext';
 import { useOIProfile } from './hooks/useOIProfile';
 import { useGreekOverlay } from './hooks/useGreekOverlay';
 import { GreekButton } from './components/GreekControls';
+import { SETTINGS_POPUP_Z, useAnchoredPopup } from './hooks/useAnchoredPopup';
 import ChartPaneResizer from './components/ChartPaneResizer';
 import { bindCandleCrosshair, fmtCrosshairTime } from './lib/greekTooltip';
 import UiIcon from './components/UiIcon';
@@ -200,7 +201,7 @@ function OiTimeSlider({
           />
         </div>
         <div className="flex justify-between text-[9px] text-[var(--text-muted)] mt-0.5">
-          <span>9:15</span>
+          <span>{minToLabel(0, openMin)}</span>
           <span>{minToLabel(max, openMin)}</span>
         </div>
       </div>
@@ -229,6 +230,7 @@ export default function CandleChart({ instrument, theme }: Props) {
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const oiTotalRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   // Read by the crosshair tooltip, which is bound once and outlives every symbol switch.
   const symRef = useRef('');
 
@@ -267,6 +269,14 @@ export default function CandleChart({ instrument, theme }: Props) {
     c: number;
     vol?: number;
     chg?: number;
+    netOi?: number;
+  } | null>(null);
+  const [totalHover, setTotalHover] = useState<{
+    x: number;
+    y: number;
+    ce: number;
+    pe: number;
+    net: number;
   } | null>(null);
   const [countdown, setCountdown] = useState<string | null>(null);
   const [countdownY, setCountdownY] = useState(0);
@@ -279,8 +289,17 @@ export default function CandleChart({ instrument, theme }: Props) {
   const [loadMore, setLoadMore] = useState(false);
   const [goToOpen, setGoToOpen] = useState(false);
   const goToBtnRef = useRef<HTMLButtonElement>(null);
+  const [timeframeOpen, setTimeframeOpen] = useState(false);
+  const timeframeAnchorRef = useRef<HTMLDivElement>(null);
+  const timeframePopupRef = useRef<HTMLDivElement>(null);
+  const timeframePopupPos = useAnchoredPopup(
+    timeframeOpen,
+    timeframeAnchorRef,
+    timeframePopupRef,
+  );
 
-  const { wsReady, subscribe, subscribeChart, unsubscribeChart, subscribeOC, unsubscribeOC } = useWs();
+  const { wsReady, subscribe, subscribeChart, unsubscribeChart, subscribeOC, unsubscribeOC } =
+    useWs();
   const intervalRef = useRef(interval);
   intervalRef.current = interval;
 
@@ -301,7 +320,64 @@ export default function CandleChart({ instrument, theme }: Props) {
     optTickExpiryRef.current = null;
   }
 
-  const oi = useOIProfile({ containerRef, canvasRef, candleRef, currentInstRef, allBarsRef });
+  const oi = useOIProfile({
+    containerRef,
+    canvasRef,
+    candleRef,
+    currentInstRef,
+    allBarsRef,
+    oiTotalSeriesRef: oiTotalRef,
+    interval,
+  });
+  const { showOiPopup, setShowOiPopup } = oi;
+  const oiSettingsAnchorRef = useRef<HTMLDivElement>(null);
+  const oiSettingsPopupRef = useRef<HTMLDivElement>(null);
+  const oiSettingsPos = useAnchoredPopup(showOiPopup, oiSettingsAnchorRef, oiSettingsPopupRef);
+
+  useEffect(() => {
+    if (!showOiPopup) return;
+    const onPointerDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        oiSettingsAnchorRef.current?.contains(target) ||
+        oiSettingsPopupRef.current?.contains(target)
+      )
+        return;
+      setShowOiPopup(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowOiPopup(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [showOiPopup, setShowOiPopup]);
+
+  useEffect(() => {
+    if (!timeframeOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        timeframeAnchorRef.current?.contains(target) ||
+        timeframePopupRef.current?.contains(target)
+      )
+        return;
+      setTimeframeOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTimeframeOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [timeframeOpen]);
+
   const vega = useGreekOverlay({ greek: 'vega', chartRef, currentInstRef, allBarsRef });
   const theta = useGreekOverlay({ greek: 'theta', chartRef, currentInstRef, allBarsRef });
   // IV rides the same sub-pane path as its siblings here (the Tracker renders all three inline).
@@ -356,20 +432,63 @@ export default function CandleChart({ instrument, theme }: Props) {
     volRef.current = vol;
     chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
 
+    // OI Profile's "Total" view: net (call OI − put OI) per minute, drawn as vertical
+    // bars in a slice of the same pane instead of a separate section — same trick as
+    // `vol` above, just pinned to the top instead of the bottom so the two don't overlap.
+    const oiTotal = chart.addSeries(HistogramSeries, {
+      priceScaleId: 'oiTotal',
+      lastValueVisible: false,
+      priceLineVisible: false,
+      visible: false,
+    } as Partial<HistogramSeriesOptions>);
+    oiTotalRef.current = oiTotal;
+    chart.priceScale('oiTotal').applyOptions({ scaleMargins: { top: 0, bottom: 0.82 } });
+
     chart.subscribeCrosshairMove((param) => {
       updateCountdownPosition();
       oi.requestDraw();
       const bar = param.seriesData?.get(candle) as OhlcBar | undefined;
       const vBar = param.seriesData?.get(vol) as { value: number } | undefined;
+      // `visible:false` (unchecking Total) leaves the series' data in place — only
+      // hidden — so without this check a stale reading would linger in the legend.
+      const oiTotalBar =
+        oiTotal.options().visible !== false
+          ? (param.seriesData?.get(oiTotal) as { value: number } | undefined)
+          : undefined;
+      const netOi = oiTotalBar?.value;
       if (bar) {
-        setOhlc({ o: bar.open, h: bar.high, l: bar.low, c: bar.close, vol: vBar?.value });
+        setOhlc({ o: bar.open, h: bar.high, l: bar.low, c: bar.close, vol: vBar?.value, netOi });
       } else if (lastBarRef.current) {
         setOhlc({
           o: lastBarRef.current.open,
           h: lastBarRef.current.high,
           l: lastBarRef.current.low,
           c: lastBarRef.current.close,
+          netOi,
         });
+      }
+
+      // Dedicated Call/Put/Net breakdown box — only while the cursor is up in the
+      // histogram's own band (its bars are squeezed into the top ~18% of the pane via
+      // scaleMargins), so it doesn't compete with the OHLC card over the candles below.
+      // Reads showTotalOiRef, not oi.showTotalOi directly: this listener is registered
+      // once when the chart is created and never rebound on re-render, so a plain state
+      // read here would always see whatever it was at mount — the ref is the one thing
+      // in this closure guaranteed to reflect the latest toggle.
+      const container = containerRef.current;
+      const topBand = container ? container.clientHeight * 0.22 : 0;
+      const detail =
+        param.time != null ? oi.oiTotalDetailRef.current.get(param.time as number) : undefined;
+      if (oi.showTotalOiRef.current && detail && param.point && param.point.y <= topBand) {
+        setTotalHover({
+          x: param.point.x,
+          y: param.point.y,
+          ce: detail.ce,
+          pe: detail.pe,
+          net: detail.ce - detail.pe,
+        });
+      } else {
+        setTotalHover(null);
       }
     });
 
@@ -415,9 +534,11 @@ export default function CandleChart({ instrument, theme }: Props) {
             tooltip: tooltipRef.current,
             candleSeries: () => candleRef.current,
             volumeSeries: () => volRef.current,
+            netOiSeries: () => oiTotalRef.current,
             symbol: () => symRef.current,
             formatPrice: (v) => fmtPrice(v),
             formatVolume: (v) => fmtVol(v),
+            formatNetOi: (v) => `${v >= 0 ? '+' : '-'}${fmtOI(Math.abs(v))}`,
           })
         : () => {};
 
@@ -442,7 +563,10 @@ export default function CandleChart({ instrument, theme }: Props) {
     const el = containerRef.current;
     if (!el) return;
     el.tabIndex = 0;
-    el.setAttribute('aria-label', 'Price chart. Arrow keys pan, plus and minus zoom, Home resets the view.');
+    el.setAttribute(
+      'aria-label',
+      'Price chart. Arrow keys pan, plus and minus zoom, Home resets the view.',
+    );
     const onKey = (e: KeyboardEvent) => {
       const ts = chartRef.current?.timeScale();
       if (!ts) return;
@@ -593,7 +717,7 @@ export default function CandleChart({ instrument, theme }: Props) {
       if (!tsStr || tsStr === '0' || !/^\d+$/.test(tsStr)) return;
       const utcSec = Number(BigInt(tsStr) / 1_000_000_000n);
       const barTime = snapToCandle(utcSec, intervalRef.current);
-      
+
       const cVal = Number(b.close) / 100;
       if (isNaN(cVal) || cVal <= 0) return;
       const vol = Number(b.cumulative_volume) || undefined;
@@ -1082,262 +1206,352 @@ export default function CandleChart({ instrument, theme }: Props) {
     <div className="flex flex-col h-full overflow-hidden">
       {/* Toolbar */}
       <div className="chart-toolbar">
-      <div className="chart-quote-row">
-        <span className="text-base font-bold text-[var(--text-primary)]">{sym}</span>
-        {priceDisplay && (
-          <>
-            <span
-              className={`text-[17px] font-bold ${priceDisplay.up ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
-            >
-              ₹{fmtPrice(priceDisplay.price)}
-            </span>
-            <span
-              className={`text-[13px] font-medium ${priceDisplay.up ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
-            >
-              {priceDisplay.up ? '+' : ''}
-              {priceDisplay.diff.toFixed(2)} ({priceDisplay.up ? '+' : ''}
-              {priceDisplay.pct}%)
-            </span>
-          </>
-        )}
+        <div className="chart-quote-row">
+          <span className="text-base font-bold text-[var(--text-primary)]">{sym}</span>
+          {priceDisplay && (
+            <>
+              <span
+                className={`text-[17px] font-bold ${priceDisplay.up ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+              >
+                ₹{fmtPrice(priceDisplay.price)}
+              </span>
+              <span
+                className={`text-[13px] font-medium ${priceDisplay.up ? 'text-[var(--green)]' : 'text-[var(--red)]'}`}
+              >
+                {priceDisplay.up ? '+' : ''}
+                {priceDisplay.diff.toFixed(2)} ({priceDisplay.up ? '+' : ''}
+                {priceDisplay.pct}%)
+              </span>
+            </>
+          )}
 
-        {/* Buy / Sell / Watchlist */}
-        {instrument && (
-          <div className="flex items-center gap-1 ml-1">
-            <button
-              onClick={() => openTicket({ instrument, side: 'BUY', ltp: priceDisplay?.price })}
-              className="px-2.5 py-1 rounded text-[11px] font-bold text-white bg-[var(--green)] hover:brightness-110 transition-all"
-            >
-              BUY
-            </button>
-            <button
-              onClick={() => openTicket({ instrument, side: 'SELL', ltp: priceDisplay?.price })}
-              className="px-2.5 py-1 rounded text-[11px] font-bold text-white bg-[var(--red)] hover:brightness-110 transition-all"
-            >
-              SELL
-            </button>
-            <button
-              onClick={() =>
-                addToWatchlist({
-                  displayName: sym,
-                  underlying: instrument.asset || sym,
-                  exchange: instrument.exchange || 'NSE',
-                  ref_id: instrument.ref_id,
-                  nubraName: getSymbol(instrument),
-                  optionType: instrument.option_type as 'CE' | 'PE' | undefined,
-                  strike: instrument.strike_price ? instrument.strike_price / 100 : undefined,
-                  expiry: instrument.expiry ? String(instrument.expiry) : undefined,
-                  ltpAtAdd: priceDisplay?.price ?? 0,
-                })
-              }
-              className="px-1.5 py-1 rounded text-[11px] font-semibold text-amber-400 bg-amber-500/15 hover:bg-amber-500/30 border border-amber-500/30 transition-all"
-              title="Add to watchlist"
-            >
-              ★
-            </button>
-          </div>
-        )}
-
-        <div className="chart-inline-tools" aria-label="Chart indicators">
-        {/* Volume toggle */}
-        <div className="relative ml-1">
-          <button
-            onClick={() => setShowVol((v) => !v)}
-            aria-pressed={showVol}
-            title="Show traded volume below the price chart"
-            className={`px-2.5 py-1 rounded text-xs font-medium border transition-all ${
-              showVol
-                ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
-                : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-            }`}
-          >
-            Volume
-          </button>
-        </div>
-
-        {/* OI Profile — left=toggle, right=settings caret */}
-        <div className="relative flex items-stretch">
-          <button
-            onClick={oi.toggleOI}
-            aria-pressed={oi.oiOn}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-l text-xs font-medium border border-r-0 transition-all ${
-              oi.oiOn
-                ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
-                : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-            }`}
-          >
-            <span
-              className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${oi.oiOn ? 'bg-white/30 border-white/60' : 'border-current opacity-60'}`}
-            >
-              {oi.oiOn && <span className="text-[8px] font-bold leading-none">✓</span>}
-            </span>
-            OI Profile
-          </button>
-          <button
-            onClick={oi.openSettings}
-            aria-label="Open interest profile settings"
-            className={`px-1.5 py-1 rounded-r text-xs font-medium border border-l-0 transition-all ${
-              oi.oiOn
-                ? 'bg-[var(--accent)] border-[var(--accent)] text-white hover:opacity-80'
-                : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-            }`}
-          >
-            ▾
-          </button>
-
-          {oi.showOiPopup && (
-            <div className="absolute top-full left-0 mt-1 z-50 w-[290px] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
-                <span className="text-[13px] font-semibold text-[var(--text-primary)]">
-                  OI Profile Settings
-                </span>
-                <button
-                  onClick={() => oi.setShowOiPopup(false)}
-                  className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-lg leading-none"
-                >
-                  ×
-                </button>
-              </div>
-
-              <div className="px-4 py-3 flex flex-col gap-4">
-                {oi.oiExpiries.length > 0 && (
-                  <div>
-                    <div className="text-[10px] font-semibold tracking-wider text-[var(--text-muted)] mb-2">
-                      EXPIRES INCLUDED
-                    </div>
-                    <div className="flex flex-col gap-1.5">
-                      {oi.oiExpiries.map((exp) => (
-                        <label
-                          key={exp}
-                          className="flex items-center gap-2 cursor-pointer select-none"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={oi.selExpiries.includes(exp)}
-                            onChange={(e) =>
-                              oi.setSelExpiries((prev) =>
-                                e.target.checked ? [...prev, exp] : prev.filter((x) => x !== exp),
-                              )
-                            }
-                            className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0"
-                          />
-                          <span className="text-[12px] text-[var(--text-primary)]">
-                            {formatExpiry(exp)}
-                          </span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                <div>
-                  <div className="text-[10px] font-semibold tracking-wider text-[var(--text-muted)] mb-2">
-                    VISUAL SETTINGS
-                  </div>
-                  <label className="flex items-center gap-2 cursor-pointer select-none mb-2">
-                    <input
-                      type="checkbox"
-                      checked={oi.showCalls}
-                      onChange={(e) => oi.setShowCalls(e.target.checked)}
-                      className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0"
-                    />
-                    <span className="text-[12px] text-[var(--text-primary)] flex-1">CALLS</span>
-                    <span
-                      className="w-4 h-4 rounded-sm shrink-0"
-                      style={{ backgroundColor: '#22c55e' }}
-                    />
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={oi.showPuts}
-                      onChange={(e) => oi.setShowPuts(e.target.checked)}
-                      className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0"
-                    />
-                    <span className="text-[12px] text-[var(--text-primary)] flex-1">PUTS</span>
-                    <span
-                      className="w-4 h-4 rounded-sm shrink-0"
-                      style={{ backgroundColor: '#ef4444' }}
-                    />
-                  </label>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-2 px-4 py-2.5 border-t border-[var(--border)]">
-                <button
-                  onClick={() => oi.setShowOiPopup(false)}
-                  className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={oi.applyExpiries}
-                  className="px-4 py-1.5 rounded-lg bg-[var(--accent)] text-white text-[12px] font-medium hover:bg-[var(--accent-dim)] transition-colors"
-                >
-                  Apply
-                </button>
-              </div>
+          {/* Buy / Sell / Watchlist */}
+          {instrument && (
+            <div className="flex items-center gap-1 ml-1">
+              <button
+                onClick={() => openTicket({ instrument, side: 'BUY', ltp: priceDisplay?.price })}
+                className="px-2.5 py-1 rounded text-[11px] font-bold text-white bg-[var(--green)] hover:brightness-110 transition-all"
+              >
+                BUY
+              </button>
+              <button
+                onClick={() => openTicket({ instrument, side: 'SELL', ltp: priceDisplay?.price })}
+                className="px-2.5 py-1 rounded text-[11px] font-bold text-white bg-[var(--red)] hover:brightness-110 transition-all"
+              >
+                SELL
+              </button>
+              <button
+                onClick={() =>
+                  addToWatchlist({
+                    displayName: sym,
+                    underlying: instrument.asset || sym,
+                    exchange: instrument.exchange || 'NSE',
+                    ref_id: instrument.ref_id,
+                    nubraName: getSymbol(instrument),
+                    optionType: instrument.option_type as 'CE' | 'PE' | undefined,
+                    strike: instrument.strike_price ? instrument.strike_price / 100 : undefined,
+                    expiry: instrument.expiry ? String(instrument.expiry) : undefined,
+                    ltpAtAdd: priceDisplay?.price ?? 0,
+                  })
+                }
+                className="px-1.5 py-1 rounded text-[11px] font-semibold text-amber-400 bg-amber-500/15 hover:bg-amber-500/30 border border-amber-500/30 transition-all"
+                title="Add to watchlist"
+              >
+                ★
+              </button>
             </div>
           )}
-        </div>
 
-        {/* Aggregate Vega / Theta / IV overlays */}
-        <GreekButton api={vega} label="Vega" />
-        <GreekButton api={theta} label="Theta" />
-        <GreekButton api={ivOverlay} label="IV" />
+          <div className="chart-inline-tools" aria-label="Chart indicators">
+            {/* Volume toggle */}
+            <div className="relative ml-1">
+              <button
+                onClick={() => setShowVol((v) => !v)}
+                aria-pressed={showVol}
+                title="Show traded volume below the price chart"
+                className={`px-2.5 py-1 rounded text-xs font-medium border transition-all ${
+                  showVol
+                    ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
+                    : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                Volume
+              </button>
+            </div>
 
-        {/* Reset zoom */}
-        <button
-          onClick={resetZoom}
-          className="px-2 py-1 rounded text-[11px] font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all ml-1"
-          title="Reset zoom to latest candles"
-          aria-label="Reset chart to latest candles"
-        >
-          <UiIcon name="reset" size={14} />
-        </button>
-        </div>
+            {/* OI Profile — left=toggle, right=settings caret */}
+            <div ref={oiSettingsAnchorRef} className="relative flex items-stretch">
+              <button
+                onClick={oi.toggleOI}
+                aria-pressed={oi.oiOn}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-l text-xs font-medium border border-r-0 transition-all ${
+                  oi.oiOn
+                    ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
+                    : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                <span
+                  className={`w-3 h-3 rounded-sm border flex items-center justify-center shrink-0 ${oi.oiOn ? 'bg-white/30 border-white/60' : 'border-current opacity-60'}`}
+                >
+                  {oi.oiOn && <span className="text-[8px] font-bold leading-none">✓</span>}
+                </span>
+                OI Profile
+              </button>
+              <button
+                onClick={oi.openSettings}
+                aria-label="Open interest profile settings"
+                className={`px-1.5 py-1 rounded-r text-xs font-medium border border-l-0 transition-all ${
+                  oi.oiOn
+                    ? 'bg-[var(--accent)] border-[var(--accent)] text-white hover:opacity-80'
+                    : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                ▾
+              </button>
 
-        <span className="chart-market-label text-[11px] text-[var(--text-muted)]">{instrument?.exchange || 'NSE'} <span className="mx-1">·</span> {interval} candles</span>
-      </div>
-      <div className="chart-tools-row chart-navigation-row">
-        <button className="shell-button" title="Fit all loaded candles" onClick={() => { chartRef.current?.timeScale().fitContent(); candleRef.current?.priceScale().applyOptions({ autoScale: true }); }}>Fit</button>
-        <button
-          ref={goToBtnRef}
-          className="shell-button"
-          title="Go to a date (Alt+G)"
-          aria-expanded={goToOpen}
-          onClick={() => setGoToOpen((v) => !v)}
-        >
-          Go to
-        </button>
-        {goToOpen && goToBtnRef.current && (
-          <GoToDatePopover
-            anchor={goToBtnRef.current}
-            intraday={isIntradayInterval(interval)}
-            defaultTime={minToHHMM(marketSession(instrument?.exchange).openMin)}
-            onGo={goToDate}
-            onClose={() => setGoToOpen(false)}
-          />
-        )}
+              {oi.showOiPopup &&
+                createPortal(
+                  <div
+                    ref={oiSettingsPopupRef}
+                    className="fixed w-[290px] bg-[var(--bg-card)] border border-[var(--border)] rounded-xl shadow-2xl overflow-hidden flex flex-col"
+                    style={
+                      oiSettingsPos
+                        ? {
+                            left: oiSettingsPos.left,
+                            top: oiSettingsPos.top,
+                            maxHeight: oiSettingsPos.maxHeight,
+                            zIndex: SETTINGS_POPUP_Z,
+                          }
+                        : {
+                            left: 0,
+                            top: 0,
+                            visibility: 'hidden',
+                            zIndex: SETTINGS_POPUP_Z,
+                          }
+                    }
+                  >
+                    <div className="flex shrink-0 items-center justify-between px-4 py-3 border-b border-[var(--border)]">
+                      <span className="text-[13px] font-semibold text-[var(--text-primary)]">
+                        OI Profile Settings
+                      </span>
+                      <button
+                        onClick={() => oi.setShowOiPopup(false)}
+                        className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-lg leading-none"
+                      >
+                        ×
+                      </button>
+                    </div>
 
-        {/* Interval buttons */}
-        <div className="chart-timeframes" role="group" aria-label="Chart timeframe">
-          {INTERVALS.map((iv) => (
+                    <div className="min-h-0 overflow-y-auto px-4 py-3 flex flex-col gap-4">
+                      <div>
+                        <div className="text-[10px] font-semibold tracking-wider text-[var(--text-muted)] mb-2">
+                          SHOW
+                        </div>
+                        <label className="flex items-center gap-2 cursor-pointer select-none mb-2">
+                          <input
+                            type="checkbox"
+                            checked={oi.showStrikeProfile}
+                            onChange={(e) => {
+                              // Both can be on together — the only rule is at least one stays
+                              // checked, or the toggle would be "on" while drawing nothing.
+                              if (!e.target.checked && !oi.showTotalOi) return;
+                              oi.setShowStrikeProfile(e.target.checked);
+                            }}
+                            className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0"
+                          />
+                          <span className="text-[12px] text-[var(--text-primary)] flex-1">
+                            Strike Profile
+                          </span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={oi.showTotalOi}
+                            onChange={(e) => {
+                              if (!e.target.checked && !oi.showStrikeProfile) return;
+                              oi.setShowTotalOi(e.target.checked);
+                            }}
+                            className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0"
+                          />
+                          <span
+                            className="text-[12px] text-[var(--text-primary)] flex-1"
+                            title="Net (total call OI − total put OI) across selected expiries, plotted over the session"
+                          >
+                            Total
+                          </span>
+                        </label>
+                      </div>
+
+                      {oi.oiExpiries.length > 0 && (
+                        <div>
+                          <div className="text-[10px] font-semibold tracking-wider text-[var(--text-muted)] mb-2">
+                            EXPIRES INCLUDED
+                          </div>
+                          <div className="flex flex-col gap-1.5">
+                            {oi.oiExpiries.map((exp) => (
+                              <label
+                                key={exp}
+                                className="flex items-center gap-2 cursor-pointer select-none"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={oi.selExpiries.includes(exp)}
+                                  onChange={(e) =>
+                                    oi.setSelExpiries((prev) =>
+                                      e.target.checked
+                                        ? [...prev, exp]
+                                        : prev.filter((x) => x !== exp),
+                                    )
+                                  }
+                                  className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0"
+                                />
+                                <span className="text-[12px] text-[var(--text-primary)]">
+                                  {formatExpiry(exp)}
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {oi.showStrikeProfile && (
+                        <div>
+                          <div className="text-[10px] font-semibold tracking-wider text-[var(--text-muted)] mb-2">
+                            VISUAL SETTINGS
+                          </div>
+                          <label className="flex items-center gap-2 cursor-pointer select-none mb-2">
+                            <input
+                              type="checkbox"
+                              checked={oi.showCalls}
+                              onChange={(e) => oi.setShowCalls(e.target.checked)}
+                              className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0"
+                            />
+                            <span className="text-[12px] text-[var(--text-primary)] flex-1">
+                              CALLS
+                            </span>
+                            <span
+                              className="w-4 h-4 rounded-sm shrink-0"
+                              style={{ backgroundColor: '#22c55e' }}
+                            />
+                          </label>
+                          <label className="flex items-center gap-2 cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={oi.showPuts}
+                              onChange={(e) => oi.setShowPuts(e.target.checked)}
+                              className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0"
+                            />
+                            <span className="text-[12px] text-[var(--text-primary)] flex-1">
+                              PUTS
+                            </span>
+                            <span
+                              className="w-4 h-4 rounded-sm shrink-0"
+                              style={{ backgroundColor: '#ef4444' }}
+                            />
+                          </label>
+                        </div>
+                      )}
+                      {oi.showTotalOi && (
+                        <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">
+                          Net of total call OI minus total put OI across the expiries above, plotted
+                          as a vertical bar per minute for the session — green above zero, red
+                          below.
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex shrink-0 items-center justify-end gap-2 px-4 py-2.5 border-t border-[var(--border)] bg-[var(--bg-card)]">
+                      <button
+                        onClick={() => oi.setShowOiPopup(false)}
+                        className="px-3 py-1.5 text-[12px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={oi.applyExpiries}
+                        className="px-4 py-1.5 rounded-lg bg-[var(--accent)] text-white text-[12px] font-medium hover:bg-[var(--accent-dim)] transition-colors"
+                      >
+                        Apply
+                      </button>
+                    </div>
+                  </div>,
+                  document.body,
+                )}
+            </div>
+
+            {/* Aggregate Vega / Theta / IV overlays */}
+            <GreekButton api={vega} label="Vega" />
+            <GreekButton api={theta} label="Theta" />
+            <GreekButton api={ivOverlay} label="IV" />
+
+            {/* Reset zoom */}
             <button
-              key={iv}
-              onClick={() => setInterval(iv)}
-              aria-pressed={interval === iv}
-              className={`px-2 py-1 rounded text-[12px] font-medium transition-all ${
-                interval === iv
-                  ? 'bg-[var(--accent)] text-white'
-                  : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
-              }`}
+              onClick={resetZoom}
+              className="px-2 py-1 rounded text-[11px] font-medium bg-[var(--bg-hover)] border border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-all ml-1"
+              title="Reset zoom to latest candles"
+              aria-label="Reset chart to latest candles"
             >
-              {iv}
+              <UiIcon name="reset" size={14} />
             </button>
-          ))}
+          </div>
+
+          <div ref={timeframeAnchorRef} className="chart-market-label">
+            <button
+              className="chart-market-timeframe"
+              title="Change chart timeframe"
+              aria-label={`Chart timeframe: ${interval}`}
+              aria-expanded={timeframeOpen}
+              onClick={() => setTimeframeOpen((open) => !open)}
+            >
+              {instrument?.exchange || 'NSE'} <span>·</span> {interval} candles <span>▾</span>
+            </button>
+
+            {timeframeOpen &&
+              createPortal(
+                <div
+                  ref={timeframePopupRef}
+                  className="fixed w-[204px] p-1.5 grid grid-cols-4 gap-1 bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-2xl"
+                  role="menu"
+                  aria-label="Chart timeframe"
+                  style={
+                    timeframePopupPos
+                      ? {
+                          left: timeframePopupPos.left,
+                          top: timeframePopupPos.top,
+                          maxHeight: timeframePopupPos.maxHeight,
+                          zIndex: SETTINGS_POPUP_Z,
+                        }
+                      : {
+                          left: 0,
+                          top: 0,
+                          visibility: 'hidden',
+                          zIndex: SETTINGS_POPUP_Z,
+                        }
+                  }
+                >
+                  {INTERVALS.map((iv) => (
+                    <button
+                      key={iv}
+                      role="menuitemradio"
+                      aria-checked={interval === iv}
+                      onClick={() => {
+                        setInterval(iv);
+                        setTimeframeOpen(false);
+                      }}
+                      className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors ${
+                        interval === iv
+                          ? 'bg-[var(--accent)] text-white'
+                          : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
+                      }`}
+                    >
+                      {iv}
+                    </button>
+                  ))}
+                </div>,
+                document.body,
+              )}
+          </div>
         </div>
-      </div>
       </div>
 
       {/* Chart container */}
@@ -1346,7 +1560,10 @@ export default function CandleChart({ instrument, theme }: Props) {
         className="relative flex-1 min-h-0 bg-[var(--bg-primary)]"
         onMouseDown={oi.handleMouseDown}
         onMouseMove={oi.handleMouseMove}
-        onMouseLeave={oi.handleMouseLeave}
+        onMouseLeave={() => {
+          oi.handleMouseLeave();
+          setTotalHover(null);
+        }}
         onWheel={() => oi.requestDraw()}
         onDoubleClick={resetZoom}
       >
@@ -1366,8 +1583,8 @@ export default function CandleChart({ instrument, theme }: Props) {
           style={{ minWidth: 150 }}
         />
 
-        {/* OI time range slider */}
-        {oi.oiOn && (
+        {/* OI time range slider — per-strike profile only; Total already spans the whole session */}
+        {oi.oiOn && oi.showStrikeProfile && (
           <OiTimeSlider
             fromTime={oi.oiFromTime}
             toTime={oi.oiToTime}
@@ -1396,6 +1613,17 @@ export default function CandleChart({ instrument, theme }: Props) {
                   <span className="text-[var(--text-primary)] font-medium">{fmtVol(ohlc.vol)}</span>
                 </>
               )}
+              {oi.showTotalOi && ohlc.netOi !== undefined && (
+                <>
+                  <span className="text-[var(--text-muted)] text-[11px] ml-1">Net OI</span>
+                  <span
+                    className={`font-medium ${ohlc.netOi >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}
+                  >
+                    {ohlc.netOi >= 0 ? '+' : '-'}
+                    {fmtOI(Math.abs(ohlc.netOi))}
+                  </span>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -1404,10 +1632,25 @@ export default function CandleChart({ instrument, theme }: Props) {
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center bg-[var(--bg-primary)] text-[var(--text-secondary)] text-[14px] z-10">
             <div className="chart-empty" role="status">
-              {loading.startsWith('Loading') ? <div className="spinner" /> : <UiIcon name="trade" size={28} />}
+              {loading.startsWith('Loading') ? (
+                <div className="spinner" />
+              ) : (
+                <UiIcon name="trade" size={28} />
+              )}
               <p>{loading}</p>
-              {loading.startsWith('Error') && instrument && <button className="shell-button border border-[var(--border)]" onClick={() => loadInstrument(instrument, interval)}>Retry loading chart</button>}
-              {!instrument && <span className="text-[12px] text-[var(--text-muted)]">Press / to find an instrument.</span>}
+              {loading.startsWith('Error') && instrument && (
+                <button
+                  className="shell-button border border-[var(--border)]"
+                  onClick={() => loadInstrument(instrument, interval)}
+                >
+                  Retry loading chart
+                </button>
+              )}
+              {!instrument && (
+                <span className="text-[12px] text-[var(--text-muted)]">
+                  Press / to find an instrument.
+                </span>
+              )}
             </div>
           </div>
         )}
@@ -1469,6 +1712,57 @@ export default function CandleChart({ instrument, theme }: Props) {
           </div>
         )}
 
+        {/* Total OI hover box — Call/Put/Net breakdown behind the net histogram bar.
+            Pinned to a fixed depth below the histogram band rather than cursor.y + a
+            small offset — the cursor is always inside that (short) band while this box
+            is showing, and the OHLC crosshair card already claims cursor.y + 16, so
+            anchoring off the same point stacked the two directly on each other. */}
+        {totalHover && oi.showTotalOi && (
+          <div
+            className="absolute z-20 pointer-events-none"
+            style={{
+              left: Math.max(
+                4,
+                Math.min(totalHover.x - 89, (containerRef.current?.clientWidth ?? 800) - 182),
+              ),
+              top: (containerRef.current?.clientHeight ?? 332) * 0.22 + 140,
+            }}
+          >
+            <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-lg shadow-2xl px-4 py-3 min-w-[178px]">
+              <div className="text-[14px] font-semibold text-[var(--text-primary)] mb-2 pb-1.5 border-b border-[var(--border)]">
+                Total OI
+              </div>
+              <div className="flex items-center justify-between gap-4 text-[13px] mb-1">
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 rounded-[2px] bg-[#22c55e] shrink-0" />
+                  <span className="text-[var(--text-muted)]">Call Total OI</span>
+                </div>
+                <span className="font-medium tabular-nums text-[var(--text-primary)]">
+                  {fmtOI(totalHover.ce)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-4 text-[13px] mb-1">
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 rounded-[2px] bg-[#ef4444] shrink-0" />
+                  <span className="text-[var(--text-muted)]">Put Total OI</span>
+                </div>
+                <span className="font-medium tabular-nums text-[var(--text-primary)]">
+                  {fmtOI(totalHover.pe)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-4 text-[13px] pt-1.5 border-t border-[var(--border)]">
+                <span className="text-[var(--text-muted)]">Net OI</span>
+                <span
+                  className={`font-medium tabular-nums ${totalHover.net >= 0 ? 'text-[#22c55e]' : 'text-[#ef4444]'}`}
+                >
+                  {totalHover.net >= 0 ? '+' : '-'}
+                  {fmtOI(Math.abs(totalHover.net))}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Candle countdown */}
         {countdown && (
           <div
@@ -1483,8 +1777,46 @@ export default function CandleChart({ instrument, theme }: Props) {
         )}
       </div>
       <div className="chart-status">
-        <span>{!wsReady ? 'Reconnecting · prices may be out of date' : lastBarRef.current ? `Latest candle: ${fmtCrosshairTime(lastBarRef.current.time)}${isIntradayInterval(interval) ? ' IST' : ''}` : 'Waiting for chart data'}</span>
-        <span className="chart-shortcuts">Scroll to zoom · Drag to pan · Double-click to reset</span>
+        <div className="chart-status-primary">
+          <span>
+            {!wsReady
+              ? 'Reconnecting · prices may be out of date'
+              : lastBarRef.current
+                ? `Latest candle: ${fmtCrosshairTime(lastBarRef.current.time)}${isIntradayInterval(interval) ? ' IST' : ''}`
+                : 'Waiting for chart data'}
+          </span>
+          <button
+            className="chart-status-button"
+            title="Fit all loaded candles"
+            onClick={() => {
+              chartRef.current?.timeScale().fitContent();
+              candleRef.current?.priceScale().applyOptions({ autoScale: true });
+            }}
+          >
+            Fit
+          </button>
+          <button
+            ref={goToBtnRef}
+            className="chart-status-button"
+            title="Go to a date (Alt+G)"
+            aria-expanded={goToOpen}
+            onClick={() => setGoToOpen((v) => !v)}
+          >
+            Go to
+          </button>
+          {goToOpen && goToBtnRef.current && (
+            <GoToDatePopover
+              anchor={goToBtnRef.current}
+              intraday={isIntradayInterval(interval)}
+              defaultTime={minToHHMM(marketSession(instrument?.exchange).openMin)}
+              onGo={goToDate}
+              onClose={() => setGoToOpen(false)}
+            />
+          )}
+        </div>
+        <span className="chart-shortcuts">
+          Scroll to zoom · Drag to pan · Double-click to reset
+        </span>
       </div>
     </div>
   );

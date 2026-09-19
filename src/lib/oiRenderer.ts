@@ -130,6 +130,10 @@ export function drawOI(p: DrawOIParams): void {
             : getHistOI(p.historicalMap, peName, null);
       deltas[sp] = { ceDelta: ceEnd - ceBase, peDelta: peEnd - peBase };
     }
+    // Strikes drop out of `deltas` when expiries/strikes change (e.g. Apply with a
+    // narrower selection) — clear before merging or a stale strike stays hit-testable
+    // in hover forever, since Object.assign only ever adds/overwrites keys.
+    for (const k of Object.keys(p.deltasOut)) delete p.deltasOut[Number(k)];
     Object.assign(p.deltasOut, deltas);
 
     let maxAbs = 1;

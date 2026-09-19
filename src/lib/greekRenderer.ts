@@ -3,12 +3,14 @@
 // Each "method pane" is a genuine lightweight-charts pane below the price pane,
 // with its own time-aligned x-axis. It plots up to four lines:
 //
-//   • CE / PE absolute totals   (Spec §2)  — solid, on the visible right scale
-//   • CE / PE difference-from-open (Spec §3) — dashed, on an overlay scale so it
-//     auto-scales independently of the (much larger) totals
+//   • CE / PE absolute totals   (Spec §2) — on the visible right scale
+//   • CE / PE difference-from-open (Spec §3) — on an overlay scale so it auto-scales
+//     independently of the (much larger) totals
 //
-// Totals and differences live on different magnitudes, so co-plotting them on one
-// axis would flatten the diff; the overlay scale keeps both readable.
+// Totals and differences live on different magnitudes, so co-plotting them on one axis would
+// flatten the diff; the overlay scale keeps both readable. Every series deliberately uses the
+// same solid 2px treatment as the strategy Greeks pane. Colour and the explicit CE/PE/Δ titles
+// carry identity more clearly than thin dash patterns at dense intraday resolutions.
 
 import {
   LineSeries,
@@ -288,7 +290,7 @@ export function createGreekPane(
 
   const mk = (
     color: string,
-    dashed: boolean,
+    _difference: boolean,
     scaleId: string | undefined,
     title: string,
   ): ISeriesApi<'Line'> =>
@@ -296,11 +298,12 @@ export function createGreekPane(
       LineSeries,
       {
         color,
-        lineWidth: dashed ? 1 : 2,
-        lineStyle: dashed ? LineStyle.Dashed : LineStyle.Solid,
+        lineWidth: 2,
+        lineStyle: LineStyle.Solid,
         priceLineVisible: false,
-        lastValueVisible: scaleId !== diffScale, // axis tag only for the totals scale
+        lastValueVisible: true,
         crosshairMarkerVisible: true,
+        crosshairMarkerRadius: 4,
         // Stated rather than defaulted: the marker's colour otherwise falls back to the hovered
         // POINT's colour, and each session's last point carries SESSION_BREAK_COLOR.
         crosshairMarkerBackgroundColor: color,
