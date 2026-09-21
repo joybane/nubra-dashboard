@@ -126,7 +126,7 @@ export default function OptionChain({
   const [activeQuick, setActiveQuick] = useState<string | null>(null);
   const [showGoToAtm, setShowGoToAtm] = useState(false);
   const [atmDir, setAtmDir] = useState<'up' | 'down'>('up');
-  const [showGreeks, setShowGreeks] = useState(true);
+  const [showGreeks, setShowGreeks] = useState(false);
 
   const cellMapRef = useRef(new Map<string, HTMLElement>());
   const maxCeOiRef = useRef(1);
@@ -1171,9 +1171,9 @@ export default function OptionChain({
 
   // ── JSX ────────────────────────────────────────────────────────────────────
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="option-chain-view flex flex-col h-full overflow-hidden">
       {/* Toolbar */}
-      <div className="h-12 bg-[var(--bg-secondary)] border-b border-[var(--border)] flex items-center gap-2 px-3 overflow-x-auto shrink-0">
+      <div className="option-chain-toolbar h-12 bg-[var(--bg-secondary)] border-b border-[var(--border)] flex items-center gap-2 px-3 overflow-x-auto shrink-0">
         <div className="flex gap-1 shrink-0">
           {QUICK_PICKS.map(({ sym, exch }) => (
             <button
@@ -1185,7 +1185,7 @@ export default function OptionChain({
                 setExchange(exch);
                 loadExpiryThenChain(sym, exch);
               }}
-              className={`px-2.5 py-1 rounded text-[12px] font-semibold border transition-all ${
+              className={`oc-quick-pick ${activeQuick === sym ? 'is-active' : ''} px-2.5 py-1 rounded text-[12px] font-semibold border transition-all ${
                 activeQuick === sym
                   ? 'bg-[var(--accent)] border-[var(--accent)] text-white'
                   : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
@@ -1292,7 +1292,7 @@ export default function OptionChain({
             setActiveQuick(null);
             loadExpiryThenChain(u, exchange);
           }}
-          className="px-3 py-1 rounded bg-[var(--accent)] text-white text-[12px] font-semibold hover:bg-[var(--accent-dim)] transition-colors shrink-0"
+          className="oc-load-button px-3 py-1 rounded bg-[var(--accent)] text-white text-[12px] font-semibold hover:bg-[var(--accent-dim)] transition-colors shrink-0"
         >
           Load
         </button>
@@ -1302,7 +1302,7 @@ export default function OptionChain({
         {/* Greeks column toggle */}
         <button
           onClick={() => setShowGreeks((v) => !v)}
-          className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all shrink-0 ${
+          className={`oc-greeks-button px-2.5 py-1 rounded text-[11px] font-semibold border transition-all shrink-0 ${
             showGreeks
               ? 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
               : 'bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)]'
@@ -1316,14 +1316,13 @@ export default function OptionChain({
         {!embedded && (
           <button
             onClick={() => setBasketMode(!basketMode)}
-            className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition-all shrink-0 flex items-center gap-1 ${
+            className={`oc-basket-button ${basketMode ? 'is-active' : ''} px-2.5 py-1 rounded text-[11px] font-semibold border transition-all shrink-0 flex items-center gap-1 ${
               basketMode
                 ? 'bg-amber-500/20 border-amber-500/40 text-amber-400'
                 : 'bg-[var(--bg-hover)] border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
             }`}
             title="Basket mode: B/S buttons add to basket instead of placing orders"
           >
-            <span className="text-[13px]">🧺</span>
             Basket
             {legCount > 0 && (
               <span className="ml-0.5 px-1.5 py-0 rounded-full bg-amber-500/30 text-amber-300 text-[9px] font-bold">
@@ -1383,7 +1382,7 @@ export default function OptionChain({
                       Puts
                     </th>
                   </tr>
-                  <tr className="sticky top-8 z-10 bg-[var(--bg-secondary)]">
+                  <tr className="sticky top-9 z-10 bg-[var(--bg-secondary)]">
                     {showGreeks &&
                       ['Vega', 'Gamma', 'Theta', 'Delta'].map((h) => (
                         <th

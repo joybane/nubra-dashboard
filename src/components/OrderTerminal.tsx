@@ -644,7 +644,7 @@ function OrdersTab({
               return (
                 <React.Fragment key={g.basket_group_id}>
                   <tr
-                    className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
+                    className="terminal-group-row border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
                     onClick={() => toggleExpand(g.basket_group_id)}
                   >
                     <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
@@ -1642,7 +1642,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                 return (
                   <React.Fragment key={g.basket_group_id}>
                     <tr
-                      className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
+                      className="terminal-group-row border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
                       onClick={() => toggleExpand(g.basket_group_id)}
                     >
                       <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
@@ -1730,7 +1730,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                 return (
                   <React.Fragment key={g.basket_group_id}>
                     <tr
-                      className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
+                      className="terminal-group-row border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
                       onClick={() => toggleExpand(g.basket_group_id)}
                     >
                       <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
@@ -1939,7 +1939,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                 return (
                   <React.Fragment key={g.basket_group_id}>
                     <tr
-                      className="border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
+                      className="terminal-group-row border-b border-[var(--border)]/50 hover:bg-[var(--bg-hover)] cursor-pointer bg-[var(--accent)]/[0.03]"
                       onClick={() => toggleExpand(g.basket_group_id)}
                     >
                       <td className="px-3 py-1.5 font-semibold text-[var(--accent)] whitespace-nowrap">
@@ -2445,7 +2445,7 @@ export default function OrderTerminal({
   return (
     <div
       ref={containerRef}
-      className="flex flex-col bg-[var(--bg-primary)] border-t border-[var(--border)] shrink-0 transition-[height] duration-200"
+      className="order-terminal flex flex-col bg-[var(--bg-primary)] border-t border-[var(--border)] shrink-0 transition-[height] duration-200"
       style={{ height: effectiveH }}
     >
       {/* drag handle — hidden when collapsed */}
@@ -2489,7 +2489,7 @@ export default function OrderTerminal({
           {uatAuth && (
             <button
               onClick={() => openTicket()}
-              className="px-3 py-1 rounded bg-[var(--accent)] text-white text-[11px] font-semibold hover:bg-[var(--accent-dim)] transition-colors"
+              className="terminal-new-order px-3 py-1 rounded bg-[var(--accent)] text-white text-[11px] font-semibold hover:bg-[var(--accent-dim)] transition-colors"
             >
               + New Order
             </button>

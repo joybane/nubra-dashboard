@@ -292,11 +292,7 @@ export default function CandleChart({ instrument, theme }: Props) {
   const [timeframeOpen, setTimeframeOpen] = useState(false);
   const timeframeAnchorRef = useRef<HTMLDivElement>(null);
   const timeframePopupRef = useRef<HTMLDivElement>(null);
-  const timeframePopupPos = useAnchoredPopup(
-    timeframeOpen,
-    timeframeAnchorRef,
-    timeframePopupRef,
-  );
+  const timeframePopupPos = useAnchoredPopup(timeframeOpen, timeframeAnchorRef, timeframePopupRef);
 
   const { wsReady, subscribe, subscribeChart, unsubscribeChart, subscribeOC, unsubscribeOC } =
     useWs();
@@ -1230,13 +1226,13 @@ export default function CandleChart({ instrument, theme }: Props) {
             <div className="flex items-center gap-1 ml-1">
               <button
                 onClick={() => openTicket({ instrument, side: 'BUY', ltp: priceDisplay?.price })}
-                className="px-2.5 py-1 rounded text-[11px] font-bold text-white bg-[var(--green)] hover:brightness-110 transition-all"
+                className="chart-trade-action is-buy px-2.5 py-1 rounded text-[11px] font-bold text-white bg-[var(--green)] hover:brightness-110 transition-all"
               >
                 BUY
               </button>
               <button
                 onClick={() => openTicket({ instrument, side: 'SELL', ltp: priceDisplay?.price })}
-                className="px-2.5 py-1 rounded text-[11px] font-bold text-white bg-[var(--red)] hover:brightness-110 transition-all"
+                className="chart-trade-action is-sell px-2.5 py-1 rounded text-[11px] font-bold text-white bg-[var(--red)] hover:brightness-110 transition-all"
               >
                 SELL
               </button>
@@ -1254,7 +1250,7 @@ export default function CandleChart({ instrument, theme }: Props) {
                     ltpAtAdd: priceDisplay?.price ?? 0,
                   })
                 }
-                className="px-1.5 py-1 rounded text-[11px] font-semibold text-amber-400 bg-amber-500/15 hover:bg-amber-500/30 border border-amber-500/30 transition-all"
+                className="chart-watchlist-action px-1.5 py-1 rounded text-[11px] font-semibold text-amber-400 bg-amber-500/15 hover:bg-amber-500/30 border border-amber-500/30 transition-all"
                 title="Add to watchlist"
               >
                 ★

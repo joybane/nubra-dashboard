@@ -571,9 +571,9 @@ export default function Analysis({ theme, onChangeView }: Props) {
   const sync = status?.sync;
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
+    <div className="analysis-view flex h-full flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
       {/* Header: what this is, what data it has, and whether the local data can be trusted */}
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border)] px-3 py-2">
+      <div className="analysis-commandbar flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border)] px-3 py-2">
         <div className="flex items-baseline gap-2">
           <span className="text-[14px] font-semibold">Analysis</span>
           <select
@@ -667,7 +667,7 @@ export default function Analysis({ theme, onChangeView }: Props) {
       )}
 
       {/* Settings */}
-      <div className="flex flex-wrap items-end gap-x-3 gap-y-2 border-b border-[var(--border)] px-3 py-2">
+      <div className="analysis-filters flex flex-wrap items-end gap-x-3 gap-y-2 border-b border-[var(--border)] px-3 py-2">
         <label className="flex flex-col gap-0.5">
           <span className={lblCls}>Entry</span>
           <input
@@ -813,9 +813,9 @@ export default function Analysis({ theme, onChangeView }: Props) {
       </div>
 
       {/* Body */}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="analysis-results flex min-h-0 flex-1 overflow-hidden">
         {/* Day list */}
-        <div className="flex w-[430px] shrink-0 flex-col border-r border-[var(--border)]">
+        <div className="analysis-list-pane flex w-[430px] shrink-0 flex-col border-r border-[var(--border)]">
           <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-1.5 text-[11px] text-[var(--text-muted)]">
             {scan ? (
               <span>
