@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
   CandlestickSeries,
+  LineStyle,
   LineSeries,
   type IChartApi,
   type MouseEventParams,
@@ -20,7 +21,7 @@ import PinnedCrosshairLayer from './components/PinnedCrosshairLayer';
 import PinCompareStrip, { type CompareRow } from './components/PinCompareStrip';
 import PaneDivider, { type PaneSpec } from './components/PaneDivider';
 import GreekIndicatorPane from './components/GreekIndicatorPane';
-import { GreeksTooltipBody, PnlTooltipBody, PriceTooltipBody } from './components/ChartTooltips';
+import { PnlTooltipBody, PriceTooltipBody } from './components/ChartTooltips';
 
 // ── Server shapes — mirrors of server/analysis/*.ts (the two tsconfigs are disjoint) ─────────
 
@@ -179,12 +180,39 @@ interface DayResponse {
   spotOhlc: { o: Grid; h: Grid; l: Grid } | null;
   ce: Grid;
   pe: Grid;
+  atmStrike: number;
+  atmCeStrike?: number;
+  atmPeStrike?: number;
+  atmCe: Grid;
+  atmPe: Grid;
 }
 
 // ── Constants & helpers ───────────────────────────────────────────────────────
 
-const UNDERLYING = 'NIFTY';
-const LOT = 65;
+type AnalysisUnderlying = 'NIFTY' | 'SENSEX';
+
+const UNDERLYING_CONFIG: Record<AnalysisUnderlying, { lot: number; instrument: Instrument }> = {
+  NIFTY: {
+    lot: 65,
+    instrument: {
+      stock_name: 'NIFTY 50',
+      nubra_name: 'NIFTY',
+      exchange: 'NSE',
+      derivative_type: 'INDEX',
+      lot_size: 65,
+    },
+  },
+  SENSEX: {
+    lot: 20,
+    instrument: {
+      stock_name: 'SENSEX',
+      nubra_name: 'SENSEX',
+      exchange: 'BSE',
+      derivative_type: 'INDEX',
+      lot_size: 20,
+    },
+  },
+};
 
 const DEFAULT_PARAMS: FinderParams = {
   entryTime: '09:15',
@@ -201,19 +229,14 @@ const DEFAULT_PARAMS: FinderParams = {
   legMismatchPct: 50,
 };
 
-const NIFTY_INSTRUMENT: Instrument = {
-  stock_name: 'NIFTY 50',
-  nubra_name: 'NIFTY',
-  exchange: 'NSE',
-  derivative_type: 'INDEX',
-  lot_size: LOT,
-};
-
 const CE_COLOR = '#22c55e';
 const PE_COLOR = '#ef4444';
 const SESSION_OPEN_MIN = 9 * 60 + 15;
 const YEAR_SECS = 365 * 86400;
-const GREEK_COLORS: Record<'delta' | 'gamma' | 'theta' | 'vega', string> = {
+type GreekKey = 'delta' | 'gamma' | 'theta' | 'vega';
+type GreekValues = Record<GreekKey, number | null>;
+const GREEK_KEYS: GreekKey[] = ['delta', 'gamma', 'theta', 'vega'];
+const GREEK_COLORS: Record<GreekKey, string> = {
   delta: '#3b82f6',
   gamma: '#a78bfa',
   theta: '#22c55e',
@@ -227,10 +250,11 @@ function expirySeconds(expiry: string): number {
 }
 
 const SETTINGS_KEY = 'nubra-analysis-settings';
-/** v2: ranking defaults to the CE/PE gap. Older saves carry the old `total` default, so it is dropped. */
-const SETTINGS_VERSION = 2;
+/** v2 changed ranking to CE/PE gap; v3 adds the underlying and its correct one-lot quantity. */
+const SETTINGS_VERSION = 3;
 
 interface Settings {
+  underlying: AnalysisUnderlying;
   params: FinderParams;
   from: string;
   to: string;
@@ -242,6 +266,7 @@ interface Settings {
 
 function loadSettings(): Settings {
   const fallback: Settings = {
+    underlying: 'NIFTY',
     params: DEFAULT_PARAMS,
     from: '',
     to: '',
@@ -254,10 +279,15 @@ function loadSettings(): Settings {
     if (!raw) return fallback;
     const saved = JSON.parse(raw) as Partial<Settings>;
     const savedParams: Partial<FinderParams> = { ...(saved.params ?? {}) };
-    if ((saved.version ?? 1) < SETTINGS_VERSION) delete savedParams.rankBy;
+    if ((saved.version ?? 1) < 2) delete savedParams.rankBy;
+    const underlying: AnalysisUnderlying = saved.underlying === 'SENSEX' ? 'SENSEX' : 'NIFTY';
+    if ((saved.version ?? 1) < SETTINGS_VERSION) {
+      savedParams.qty = UNDERLYING_CONFIG[underlying].lot;
+    }
     return {
       ...fallback,
       ...saved,
+      underlying,
       version: SETTINGS_VERSION,
       params: { ...DEFAULT_PARAMS, ...savedParams },
     };
@@ -337,6 +367,8 @@ export default function Analysis({ theme, onChangeView }: Props) {
   const { loadInstrumentInActivePane } = useWorkspaceState();
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const { params } = settings;
+  const underlying = settings.underlying;
+  const underlyingConfig = UNDERLYING_CONFIG[underlying];
 
   const updateSettings = useCallback((patch: Partial<Settings>) => {
     setSettings((prev) => {
@@ -362,7 +394,7 @@ export default function Analysis({ theme, onChangeView }: Props) {
 
   const refreshStatus = useCallback(async (): Promise<StatusResponse | null> => {
     try {
-      const res = await fetch(`/api/analysis/status?underlying=${UNDERLYING}`);
+      const res = await fetch(`/api/analysis/status?underlying=${underlying}`);
       if (res.status === 404) {
         setStatusError(
           'This server has no Analysis routes yet. Restart the server so it loads them, then reopen this tab.',
@@ -381,7 +413,7 @@ export default function Analysis({ theme, onChangeView }: Props) {
       setStatusError((e as Error).message);
       return null;
     }
-  }, []);
+  }, [underlying]);
 
   useEffect(() => {
     void refreshStatus();
@@ -399,12 +431,12 @@ export default function Analysis({ theme, onChangeView }: Props) {
       await fetch('/api/analysis/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ underlying: UNDERLYING }),
+        body: JSON.stringify({ underlying }),
       });
     } finally {
       void refreshStatus();
     }
-  }, [refreshStatus]);
+  }, [underlying, refreshStatus]);
 
   const verdictOk = status?.validation?.verdict.ok ?? false;
   const includeLocalOnly = settings.localOnly ?? verdictOk;
@@ -424,7 +456,7 @@ export default function Analysis({ theme, onChangeView }: Props) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          underlying: UNDERLYING,
+          underlying,
           params,
           from: settings.from || undefined,
           to: settings.to || undefined,
@@ -443,7 +475,7 @@ export default function Analysis({ theme, onChangeView }: Props) {
     } finally {
       if (seq === scanSeq.current) setScanLoading(false);
     }
-  }, [params, settings.from, settings.to, includeLocalOnly]);
+  }, [underlying, params, settings.from, settings.to, includeLocalOnly]);
 
   // First scan once the status says there is something to scan; again whenever a sync finishes.
   const autoScanned = useRef(false);
@@ -465,6 +497,20 @@ export default function Analysis({ theme, onChangeView }: Props) {
   const [visibleDays, setVisibleDays] = useState(120);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [selected, setSelected] = useState<{ date: string; index: number } | null>(null);
+  const [reportOpen, setReportOpen] = useState(false);
+
+  useEffect(() => {
+    scanSeq.current++;
+    autoScanned.current = false;
+    prevRunning.current = false;
+    setStatus(null);
+    setStatusError(null);
+    setScan(null);
+    setScanError(null);
+    setSelected(null);
+    setExpanded(new Set());
+    setReportOpen(false);
+  }, [underlying]);
 
   const rankBy = scan?.params.rankBy ?? params.rankBy;
   const sortedDays = useMemo(() => {
@@ -502,9 +548,9 @@ export default function Analysis({ theme, onChangeView }: Props) {
   const openInNubraBt = useCallback(
     (day: ScanDay) => {
       const p = scan?.params ?? params;
-      const lots = Math.max(1, Math.round(p.qty / LOT));
+      const lots = Math.max(1, Math.round(p.qty / underlyingConfig.lot));
       setNubraBtHandoff({
-        underlying: UNDERLYING,
+        underlying,
         date: day.date,
         expiry: day.expiry,
         entryTime: day.legs.entryTime,
@@ -514,13 +560,11 @@ export default function Analysis({ theme, onChangeView }: Props) {
           { strike: day.legs.ceStrike, optionType: 'CE', side: p.side, lots },
         ],
       });
-      loadInstrumentInActivePane(NIFTY_INSTRUMENT);
+      loadInstrumentInActivePane(underlyingConfig.instrument);
       onChangeView?.('nubrabacktest');
     },
-    [scan, params, loadInstrumentInActivePane, onChangeView],
+    [scan, params, underlying, underlyingConfig, loadInstrumentInActivePane, onChangeView],
   );
-
-  const [reportOpen, setReportOpen] = useState(false);
 
   // ── Render ──
   const cov = status?.coverage;
@@ -532,9 +576,25 @@ export default function Analysis({ theme, onChangeView }: Props) {
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border)] px-3 py-2">
         <div className="flex items-baseline gap-2">
           <span className="text-[14px] font-semibold">Analysis</span>
+          <select
+            aria-label="Analysis underlying"
+            className="h-6 rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-1.5 text-[11px] font-semibold"
+            value={underlying}
+            onChange={(e) => {
+              const next = e.target.value as AnalysisUnderlying;
+              updateSettings({
+                underlying: next,
+                params: { ...params, qty: UNDERLYING_CONFIG[next].lot },
+                localOnly: null,
+              });
+            }}
+          >
+            <option value="NIFTY">NIFTY</option>
+            <option value="SENSEX">SENSEX</option>
+          </select>
           <span className="text-[11px] text-[var(--text-muted)]">
-            {UNDERLYING} · {params.side === 'SELL' ? 'short' : 'long'} strangle OTM±
-            {params.strikeOffset} · profit mismatch at the same NIFTY close
+            {underlying} · {params.side === 'SELL' ? 'short' : 'long'} strangle OTM±
+            {params.strikeOffset} · profit mismatch at the same {underlying} close
           </span>
         </div>
         <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -741,7 +801,11 @@ export default function Analysis({ theme, onChangeView }: Props) {
         <button
           type="button"
           className="h-7 rounded border border-[var(--border)] px-2 text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-          onClick={() => updateSettings({ params: DEFAULT_PARAMS })}
+          onClick={() =>
+            updateSettings({
+              params: { ...DEFAULT_PARAMS, qty: underlyingConfig.lot },
+            })
+          }
           title="Restore default settings"
         >
           Defaults
@@ -903,10 +967,16 @@ export default function Analysis({ theme, onChangeView }: Props) {
         {/* Case chart / data check */}
         <div className="relative flex min-w-0 flex-1 flex-col">
           {reportOpen ? (
-            <ValidationPanel onClose={() => setReportOpen(false)} status={status} />
+            <ValidationPanel
+              onClose={() => setReportOpen(false)}
+              status={status}
+              underlying={underlying}
+            />
           ) : selectedDay && scan ? (
             <CaseChart
               theme={theme}
+              underlying={underlying}
+              instrument={underlyingConfig.instrument}
               day={selectedDay}
               selected={selectedCase}
               params={scan.params}
@@ -962,9 +1032,11 @@ function NumberField({
 function ValidationPanel({
   status,
   onClose,
+  underlying,
 }: {
   status: StatusResponse | null;
   onClose: () => void;
+  underlying: AnalysisUnderlying;
 }) {
   const [perDay, setPerDay] = useState<DayValidation[] | null>(null);
   const v = status?.validation;
@@ -972,7 +1044,7 @@ function ValidationPanel({
   useEffect(() => {
     if (!v) return;
     let cancelled = false;
-    fetch(`/api/analysis/validation?underlying=${UNDERLYING}`)
+    fetch(`/api/analysis/validation?underlying=${underlying}`)
       .then((r) => r.json())
       .then((d: { ok: boolean; report?: { perDay: DayValidation[] } }) => {
         if (!cancelled && d.ok && d.report) setPerDay(d.report.perDay);
@@ -981,7 +1053,7 @@ function ValidationPanel({
     return () => {
       cancelled = true;
     };
-  }, [v]);
+  }, [v, underlying]);
 
   const worst = useMemo(
     () => [...(perDay ?? [])].sort((a, b) => b.replayMaxAbsDiff - a.replayMaxAbsDiff).slice(0, 25),
@@ -1113,6 +1185,65 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
+function AtmGreeksTooltipBody({
+  timeStr,
+  strikeLabel,
+  ceName,
+  peName,
+  values,
+}: {
+  timeStr: string;
+  strikeLabel: string;
+  ceName: string;
+  peName: string;
+  values: Record<'CE' | 'PE', GreekValues>;
+}) {
+  const symbol = (key: GreekKey) =>
+    key === 'delta' ? 'Δ' : key === 'gamma' ? 'Γ' : key === 'theta' ? 'Θ' : 'V';
+  return (
+    <div className="min-w-[270px] rounded-lg border border-[var(--border)] bg-[var(--bg-card)] px-3 py-2 shadow-xl backdrop-blur-md">
+      <div className="mb-2 flex items-center justify-between gap-3 border-b border-[var(--border)] pb-1 text-[10px]">
+        <span className="font-mono tracking-wide text-[var(--text-muted)]">{timeStr}</span>
+        <span className="font-semibold text-[var(--text-primary)]">{strikeLabel}</span>
+      </div>
+      <table className="w-full border-collapse text-[10px]">
+        <thead className="text-[var(--text-muted)]">
+          <tr>
+            <th className="pb-1 text-left font-normal">Contract</th>
+            {GREEK_KEYS.map((key) => (
+              <th key={key} className="px-1 pb-1 text-right font-normal">
+                {symbol(key)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {(['CE', 'PE'] as const).map((side) => (
+            <tr key={side} className="border-t border-[#ffffff0a]">
+              <td
+                className="py-1 font-semibold"
+                style={{ color: side === 'CE' ? CE_COLOR : PE_COLOR }}
+              >
+                {side === 'CE' ? ceName : peName}
+              </td>
+              {GREEK_KEYS.map((key) => {
+                const value = values[side][key];
+                return (
+                  <td key={key} className="px-1 py-1 text-right font-mono font-semibold">
+                    {value == null
+                      ? '—'
+                      : `${value >= 0 ? '+' : ''}${value.toFixed(key === 'gamma' ? 4 : 2)}`}
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 // ── Case chart ────────────────────────────────────────────────────────────────
 
 function chartOptions(theme: Theme) {
@@ -1127,6 +1258,8 @@ function chartOptions(theme: Theme) {
 
 interface CaseChartProps {
   theme: Theme;
+  underlying: AnalysisUnderlying;
+  instrument: Instrument;
   day: ScanDay;
   selected: AnalysisCase | null;
   params: FinderParams;
@@ -1136,6 +1269,8 @@ interface CaseChartProps {
 
 function CaseChart({
   theme,
+  underlying,
+  instrument,
   day,
   selected,
   params,
@@ -1152,19 +1287,31 @@ function CaseChart({
     setLoading(true);
     setError(null);
     const qs = new URLSearchParams({
-      underlying: UNDERLYING,
+      underlying,
       date: day.date,
       source: day.source,
       entryTime: params.entryTime,
       strikeOffset: String(params.strikeOffset),
     });
+    if (selected) qs.set('atmSpot', String(selected.spot1));
     fetch(`/api/analysis/day?${qs}`, { signal: ctrl.signal })
       .then((r) => r.json() as Promise<DayResponse>)
       .then((d) => {
-        if (d.ok) setData(d);
-        else {
+        if (
+          d.ok &&
+          Number.isFinite(d.atmStrike) &&
+          Array.isArray(d.atmCe) &&
+          Array.isArray(d.atmPe)
+        ) {
+          setData(d);
+        } else {
           setData(null);
-          setError(d.error || 'Could not load this day.');
+          setError(
+            d.error ||
+              (d.ok
+                ? 'The Analysis server is out of date. Restart the app server, then try again.'
+                : 'Could not load this day.'),
+          );
         }
       })
       .catch((e: Error) => {
@@ -1174,7 +1321,7 @@ function CaseChart({
         if (!ctrl.signal.aborted) setLoading(false);
       });
     return () => ctrl.abort();
-  }, [day.date, day.source, params.entryTime, params.strikeOffset]);
+  }, [underlying, day.date, day.source, params.entryTime, params.strikeOffset, selected]);
 
   /** Everything the panes draw, precomputed once per day. P&L exists only from entry to exit. */
   const built = useMemo(() => {
@@ -1199,20 +1346,21 @@ function CaseChart({
     const cePnlAt: Grid = [];
     const pePnlAt: Grid = [];
     const totalAt: Grid = [];
-    // Net position Greeks (per unit — direction-signed, not scaled by qty), reconstructed via
-    // Black-76 the same way TradeChartView does for a backtested day: the broker keeps no
-    // historical Greeks feed for these dates, so IV is back-solved from each leg's traded
-    // premium and delta/gamma/theta/vega computed off that.
+    // Per-option Greeks for the fixed ATM CE and PE nearest the selected match's spot. Historical
+    // Greeks are not stored, so IV is back-solved from each option's traded premium before the
+    // Black-76 values are reconstructed.
     const expirySec = expirySeconds(data.expiry);
-    const legSign = params.side === 'SELL' ? -1 : 1;
-    const greekDelta: Array<{ time: UTCTimestamp; value: number }> = [];
-    const greekGamma: Array<{ time: UTCTimestamp; value: number }> = [];
-    const greekTheta: Array<{ time: UTCTimestamp; value: number }> = [];
-    const greekVega: Array<{ time: UTCTimestamp; value: number }> = [];
-    const deltaAt: Grid = [];
-    const gammaAt: Grid = [];
-    const thetaAt: Grid = [];
-    const vegaAt: Grid = [];
+    const greekSeries: Record<
+      'CE' | 'PE',
+      Record<GreekKey, Array<{ time: UTCTimestamp; value: number }>>
+    > = {
+      CE: { delta: [], gamma: [], theta: [], vega: [] },
+      PE: { delta: [], gamma: [], theta: [], vega: [] },
+    };
+    const greeksAt: Record<'CE' | 'PE', Record<GreekKey, Grid>> = {
+      CE: { delta: [], gamma: [], theta: [], vega: [] },
+      PE: { delta: [], gamma: [], theta: [], vega: [] },
+    };
     for (let i = 0; i < data.minutes.length; i++) {
       const time = (start + i * 60) as UTCTimestamp;
       const s = data.spot[i];
@@ -1254,31 +1402,26 @@ function CaseChart({
       pePnlAt.push(pp);
       totalAt.push(tp);
 
-      let dg: number | null = null;
-      let gg: number | null = null;
-      let tg: number | null = null;
-      let vg: number | null = null;
-      if (i >= entryIdx && i <= exitIdx && s != null && s > 0 && c != null && p != null) {
-        const T = Math.max((expirySec - time) / YEAR_SECS, 1e-6);
-        let ivC = impliedVolatility(c, s, data.legs.ceStrike, T, RISK_FREE, 'CE');
-        if (!Number.isFinite(ivC) || ivC <= 0) ivC = 0.2;
-        let ivP = impliedVolatility(p, s, data.legs.peStrike, T, RISK_FREE, 'PE');
-        if (!Number.isFinite(ivP) || ivP <= 0) ivP = 0.2;
-        const gC = blackScholes(s, data.legs.ceStrike, T, RISK_FREE, ivC, 'CE', true);
-        const gP = blackScholes(s, data.legs.peStrike, T, RISK_FREE, ivP, 'PE', true);
-        dg = legSign * (gC.delta + gP.delta);
-        gg = legSign * (gC.gamma + gP.gamma);
-        tg = legSign * (gC.theta + gP.theta);
-        vg = legSign * (gC.vega + gP.vega);
-        greekDelta.push({ time, value: dg });
-        greekGamma.push({ time, value: gg });
-        greekTheta.push({ time, value: tg });
-        greekVega.push({ time, value: vg });
+      const atmPrices = { CE: data.atmCe[i], PE: data.atmPe[i] };
+      for (const side of ['CE', 'PE'] as const) {
+        let values: GreekValues = { delta: null, gamma: null, theta: null, vega: null };
+        const premium = atmPrices[side];
+        if (s != null && s > 0 && premium != null && premium > 0) {
+          const T = Math.max((expirySec - time) / YEAR_SECS, 1e-6);
+          const strike =
+            side === 'CE'
+              ? (data.atmCeStrike ?? data.atmStrike)
+              : (data.atmPeStrike ?? data.atmStrike);
+          let iv = impliedVolatility(premium, s, strike, T, RISK_FREE, side);
+          if (!Number.isFinite(iv) || iv <= 0) iv = 0.2;
+          const g = blackScholes(s, strike, T, RISK_FREE, iv, side, true);
+          values = { delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega };
+          for (const key of GREEK_KEYS) {
+            greekSeries[side][key].push({ time, value: values[key]! });
+          }
+        }
+        for (const key of GREEK_KEYS) greeksAt[side][key].push(values[key]);
       }
-      deltaAt.push(dg);
-      gammaAt.push(gg);
-      thetaAt.push(tg);
-      vegaAt.push(vg);
     }
     return {
       start,
@@ -1292,14 +1435,8 @@ function CaseChart({
       cePnlAt,
       pePnlAt,
       totalAt,
-      greekDelta,
-      greekGamma,
-      greekTheta,
-      greekVega,
-      deltaAt,
-      gammaAt,
-      thetaAt,
-      vegaAt,
+      greekSeries,
+      greeksAt,
     };
   }, [data, params.side, params.qty, params.exitTime]);
 
@@ -1394,23 +1531,24 @@ function CaseChart({
       })
       .setData(built.total);
     if (greeks) {
-      const greekSeriesData = {
-        delta: built.greekDelta,
-        gamma: built.greekGamma,
-        theta: built.greekTheta,
-        vega: built.greekVega,
-      } as const;
-      (['delta', 'gamma', 'theta', 'vega'] as const).forEach((gk) => {
-        const s = greeks.addSeries(LineSeries, {
-          color: GREEK_COLORS[gk],
-          lineWidth: 1,
-          priceScaleId: `gk-${gk}`,
-          title: gk,
-          lastValueVisible: true,
-          priceLineVisible: false,
-        });
-        s.setData(greekSeriesData[gk]);
-      });
+      for (const side of ['CE', 'PE'] as const) {
+        for (const gk of GREEK_KEYS) {
+          const s = greeks.addSeries(LineSeries, {
+            color: GREEK_COLORS[gk],
+            lineWidth: side === 'CE' ? 2 : 1,
+            lineStyle: side === 'CE' ? LineStyle.Solid : LineStyle.Dashed,
+            priceScaleId: `gk-${gk}`,
+            title: `${
+              side === 'CE'
+                ? (data?.atmCeStrike ?? data?.atmStrike ?? 'ATM')
+                : (data?.atmPeStrike ?? data?.atmStrike ?? 'ATM')
+            } ${side} ${gk}`,
+            lastValueVisible: true,
+            priceLineVisible: false,
+          });
+          s.setData(built.greekSeries[side][gk]);
+        }
+      }
     }
     price.timeScale().fitContent();
     pnl.timeScale().fitContent();
@@ -1426,7 +1564,7 @@ function CaseChart({
       removeChart(pnl);
       if (greeks) removeChart(greeks);
     };
-  }, [built, theme, greeksVisible]);
+  }, [built, theme, greeksVisible, data?.atmStrike, data?.atmCeStrike, data?.atmPeStrike, isDark]);
 
   /**
    * Cross-pane scroll sync, crosshair→hoverIdx, and pin binding — for every pane currently on
@@ -1507,10 +1645,14 @@ function CaseChart({
         cePnl: built.cePnlAt[i],
         pePnl: built.pePnlAt[i],
         total: built.totalAt[i],
-        delta: built.deltaAt[i],
-        gamma: built.gammaAt[i],
-        theta: built.thetaAt[i],
-        vega: built.vegaAt[i],
+        atmGreeks: {
+          CE: Object.fromEntries(
+            GREEK_KEYS.map((key) => [key, built.greeksAt.CE[key][i]]),
+          ) as GreekValues,
+          PE: Object.fromEntries(
+            GREEK_KEYS.map((key) => [key, built.greeksAt.PE[key][i]]),
+          ) as GreekValues,
+        },
       };
     },
     [data, built],
@@ -1521,8 +1663,17 @@ function CaseChart({
     [built],
   );
 
-  const ceName = data ? `${UNDERLYING} ${data.legs.ceStrike} CE` : '';
-  const peName = data ? `${UNDERLYING} ${data.legs.peStrike} PE` : '';
+  const ceName = data ? `${underlying} ${data.legs.ceStrike} CE` : '';
+  const peName = data ? `${underlying} ${data.legs.peStrike} PE` : '';
+  const atmCeName = data ? `${underlying} ${data.atmCeStrike ?? data.atmStrike} CE` : '';
+  const atmPeName = data ? `${underlying} ${data.atmPeStrike ?? data.atmStrike} PE` : '';
+  const atmStrikeLabel = data
+    ? (data.atmCeStrike ?? data.atmStrike) === (data.atmPeStrike ?? data.atmStrike)
+      ? `ATM ${data.atmCeStrike ?? data.atmStrike}`
+      : `Near ATM CE ${data.atmCeStrike ?? data.atmStrike} · PE ${
+          data.atmPeStrike ?? data.atmStrike
+        }`
+    : 'ATM —';
 
   const compare = useMemo(() => {
     if (pins.length !== 2) return null;
@@ -1538,7 +1689,7 @@ function CaseChart({
       dt: pins[1].time - pins[0].time,
       colors: [pins[0].color, pins[1].color] as [string, string],
       price: rows([
-        [UNDERLYING, diff(a.spot, b.spot), 'price'],
+        [underlying, diff(a.spot, b.spot), 'price'],
         [peName, diff(a.pe, b.pe), 'price'],
         [ceName, diff(a.ce, b.ce), 'price'],
       ]),
@@ -1547,18 +1698,21 @@ function CaseChart({
         [peName, diff(a.pePnl, b.pePnl), 'money'],
         [ceName, diff(a.cePnl, b.cePnl), 'money'],
       ]),
-      greeks: (
-        [
-          ['Delta', diff(a.delta, b.delta), 2],
-          ['Gamma', diff(a.gamma, b.gamma), 4],
-          ['Theta', diff(a.theta, b.theta), 2],
-          ['Vega', diff(a.vega, b.vega), 2],
-        ] as Array<[string, number | null, number]>
-      )
+      greeks: (['CE', 'PE'] as const)
+        .flatMap((side) =>
+          GREEK_KEYS.map(
+            (key) =>
+              [
+                `${side} ${key.charAt(0).toUpperCase()}${key.slice(1)}`,
+                diff(a.atmGreeks[side][key], b.atmGreeks[side][key]),
+                key === 'gamma' ? 4 : 2,
+              ] as [string, number | null, number],
+          ),
+        )
         .filter((p): p is [string, number, number] => p[1] != null)
         .map(([label, value, digits]) => ({ label, value, kind: 'plain' as const, digits })),
     };
-  }, [pins, valuesAt, indexOfTime, ceName, peName]);
+  }, [pins, valuesAt, indexOfTime, underlying, ceName, peName]);
 
   const hover = hoverIdx != null ? valuesAt(hoverIdx) : null;
 
@@ -1616,7 +1770,9 @@ function CaseChart({
         <button
           type="button"
           onClick={() => setGreeksVisible((v) => !v)}
-          title="Net position Greeks (Black-76), reconstructed per minute from each leg's traded premium"
+          title={`Greeks for ${atmCeName || 'the near-ATM call'} and ${
+            atmPeName || 'the near-ATM put'
+          } (Black-76)`}
           className={`rounded px-2 py-1 text-[11px] font-semibold border transition-colors ${
             greeksVisible
               ? 'bg-[#a78bfa]/15 border-[#a78bfa]/40 text-[#a78bfa]'
@@ -1656,7 +1812,7 @@ function CaseChart({
           <>
             <span className="font-mono text-[var(--text-primary)]">{hover.hhmm}</span>
             <span>
-              {UNDERLYING} {num(hover.spot)}
+              {underlying} {num(hover.spot)}
             </span>
             <span style={{ color: PE_COLOR }}>PE {num(hover.pe)}</span>
             <span style={{ color: CE_COLOR }}>CE {num(hover.ce)}</span>
@@ -1671,10 +1827,15 @@ function CaseChart({
             </span>
             {greeksVisible && (
               <>
-                <span style={{ color: GREEK_COLORS.delta }}>Δ {num(hover.delta, 3)}</span>
-                <span style={{ color: GREEK_COLORS.gamma }}>Γ {num(hover.gamma, 4)}</span>
-                <span style={{ color: GREEK_COLORS.theta }}>Θ {num(hover.theta, 2)}</span>
-                <span style={{ color: GREEK_COLORS.vega }}>V {num(hover.vega, 2)}</span>
+                <span className="font-semibold">{atmStrikeLabel}</span>
+                <span style={{ color: CE_COLOR }}>
+                  CE Δ {num(hover.atmGreeks.CE.delta, 3)} Γ {num(hover.atmGreeks.CE.gamma, 4)} Θ{' '}
+                  {num(hover.atmGreeks.CE.theta, 2)} V {num(hover.atmGreeks.CE.vega, 2)}
+                </span>
+                <span style={{ color: PE_COLOR }}>
+                  PE Δ {num(hover.atmGreeks.PE.delta, 3)} Γ {num(hover.atmGreeks.PE.gamma, 4)} Θ{' '}
+                  {num(hover.atmGreeks.PE.theta, 2)} V {num(hover.atmGreeks.PE.vega, 2)}
+                </span>
               </>
             )}
           </>
@@ -1711,7 +1872,7 @@ function CaseChart({
                     ...(v.pe != null ? [{ name: peName, color: PE_COLOR, value: v.pe }] : []),
                     ...(v.ce != null ? [{ name: ceName, color: CE_COLOR, value: v.ce }] : []),
                   ]}
-                  underlying={UNDERLYING}
+                  underlying={underlying}
                 />
               );
             }}
@@ -1793,14 +1954,12 @@ function CaseChart({
                   const v = valuesAt(indexOfTime(pin.time));
                   if (!v) return null;
                   return (
-                    <GreeksTooltipBody
+                    <AtmGreeksTooltipBody
                       timeStr={v.hhmm}
-                      values={{
-                        net: { delta: v.delta, gamma: v.gamma, theta: v.theta, vega: v.vega },
-                      }}
-                      selectedGreeks={new Set(['delta', 'gamma', 'theta', 'vega'])}
-                      greeksLegFilter={new Set(['net'])}
-                      colors={GREEK_COLORS}
+                      strikeLabel={atmStrikeLabel}
+                      ceName={atmCeName}
+                      peName={atmPeName}
+                      values={v.atmGreeks}
                     />
                   );
                 }}
@@ -1833,7 +1992,7 @@ function CaseChart({
               className="bg-[var(--bg-primary)]"
             >
               <GreekIndicatorPane
-                instrument={NIFTY_INSTRUMENT}
+                instrument={instrument}
                 bars={indicatorBars}
                 theme={theme}
                 // One session: this is a single backtested day, the same as TradeChartView.

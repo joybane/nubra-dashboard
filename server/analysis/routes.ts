@@ -34,7 +34,7 @@ import type { PostTimeseries } from './nubraSource.ts';
 import { createAnalysisSync, type AnalysisSync } from './sync.ts';
 import { readValidationReport } from './validation.ts';
 
-const UNDERLYINGS = ['NIFTY'] as const;
+const UNDERLYINGS = ['NIFTY', 'SENSEX'] as const;
 type AnalysisUnderlying = (typeof UNDERLYINGS)[number];
 
 export interface AnalysisRouteDeps {
@@ -322,6 +322,7 @@ export function registerAnalysisRoutes(deps: AnalysisRouteDeps): void {
       source?: string;
       entryTime?: string;
       strikeOffset?: string;
+      atmSpot?: string;
     };
   }>('/api/analysis/day', async (req, reply) => {
     const q = req.query;
@@ -350,6 +351,31 @@ export function registerAnalysisRoutes(deps: AnalysisRouteDeps): void {
       }
       const ce: Grid = day.ce[String(legs.ceStrike)];
       const pe: Grid = day.pe[String(legs.peStrike)];
+      const requestedAtmSpot = Number(q.atmSpot);
+      const atmSpot =
+        Number.isFinite(requestedAtmSpot) && requestedAtmSpot > 0
+          ? requestedAtmSpot
+          : legs.entrySpot;
+      const byDistanceToAtm = (a: number, b: number) =>
+        Math.abs(a - atmSpot) - Math.abs(b - atmSpot) || a - b;
+      const ceStrikes = Object.keys(day.ce)
+        .map(Number)
+        .filter(Number.isFinite)
+        .sort(byDistanceToAtm);
+      const peStrikes = Object.keys(day.pe)
+        .map(Number)
+        .filter(Number.isFinite)
+        .sort(byDistanceToAtm);
+      const commonStrike = ceStrikes.filter((strike) => day.pe[String(strike)] != null)[0];
+      // Older cache files only kept the OTM call ladder and OTM put ladder, so they have no
+      // shared strike. That must not suppress the case price/P&L charts: use the nearest stored
+      // contract on each side for Greeks until those immutable days are rebuilt with ATM overlap.
+      const atmCeStrike = commonStrike ?? ceStrikes[0];
+      const atmPeStrike = commonStrike ?? peStrikes[0];
+      if (atmCeStrike == null || atmPeStrike == null) {
+        reply.code(422);
+        return { ok: false, error: `no call/put series available near ${atmSpot}` };
+      }
       return {
         ok: true,
         underlying,
@@ -363,6 +389,12 @@ export function registerAnalysisRoutes(deps: AnalysisRouteDeps): void {
         spotOhlc: day.spotOhlc ?? null,
         ce,
         pe,
+        // Kept for clients predating side-specific strikes. New clients use the two fields below.
+        atmStrike: commonStrike ?? atmCeStrike,
+        atmCeStrike,
+        atmPeStrike,
+        atmCe: day.ce[String(atmCeStrike)],
+        atmPe: day.pe[String(atmPeStrike)],
       };
     }
     reply.code(404);

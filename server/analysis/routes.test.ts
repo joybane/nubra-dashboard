@@ -18,7 +18,12 @@ const idleSync = {
 } as unknown as AnalysisSync;
 
 /** Spot flat at 23250 all day; CE decays, PE flat — every same-spot pair is a SELL gain. */
-function day(date: string, source: 'nubra' | 'local', ceSlope = 0.1) {
+function day(
+  date: string,
+  source: 'nubra' | 'local',
+  ceSlope = 0.1,
+  underlying: 'NIFTY' | 'SENSEX' = 'NIFTY',
+) {
   const spot = emptyGrid();
   const ce = emptyGrid();
   const pe = emptyGrid();
@@ -29,14 +34,20 @@ function day(date: string, source: 'nubra' | 'local', ceSlope = 0.1) {
   }
   return {
     v: 1 as const,
-    underlying: 'NIFTY',
+    underlying,
     date,
     source,
     expiry: '2026-01-06',
     monthly: false,
     spot,
-    ce: { '23350': ce },
-    pe: { '23150': pe },
+    ce:
+      underlying === 'SENSEX'
+        ? { '23100': ce, '23250': ce, '23300': ce, '23500': ce }
+        : { '23150': ce, '23250': ce, '23350': ce },
+    pe:
+      underlying === 'SENSEX'
+        ? { '23100': pe, '23250': pe, '23300': pe, '23500': pe }
+        : { '23150': pe, '23250': pe, '23350': pe },
   };
 }
 
@@ -137,11 +148,48 @@ describe('analysis routes', () => {
     expect(body.legs).toMatchObject({ ceStrike: 23350, peStrike: 23150, entryTime: '09:15' });
     expect(body.minutes).toHaveLength(SESSION_BARS);
     expect(body.ce[0]).toBe(200);
+    expect(body.atmStrike).toBe(23250);
+    expect(body.atmCe[0]).toBe(200);
+    expect(body.atmPe[0]).toBe(50);
 
     const missing = await app.inject({
       method: 'GET',
       url: '/api/analysis/day?underlying=NIFTY&date=2026-02-02',
     });
     expect(missing.statusCode).toBe(404);
+  });
+
+  test('day remains chartable when an older cache has disjoint call and put ladders', async () => {
+    const cached = day('2026-01-05', 'nubra');
+    cached.ce = { '23250': cached.ce['23250'], '23350': cached.ce['23350'] };
+    cached.pe = { '23150': cached.pe['23150'], '23200': cached.pe['23250'] };
+    await store.write(cached);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/analysis/day?underlying=NIFTY&date=2026-01-05&atmSpot=23261',
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      atmCeStrike: 23250,
+      atmPeStrike: 23200,
+    });
+  });
+
+  test('supports SENSEX and returns the common ATM call and put nearest the matched spot', async () => {
+    await store.write(day('2026-01-05', 'nubra', 0.1, 'SENSEX'));
+    const status = await app.inject({
+      method: 'GET',
+      url: '/api/analysis/status?underlying=SENSEX',
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json().coverage.nubra.days).toBe(1);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/analysis/day?underlying=SENSEX&date=2026-01-05&atmSpot=23261',
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ underlying: 'SENSEX', atmStrike: 23250 });
   });
 });

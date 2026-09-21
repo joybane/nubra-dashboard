@@ -90,7 +90,8 @@ export function round2(n: number): number {
 }
 
 /**
- * The strikes a day must keep so that OTM±`offset` resolves at any minute.
+ * The strikes a day must keep so that OTM±`offset` resolves at any minute and both sides have
+ * the day's ATM range available for chart/Greeks enrichment.
  *
  * ATM is spot rounded to the strike step, so over the day it ranges between the rounded low and
  * the rounded high. One extra strike either side absorbs rounding at the edges and a step that is
@@ -117,8 +118,8 @@ export function strikeCoverage(
     return out;
   };
   return {
-    ce: range(atmLo + (offset - 1) * step, atmHi + (offset + 1) * step),
-    pe: range(atmLo - (offset + 1) * step, atmHi - (offset - 1) * step),
+    ce: range(atmLo, atmHi + (offset + 1) * step),
+    pe: range(atmLo - (offset + 1) * step, atmHi),
   };
 }
 
