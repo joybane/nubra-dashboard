@@ -72,3 +72,51 @@ test('initDb leaves the schema alone; trackers and versions round-trip once used
   expect(rows[0]).toMatchObject({ t1_ns: T1, spot2: 23226.5, pe_delta: -406.25 });
   expect(mod.dbListMismatchVersions()).toHaveLength(4);
 });
+
+test('versions reload in saved order; coverage only moves forward; prune drops and renumbers', async () => {
+  const mod = await import('./paperDb.ts');
+  handle = mod.initDb();
+  const T1 = Date.parse('2026-09-24T03:47:00Z') * 1_000_000;
+  const row = (case_no: number, t2Min: number, gap: number) => ({
+    basket_group_id: 'bg_1',
+    case_no,
+    color_idx: case_no - 1,
+    t1_ns: T1,
+    t2_ns: T1 + t2Min * 60e9,
+    spot1: 1,
+    spot2: 1,
+    ce1: 1,
+    ce2: 1,
+    pe1: 1,
+    pe2: 1,
+    ce_delta: 1,
+    pe_delta: 1,
+    gap,
+  });
+  // A stronger reading saved last with an EARLIER t2 is still the case's latest version.
+  mod.dbInsertMismatchVersion(row(1, 45, 692.25));
+  mod.dbInsertMismatchVersion(row(1, 41, 705.25));
+  mod.dbInsertMismatchVersion(row(3, 50, 10));
+  mod.dbInsertMismatchVersion(row(4, 60, 20));
+  expect(mod.dbListMismatchVersions('bg_1').map((r) => r.gap)).toEqual([692.25, 705.25, 10, 20]);
+
+  expect(mod.dbGetMismatchCoverage('bg_1')).toBeNull();
+  mod.dbSetMismatchCoverage('bg_1', 2000);
+  mod.dbSetMismatchCoverage('bg_1', 1000);
+  expect(mod.dbGetMismatchCoverage('bg_1')).toBe(2000);
+
+  const [, , third] = mod.dbListMismatchVersions('bg_1');
+  mod.dbPruneMismatchVersions(
+    'bg_1',
+    [third.id!],
+    [
+      [1, 1],
+      [4, 2],
+    ],
+  );
+  expect(mod.dbListMismatchVersions('bg_1').map((r) => [r.case_no, r.color_idx, r.gap])).toEqual([
+    [1, 0, 692.25],
+    [1, 0, 705.25],
+    [2, 1, 20],
+  ]);
+});

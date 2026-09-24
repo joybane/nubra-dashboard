@@ -64,9 +64,16 @@ export function getChainAsset(item: Instrument): string {
  * `FUT_CRUDEOIL_20260819`. NSE names (`NIFTY2570329900CE`) cannot match that shape,
  * so they keep returning 'NSE' exactly as before. Mirrors `parseDisplayName` in
  * server/ocFeedGuard.ts.
+ *
+ * SENSEX and BANKEX derivatives (`SENSEX26SEP74100PE`, "SENSEX 74100 PE") are BSE. Reading
+ * them as NSE made the broker 404 their history, so a SENSEX strategy chart had no leg lines
+ * and no P&L curve.
  */
 export function exchangeFromName(name: string | undefined | null): string {
-  return /^(?:OPT|FUT)_[A-Z][A-Z0-9]*_\d{8}/.test(String(name ?? '')) ? 'MCX' : 'NSE';
+  const n = String(name ?? '').toUpperCase();
+  if (/^(?:OPT|FUT)_[A-Z][A-Z0-9]*_\d{8}/.test(n)) return 'MCX';
+  if (/^(?:SENSEX|BANKEX)/.test(n)) return 'BSE';
+  return 'NSE';
 }
 
 // ─── Chart / OHLCV ───────────────────────────────────────────────────────────

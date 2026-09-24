@@ -119,12 +119,17 @@ export default function MismatchStripLayer({
   const strips: Array<{ key: string; x: number; members: Member[] }> = [];
   for (const [minute, members] of groups) {
     const x = xOfMinute(minute);
+    // Strongest first. A stack used to show its last-listed case, which buried the day's biggest
+    // case (2026-09-24 NIFTY #1, ₹1,088.75) under #3/#9 at 09:17 and #2 at 09:49 — it was only
+    // reachable by clicking through the stack.
+    members.sort((a, b) => b.v.gap - a.v.gap || a.c.case_no - b.c.case_no);
     if (x != null) strips.push({ key: String(minute), x, members });
   }
 
   // The active case's whole trail, so a reading you saw earlier (before a stronger near-copy
   // took over its tab) never just vanishes — it stays as a faint mark you can click back to.
-  const activeCaseObj = activeCase != null ? cases.find((c) => c.case_no === activeCase) : undefined;
+  const activeCaseObj =
+    activeCase != null ? cases.find((c) => c.case_no === activeCase) : undefined;
   const historyTicks: Array<{ key: string; x: number; versionIdx: number }> = [];
   if (activeCaseObj && onPickVersion) {
     const strongestIdx = activeCaseObj.versions.length - 1;
@@ -160,9 +165,12 @@ export default function MismatchStripLayer({
                 background: mismatchColor(activeCaseObj.color_idx),
                 opacity: 0.5,
               }}
-              title={`Mismatch #${activeCaseObj.case_no} · superseded reading · ${mismatchClock(
+              title={`Decay #${activeCaseObj.case_no} · superseded reading · ${mismatchClock(
                 v.t1_ns,
-              ).slice(0, 5)} → ${mismatchClock(v.t2_ns)} · gap ${inr(v.gap).slice(1)} — click to view`}
+              ).slice(
+                0,
+                5,
+              )} → ${mismatchClock(v.t2_ns)} · gap ${inr(v.gap).slice(1)} — click to view`}
               onClick={(e) => {
                 e.stopPropagation();
                 onPickVersion(activeCaseObj.case_no, versionIdx);
@@ -171,13 +179,12 @@ export default function MismatchStripLayer({
           );
         })}
       {strips.map(({ key, x, members }) => {
-        const topIdx = members.length - 1;
         const activeIdx = members.findIndex((m) => m.c.case_no === activeCase);
-        const shownIdx = activeIdx === -1 ? topIdx : activeIdx;
+        const shownIdx = activeIdx === -1 ? 0 : activeIdx;
         const shown = members[shownIdx];
         const active = activeCase === shown.c.case_no;
         const stacked = members.length > 1;
-        const baseTitle = `Mismatch #${shown.c.case_no} · ${mismatchClock(shown.v.t1_ns).slice(0, 5)} → ${mismatchClock(
+        const baseTitle = `Decay #${shown.c.case_no} · ${mismatchClock(shown.v.t1_ns).slice(0, 5)} → ${mismatchClock(
           shown.v.t2_ns,
         )} · PE ${inr(shown.v.pe_delta)} · CE ${inr(shown.v.ce_delta)}`;
         return (
@@ -207,7 +214,7 @@ export default function MismatchStripLayer({
             }
             onClick={(e) => {
               e.stopPropagation();
-              const nextIdx = activeIdx === -1 ? topIdx : (activeIdx - 1 + members.length) % members.length;
+              const nextIdx = activeIdx === -1 ? 0 : (activeIdx + 1) % members.length;
               onPick(members[nextIdx].c.case_no);
             }}
           >
@@ -240,13 +247,19 @@ export function MismatchCaseCard({ c, pinnedVersion, onPinVersion, onClose }: Ca
   const rows = c.versions.map((v, i) => ({ v, i })).reverse();
   return (
     <div
-      className="absolute z-50 pointer-events-auto rounded-lg border border-[var(--border)] bg-[var(--bg-card,var(--bg-secondary))] shadow-2xl text-[11px]"
-      style={{ top: 8, right: 84, borderLeft: `3px solid ${color}`, maxHeight: '60%', width: 360 }}
+      className="absolute z-50 pointer-events-auto flex flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-card,var(--bg-secondary))] shadow-2xl text-[11px]"
+      style={{
+        top: 8,
+        right: 8,
+        borderLeft: `3px solid ${color}`,
+        maxHeight: 'min(60vh, calc(100% - 16px))',
+        width: 'min(440px, calc(100% - 16px))',
+      }}
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-[var(--border)]">
+      <div className="flex shrink-0 items-center justify-between gap-2 px-2.5 py-1.5 border-b border-[var(--border)]">
         <span className="font-semibold" style={{ color }}>
-          Mismatch #{c.case_no}
+          Decay #{c.case_no}
           <span className="ml-2 font-normal text-[var(--text-muted)]">
             {c.versions.length} version{c.versions.length === 1 ? '' : 's'} · recorded tick values
           </span>
@@ -255,20 +268,39 @@ export function MismatchCaseCard({ c, pinnedVersion, onPinVersion, onClose }: Ca
           type="button"
           className="text-[var(--text-muted)] hover:text-[var(--text-primary)] leading-none text-sm"
           onClick={onClose}
-          title="Close this case and its pins"
+          title="Close this decay case and its pins"
+          aria-label="Close decay case"
         >
           ×
         </button>
       </div>
-      <div className="overflow-y-auto" style={{ maxHeight: 'calc(60vh - 40px)' }}>
-        <table className="w-full tabular-nums">
+      <details className="group shrink-0 border-b border-[var(--border)] px-2.5 py-1 text-[10px] text-[var(--text-muted)]">
+        <summary className="cursor-pointer select-none hover:text-[var(--text-secondary)]">
+          How versions are grouped
+        </summary>
+        <p className="pt-1 leading-relaxed">
+          A reading joins this case when its earlier time and live time are each under 30 minutes
+          from the case&apos;s latest version. Only a wider CE/PE gap is kept as a new version.
+          Every reading already has the underlying within ±1 point, its two moments at least 30
+          minutes apart, and a leg divergence of at least 50%.
+        </p>
+      </details>
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+        <table className="w-full table-fixed tabular-nums">
+          <colgroup>
+            <col style={{ width: '31%' }} />
+            <col style={{ width: '18%' }} />
+            <col style={{ width: '17%' }} />
+            <col style={{ width: '17%' }} />
+            <col style={{ width: '17%' }} />
+          </colgroup>
           <thead className="text-[10px] text-[var(--text-muted)]">
             <tr>
-              <th className="text-left font-normal px-2 py-1">Earlier → live</th>
+              <th className="text-left font-normal pl-2 pr-1 py-1">Earlier → live</th>
               <th className="text-right font-normal px-1 py-1">NIFTY</th>
               <th className="text-right font-normal px-1 py-1">PE Δ</th>
               <th className="text-right font-normal px-1 py-1">CE Δ</th>
-              <th className="text-right font-normal px-2 py-1">Gap</th>
+              <th className="text-right font-normal pl-1 pr-2 py-1">Gap</th>
             </tr>
           </thead>
           <tbody>
@@ -281,10 +313,14 @@ export function MismatchCaseCard({ c, pinnedVersion, onPinVersion, onClose }: Ca
                 onClick={() => onPinVersion(i)}
                 title="Pin this version's two minutes"
               >
-                <td className="px-2 py-0.5 whitespace-nowrap">
-                  {mismatchClock(v.t1_ns).slice(0, 5)} → {mismatchClock(v.t2_ns)}
+                <td className="pl-2 pr-1 py-0.5 whitespace-nowrap">
+                  <span>
+                    {mismatchClock(v.t1_ns).slice(0, 5)} → {mismatchClock(v.t2_ns)}
+                  </span>
                   {i === c.versions.length - 1 && (
-                    <span className="ml-1 text-[9px] text-[var(--text-muted)]">strongest</span>
+                    <span className="block text-[9px] leading-none text-[var(--text-muted)]">
+                      strongest
+                    </span>
                   )}
                 </td>
                 <td className="px-1 py-0.5 text-right text-[var(--text-secondary)]">
@@ -300,7 +336,9 @@ export function MismatchCaseCard({ c, pinnedVersion, onPinVersion, onClose }: Ca
                 >
                   {inr(v.ce_delta)}
                 </td>
-                <td className="px-2 py-0.5 text-right font-semibold">{inr(v.gap).slice(1)}</td>
+                <td className="pl-1 pr-2 py-0.5 text-right font-semibold whitespace-nowrap">
+                  {inr(v.gap).slice(1)}
+                </td>
               </tr>
             ))}
           </tbody>

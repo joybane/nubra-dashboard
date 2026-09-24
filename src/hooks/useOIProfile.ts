@@ -115,6 +115,11 @@ export function useOIProfile({
   const oiDrawPendingRef = useRef(false);
   const oiHistDateRef = useRef<string>('');
   const oiHistFailedRef = useRef(false);
+  // Bumped on every fetchOIHistory call so a fetch started for an expiry selection that's
+  // since been superseded (a new Apply landed before the old request returned) can tell
+  // its response is stale and discard it, instead of overwriting oiHistoricalRef with
+  // data keyed to symbols that no longer match oiSymbolMapRef.
+  const oiHistTicketRef = useRef(0);
 
   // ── State ────────────────────────────────────────────────────────────────
   const [oiOn, setOiOn] = useState(false);
@@ -414,8 +419,10 @@ export function useOIProfile({
     startSnapshotTimer();
     requestDraw();
     // Expiry selection changed — the per-symbol history above was just invalidated,
-    // so the net-OI series needs a fresh fetch too, not just the per-strike bars.
-    if (showTotalOiRef.current) fetchOIHistory();
+    // so the net-OI series needs a fresh fetch too, not just the per-strike bars. Forced
+    // because a fetch for the *old* expiries (e.g. triggered the instant "Total" was
+    // checked) may still be in flight; it must not block this one.
+    if (showTotalOiRef.current) fetchOIHistory(true);
   }
 
   function getChartDate(): Date {
@@ -431,10 +438,19 @@ export function useOIProfile({
     return new Date();
   }
 
-  async function fetchOIHistory() {
-    if (!oiChainRef.current || !currentInstRef.current || oiHistLoadingRef.current) return;
+  // `force` bypasses the "already loading" guard for callers that know the expiry
+  // selection just changed — otherwise a fetch still in flight for the *previous*
+  // expiries (e.g. kicked off the instant "Total" was checked) silently swallows the
+  // fresh request. The ticket then makes sure that if the superseded fetch resolves
+  // after this one starts, its response — keyed to symbols oiSymbolMapRef no longer
+  // has — gets discarded instead of overwriting the current data with a mismatch that
+  // computeTotalSeries can't find anything for.
+  async function fetchOIHistory(force = false) {
+    if (!oiChainRef.current || !currentInstRef.current) return;
+    if (oiHistLoadingRef.current && !force) return;
     const symMap = oiSymbolMapRef.current;
     if (!symMap.ce.size) return;
+    const ticket = ++oiHistTicketRef.current;
     oiHistLoadingRef.current = true;
     oiHistFailedRef.current = false;
 
@@ -512,6 +528,7 @@ export function useOIProfile({
       }
 
       console.log(`[OI] Fetched ${map.size}/${values.length} instruments`);
+      if (ticket !== oiHistTicketRef.current) return; // superseded by a newer expiry change
       oiHistoricalRef.current = map;
       oiHistFetchedRef.current = true;
       oiHistDateRef.current = chartDate.toISOString().slice(0, 10);
@@ -519,9 +536,9 @@ export function useOIProfile({
       computeTotalSeries();
     } catch (e) {
       console.error('[OI] Historical fetch failed:', e);
-      oiHistFailedRef.current = true;
+      if (ticket === oiHistTicketRef.current) oiHistFailedRef.current = true;
     } finally {
-      oiHistLoadingRef.current = false;
+      if (ticket === oiHistTicketRef.current) oiHistLoadingRef.current = false;
     }
   }
 

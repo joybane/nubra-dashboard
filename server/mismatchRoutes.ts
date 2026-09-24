@@ -7,17 +7,27 @@
  */
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import {
+  dbGetMismatchCoverage,
   dbInsertMismatchVersion,
   dbListMismatchTrackers,
   dbListMismatchVersions,
+  dbPruneMismatchVersions,
+  dbSetMismatchCoverage,
   dbSetMismatchTracker,
   type MismatchVersionRow,
 } from './paperDb.ts';
-import type { TimeseriesPost } from './intradayBars.ts';
+import {
+  fetchTodaySeconds,
+  istSecondOfDay,
+  istSecondToEpochNs,
+  type TimeseriesPost,
+} from './intradayBars.ts';
 import {
   StrategyMismatchTracker,
   istDate,
   istMinute,
+  isNearVersion,
+  sessionMinutes,
   strategyLegs,
   type MismatchCase,
   type MismatchVersion,
@@ -37,6 +47,9 @@ export interface MismatchStore {
   listTrackers(): Array<{ basket_group_id: string; enabled: number }>;
   insertVersion(row: MismatchVersionRow): void;
   listVersions(basketGroupId?: string): MismatchVersionRow[];
+  getCoverage?(basketGroupId: string): number | null;
+  setCoverage?(basketGroupId: string, liveUntilMs: number): void;
+  prune?(basketGroupId: string, deleteIds: number[], renumber: Array<[number, number]>): void;
 }
 
 const dbStore: MismatchStore = {
@@ -44,7 +57,60 @@ const dbStore: MismatchStore = {
   listTrackers: dbListMismatchTrackers,
   insertVersion: dbInsertMismatchVersion,
   listVersions: dbListMismatchVersions,
+  getCoverage: dbGetMismatchCoverage,
+  setCoverage: dbSetMismatchCoverage,
+  prune: dbPruneMismatchVersions,
 };
+
+/** A row written this long after the moment it describes came from a catch-up replay. */
+const REPLAYED_AFTER_MS = 120_000;
+
+/**
+ * What to remove from one strategy's stored versions, which must be in saved (id) order.
+ *
+ * Before 2026-09-24 a restart replayed the whole day and re-stored early moments of existing cases
+ * as new cases, and re-added readings an existing case already held. A case goes when it was
+ * written by a replay and every one of its readings is a near-copy of a reading in an earlier
+ * surviving case; a reading goes when its case already holds the identical reading. The
+ * survivors are renumbered 1..n in their original order.
+ */
+export function planMismatchCleanup(rows: MismatchVersionRow[]): {
+  deleteIds: number[];
+  renumber: Array<[number, number]>;
+} {
+  const byCase = new Map<number, MismatchVersionRow[]>();
+  for (const r of rows) {
+    const list = byCase.get(r.case_no) ?? [];
+    list.push(r);
+    byCase.set(r.case_no, list);
+  }
+  const at = (r: MismatchVersionRow) => ({ t1Ns: Number(r.t1_ns), t2Ns: Number(r.t2_ns) });
+  const deleteIds: number[] = [];
+  const kept: MismatchVersionRow[] = [];
+  const keptNos: number[] = [];
+  for (const no of [...byCase.keys()].sort((a, b) => a - b)) {
+    const list = byCase.get(no)!;
+    const first = list[0];
+    const replayed =
+      first.created_at != null &&
+      first.created_at - Number(first.t2_ns) / 1_000_000 > REPLAYED_AFTER_MS;
+    if (replayed && list.every((r) => kept.some((k) => isNearVersion(at(k), at(r))))) {
+      for (const r of list) if (r.id != null) deleteIds.push(r.id);
+      continue;
+    }
+    const seen = new Set<string>();
+    for (const r of list) {
+      const key = `${r.t1_ns}|${r.t2_ns}|${r.ce2}|${r.pe2}|${r.gap}`;
+      if (seen.has(key) && r.id != null) deleteIds.push(r.id);
+      else {
+        seen.add(key);
+        kept.push(r);
+      }
+    }
+    keptNos.push(no);
+  }
+  return { deleteIds, renumber: keptNos.map((no, i) => [no, i + 1] as [number, number]) };
+}
 
 export interface MismatchRouteDeps {
   fastify: FastifyInstance;
@@ -62,6 +128,11 @@ export interface MismatchRouteDeps {
   nowMs?: () => number;
   /** Background minute-close refresh. Off in tests. */
   backfillEveryMs?: number | null;
+  /**
+   * Turn the tracker on by itself for every eligible strategy nobody has toggled yet. A manual
+   * "off" is stored and respected. Default on.
+   */
+  autoEnable?: boolean;
 }
 
 export interface MismatchCaseDto {
@@ -173,16 +244,42 @@ export function registerMismatchRoutes({
   store = dbStore,
   nowMs = () => Date.now(),
   backfillEveryMs = 60_000,
+  autoEnable = true,
 }: MismatchRouteDeps) {
-  const enabled = new Set(
-    store
-      .listTrackers()
-      .filter((t) => t.enabled)
-      .map((t) => t.basket_group_id),
-  );
+  if (store.prune) {
+    const all = store.listVersions();
+    for (const gid of new Set(all.map((r) => r.basket_group_id))) {
+      const plan = planMismatchCleanup(all.filter((r) => r.basket_group_id === gid));
+      if (plan.deleteIds.length === 0 && plan.renumber.every(([a, b]) => a === b)) continue;
+      store.prune(gid, plan.deleteIds, plan.renumber);
+      console.log(
+        `[Mismatch] ${gid}: removed ${plan.deleteIds.length} duplicate reading(s), ${plan.renumber.length} case(s) kept`,
+      );
+    }
+  }
+  const stored = store.listTrackers();
+  const enabled = new Set(stored.filter((t) => t.enabled).map((t) => t.basket_group_id));
+  /** Strategies with a stored on/off, auto or manual. Auto-enable never overrides these. */
+  const decided = new Set(stored.map((t) => t.basket_group_id));
   const trackers = new Map<string, StrategyMismatchTracker>();
   /** Which option-chain feed each tracker's legs arrive on, learned from the first tick. */
   const feedOf = new Map<string, string>();
+  /** Latest moment (epoch ms) each strategy has been scored up to, live or by replay. */
+  const liveUntil = new Map<string, number>();
+  const coverageDirty = new Set<string>();
+  /** Where each tracker's catch-up replay starts: what was already scored when it was created. */
+  const replayFrom = new WeakMap<StrategyMismatchTracker, number>();
+
+  function markCovered(gid: string, ms: number): void {
+    if (ms <= (liveUntil.get(gid) ?? 0)) return;
+    liveUntil.set(gid, ms);
+    coverageDirty.add(gid);
+  }
+
+  function flushCoverage(): void {
+    for (const gid of coverageDirty) store.setCoverage?.(gid, liveUntil.get(gid)!);
+    coverageDirty.clear();
+  }
 
   const sameLegs = (a: StrategyLegs, b: StrategyLegs) =>
     a.ce.refId === b.ce.refId &&
@@ -193,7 +290,20 @@ export function registerMismatchRoutes({
 
   /** Bring the live trackers in line with the enabled set and the open book. */
   function sync(): void {
+    flushCoverage();
     const positions = simBroker.getPositions();
+    // Same gate as the manual toggle: without a broker session the backfill and replay can't run,
+    // so wait for one rather than start a tracker that misses everything before now. A strategy
+    // that isn't one CE + one PE yet (legs still filling) stays undecided and is retried.
+    if (autoEnable && getTimeseriesPost()) {
+      const today = istDate(nowMs());
+      for (const gid of new Set(positions.map((p) => p.basket_group_id || ''))) {
+        if (!gid || decided.has(gid) || !strategyLegs(positions, gid, today).ok) continue;
+        decided.add(gid);
+        enabled.add(gid);
+        store.setTracker(gid, true);
+      }
+    }
     for (const gid of [...trackers.keys()]) {
       if (!enabled.has(gid)) {
         trackers.delete(gid);
@@ -213,10 +323,25 @@ export function registerMismatchRoutes({
       }
       if (current && sameLegs(current.legs, found.legs)) continue;
       const t = new StrategyMismatchTracker(found.legs, casesFromRows(store.listVersions(gid)));
+      // Read before any live tick reaches the new tracker, or the replay would skip everything.
+      replayFrom.set(t, liveUntil.get(gid) ?? store.getCoverage?.(gid) ?? 0);
       trackers.set(gid, t);
       feedOf.delete(gid);
-      void backfill(t);
+      void backfillAndCatchUp(t);
     }
+  }
+
+  /** The symbol the "spot" side is read from: the asset itself, or on MCX the future its options
+   * are written on. Null means the future couldn't be resolved — nothing more can be done. */
+  async function resolveUnderlying(legs: StrategyLegs): Promise<string | null> {
+    if (legs.exchange !== 'MCX') return legs.asset;
+    const fut =
+      legs.optionExpiry && getMcxFuture
+        ? await getMcxFuture(legs.asset, legs.optionExpiry).catch(() => null)
+        : null;
+    if (!fut)
+      console.warn(`[Mismatch] no ${legs.asset} future for ${legs.optionExpiry}; ticks only`);
+    return fut;
   }
 
   async function backfill(t: StrategyMismatchTracker): Promise<void> {
@@ -224,18 +349,8 @@ export function registerMismatchRoutes({
     if (!post) return;
     const date = istDate(nowMs());
     const { legs } = t;
-    let underlying = legs.asset;
-    if (legs.exchange === 'MCX') {
-      const fut =
-        legs.optionExpiry && getMcxFuture
-          ? await getMcxFuture(legs.asset, legs.optionExpiry).catch(() => null)
-          : null;
-      if (!fut) {
-        console.warn(`[Mismatch] no ${legs.asset} future for ${legs.optionExpiry}; ticks only`);
-        return;
-      }
-      underlying = fut;
-    }
+    const underlying = await resolveUnderlying(legs);
+    if (!underlying) return;
     const query = [
       { exchange: legs.exchange, type: legs.underlyingType, symbol: underlying },
       { exchange: legs.exchange, type: 'OPT', symbol: legs.ce.nubraName },
@@ -260,6 +375,92 @@ export function registerMismatchRoutes({
     } catch (e) {
       console.warn(`[Mismatch] backfill ${legs.basketGroupId} failed: ${(e as Error).message}`);
     }
+  }
+
+  /**
+   * A tracker only ever sees matches from the moment it's created onward — `onTick` is fed by
+   * whatever live ticks arrive after that. A strategy entered earlier (backdated legs, or simply
+   * turning the tracker on well after entry) can have real matches sitting in the gap between
+   * entry and creation that no live tick will ever revisit.
+   *
+   * Sub-minute history (`1s`) is kept for a rolling 168h — same-day, which every open strategy's
+   * entry is — so that gap can be replayed at (close to) the same resolution a live tick feed
+   * would have given it, not just at the 1-minute resolution `backfill` uses for the *reference*
+   * side of each comparison. `fetchTodaySeconds` only returns seconds that actually traded, so
+   * this reconstructs the real sequence of price moves rather than one synthetic tick per minute.
+   * Safe to call more than once: an unchanged candidate never outscores the version already on
+   * file, so a repeat replay finds nothing new to record.
+   */
+  async function replayHistory(t: StrategyMismatchTracker): Promise<void> {
+    const post = getTimeseriesPost();
+    if (!post) return;
+    const { legs } = t;
+    const nowT = nowMs();
+    const date = istDate(nowT);
+    const session = sessionMinutes(legs.exchange);
+    const entryMs = legs.entryNs / 1_000_000;
+    const coveredMs = replayFrom.get(t) ?? 0;
+    const firstSec = Math.max(
+      (istDate(entryMs) === date ? Math.max(session.open, istMinute(entryMs)) : session.open) * 60,
+      // The live feed already scored everything up to here; its readings stand.
+      istDate(coveredMs) === date ? istSecondOfDay(coveredMs) + 1 : 0,
+    );
+    const lastSec = Math.min(istSecondOfDay(nowT), session.last * 60 + 59);
+    const underlying = await resolveUnderlying(legs);
+    if (!underlying) return;
+    let spotBars, ceBars, peBars;
+    try {
+      [spotBars, ceBars, peBars] = await Promise.all([
+        fetchTodaySeconds(post, {
+          exchange: legs.exchange,
+          type: legs.underlyingType,
+          symbol: underlying,
+          date,
+        }),
+        fetchTodaySeconds(post, {
+          exchange: legs.exchange,
+          type: 'OPT',
+          symbol: legs.ce.nubraName,
+          date,
+        }),
+        fetchTodaySeconds(post, {
+          exchange: legs.exchange,
+          type: 'OPT',
+          symbol: legs.pe.nubraName,
+          date,
+        }),
+      ]);
+    } catch (e) {
+      console.warn(`[Mismatch] replay fetch ${legs.basketGroupId} failed: ${(e as Error).message}`);
+      return;
+    }
+    if (trackers.get(legs.basketGroupId) !== t) return;
+
+    const toMap = (bars: typeof spotBars) => new Map(bars.map((b) => [b.sec, b.close]));
+    const spotMap = toMap(spotBars);
+    const ceMap = toMap(ceBars);
+    const peMap = toMap(peBars);
+    const secs = new Set<number>();
+    for (const m of [spotMap, ceMap, peMap]) for (const sec of m.keys()) secs.add(sec);
+    const ordered = [...secs].filter((s) => s >= firstSec && s <= lastSec).sort((a, b) => a - b);
+
+    for (const sec of ordered) {
+      const changed = t.onTick(
+        { spot: spotMap.get(sec), ce: ceMap.get(sec), pe: peMap.get(sec) },
+        istSecondToEpochNs(date, sec) / 1_000_000,
+        { replay: true },
+      );
+      if (changed.length) record(legs.basketGroupId, changed);
+    }
+    const doneMs = istSecondToEpochNs(date, lastSec) / 1_000_000;
+    replayFrom.set(t, Math.max(coveredMs, doneMs));
+    markCovered(legs.basketGroupId, doneMs);
+  }
+
+  async function backfillAndCatchUp(t: StrategyMismatchTracker): Promise<void> {
+    await backfill(t);
+    if (trackers.get(t.legs.basketGroupId) !== t) return;
+    await replayHistory(t);
   }
 
   function record(gid: string, changed: MismatchCase[]): void {
@@ -313,6 +514,7 @@ export function registerMismatchRoutes({
       const { ce, pe } = t.legs;
       if (ltps.has(ce.refId) || ltps.has(pe.refId)) feedOf.set(gid, key);
       if (feedOf.get(gid) !== key) continue;
+      markCovered(gid, now);
       const changed = t.onTick(
         {
           spot: spotPaise > 0 ? spotPaise / 100 : undefined,
@@ -382,6 +584,7 @@ export function registerMismatchRoutes({
       } else {
         enabled.delete(gid);
       }
+      decided.add(gid);
       store.setTracker(gid, on);
       sync();
       return { basket_group_id: gid, enabled: on, tracking: trackers.has(gid) };
@@ -403,8 +606,9 @@ export function registerMismatchRoutes({
   return {
     onChain,
     sync,
-    backfill: () => Promise.all([...trackers.values()].map(backfill)),
+    backfill: () => Promise.all([...trackers.values()].map(backfillAndCatchUp)),
     stop: () => {
+      flushCoverage();
       clearInterval(syncTimer);
       if (backfillTimer) clearInterval(backfillTimer);
     },

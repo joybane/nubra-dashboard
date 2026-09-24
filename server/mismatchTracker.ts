@@ -177,6 +177,16 @@ const emptyCloses = (): Closes => ({ spot: new Map(), ce: new Map(), pe: new Map
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
+const NEAR_NS = MISMATCH_PARAMS.nearCopyMinutes * MINUTE_MS * 1_000_000;
+
+/** Two readings are near-copies when both their earlier and later moments are within 30 minutes. */
+export function isNearVersion(
+  a: Pick<MismatchVersion, 't1Ns' | 't2Ns'>,
+  b: Pick<MismatchVersion, 't1Ns' | 't2Ns'>,
+): boolean {
+  return Math.abs(a.t1Ns - b.t1Ns) < NEAR_NS && Math.abs(a.t2Ns - b.t2Ns) < NEAR_NS;
+}
+
 export class StrategyMismatchTracker {
   readonly legs: StrategyLegs;
   readonly cases: MismatchCase[];
@@ -213,8 +223,18 @@ export class StrategyMismatchTracker {
    * One live update. Any of the three prices may be missing (a feed message carries only what
    * changed); the last known value stands in. Returns the cases that were created or gained a
    * version.
+   *
+   * `replay` marks a catch-up pass over broker history rather than the live feed. Such a pass can
+   * revisit moments a stored case already covers, but a case only compares against its latest
+   * version, which by then may have moved more than 30 minutes on. Without the guard below that
+   * early moment looked brand new and was stored again as a duplicate case (2026-09-24: cases 8–11
+   * of that day's NIFTY strategy repeated cases 2, 3, 5 and 6 after a 14:26 restart).
    */
-  onTick(prices: Partial<Record<Kind, number>>, nowMs: number): MismatchCase[] {
+  onTick(
+    prices: Partial<Record<Kind, number>>,
+    nowMs: number,
+    { replay = false }: { replay?: boolean } = {},
+  ): MismatchCase[] {
     const date = istDate(nowMs);
     this.rollDate(date);
     const now = istMinute(nowMs);
@@ -263,11 +283,8 @@ export class StrategyMismatchTracker {
     }
     candidates.sort((a, b) => b.gap - a.gap || a.t1Ns - b.t1Ns);
 
-    const nearNs = p.nearCopyMinutes * MINUTE_MS * 1_000_000;
-    const isNear = (c: MismatchCase, v: MismatchVersion) => {
-      const top = c.versions[c.versions.length - 1];
-      return Math.abs(v.t1Ns - top.t1Ns) < nearNs && Math.abs(v.t2Ns - top.t2Ns) < nearNs;
-    };
+    const isNear = (c: MismatchCase, v: MismatchVersion) =>
+      isNearVersion(c.versions[c.versions.length - 1], v);
     const changed = new Set<MismatchCase>();
     for (const cand of candidates) {
       const near = this.cases.filter((c) => isNear(c, cand));
@@ -283,7 +300,10 @@ export class StrategyMismatchTracker {
       // the other — on the 2026-09-16 replay that left 5 pairs of cases ending as the same
       // 09:55→afternoon moment. Skipping keeps every case distinct from every other.
       if (near.length > 1) continue;
-      const caseNo = this.cases.length + 1;
+      if (replay && this.cases.some((c) => c.versions.some((v) => isNearVersion(v, cand))))
+        continue;
+      // After old duplicates are pruned the numbers can have gaps; never reuse one.
+      const caseNo = this.cases.reduce((n, c) => Math.max(n, c.caseNo), 0) + 1;
       const created: MismatchCase = { caseNo, colorIdx: caseNo - 1, versions: [cand] };
       this.cases.push(created);
       changed.add(created);

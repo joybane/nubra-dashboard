@@ -3455,13 +3455,13 @@ export default function StrategyAnalysisView({
               ? mismatchTracker.reason
               : 'the strategy is no longer open';
             const title = mismatchToggleError
-              ? `Mismatch tracker: ${mismatchToggleError}`
+              ? `Decay tracker: ${mismatchToggleError}`
               : on
-                ? `Mismatch tracker on${
+                ? `Decay tracker on${
                     mismatchTracker?.tracking ? '' : ' (not tracking right now: ' + why + ')'
                   } · ${count} case${count === 1 ? '' : 's'} · click to turn off`
                 : canTurnOn
-                  ? 'Track live CE/PE profit mismatch at the same underlying close (±1 pt, ≥30 min apart, legs differ ≥50%). Cases appear as colour strips on the time axis.'
+                  ? 'Track live CE/PE profit decay at the same underlying close (±1 pt, ≥30 min apart, legs diverge ≥50%). Cases appear as colour strips on the time axis.'
                   : `Can't track: ${why}. Only an open strategy of one CE and one PE can be tracked.${
                       count ? ' Recorded cases still show on the chart.' : ''
                     }`;
@@ -3482,12 +3482,12 @@ export default function StrategyAnalysisView({
                     count > 0 ? 'rounded-l border-r-0' : 'rounded'
                   } ${toneClass}`}
                 >
-                  ≠ Mismatch{on || count ? ` · ${count}` : ''}
+                  Decay{on || count ? ` · ${count}` : ''}
                 </button>
                 {count > 0 && (
                   <button
                     onClick={() => setMismatchPopupOpen((v) => !v)}
-                    title="List every mismatch case — jump straight to one instead of hunting for its strip on the chart"
+                    title="List every decay case — jump straight to one instead of hunting for its strip on the chart"
                     className={`px-1 py-0.5 rounded-r text-[11px] font-semibold border border-l-0 transition-colors ${toneClass}`}
                   >
                     ▾
@@ -3497,7 +3497,7 @@ export default function StrategyAnalysisView({
                   <div className="absolute top-full left-0 mt-1 z-50 w-[300px] max-h-[70vh] overflow-y-auto bg-[var(--bg-card,var(--bg-secondary))] border border-[var(--border)] rounded-xl shadow-2xl">
                     <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] sticky top-0 bg-[var(--bg-card,var(--bg-secondary))]">
                       <span className="text-[11px] font-semibold text-[var(--text-primary)]">
-                        Mismatch cases
+                        Decay cases
                       </span>
                       <button
                         onClick={() => setMismatchPopupOpen(false)}

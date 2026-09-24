@@ -25,6 +25,17 @@ describe('strategy commodity metadata', () => {
     expect(strategyPositionExpiry(position)).toBe('20260817');
   });
 
+  it('reads SENSEX and BANKEX as BSE, and NIFTY as NSE', () => {
+    const leg = (zanskar_name: string, display_name: string) => ({
+      ...position,
+      zanskar_name,
+      display_name,
+    });
+    expect(strategyPositionExchange([leg('SENSEX26SEP74100PE', 'SENSEX 74100 PE')])).toBe('BSE');
+    expect(strategyPositionExchange([leg('BANKEX2692460000CE', 'BANKEX 60000 CE')])).toBe('BSE');
+    expect(strategyPositionExchange([leg('NIFTY2692223350CE', 'NIFTY 23350 CE')])).toBe('NSE');
+  });
+
   it('maps the option expiry to its backing futures contract', () => {
     const futures: Instrument[] = [
       { zanskar_name: 'FUT_CRUDEOIL_20260921', expiry: '20260921' },

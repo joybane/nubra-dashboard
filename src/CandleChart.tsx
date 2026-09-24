@@ -840,8 +840,8 @@ export default function CandleChart({ instrument, theme }: Props) {
         unsubscribeChart({ indexes: [oldSym] }, iv, currentInstRef.current.exchange || 'NSE');
         if (nubraType(currentInstRef.current) === 'OPT') unsubscribeOptTickWs();
       }
-      oi.clearForInstrumentChange();
       if (!sameInstrument) {
+        oi.clearForInstrumentChange();
         vega.clearForInstrumentChange();
         theta.clearForInstrumentChange();
         ivOverlay.clearForInstrumentChange();

@@ -18,6 +18,7 @@ import {
   pickLegs,
   type AnalysisCase,
   type DayLegs,
+  type DayScan,
   type FinderParams,
 } from './caseFinder.ts';
 import {
@@ -29,6 +30,7 @@ import {
   type DaySource,
   type DayStore,
   type Grid,
+  type StoredDay,
 } from './daySeries.ts';
 import type { PostTimeseries } from './nubraSource.ts';
 import { createAnalysisSync, type AnalysisSync } from './sync.ts';
@@ -148,7 +150,38 @@ function coverage(listing: Array<{ date: string; empty: boolean }>) {
 
 export function registerAnalysisRoutes(deps: AnalysisRouteDeps): void {
   const { fastify, rootDir, getPost } = deps;
-  const store = deps.store ?? createDayStore(path.join(rootDir, '.analysis-cache'));
+  const rawStore = deps.store ?? createDayStore(path.join(rootDir, '.analysis-cache'));
+
+  // A day's parsed contents and its found cases (for a given params set) are pure functions of
+  // that day's file — safe to keep until the file is rewritten. Without this, every scan re-reads
+  // and re-gunzips ~1,400+ files and reruns the O(n²) case finder on every one, even when only the
+  // date range or "Local-only years" checkbox changed and the underlying days are unchanged.
+  const dayCache = new Map<string, StoredDay | null>();
+  const caseCache = new Map<string, Map<string, DayScan>>(); // dayKey -> paramsKey -> result
+  const dayKey = (underlying: string, source: DaySource, date: string) =>
+    `${underlying}|${source}|${date}`;
+  const DAY_CACHE_MAX = 6000;
+  const CASE_CACHE_MAX = 6000;
+
+  const store: DayStore = {
+    ...rawStore,
+    async read(underlying, source, date) {
+      const k = dayKey(underlying, source, date);
+      if (dayCache.has(k)) return dayCache.get(k)!;
+      const day = await rawStore.read(underlying, source, date);
+      dayCache.set(k, day);
+      if (dayCache.size > DAY_CACHE_MAX) dayCache.delete(dayCache.keys().next().value!);
+      return day;
+    },
+    async write(day) {
+      await rawStore.write(day);
+      // The file changed: drop anything derived from its old contents.
+      const k = dayKey(day.underlying, day.source, day.date);
+      dayCache.delete(k);
+      caseCache.delete(k);
+    },
+  };
+
   const sync =
     deps.sync ??
     createAnalysisSync({
@@ -270,6 +303,7 @@ export function registerAnalysisRoutes(deps: AnalysisRouteDeps): void {
     const skipped: Record<string, number> = {};
     let nubraDays = 0;
     let localDays = 0;
+    const paramsKey = JSON.stringify(params);
     const CHUNK = 16;
     for (let i = 0; i < plan.length; i += CHUNK) {
       const chunk = plan.slice(i, i + CHUNK);
@@ -280,7 +314,18 @@ export function registerAnalysisRoutes(deps: AnalysisRouteDeps): void {
           skipped['unreadable'] = (skipped['unreadable'] ?? 0) + 1;
           return;
         }
-        const scan = findCases(day, params);
+        const dKey = dayKey(underlying, source, date);
+        let byParams = caseCache.get(dKey);
+        if (!byParams) {
+          byParams = new Map();
+          caseCache.set(dKey, byParams);
+          if (caseCache.size > CASE_CACHE_MAX) caseCache.delete(caseCache.keys().next().value!);
+        }
+        let scan = byParams.get(paramsKey);
+        if (!scan) {
+          scan = findCases(day, params);
+          byParams.set(paramsKey, scan);
+        }
         if (!scan.ok) {
           const reason = scan.reason.replace(/\d{4,5}/g, 'K');
           skipped[reason] = (skipped[reason] ?? 0) + 1;
@@ -290,6 +335,9 @@ export function registerAnalysisRoutes(deps: AnalysisRouteDeps): void {
         else localDays++;
         days.push({ date, source, expiry: day.expiry, legs: scan.legs, cases: scan.cases });
       });
+      // Between chunks, let the rest of the server (price feeds, other requests) get a turn — a
+      // cold multi-year scan is CPU-bound and would otherwise hold the event loop the whole time.
+      await new Promise((resolve) => setImmediate(resolve));
     }
 
     const response: ScanResponse = {

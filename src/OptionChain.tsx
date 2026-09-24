@@ -126,7 +126,7 @@ export default function OptionChain({
   const [activeQuick, setActiveQuick] = useState<string | null>(null);
   const [showGoToAtm, setShowGoToAtm] = useState(false);
   const [atmDir, setAtmDir] = useState<'up' | 'down'>('up');
-  const [showGreeks, setShowGreeks] = useState(false);
+  const [showGreeks, setShowGreeks] = useState(true);
 
   const cellMapRef = useRef(new Map<string, HTMLElement>());
   const maxCeOiRef = useRef(1);

@@ -103,6 +103,19 @@ export interface AnalysisCase {
   ceDelta: number;
   peDelta: number;
   totalDelta: number;
+  /**
+   * Other candidates whose t1 OR t2 is within `spacingMinutes` of this case's.
+   * Sorted strongest-first. The picked cases are never affected by this list.
+   */
+  groupCandidates: Array<{
+    t1: string;
+    t2: string;
+    spot1: number;
+    spot2: number;
+    ceDelta: number;
+    peDelta: number;
+    totalDelta: number;
+  }>;
 }
 
 export type DayScan =
@@ -231,6 +244,49 @@ export function findCases(day: DaySeries, params: FinderParams): DayScan {
   const cases = picked.map(([i, j]) => {
     const ceDelta = round2((ce[i]! - ce[j]!) * k);
     const peDelta = round2((pe[i]! - pe[j]!) * k);
+
+    // Collect all candidates whose t1 AND t2 are both within `spacing` minutes
+    // of this picked case — these are genuine near-copies of the same window
+    // (the same scenario, slightly shifted).
+    const rawGroup: AnalysisCase['groupCandidates'] = [];
+    for (let n = 0; n < cand.length / 3; n++) {
+      const ci = cand[n * 3 + 1];
+      const cj = cand[n * 3 + 2];
+      if (ci === i && cj === j) continue;
+      if (Math.abs(ci - i) < spacing && Math.abs(cj - j) < spacing) {
+        const gCeDelta = round2((ce[ci]! - ce[cj]!) * k);
+        const gPeDelta = round2((pe[ci]! - pe[cj]!) * k);
+        rawGroup.push({
+          t1: hhmmAt(ci),
+          t2: hhmmAt(cj),
+          spot1: day.spot[ci]!,
+          spot2: day.spot[cj]!,
+          ceDelta: gCeDelta,
+          peDelta: gPeDelta,
+          totalDelta: round2(gCeDelta + gPeDelta),
+        });
+      }
+    }
+
+    // To match the live tracker (SS1), we only show the "rising peaks" — how this
+    // case evolved chronologically, keeping a version only when it beats the previous best.
+    const groupCandidates: AnalysisCase['groupCandidates'] = [];
+    rawGroup.sort((a, b) => {
+      if (a.t2 !== b.t2) return a.t2.localeCompare(b.t2);
+      return a.t1.localeCompare(b.t1);
+    });
+    
+    let maxScore = -1;
+    for (const g of rawGroup) {
+      const score = params.rankBy === 'legGap' ? Math.abs(g.ceDelta - g.peDelta) : Math.abs(g.totalDelta);
+      if (score > maxScore) {
+        groupCandidates.push(g);
+        maxScore = score;
+      }
+    }
+    // Reverse so the strongest/latest is at the top of the popup
+    groupCandidates.reverse();
+
     return {
       t1: hhmmAt(i),
       t2: hhmmAt(j),
@@ -243,7 +299,9 @@ export function findCases(day: DaySeries, params: FinderParams): DayScan {
       ceDelta,
       peDelta,
       totalDelta: round2(ceDelta + peDelta),
+      groupCandidates,
     };
   });
+
   return { ok: true, legs, cases, candidates: cand.length / 3 };
 }

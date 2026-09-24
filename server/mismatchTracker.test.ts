@@ -366,3 +366,59 @@ describe('StrategyMismatchTracker', () => {
     expect(t.onTick({ spot: 23226, ce: 100, pe: 118 }, at('15:31:00'))).toEqual([]);
   });
 });
+
+describe('catch-up replay', () => {
+  const version = (t1: string, t2: string, gap: number) => ({
+    t1Ns: at(t1) * 1_000_000,
+    t2Ns: at(t2) * 1_000_000,
+    spot1: 23226,
+    spot2: 23226,
+    ce1: 120,
+    ce2: 100,
+    pe1: 110,
+    pe2: 118,
+    ceDelta: 1300,
+    peDelta: -520,
+    gap,
+  });
+  /** A stored case whose latest version has moved 50 minutes past its first. */
+  const withCase = () => {
+    const t = tracker(
+      onlyAtTen,
+      () => 120,
+      () => 110,
+    );
+    const restored = new StrategyMismatchTracker(LEGS, [
+      {
+        caseNo: 1,
+        colorIdx: 0,
+        versions: [version('10:00', '10:40:05', 500), version('10:00', '11:30:00', 5000)],
+      },
+      { caseNo: 3, colorIdx: 2, versions: [version('13:00', '13:40:00', 100)] },
+    ]);
+    // Same closes as `t`, which only exists to build them.
+    for (const kind of ['spot', 'ce', 'pe'] as const) {
+      const closes = Array.from({ length: 345 }, (_, i) => ({
+        minute: 555 + i,
+        close: t.closeAt(kind, 555 + i)!,
+      }));
+      restored.setBrokerCloses(DATE, kind, closes);
+    }
+    return restored;
+  };
+  const early = { spot: 23226.5, ce: 103.3, pe: 116.25 };
+
+  test('a replayed moment an existing case already holds is not stored again as a new case', () => {
+    // 10:00 → 10:40 is a near-copy of case 1's first version but 50 min from its latest, so
+    // compared with the latest alone it looked new. That was the 2026-09-24 duplicate bug.
+    expect(withCase().onTick(early, at('10:40:06'))).toHaveLength(1);
+    const t = withCase();
+    expect(t.onTick(early, at('10:40:06'), { replay: true })).toEqual([]);
+    expect(t.cases.map((c) => c.caseNo)).toEqual([1, 3]);
+  });
+
+  test('a new case numbers after the highest existing one, never into a gap', () => {
+    const [created] = withCase().onTick(early, at('10:40:06'));
+    expect(created.caseNo).toBe(4);
+  });
+});

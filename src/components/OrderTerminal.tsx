@@ -1811,19 +1811,19 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
                                     }`}
                                     title={
                                       err
-                                        ? `Mismatch tracker: ${err}`
+                                        ? `Decay tracker: ${err}`
                                         : on
-                                          ? `Mismatch tracker on${
+                                          ? `Decay tracker on${
                                               mt.tracking
                                                 ? ''
                                                 : ' (waiting — not tracking right now)'
                                             } · ${mt.case_count} case${
                                               mt.case_count === 1 ? '' : 's'
                                             } · click to turn off. Cases show as colour strips on the strategy chart.`
-                                          : 'Track live CE/PE profit mismatch at the same NIFTY close (±1 pt, ≥30 min apart, legs differ ≥50%)'
+                                          : 'Track live CE/PE profit decay at the same NIFTY close (±1 pt, ≥30 min apart, legs diverge ≥50%)'
                                     }
                                   >
-                                    ≠{on ? ` ${mt.case_count}` : ''}
+                                    Decay{on ? ` ${mt.case_count}` : ''}
                                   </button>
                                 );
                               })()}

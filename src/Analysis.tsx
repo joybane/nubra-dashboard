@@ -66,6 +66,15 @@ interface AnalysisCase {
   ceDelta: number;
   peDelta: number;
   totalDelta: number;
+  groupCandidates: Array<{
+    t1: string;
+    t2: string;
+    spot1: number;
+    spot2: number;
+    ceDelta: number;
+    peDelta: number;
+    totalDelta: number;
+  }>;
 }
 
 interface ScanDay {
@@ -498,6 +507,8 @@ export default function Analysis({ theme, onChangeView }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [selected, setSelected] = useState<{ date: string; index: number } | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
+  /** Key of the group popup currently open: "date:caseIndex", or null if closed. */
+  const [groupPopup, setGroupPopup] = useState<string | null>(null);
 
   useEffect(() => {
     scanSeq.current++;
@@ -891,34 +902,82 @@ export default function Analysis({ theme, onChangeView }: Props) {
                     <div className="pb-1">
                       {day.cases.map((c, index) => {
                         const isSel = selected?.date === day.date && selected.index === index;
+                        const popupKey = `${day.date}:${index}`;
+                        const popupOpen = groupPopup === popupKey;
                         return (
-                          <div
-                            key={`${c.t1}-${c.t2}`}
-                            role="button"
-                            tabIndex={0}
-                            onClick={() => setSelected({ date: day.date, index })}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') setSelected({ date: day.date, index });
-                            }}
-                            className={`mx-2 grid cursor-pointer grid-cols-[88px_1fr_1fr_1fr] items-center gap-1 rounded px-2 py-1 text-[11px] ${
-                              isSel ? 'bg-[var(--accent)]/15' : 'hover:bg-[var(--bg-secondary)]'
-                            }`}
-                          >
-                            <span className="font-mono">
-                              {c.t1}→{c.t2}
-                            </span>
-                            <span className={pnlClass(c.peDelta)} title="PE leg P&L change">
-                              PE {inr(c.peDelta)}
-                            </span>
-                            <span className={pnlClass(c.ceDelta)} title="CE leg P&L change">
-                              CE {inr(c.ceDelta)}
-                            </span>
-                            <span
-                              className={`text-right font-semibold ${pnlClass(c.totalDelta)}`}
-                              title={`Spot ${num(c.spot1)} → ${num(c.spot2)}`}
+                          <div key={`${c.t1}-${c.t2}`}>
+                            <div
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => setSelected({ date: day.date, index })}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') setSelected({ date: day.date, index });
+                              }}
+                              className={`mx-2 grid cursor-pointer grid-cols-[88px_1fr_1fr_1fr_16px] items-center gap-1 rounded px-2 py-1 text-[11px] ${
+                                isSel ? 'bg-[var(--accent)]/15' : 'hover:bg-[var(--bg-secondary)]'
+                              }`}
                             >
-                              {inr(c.totalDelta)}
-                            </span>
+                              <span className="font-mono">
+                                {c.t1}→{c.t2}
+                              </span>
+                              <span className={pnlClass(c.peDelta)} title="PE leg P&L change">
+                                PE {inr(c.peDelta)}
+                              </span>
+                              <span className={pnlClass(c.ceDelta)} title="CE leg P&L change">
+                                CE {inr(c.ceDelta)}
+                              </span>
+                              <span
+                                className={`text-right font-semibold ${pnlClass(c.totalDelta)}`}
+                                title={`Spot ${num(c.spot1)} → ${num(c.spot2)}`}
+                              >
+                                {inr(c.totalDelta)}
+                              </span>
+                              {c.groupCandidates?.length > 0 && (
+                                <button
+                                  type="button"
+                                  title={`${c.groupCandidates.length} earlier version${c.groupCandidates.length === 1 ? '' : 's'}`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setGroupPopup((prev) => (prev === popupKey ? null : popupKey));
+                                  }}
+                                  className={`flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] leading-none transition-colors ${
+                                    popupOpen
+                                      ? 'bg-[var(--accent)]/20 text-[var(--accent)]'
+                                      : 'text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                                  }`}
+                                >
+                                  ⊞
+                                </button>
+                              )}
+                            </div>
+                            {popupOpen && c.groupCandidates?.length > 0 && (
+                              <div className="mx-4 mb-1 rounded border border-[var(--border)] bg-[var(--bg-secondary)] p-2 text-[10px]">
+                                <div className="mb-1.5 flex items-center justify-between text-[var(--text-muted)]">
+                                  <span className="font-semibold uppercase tracking-wide">
+                                    {c.groupCandidates.length} earlier version{c.groupCandidates.length === 1 ? '' : 's'}
+                                  </span>
+                                  <span className="text-[9px]">Rising peaks leading up to this match</span>
+                                </div>
+                                <div className="space-y-0.5">
+                                  {c.groupCandidates.map((g, gi) => (
+                                    <div
+                                      key={`${g.t1}-${g.t2}-${gi}`}
+                                      className="grid grid-cols-[80px_1fr_1fr_1fr] gap-1 rounded px-1 py-0.5 text-[10px] text-[var(--text-muted)]"
+                                      title={`Spot ${num(g.spot1)} → ${num(g.spot2)}`}
+                                    >
+                                      <span className="font-mono text-[var(--text-primary)]">
+                                        {g.t1}→{g.t2}
+                                      </span>
+                                      <span className={pnlClass(g.peDelta)}>PE {inr(g.peDelta)}</span>
+                                      <span className={pnlClass(g.ceDelta)}>CE {inr(g.ceDelta)}</span>
+                                      <span className={`text-right font-semibold ${pnlClass(g.totalDelta)}`}>
+                                        {inr(g.totalDelta)}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         );
                       })}

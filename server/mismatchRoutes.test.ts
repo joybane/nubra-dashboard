@@ -7,9 +7,12 @@ vi.mock('./paperDb.ts', () => ({
   dbListMismatchTrackers: vi.fn(() => []),
   dbListMismatchVersions: vi.fn(() => []),
   dbSetMismatchTracker: vi.fn(),
+  dbGetMismatchCoverage: vi.fn(() => null),
+  dbSetMismatchCoverage: vi.fn(),
+  dbPruneMismatchVersions: vi.fn(),
 }));
 
-const { registerMismatchRoutes, casesFromRows, parseMinuteCloses } =
+const { registerMismatchRoutes, casesFromRows, parseMinuteCloses, planMismatchCleanup } =
   await import('./mismatchRoutes.ts');
 
 const DATE = '2026-09-16';
@@ -54,6 +57,7 @@ let positions: Array<{
 let post: ((body: object) => Promise<Record<string, unknown>>) | null;
 let rows: MismatchVersionRow[] = [];
 let trackersRows: Array<{ basket_group_id: string; enabled: number }> = [];
+const coverage = new Map<string, number>();
 const broadcast = vi.fn();
 let service: ReturnType<typeof registerMismatchRoutes>;
 
@@ -67,9 +71,14 @@ const store = {
     rows.push(row);
   }),
   listVersions: (gid?: string) => rows.filter((r) => !gid || r.basket_group_id === gid),
+  getCoverage: (gid: string) => coverage.get(gid) ?? null,
+  setCoverage: (gid: string, ms: number) => {
+    coverage.set(gid, Math.max(coverage.get(gid) ?? 0, ms));
+  },
 };
 
-function build() {
+/** Most tests drive the toggle by hand; the auto-enable tests opt in. */
+function build(autoEnable = false) {
   app = Fastify();
   service = registerMismatchRoutes({
     fastify: app,
@@ -80,7 +89,14 @@ function build() {
     store,
     nowMs: () => now,
     backfillEveryMs: null,
+    autoEnable,
   });
+}
+
+async function rebuild(autoEnable: boolean) {
+  service.stop();
+  await app.close();
+  build(autoEnable);
 }
 
 beforeEach(() => {
@@ -105,6 +121,7 @@ beforeEach(() => {
   post = vi.fn(async () => brokerResponse());
   rows = [];
   trackersRows = [];
+  coverage.clear();
   broadcast.mockReset();
   store.setTracker.mockClear();
   store.insertVersion.mockClear();
@@ -198,6 +215,62 @@ test('enabled: backfills closes, finds the live case, stores and broadcasts ever
   expect(c.versions[1].gap).toBeGreaterThan(c.versions[0].gap);
 });
 
+test('enabling well after entry still finds a match that happened before it was turned on', async () => {
+  // Spot revisits its 09:20 close at 09:55 (35 min later); CE moves, PE doesn't — a real case.
+  // Flat everywhere else so no other pair of minutes can accidentally qualify.
+  const minutes: string[] = [];
+  for (let m = 9 * 60 + 15; m < 12 * 60; m++) {
+    minutes.push(
+      `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`,
+    );
+  }
+  const spotAt = (t: string) => (t === '09:20' ? 23226 : t === '09:55' ? 23226.3 : 23300);
+  const ceAt = (t: string) => (t === '09:55' ? 100 : 120);
+  const peAt = () => 110;
+  const closes = (v: (hhmm: string) => number) => ({
+    close: minutes.map((hhmm) => ({ ts: tsNs(hhmm), v: Math.round(v(hhmm) * 100) })),
+  });
+  const valueFnFor = (symbol: string) =>
+    symbol === 'NIFTY' ? spotAt : symbol === CE ? ceAt : peAt;
+  // `backfill` sends one combined 1m query (all three symbols); the replay's `fetchTodaySeconds`
+  // sends one 1s query per symbol. Route each to the matching shape so both legs of the fix —
+  // the reference-minute closes and the second-level replay — see the same underlying data.
+  post = vi.fn(async (body: object) => {
+    const query = (body as { query: Array<{ interval: string; values: string[] }> }).query;
+    if (query.length === 1) {
+      const symbol = query[0].values[0];
+      return { result: [{ values: [{ [symbol]: closes(valueFnFor(symbol)) }] }] };
+    }
+    return {
+      result: [
+        { values: [{ NIFTY: closes(spotAt) }] },
+        { values: [{ [CE]: closes(ceAt) }] },
+        { values: [{ [PE]: closes(peAt) }] },
+      ],
+    };
+  });
+
+  // Both the 09:20 reference minute and the 09:55 match are well before this — no live tick
+  // will ever revisit that pair, so only a backfill replay can surface it.
+  now = istMs('10:30:00');
+  const res = await app.inject({
+    method: 'POST',
+    url: '/paper/mismatch/trackers',
+    payload: { basket_group_id: 'bg_1', enabled: true },
+  });
+  expect(res.statusCode).toBe(200);
+  await service.backfill();
+
+  expect(store.insertVersion).toHaveBeenCalledTimes(1);
+  expect(rows[0]).toMatchObject({ basket_group_id: 'bg_1', case_no: 1 });
+  expect(rows[0].spot1).toBeCloseTo(23226, 1);
+  expect(rows[0].spot2).toBeCloseTo(23226.3, 1);
+
+  // Idempotent: re-running the catch-up (e.g. the periodic backfill) finds nothing new.
+  await service.backfill();
+  expect(store.insertVersion).toHaveBeenCalledTimes(1);
+});
+
 test('a feed for another expiry or underlying never moves a tracked strategy', async () => {
   await app.inject({
     method: 'POST',
@@ -261,6 +334,88 @@ test('enabled trackers and their cases survive a restart', async () => {
   expect(rows.map((r) => r.case_no)).toEqual([1, 1]);
 });
 
+test('after a restart the catch-up replay only fills time the live feed did not already score', async () => {
+  await app.inject({
+    method: 'POST',
+    url: '/paper/mismatch/trackers',
+    payload: { basket_group_id: 'bg_1', enabled: true },
+  });
+  await service.backfill();
+  service.onChain(chain(23226.5, 103.3, 116.25)); // live case at 11:49:23
+  expect(rows).toHaveLength(1);
+  service.stop(); // flushes how far the live feed got
+  await app.close();
+  expect(coverage.get('bg_1')).toBe(now);
+
+  // Per-second history for the restart: NIFTY back at 23,226.2 twice with the legs far apart —
+  // once at 11:40 (already scored live, before the restart) and once at 11:55 (after it).
+  const seconds = ['11:40:00', '11:55:00'];
+  const series = (v: number) => ({
+    close: seconds.map((hms) => ({ ts: tsNs(hms), v: v * 100 })),
+  });
+  post = vi.fn(async (body: object) => {
+    const query = (body as { query: Array<{ values: string[] }> }).query;
+    if (query.length > 1) return brokerResponse();
+    const symbol = query[0].values[0];
+    const v = symbol === 'NIFTY' ? 23226.2 : symbol === CE ? 90 : 125;
+    return { result: [{ values: [{ [symbol]: series(v) }] }] };
+  });
+  now = istMs('11:56:00');
+  build();
+  await service.backfill();
+
+  const t2s = rows.map((r) =>
+    new Date(Number(r.t2_ns) / 1e6 + 19_800_000).toISOString().slice(11, 19),
+  );
+  expect(t2s).not.toContain('11:40:00');
+  expect(t2s).toContain('11:55:00');
+});
+
+test('cleanup drops replayed duplicate cases and identical re-added readings, then renumbers', () => {
+  const T = (hms: string) => istMs(hms) * 1_000_000;
+  const row = (
+    id: number,
+    case_no: number,
+    t1: string,
+    t2: string,
+    gap: number,
+    insertedAt: string,
+  ): MismatchVersionRow => ({
+    id,
+    basket_group_id: 'bg_1',
+    case_no,
+    color_idx: case_no - 1,
+    t1_ns: T(t1),
+    t2_ns: T(t2),
+    spot1: 1,
+    spot2: 1,
+    ce1: 1,
+    ce2: 1,
+    pe1: 1,
+    pe2: 1,
+    ce_delta: 1,
+    pe_delta: 1,
+    gap,
+    created_at: istMs(insertedAt),
+  });
+  const plan = planMismatchCleanup([
+    row(1, 1, '09:47', '10:19:52', 299, '10:19:52'),
+    row(2, 1, '09:49', '11:01:17', 689, '11:01:17'),
+    row(3, 2, '11:57', '12:28:35', 705.25, '14:26:15'),
+    row(4, 2, '11:57', '12:28:35', 705.25, '14:46:44'), // the same reading, re-added
+    row(5, 3, '09:47', '10:19:51', 299, '14:26:15'), // replayed copy of case 1's start
+    row(6, 4, '10:22', '12:19:55', 357.5, '14:26:15'), // replayed, but nothing like it exists
+    row(7, 5, '14:00', '14:32:12', 429, '14:32:12'),
+  ]);
+  expect(plan.deleteIds).toEqual([4, 5]);
+  expect(plan.renumber).toEqual([
+    [1, 1],
+    [2, 2],
+    [4, 3],
+    [5, 4],
+  ]);
+});
+
 test('MCX: backfills the future the options are written on, and tracks in the evening', async () => {
   service.stop();
   await app.close();
@@ -302,6 +457,7 @@ test('MCX: backfills the future the options are written on, and tracks in the ev
     store,
     nowMs: () => now,
     backfillEveryMs: null,
+    autoEnable: false,
   });
   const res = await app.inject({
     method: 'POST',
@@ -311,7 +467,11 @@ test('MCX: backfills the future the options are written on, and tracks in the ev
   expect(res.statusCode).toBe(200);
   await service.backfill();
   expect(getMcxFuture).toHaveBeenCalledWith('CRUDEOIL', '20260917');
-  expect(queries.at(-1)?.[0]).toMatchObject({ exchange: 'MCX', type: 'FUT', values: [FUT] });
+  // One query for the 1m backfill's reference closes, plus one 1s query per symbol for the
+  // replay — all reading the future, not the option chain's own (nonexistent) spot.
+  expect(queries.flat()).toContainEqual(
+    expect.objectContaining({ exchange: 'MCX', type: 'FUT', values: [FUT] }),
+  );
 
   service.onChain({
     asset: 'CRUDEOIL',
@@ -323,6 +483,53 @@ test('MCX: backfills the future the options are written on, and tracks in the ev
   });
   expect(rows.length).toBeGreaterThan(0);
   expect(rows[0]).toMatchObject({ basket_group_id: 'bg_c', spot2: 9815.5 });
+});
+
+test('auto-enable: every eligible strategy is tracked without a click, and finds cases', async () => {
+  await rebuild(true);
+  expect(store.setTracker).toHaveBeenCalledWith('bg_1', true);
+  expect(store.setTracker).not.toHaveBeenCalledWith('bg_2', true);
+  const list = await app.inject({ method: 'GET', url: '/paper/mismatch/trackers' });
+  expect(list.json().trackers).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ basket_group_id: 'bg_1', enabled: true, tracking: true }),
+      expect.objectContaining({ basket_group_id: 'bg_2', enabled: false }),
+    ]),
+  );
+  await service.backfill();
+  service.onChain(chain(23226.5, 103.3, 116.25));
+  expect(rows[0]).toMatchObject({ basket_group_id: 'bg_1', case_no: 1 });
+});
+
+test('auto-enable: a manual off sticks, across syncs and restarts', async () => {
+  await rebuild(true);
+  await app.inject({
+    method: 'POST',
+    url: '/paper/mismatch/trackers',
+    payload: { basket_group_id: 'bg_1', enabled: false },
+  });
+  service.sync();
+  await rebuild(true);
+  const list = await app.inject({ method: 'GET', url: '/paper/mismatch/trackers' });
+  expect(list.json().trackers).toContainEqual(
+    expect.objectContaining({ basket_group_id: 'bg_1', enabled: false, tracking: false }),
+  );
+});
+
+test('auto-enable: waits for a broker session, and for the second leg to fill', async () => {
+  post = null;
+  positions = positions.filter((p) => p.ref_id !== 2);
+  await rebuild(true);
+  service.sync();
+  expect(store.setTracker).not.toHaveBeenCalled();
+
+  post = vi.fn(async () => brokerResponse());
+  service.sync();
+  expect(store.setTracker).not.toHaveBeenCalled(); // bg_1 is still CE only
+
+  positions.push({ ref_id: 2, nubraName: PE, qty: -65, basket_group_id: 'bg_1', entry_time: 1 });
+  service.sync();
+  expect(store.setTracker).toHaveBeenCalledWith('bg_1', true);
 });
 
 test('casesFromRows groups versions by case, oldest first', () => {

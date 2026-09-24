@@ -800,6 +800,10 @@ function ensureMismatchTables(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_mismatch_versions_group
       ON mismatch_versions (basket_group_id, case_no, t2_ns);
+    CREATE TABLE IF NOT EXISTS mismatch_coverage (
+      basket_group_id  TEXT PRIMARY KEY,
+      live_until_ms    INTEGER NOT NULL
+    );
   `);
   mismatchTablesReady = true;
 }
@@ -834,12 +838,48 @@ export function dbListMismatchVersions(basketGroupId?: string): MismatchVersionR
   return (
     basketGroupId
       ? db
-          .prepare(
-            'SELECT * FROM mismatch_versions WHERE basket_group_id = ? ORDER BY case_no, t2_ns, id',
-          )
+          .prepare('SELECT * FROM mismatch_versions WHERE basket_group_id = ? ORDER BY case_no, id')
           .all(basketGroupId)
-      : db
-          .prepare('SELECT * FROM mismatch_versions ORDER BY basket_group_id, case_no, t2_ns, id')
-          .all()
+      : db.prepare('SELECT * FROM mismatch_versions ORDER BY basket_group_id, case_no, id').all()
   ) as MismatchVersionRow[];
+}
+
+/**
+ * Up to when (epoch ms) the live feed has already been scored for a strategy. A catch-up replay
+ * starts after it, so it only fills time the dashboard wasn't listening.
+ */
+export function dbGetMismatchCoverage(basketGroupId: string): number | null {
+  ensureMismatchTables();
+  const row = db
+    .prepare('SELECT live_until_ms FROM mismatch_coverage WHERE basket_group_id = ?')
+    .get(basketGroupId) as { live_until_ms: number } | undefined;
+  return row ? row.live_until_ms : null;
+}
+
+export function dbSetMismatchCoverage(basketGroupId: string, liveUntilMs: number): void {
+  ensureMismatchTables();
+  db.prepare(
+    `INSERT INTO mismatch_coverage (basket_group_id, live_until_ms) VALUES (?, ?)
+     ON CONFLICT(basket_group_id) DO UPDATE SET live_until_ms = MAX(live_until_ms, excluded.live_until_ms)`,
+  ).run(basketGroupId, liveUntilMs);
+}
+
+/**
+ * Drop version rows by id, then renumber the surviving cases. `renumber` must be in ascending
+ * old-number order with new <= old, so no update lands on a number still in use.
+ */
+export function dbPruneMismatchVersions(
+  basketGroupId: string,
+  deleteIds: number[],
+  renumber: Array<[number, number]>,
+): void {
+  ensureMismatchTables();
+  const del = db.prepare('DELETE FROM mismatch_versions WHERE id = ?');
+  const move = db.prepare(
+    'UPDATE mismatch_versions SET case_no = ?, color_idx = ? WHERE basket_group_id = ? AND case_no = ?',
+  );
+  db.transaction(() => {
+    for (const id of deleteIds) del.run(id);
+    for (const [from, to] of renumber) if (from !== to) move.run(to, to - 1, basketGroupId, from);
+  })();
 }
