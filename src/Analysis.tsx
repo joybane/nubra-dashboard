@@ -77,6 +77,9 @@ interface AnalysisCase {
   }>;
 }
 
+/** What the day chart needs from a case — a main match or one of its earlier versions. */
+type CaseWindow = AnalysisCase['groupCandidates'][number];
+
 interface ScanDay {
   date: string;
   source: DaySource;
@@ -505,7 +508,10 @@ export default function Analysis({ theme, onChangeView }: Props) {
   const [onlyWithCases, setOnlyWithCases] = useState(true);
   const [visibleDays, setVisibleDays] = useState(120);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const [selected, setSelected] = useState<{ date: string; index: number } | null>(null);
+  // `group` picks one of the case's earlier versions (from the ⊞ popup) instead of the case itself.
+  const [selected, setSelected] = useState<{ date: string; index: number; group?: number } | null>(
+    null,
+  );
   const [reportOpen, setReportOpen] = useState(false);
   /** Key of the group popup currently open: "date:caseIndex", or null if closed. */
   const [groupPopup, setGroupPopup] = useState<string | null>(null);
@@ -550,7 +556,11 @@ export default function Analysis({ theme, onChangeView }: Props) {
     () => (selected ? (scan?.days.find((d) => d.date === selected.date) ?? null) : null),
     [scan, selected],
   );
-  const selectedCase = selectedDay && selected ? (selectedDay.cases[selected.index] ?? null) : null;
+  const selectedMain = selectedDay && selected ? (selectedDay.cases[selected.index] ?? null) : null;
+  const selectedCase: CaseWindow | null =
+    selectedMain && selected?.group != null
+      ? (selectedMain.groupCandidates?.[selected.group] ?? null)
+      : selectedMain;
 
   const nubraFrom = status?.coverage.nubra.from ?? null;
   const nubraAvailable = (day: ScanDay) =>
@@ -901,7 +911,10 @@ export default function Analysis({ theme, onChangeView }: Props) {
                   {open && (
                     <div className="pb-1">
                       {day.cases.map((c, index) => {
-                        const isSel = selected?.date === day.date && selected.index === index;
+                        const isSel =
+                          selected?.date === day.date &&
+                          selected.index === index &&
+                          selected.group == null;
                         const popupKey = `${day.date}:${index}`;
                         const popupOpen = groupPopup === popupKey;
                         return (
@@ -954,27 +967,54 @@ export default function Analysis({ theme, onChangeView }: Props) {
                               <div className="mx-4 mb-1 rounded border border-[var(--border)] bg-[var(--bg-secondary)] p-2 text-[10px]">
                                 <div className="mb-1.5 flex items-center justify-between text-[var(--text-muted)]">
                                   <span className="font-semibold uppercase tracking-wide">
-                                    {c.groupCandidates.length} earlier version{c.groupCandidates.length === 1 ? '' : 's'}
+                                    {c.groupCandidates.length} earlier version
+                                    {c.groupCandidates.length === 1 ? '' : 's'}
                                   </span>
-                                  <span className="text-[9px]">Rising peaks leading up to this match</span>
+                                  <span className="text-[9px]">
+                                    Rising peaks leading up to this match
+                                  </span>
                                 </div>
                                 <div className="space-y-0.5">
-                                  {c.groupCandidates.map((g, gi) => (
-                                    <div
-                                      key={`${g.t1}-${g.t2}-${gi}`}
-                                      className="grid grid-cols-[80px_1fr_1fr_1fr] gap-1 rounded px-1 py-0.5 text-[10px] text-[var(--text-muted)]"
-                                      title={`Spot ${num(g.spot1)} → ${num(g.spot2)}`}
-                                    >
-                                      <span className="font-mono text-[var(--text-primary)]">
-                                        {g.t1}→{g.t2}
-                                      </span>
-                                      <span className={pnlClass(g.peDelta)}>PE {inr(g.peDelta)}</span>
-                                      <span className={pnlClass(g.ceDelta)}>CE {inr(g.ceDelta)}</span>
-                                      <span className={`text-right font-semibold ${pnlClass(g.totalDelta)}`}>
-                                        {inr(g.totalDelta)}
-                                      </span>
-                                    </div>
-                                  ))}
+                                  {c.groupCandidates.map((g, gi) => {
+                                    const gSel =
+                                      selected?.date === day.date &&
+                                      selected.index === index &&
+                                      selected.group === gi;
+                                    const pick = () =>
+                                      setSelected({ date: day.date, index, group: gi });
+                                    return (
+                                      <div
+                                        key={`${g.t1}-${g.t2}-${gi}`}
+                                        role="button"
+                                        tabIndex={0}
+                                        onClick={pick}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') pick();
+                                        }}
+                                        className={`grid cursor-pointer grid-cols-[80px_1fr_1fr_1fr] gap-1 rounded px-1 py-0.5 text-[10px] text-[var(--text-muted)] ${
+                                          gSel
+                                            ? 'bg-[var(--accent)]/15'
+                                            : 'hover:bg-[var(--bg-primary)]'
+                                        }`}
+                                        title={`Spot ${num(g.spot1)} → ${num(g.spot2)}`}
+                                      >
+                                        <span className="font-mono text-[var(--text-primary)]">
+                                          {g.t1}→{g.t2}
+                                        </span>
+                                        <span className={pnlClass(g.peDelta)}>
+                                          PE {inr(g.peDelta)}
+                                        </span>
+                                        <span className={pnlClass(g.ceDelta)}>
+                                          CE {inr(g.ceDelta)}
+                                        </span>
+                                        <span
+                                          className={`text-right font-semibold ${pnlClass(g.totalDelta)}`}
+                                        >
+                                          {inr(g.totalDelta)}
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
                                 </div>
                               </div>
                             )}
@@ -1320,7 +1360,7 @@ interface CaseChartProps {
   underlying: AnalysisUnderlying;
   instrument: Instrument;
   day: ScanDay;
-  selected: AnalysisCase | null;
+  selected: CaseWindow | null;
   params: FinderParams;
   nubraAvailable: boolean;
   onOpenNubraBt: () => void;
