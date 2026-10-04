@@ -1,4 +1,12 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type { WsMessage } from '../types';
 import { createChartSubRegistry } from '../lib/chartSubRegistry';
 import { createOcSubRegistry, ocKey } from '../lib/ocSubRegistry';
@@ -173,21 +181,22 @@ export function WsProvider({ children }: { children: React.ReactNode }) {
     [send],
   );
 
-  return (
-    <WsContext.Provider
-      value={{
-        wsReady,
-        subscribe,
-        send,
-        subscribeOC,
-        unsubscribeOC,
-        subscribeChart,
-        unsubscribeChart,
-      }}
-    >
-      {children}
-    </WsContext.Provider>
+  // Memoised so consumers re-render when the socket's readiness changes, not every time this
+  // provider's parent does — every callback in it is already stable.
+  const value = useMemo(
+    () => ({
+      wsReady,
+      subscribe,
+      send,
+      subscribeOC,
+      unsubscribeOC,
+      subscribeChart,
+      unsubscribeChart,
+    }),
+    [wsReady, subscribe, send, subscribeOC, unsubscribeOC, subscribeChart, unsubscribeChart],
   );
+
+  return <WsContext.Provider value={value}>{children}</WsContext.Provider>;
 }
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────

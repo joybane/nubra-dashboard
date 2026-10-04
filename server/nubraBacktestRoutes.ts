@@ -5,6 +5,44 @@ import {
   type BacktestBarStore,
   type BarPayload,
 } from './backtestBarStore.ts';
+import { describeUpstreamError } from './upstreamError.ts';
+import {
+  TICK_RETENTION_MS,
+  decayCaseDto,
+  replayDecay,
+  tickCoverageStart,
+  type SecondCloses,
+} from './backtestDecay.ts';
+import { formatHms, parseSecondBars } from './intradayBars.ts';
+import { istDate, istMinuteToMs, sessionMinutes, type StrategyLegs } from './mismatchTracker.ts';
+import {
+  isLocalUnderlying,
+  istDatesBetween,
+  localBarAt,
+  localContractName,
+  localDay,
+  localExpiriesFor,
+  localGreeksFor,
+  parseLocalContractName,
+  parseSourcePref,
+  resolveSource,
+  type DataSource,
+  type LocalBar,
+  type LocalDay,
+} from './nubraBacktestLocal.ts';
+
+/**
+ * The message a route hands the UI. Node reports every network failure as the bare words
+ * "fetch failed"; say what actually happened, and that a retry is cheap (batches that did land are
+ * cached per symbol, so the next attempt only fetches what is still missing).
+ */
+function nbErrorMessage(err: unknown): string {
+  const f = describeUpstreamError(err);
+  if (f.kind === 'transport') {
+    return `Could not reach the broker (${f.detail}). Retry — data already loaded is kept.`;
+  }
+  return f.message;
+}
 
 type NubraGet = (
   endpoint: string,
@@ -35,6 +73,12 @@ interface NubraBacktestRouteDeps {
    * disk-backed store; see backtestBarStore.ts.
    */
   barStore?: BacktestBarStore;
+  /**
+   * The Analysis day cache (`.analysis-cache`). Its first Nubra day is where broker history starts,
+   * which is what `source=auto` compares a date against. Optional: without it a measured constant
+   * per underlying stands in — see nubraBacktestLocal.ts.
+   */
+  analysisCacheDir?: string;
 }
 
 export function registerNubraBacktestRoutes({
@@ -45,6 +89,7 @@ export function registerNubraBacktestRoutes({
   getSessionToken,
   refdataStore,
   barStore,
+  analysisCacheDir,
 }: NubraBacktestRouteDeps): void {
   // ─── Nubra Backtest — Utilities ───────────────────────────────────────────────
 
@@ -550,17 +595,388 @@ export function registerNubraBacktestRoutes({
     }
   });
 
+  // ─── Local parquet source ─────────────────────────────────────────────────────
+  // Dates before broker history (or any date, when forced) are answered from the parquet tree.
+  // Every helper returns the same shape as its broker twin, tagged `source: 'local'`, so the view
+  // only learns WHICH source answered — never has to read a different payload. No broker login is
+  // needed for any of them. See nubraBacktestLocal.ts for what the tree lacks and how it is filled.
+
+  function nbSource(underlying: string, date: string, raw: unknown): Promise<DataSource> {
+    return resolveSource(underlying, date, parseSourcePref(raw), analysisCacheDir);
+  }
+
+  /** Expiry to use: the requested one when the tree holds it for the date, else the nearest. */
+  async function localPickExpiry(
+    underlying: string,
+    date: string,
+    requested?: string,
+  ): Promise<{
+    expiries: Array<{ expiry: string; flag: 'WEEK' | 'MONTH' }>;
+    selected: string | null;
+  }> {
+    if (!isLocalUnderlying(underlying)) return { expiries: [], selected: null };
+    const expiries = await localExpiriesFor(underlying, date);
+    const want = requested ? requested.replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3') : '';
+    const selected = expiries.find((e) => e.expiry === want)?.expiry ?? expiries[0]?.expiry ?? null;
+    return { expiries, selected };
+  }
+
+  async function localLoad(underlying: string, date: string, expiry?: string) {
+    const { expiries, selected } = await localPickExpiry(underlying, date, expiry);
+    if (!selected || !isLocalUnderlying(underlying)) {
+      return { expiries, day: null as LocalDay | null, selected };
+    }
+    return { expiries, day: await localDay(underlying, selected, date), selected };
+  }
+
+  async function localChain(underlying: string, date: string, time: string, expiry?: string) {
+    const t0 = Date.now();
+    const { expiries, day, selected } = await localLoad(underlying, date, expiry);
+    const availableExpiries = expiries.map((e) => ({ expiry: e.expiry, flag: e.flag }));
+    const flagOf = (exp: string | null) =>
+      expiries.find((e) => e.expiry === exp)?.flag ?? ('WEEK' as const);
+    const base = {
+      underlying,
+      date,
+      time,
+      expiry: selected ?? '',
+      expiryFlag: flagOf(selected),
+      availableExpiries,
+      expiriesPartial: false,
+      source: 'local' as DataSource,
+    };
+    if (!day) {
+      return {
+        ...base,
+        ok: false,
+        error: `No local data for ${underlying} on ${date}.`,
+        spot: 0,
+        chain: [],
+      };
+    }
+    const spotBar = localBarAt(day.spot, time, 5);
+    if (!spotBar) {
+      return {
+        ...base,
+        ok: false,
+        error: `No local ${underlying} spot near ${time} on ${date}.`,
+        spot: 0,
+        chain: [],
+      };
+    }
+    const spot = spotBar.close;
+    let closest = 0;
+    for (let i = 1; i < day.strikes.length; i++) {
+      if (Math.abs(day.strikes[i] - spot) < Math.abs(day.strikes[closest] - spot)) closest = i;
+    }
+    const strikes = day.strikes.slice(
+      Math.max(0, closest - STRIKE_SPAN),
+      Math.min(day.strikes.length, closest + STRIKE_SPAN + 1),
+    );
+    // IV is the one inverted off the parity forward — the same number the Greek overlay plots for
+    // this day — rather than the vendor's `iv` column, which ivHistory.ts measured as unreliable.
+    // The vendor value stays as the fallback for a print that will not invert.
+    const greeks = localGreeksFor(day);
+    const ivAt = (strike: number, side: 'CE' | 'PE', bar: LocalBar | null) =>
+      bar ? (greeks.get(`${strike}|${side}`)?.find((g) => g.ts === bar.ts)?.iv ?? bar.iv) : 0;
+    const chain = strikes.map((strike) => {
+      // Strict on time: a strike outside the captured wing at `time` shows empty, not an hour-old
+      // price borrowed from when spot was near it.
+      const ce = localBarAt(day.ce.get(strike), time);
+      const pe = localBarAt(day.pe.get(strike), time);
+      return {
+        strike,
+        ceLtp: ce?.close ?? 0,
+        ceIv: ivAt(strike, 'CE', ce),
+        ceOi: ce?.oi ?? 0,
+        ceVol: ce?.vol ?? 0,
+        peLtp: pe?.close ?? 0,
+        peIv: ivAt(strike, 'PE', pe),
+        peOi: pe?.oi ?? 0,
+        peVol: pe?.vol ?? 0,
+      };
+    });
+    console.log(
+      `NubraBacktest LOCAL chain ${underlying} ${date} ${time} exp=${selected}: ${chain.length} strikes, spot=${spot} in ${Date.now() - t0}ms`,
+    );
+    return { ...base, ok: true, spot, chain };
+  }
+
+  /** Bars per leg, or the first leg the tree cannot price at entry or exit. */
+  function localLegBars(
+    day: LocalDay,
+    legs: NbEvalLeg[],
+    entryTime: string,
+    exitTime: string,
+  ): { bars: LocalBar[][] } | { error: string } {
+    const out: LocalBar[][] = [];
+    for (const leg of legs) {
+      const side = leg.optionType === 'CALL' ? 'CE' : 'PE';
+      const bars = (side === 'CE' ? day.ce : day.pe).get(leg.strike) ?? [];
+      const missing = [entryTime, exitTime].find((t) => !localBarAt(bars, t));
+      if (missing) {
+        return {
+          error:
+            `${leg.strike} ${side} has no local price near ${missing} on ${day.date} — the local ` +
+            `files only capture ATM±10 strikes, and this one was outside that range then.`,
+        };
+      }
+      out.push(bars);
+    }
+    return { bars: out };
+  }
+
+  async function localEvaluate(body: NbEvalBody) {
+    const t0 = Date.now();
+    const { underlying, date, expiry, entryTime, exitTime, legs, lotSize } = body;
+    const { day } = await localLoad(underlying, date, expiry);
+    if (!day || day.expiry !== expiry.replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3')) {
+      return {
+        ok: false,
+        source: 'local' as DataSource,
+        error: `No local data for ${underlying} expiry ${expiry} on ${date}.`,
+      };
+    }
+    const legBars = localLegBars(day, legs, entryTime, exitTime);
+    if ('error' in legBars)
+      return { ok: false, source: 'local' as DataSource, error: legBars.error };
+    const result = nbEvaluateFromBars({
+      legs,
+      legBarsList: legBars.bars,
+      spotBars: day.spot,
+      daySpot: day.spot.length ? day.spot[day.spot.length - 1].close : 0,
+      entryTime,
+      exitTime,
+      lotSize,
+    });
+    console.log(
+      `NubraBacktest LOCAL eval ${underlying} ${date} ${entryTime}→${exitTime}: ${legs.length} legs, P&L=${Math.round(result.grossPnl)} in ${Date.now() - t0}ms`,
+    );
+    return { ...result, source: 'local' as DataSource };
+  }
+
+  async function localDecay(body: NbEvalBody, ceLeg: NbEvalLeg, peLeg: NbEvalLeg) {
+    const { underlying, date, expiry, entryTime, exitTime, lotSize } = body;
+    const { day } = await localLoad(underlying, date, expiry);
+    if (!day) return { ok: false, error: `No local data for ${underlying} on ${date}.` };
+    const legBars = localLegBars(day, [ceLeg, peLeg], entryTime, exitTime);
+    if ('error' in legBars) return { ok: false, error: legBars.error };
+    const exchange = nbResolveExchange(underlying, body.exchange);
+    const session = sessionMinutes(exchange);
+    const entryMinute = Math.max(session.open, nbTimeToMin(entryTime));
+    const exitMinute = Math.min(session.last, nbTimeToMin(exitTime));
+    if (exitMinute <= entryMinute) return { ok: false, error: 'Exit must be after entry.' };
+    const signed = (leg: NbEvalLeg) => leg.lots * lotSize * (leg.side === 'BUY' ? 1 : -1);
+    const minuteCloses = (bars: LocalBar[]) =>
+      bars.filter((b) => b.close > 0).map((b) => ({ minute: nbTsToIstMin(b.ts), close: b.close }));
+    const result = replayDecay({
+      legs: {
+        basketGroupId: 'nubra-bt-local',
+        asset: underlying,
+        exchange: exchange as StrategyLegs['exchange'],
+        underlyingType: 'INDEX',
+        ce: {
+          refId: 0,
+          nubraName: localContractName(day.underlying, day.expiry, ceLeg.strike, 'CE'),
+          qty: signed(ceLeg),
+        },
+        pe: {
+          refId: 0,
+          nubraName: localContractName(day.underlying, day.expiry, peLeg.strike, 'PE'),
+          qty: signed(peLeg),
+        },
+        entryNs: istMinuteToMs(date, entryMinute) * 1_000_000,
+      },
+      date,
+      entryMinute,
+      exitMinute,
+      closes: {
+        spot: minuteCloses(day.spot),
+        ce: minuteCloses(legBars.bars[0]),
+        pe: minuteCloses(legBars.bars[1]),
+      },
+      // The tree has no ticks; the walk runs on minute closes throughout.
+      ticks: null,
+      tickFromSec: null,
+    });
+    return {
+      ok: true,
+      source: 'local' as DataSource,
+      resolution: result.resolution,
+      tickFrom: null,
+      tickError: null,
+      cases: result.cases.map(decayCaseDto),
+    };
+  }
+
+  /**
+   * The Band's contract list, named `LOCAL|…` so /local-historical can resolve each back to a strike
+   * of the tree. No lot size: the tree does not carry one, and the overlay keeps the chain's.
+   */
+  async function localBandContracts(underlying: string, date: string, expiry?: string) {
+    const { expiries, day, selected } = await localLoad(underlying, date, expiry);
+    const availableExpiries = expiries.map((e) => e.expiry);
+    if (!day || !selected || !isLocalUnderlying(underlying)) {
+      return {
+        ok: false,
+        source: 'local' as DataSource,
+        error: `No local data for ${underlying} on ${date}.`,
+        underlying,
+        date,
+        exchange: nbResolveExchange(underlying),
+        expiry: '',
+        availableExpiries,
+        contracts: [],
+      };
+    }
+    const contracts: Array<{ name: string; strike: number; side: 'CE' | 'PE'; expiry: string }> =
+      [];
+    for (const strike of day.strikes) {
+      for (const side of ['CE', 'PE'] as const) {
+        if ((side === 'CE' ? day.ce : day.pe).get(strike)?.length) {
+          contracts.push({
+            name: localContractName(underlying, selected, strike, side),
+            strike,
+            side,
+            expiry: selected,
+          });
+        }
+      }
+    }
+    return {
+      ok: true,
+      source: 'local' as DataSource,
+      underlying,
+      date,
+      exchange: nbResolveExchange(underlying),
+      expiry: selected,
+      availableExpiries,
+      contracts,
+    };
+  }
+
+  interface HistQuery {
+    exchange?: string;
+    type?: string;
+    values?: string[];
+    fields?: string[];
+    startDate?: string;
+    endDate?: string;
+    interval?: string;
+  }
+
+  /**
+   * `/api/historical`'s request and response shape, answered from the tree — what the Greek overlay
+   * reads when its host is on a local day. Prices go out in paise as the broker's do; greeks are
+   * reconstructed per day (localGreeksFor). Book fields (l1bid/l1ask) are the close: the tree has no
+   * book. Only 1m exists locally; any other interval is answered empty, which the overlay already
+   * treats as "no data for that window".
+   */
+  fastify.post<{ Body: { query?: HistQuery[] } }>(
+    '/api/nubra-backtest/local-historical',
+    async (req) => {
+      const queries = Array.isArray(req.body?.query) ? req.body.query : [];
+      const result = await Promise.all(
+        queries.map(async (q) => {
+          const values: Record<string, Record<string, Array<{ ts: number; v: number }>>> = {};
+          const startMs = Date.parse(q.startDate ?? '');
+          const endMs = Date.parse(q.endDate ?? '');
+          if (q.interval !== '1m' || !Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+            return { values: [values] };
+          }
+          const fields = new Set(q.fields ?? ['close']);
+          const inWindow = (ts: string) => {
+            const ms = Number(BigInt(ts) / 1_000_000n);
+            return ms >= startMs && ms <= endMs;
+          };
+          // Only dates whose 09:15–15:30 IST session overlaps the window. The overlay's one-day
+          // window opens at the previous close, and loading that whole earlier day to keep none
+          // of it would double the cold cost of every request.
+          const dates = istDatesBetween(startMs, endMs).filter((d) => {
+            const open = Date.parse(`${d}T09:15:00+05:30`);
+            const close = Date.parse(`${d}T15:30:00+05:30`);
+            return close >= startMs && open <= endMs;
+          });
+
+          for (const name of q.values ?? []) {
+            const series: Record<string, Array<{ ts: number; v: number }>> = {};
+            // A plain number, as the broker sends it: the overlay normalises by magnitude, and a
+            // string here would be the one field shape the broker never produces.
+            const push = (field: string, ts: string, v: number) => {
+              if (!fields.has(field) || !Number.isFinite(v)) return;
+              (series[field] ??= []).push({ ts: Number(ts), v });
+            };
+            const contract = parseLocalContractName(name);
+            if (contract) {
+              for (const date of dates) {
+                if (date > contract.expiry) break;
+                const day = await localDay(contract.und, contract.expiry, date);
+                if (!day) continue;
+                const bars = (contract.side === 'CE' ? day.ce : day.pe).get(contract.strike) ?? [];
+                const greeks = new Map(
+                  (localGreeksFor(day).get(`${contract.strike}|${contract.side}`) ?? []).map(
+                    (g) => [g.ts, g],
+                  ),
+                );
+                for (const b of bars) {
+                  if (!inWindow(b.ts)) continue;
+                  const paise = Math.round(b.close * 100);
+                  push('close', b.ts, paise);
+                  push('l1bid', b.ts, paise);
+                  push('l1ask', b.ts, paise);
+                  push('cumulative_oi', b.ts, b.oi);
+                  const g = greeks.get(b.ts);
+                  if (g) {
+                    push('delta', b.ts, g.delta);
+                    push('vega', b.ts, g.vega);
+                    push('theta', b.ts, g.theta);
+                    push('iv_mid', b.ts, g.iv);
+                  }
+                }
+              }
+            } else if (isLocalUnderlying(name)) {
+              // The underlying itself: spot from whichever expiry holds each date.
+              for (const date of dates) {
+                const exp = (await localExpiriesFor(name, date))[0]?.expiry;
+                const day = exp ? await localDay(name, exp, date) : null;
+                for (const b of day?.spot ?? []) {
+                  if (!inWindow(b.ts)) continue;
+                  push('close', b.ts, Math.round(b.close * 100));
+                  push('open', b.ts, Math.round(b.open * 100));
+                  push('high', b.ts, Math.round(b.high * 100));
+                  push('low', b.ts, Math.round(b.low * 100));
+                }
+              }
+            }
+            if (Object.keys(series).length) values[name] = series;
+          }
+          return { values: [values] };
+        }),
+      );
+      return { result };
+    },
+  );
+
   // ─── Nubra Backtest — Routes ──────────────────────────────────────────────────
 
   fastify.get<{
-    Querystring: { underlying?: string; date?: string; expiry?: string; exchange?: string };
+    Querystring: {
+      underlying?: string;
+      date?: string;
+      expiry?: string;
+      exchange?: string;
+      source?: string;
+    };
   }>('/api/nubra-backtest/band-contracts', async (req, reply) => {
-    if (!requireAuth(reply)) return;
     const { underlying = 'NIFTY', date, expiry } = req.query;
     if (!date) {
       reply.code(400);
       return { ok: false, error: 'date is required.' };
     }
+    if ((await nbSource(underlying, date, req.query.source)) === 'local') {
+      return localBandContracts(underlying, date, expiry);
+    }
+    if (!requireAuth(reply)) return;
 
     try {
       const exchange = nbResolveExchange(underlying, req.query.exchange);
@@ -621,7 +1037,7 @@ export function registerNubraBacktestRoutes({
     } catch (error) {
       console.error('Band contracts error:', error);
       reply.code(500);
-      return { ok: false, error: (error as Error).message };
+      return { ok: false, error: nbErrorMessage(error) };
     }
   });
 
@@ -632,18 +1048,45 @@ export function registerNubraBacktestRoutes({
       time?: string;
       expiry?: string;
       exchange?: string;
+      source?: string;
     };
   }>('/api/nubra-backtest/chain', async (req, reply) => {
-    if (!requireAuth(reply)) return;
     const { underlying = 'NIFTY', date, time = '09:20', expiry } = req.query;
     if (!date) {
       reply.code(400);
       return { ok: false, error: 'date is required.' };
     }
+    if ((await nbSource(underlying, date, req.query.source)) === 'local') {
+      try {
+        return await localChain(underlying, date, time, expiry);
+      } catch (e) {
+        console.error('NubraBacktest local chain error:', e);
+        reply.code(500);
+        return { ok: false, source: 'local', error: (e as Error).message };
+      }
+    }
+    if (!requireAuth(reply)) return;
 
+    // No falling back to local when this fails. The refdata store turns a failed download into an
+    // empty master, so "the broker has no data for this date" and "the connection dropped" look
+    // identical from here — a fallback would quietly swap sources on a network hiccup. Which source
+    // answers is decided by the date alone (resolveSource); a broker failure shows as an error with
+    // Retry, and Local stays one click away.
+    return nbBrokerChain(underlying, date, time, expiry, req.query.exchange, reply);
+  });
+
+  /** The broker half of `/chain`: everything it did before there was a local source. */
+  async function nbBrokerChain(
+    underlying: string,
+    date: string,
+    time: string,
+    expiry: string | undefined,
+    exchangeParam: string | undefined,
+    reply: FastifyReply,
+  ) {
     try {
       const t0 = Date.now();
-      const exchange = nbResolveExchange(underlying, req.query.exchange);
+      const exchange = nbResolveExchange(underlying, exchangeParam);
       const expiryFlag = exchange === 'MCX' ? 'MONTH' : 'WEEK';
 
       // Resolve the option expiry first. MCX has no cash/index ticker named
@@ -876,13 +1319,14 @@ export function registerNubraBacktestRoutes({
         availableExpiries: expiries.map((e) => ({ expiry: e, flag: expiryFlag })),
         expiriesPartial: !exact,
         chain,
+        source: 'nubra' as DataSource,
       };
     } catch (e) {
       console.error('NubraBacktest chain error:', e);
       reply.code(500);
-      return { ok: false, error: (e as Error).message };
+      return { ok: false, error: nbErrorMessage(e) };
     }
-  });
+  }
 
   interface NbEvalLeg {
     strike: number;
@@ -899,17 +1343,181 @@ export function registerNubraBacktestRoutes({
     exitTime: string;
     legs: NbEvalLeg[];
     lotSize: number;
+    /** 'auto' | 'nubra' | 'local' — see resolveSource. Absent means 'auto'. */
+    source?: string;
   }
 
   const IST_OFFSET = 19800; // 5h30m in seconds
 
+  /**
+   * Entry → exit replay of a fixed basket over already-fetched 1m bars. Pure: both sources fetch
+   * (broker timeseries or the local parquet tree) and hand the bars here, so the result is computed
+   * the same way whichever one answered.
+   */
+  function nbEvaluateFromBars(args: {
+    legs: NbEvalLeg[];
+    legBarsList: NbBar[][];
+    spotBars: NbBar[];
+    daySpot: number;
+    entryTime: string;
+    exitTime: string;
+    lotSize: number;
+  }) {
+    const { legs, legBarsList, spotBars, daySpot, entryTime, exitTime, lotSize } = args;
+    const underlyingBars = spotBars.map((b) => ({
+      time: Number(BigInt(b.ts) / 1000000000n) + IST_OFFSET,
+      open: b.open,
+      high: b.high,
+      low: b.low,
+      close: b.close,
+    }));
+
+    const entryMin = nbTimeToMin(entryTime);
+    const exitMin = nbTimeToMin(exitTime);
+
+    // 3. Replay leg results
+    const legResults: Array<{
+      strike: number;
+      optionType: string;
+      side: string;
+      lots: number;
+      entryPrice: number;
+      exitPrice: number;
+      highAfterEntry: number;
+      lowAfterEntry: number;
+      pnl: number;
+    }> = [];
+    let totalPnl = 0;
+
+    const legPriceData: Array<{
+      legIndex: number;
+      data: Array<{ time: number; value: number }>;
+    }> = [];
+    const legPnlData: Array<{ legIndex: number; data: Array<{ time: number; value: number }> }> =
+      [];
+
+    for (let li = 0; li < legs.length; li++) {
+      const leg = legs[li];
+      const bars = legBarsList[li];
+
+      const entryBar = nbFindBar(bars, entryTime);
+      const exitBar = nbFindBar(bars, exitTime);
+      const entryPrice = entryBar?.close ?? 0;
+      const exitPrice = exitBar?.close ?? 0;
+
+      const rangeBars = bars.filter((b) => {
+        const m = nbTsToIstMin(b.ts);
+        return m >= entryMin && m <= exitMin;
+      });
+      const high = rangeBars.length ? Math.max(...rangeBars.map((b) => b.close)) : entryPrice;
+      const low = rangeBars.length ? Math.min(...rangeBars.map((b) => b.close)) : entryPrice;
+
+      const qty = leg.lots * lotSize;
+      const sign = leg.side === 'BUY' ? 1 : -1;
+      const pnl = (exitPrice - entryPrice) * qty * sign;
+      totalPnl += pnl;
+
+      legResults.push({
+        strike: leg.strike,
+        optionType: leg.optionType,
+        side: leg.side,
+        lots: leg.lots,
+        entryPrice,
+        exitPrice,
+        highAfterEntry: high,
+        lowAfterEntry: low,
+        pnl,
+      });
+
+      const pricePoints = bars.map((b) => ({
+        time: Number(BigInt(b.ts) / 1000000000n) + IST_OFFSET,
+        value: b.close,
+      }));
+      legPriceData.push({ legIndex: li, data: pricePoints });
+
+      const pnlPoints = bars.map((b) => {
+        const t = Number(BigInt(b.ts) / 1000000000n) + IST_OFFSET;
+        const m = nbTsToIstMin(b.ts);
+        if (m < entryMin) return { time: t, value: 0 };
+        if (m > exitMin) return { time: t, value: (exitPrice - entryPrice) * qty * sign };
+        return { time: t, value: (b.close - entryPrice) * qty * sign };
+      });
+      legPnlData.push({ legIndex: li, data: pnlPoints });
+    }
+
+    // 4. Build intraday P&L curve at 1-minute resolution
+    const timeSet = new Set<string>();
+    for (const bars of legBarsList) {
+      for (const b of bars) {
+        const m = nbTsToIstMin(b.ts);
+        if (m >= entryMin && m <= exitMin) timeSet.add(nbTsToIstHHMM(b.ts));
+      }
+    }
+    const sortedTimes = [...timeSet].sort();
+
+    const intradayCurve: Array<{ hhmm: string; spot: number; total: number }> = [];
+    const basketPnlData: Array<{ time: number; value: number }> = [];
+
+    for (const hhmm of sortedTimes) {
+      let total = 0;
+      let timestamp = 0;
+      let currentSpot = daySpot;
+
+      const spotBar = nbFindBar(spotBars, hhmm);
+      if (spotBar) currentSpot = spotBar.close;
+
+      for (let li = 0; li < legs.length; li++) {
+        const leg = legs[li];
+        const bars = legBarsList[li];
+        const entry = nbFindBar(bars, entryTime);
+        const cur = nbFindBar(bars, hhmm);
+        if (!entry || !cur) continue;
+        total += (cur.close - entry.close) * leg.lots * lotSize * (leg.side === 'BUY' ? 1 : -1);
+        if (!timestamp) {
+          timestamp = Number(BigInt(cur.ts) / 1000000000n) + IST_OFFSET;
+        }
+      }
+      intradayCurve.push({ hhmm, spot: currentSpot, total: Math.round(total * 100) / 100 });
+      if (timestamp) {
+        basketPnlData.push({ time: timestamp, value: Math.round(total * 100) / 100 });
+      }
+    }
+
+    const entrySpotBar = nbFindBar(spotBars, entryTime);
+    const exitSpotBar = nbFindBar(spotBars, exitTime);
+    const entrySpot = entrySpotBar?.close ?? daySpot;
+    const exitSpot = exitSpotBar?.close ?? daySpot;
+
+    return {
+      ok: true as const,
+      entrySpot,
+      exitSpot,
+      legs: legResults,
+      grossPnl: Math.round(totalPnl * 100) / 100,
+      intradayCurve,
+      underlyingBars,
+      legPriceData,
+      legPnlData,
+      basketPnlData,
+    };
+  }
+
   fastify.post<{ Body: NbEvalBody }>('/api/nubra-backtest/evaluate', async (req, reply) => {
-    if (!requireAuth(reply)) return;
     const body = req.body;
     if (!body?.underlying || !body?.date || !body?.legs?.length) {
       reply.code(400);
       return { ok: false, error: 'underlying, date, and at least one leg are required.' };
     }
+    if ((await nbSource(body.underlying, body.date, body.source)) === 'local') {
+      try {
+        return await localEvaluate(body);
+      } catch (e) {
+        console.error('NubraBacktest local eval error:', e);
+        reply.code(500);
+        return { ok: false, source: 'local', error: (e as Error).message };
+      }
+    }
+    if (!requireAuth(reply)) return;
 
     try {
       const t0 = Date.now();
@@ -973,14 +1581,6 @@ export function registerNubraBacktestRoutes({
       const spotData = spotAll[indexName] || {};
       const spotBars = nbParseBars(spotData);
 
-      const underlyingBars = spotBars.map((b) => ({
-        time: Number(BigInt(b.ts) / 1000000000n) + IST_OFFSET,
-        open: b.open,
-        high: b.high,
-        low: b.low,
-        close: b.close,
-      }));
-
       let daySpot = 0;
       if (spotBars.length) {
         daySpot = spotBars[spotBars.length - 1].close;
@@ -1009,144 +1609,202 @@ export function registerNubraBacktestRoutes({
         if (closes.length) daySpot = closes[0].v / 100;
       }
 
-      const entryMin = nbTimeToMin(entryTime);
-      const exitMin = nbTimeToMin(exitTime);
-
-      // 3. Replay leg results
-      const legResults: Array<{
-        strike: number;
-        optionType: string;
-        side: string;
-        lots: number;
-        entryPrice: number;
-        exitPrice: number;
-        highAfterEntry: number;
-        lowAfterEntry: number;
-        pnl: number;
-      }> = [];
-      const legBarsList: NbBar[][] = [];
-      let totalPnl = 0;
-
-      const legPriceData: Array<{
-        legIndex: number;
-        data: Array<{ time: number; value: number }>;
-      }> = [];
-      const legPnlData: Array<{ legIndex: number; data: Array<{ time: number; value: number }> }> =
-        [];
-
-      for (let li = 0; li < legs.length; li++) {
-        const leg = legs[li];
-        const symbol = legSymbols[li];
-        const bars = optAll[symbol] ? nbParseBars(optAll[symbol]) : [];
-        legBarsList.push(bars);
-
-        const entryBar = nbFindBar(bars, entryTime);
-        const exitBar = nbFindBar(bars, exitTime);
-        const entryPrice = entryBar?.close ?? 0;
-        const exitPrice = exitBar?.close ?? 0;
-
-        const rangeBars = bars.filter((b) => {
-          const m = nbTsToIstMin(b.ts);
-          return m >= entryMin && m <= exitMin;
-        });
-        const high = rangeBars.length ? Math.max(...rangeBars.map((b) => b.close)) : entryPrice;
-        const low = rangeBars.length ? Math.min(...rangeBars.map((b) => b.close)) : entryPrice;
-
-        const qty = leg.lots * lotSize;
-        const sign = leg.side === 'BUY' ? 1 : -1;
-        const pnl = (exitPrice - entryPrice) * qty * sign;
-        totalPnl += pnl;
-
-        legResults.push({
-          strike: leg.strike,
-          optionType: leg.optionType,
-          side: leg.side,
-          lots: leg.lots,
-          entryPrice,
-          exitPrice,
-          highAfterEntry: high,
-          lowAfterEntry: low,
-          pnl,
-        });
-
-        const pricePoints = bars.map((b) => ({
-          time: Number(BigInt(b.ts) / 1000000000n) + IST_OFFSET,
-          value: b.close,
-        }));
-        legPriceData.push({ legIndex: li, data: pricePoints });
-
-        const pnlPoints = bars.map((b) => {
-          const t = Number(BigInt(b.ts) / 1000000000n) + IST_OFFSET;
-          const m = nbTsToIstMin(b.ts);
-          if (m < entryMin) return { time: t, value: 0 };
-          if (m > exitMin) return { time: t, value: (exitPrice - entryPrice) * qty * sign };
-          return { time: t, value: (b.close - entryPrice) * qty * sign };
-        });
-        legPnlData.push({ legIndex: li, data: pnlPoints });
-      }
-
-      // 4. Build intraday P&L curve at 1-minute resolution
-      const timeSet = new Set<string>();
-      for (const bars of legBarsList) {
-        for (const b of bars) {
-          const m = nbTsToIstMin(b.ts);
-          if (m >= entryMin && m <= exitMin) timeSet.add(nbTsToIstHHMM(b.ts));
-        }
-      }
-      const sortedTimes = [...timeSet].sort();
-
-      const intradayCurve: Array<{ hhmm: string; spot: number; total: number }> = [];
-      const basketPnlData: Array<{ time: number; value: number }> = [];
-
-      for (const hhmm of sortedTimes) {
-        let total = 0;
-        let timestamp = 0;
-        let currentSpot = daySpot;
-
-        const spotBar = nbFindBar(spotBars, hhmm);
-        if (spotBar) currentSpot = spotBar.close;
-
-        for (let li = 0; li < legs.length; li++) {
-          const leg = legs[li];
-          const bars = legBarsList[li];
-          const entry = nbFindBar(bars, entryTime);
-          const cur = nbFindBar(bars, hhmm);
-          if (!entry || !cur) continue;
-          total += (cur.close - entry.close) * leg.lots * lotSize * (leg.side === 'BUY' ? 1 : -1);
-          if (!timestamp) {
-            timestamp = Number(BigInt(cur.ts) / 1000000000n) + IST_OFFSET;
-          }
-        }
-        intradayCurve.push({ hhmm, spot: currentSpot, total: Math.round(total * 100) / 100 });
-        if (timestamp) {
-          basketPnlData.push({ time: timestamp, value: Math.round(total * 100) / 100 });
-        }
-      }
-
-      const entrySpotBar = nbFindBar(spotBars, entryTime);
-      const exitSpotBar = nbFindBar(spotBars, exitTime);
-      const entrySpot = entrySpotBar?.close ?? daySpot;
-      const exitSpot = exitSpotBar?.close ?? daySpot;
+      const result = nbEvaluateFromBars({
+        legs,
+        legBarsList: legSymbols.map((symbol) =>
+          optAll[symbol] ? nbParseBars(optAll[symbol]) : [],
+        ),
+        spotBars,
+        daySpot,
+        entryTime,
+        exitTime,
+        lotSize,
+      });
 
       console.log(
-        `NubraBacktest eval ${underlying} ${date} ${entryTime}→${exitTime}: ${legs.length} legs, P&L=${Math.round(totalPnl)} in ${Date.now() - t0}ms`,
+        `NubraBacktest eval ${underlying} ${date} ${entryTime}→${exitTime}: ${legs.length} legs, P&L=${Math.round(result.grossPnl)} in ${Date.now() - t0}ms`,
       );
-      return {
-        ok: true,
-        entrySpot,
-        exitSpot,
-        legs: legResults,
-        grossPnl: Math.round(totalPnl * 100) / 100,
-        intradayCurve,
-        underlyingBars,
-        legPriceData,
-        legPnlData,
-        basketPnlData,
-      };
+      return { ...result, source: 'nubra' as DataSource };
     } catch (e) {
       console.error('NubraBacktest eval error:', e);
       reply.code(500);
-      return { ok: false, error: (e as Error).message };
+      return { ok: false, error: nbErrorMessage(e) };
+    }
+  });
+
+  // ─── Decay matcher over a backtest day ──────────────────────────────────────
+  // Additive: the evaluate route above is untouched, so turning Decay on changes nothing else the
+  // view shows. The engine and the tick/minute walk live in backtestDecay.ts.
+
+  /** 1s closes of one symbol from `startMs` to the end of `date`, as IST seconds of that date. */
+  async function nbFetchSeconds(
+    exchange: string,
+    type: string,
+    symbol: string,
+    date: string,
+    startMs: number,
+    today: boolean,
+  ): Promise<Array<{ sec: number; close: number }>> {
+    const res = await nubraPost(
+      '/charts/timeseries',
+      {
+        query: [
+          {
+            exchange,
+            type,
+            values: [symbol],
+            fields: ['close'],
+            startDate: new Date(Math.max(startMs, Date.parse(`${date}T00:00:00Z`))).toISOString(),
+            endDate: `${date}T23:59:59.000Z`,
+            interval: '1s',
+            intraDay: today,
+            realTime: false,
+          },
+        ],
+      },
+      { Authorization: `Bearer ${getSessionToken()!}` },
+    );
+    return parseSecondBars(res, symbol, date).map((b) => ({ sec: b.sec, close: b.close }));
+  }
+
+  fastify.post<{ Body: NbEvalBody }>('/api/nubra-backtest/decay', async (req, reply) => {
+    const body = req.body;
+    if (!body?.underlying || !body?.date || !body?.expiry || !body?.legs?.length) {
+      reply.code(400);
+      return { ok: false, error: 'underlying, date, expiry and legs are required.' };
+    }
+    const ceLegs = body.legs.filter((l) => l.optionType === 'CALL');
+    const peLegs = body.legs.filter((l) => l.optionType === 'PUT');
+    if (body.legs.length !== 2 || ceLegs.length !== 1 || peLegs.length !== 1) {
+      return { ok: false, error: 'Decay needs exactly one CE and one PE leg.' };
+    }
+    if ((await nbSource(body.underlying, body.date, body.source)) === 'local') {
+      try {
+        return await localDecay(body, ceLegs[0], peLegs[0]);
+      } catch (e) {
+        console.error('NubraBacktest local decay error:', e);
+        reply.code(500);
+        return { ok: false, error: (e as Error).message };
+      }
+    }
+    if (!requireAuth(reply)) return;
+
+    try {
+      const t0 = Date.now();
+      const { underlying, date, expiry, entryTime, exitTime, lotSize } = body;
+      const exchange = nbResolveExchange(underlying, body.exchange);
+      const refdata = await nbGetRefdataForDate(exchange, date);
+      const targetExpiryNum = Number(expiry.replace(/-/g, ''));
+      const series = nbResolveUnderlyingSeries(underlying, exchange, refdata, targetExpiryNum);
+      if (!series) {
+        return {
+          ok: false,
+          error: `Could not resolve the ${underlying} underlying for ${expiry}.`,
+        };
+      }
+      const symbolOf = (leg: NbEvalLeg) =>
+        refdata.find(
+          (x) =>
+            x.asset === underlying &&
+            x.derivative_type === 'OPT' &&
+            x.expiry === targetExpiryNum &&
+            x.strike_price === leg.strike * 100 &&
+            x.option_type === (leg.optionType === 'CALL' ? 'CE' : 'PE'),
+        );
+      const ceRef = symbolOf(ceLegs[0]);
+      const peRef = symbolOf(peLegs[0]);
+      if (!ceRef?.stock_name || !peRef?.stock_name) {
+        return { ok: false, error: `A leg is not in the instrument master for ${expiry}.` };
+      }
+      const ceName = String(ceRef.stock_name);
+      const peName = String(peRef.stock_name);
+
+      const session = sessionMinutes(exchange);
+      const entryMinute = Math.max(session.open, nbTimeToMin(entryTime));
+      const exitMinute = Math.min(session.last, nbTimeToMin(exitTime));
+      if (exitMinute <= entryMinute) {
+        return { ok: false, error: 'Exit must be after entry.' };
+      }
+      const signed = (leg: NbEvalLeg) => leg.lots * lotSize * (leg.side === 'BUY' ? 1 : -1);
+      const legs: StrategyLegs = {
+        basketGroupId: 'nubra-bt',
+        asset: underlying,
+        exchange: exchange as StrategyLegs['exchange'],
+        underlyingType: series.type,
+        ce: { refId: Number(ceRef.ref_id) || 0, nubraName: ceName, qty: signed(ceLegs[0]) },
+        pe: { refId: Number(peRef.ref_id) || 0, nubraName: peName, qty: signed(peLegs[0]) },
+        entryNs: istMinuteToMs(date, entryMinute) * 1_000_000,
+      };
+
+      // The "earlier minute" side: the broker's 1m closes, the same (cached) bars evaluate reads.
+      const [optRes, spotRes] = await Promise.all([
+        nbFetchTs(exchange, 'OPT', [ceName, peName], ['close'], date, '1m', false),
+        nbFetchTs(exchange, series.type, [series.symbol], ['close'], date, '1m', false),
+      ]);
+      const optAll = nbCollect(optRes);
+      const spotAll = nbCollect(spotRes);
+      const minuteCloses = (payload: Record<string, unknown> | undefined) =>
+        payload
+          ? nbParseBars(payload)
+              .filter((b) => b.close > 0)
+              .map((b) => ({ minute: nbTsToIstMin(b.ts), close: b.close }))
+          : [];
+      const closes = {
+        spot: minuteCloses(spotAll[series.symbol]),
+        ce: minuteCloses(optAll[ceName]),
+        pe: minuteCloses(optAll[peName]),
+      };
+
+      // The "now" side: recorded ticks wherever the broker still keeps them.
+      const nowMs = Date.now();
+      const tickFromSec = tickCoverageStart(date, entryMinute * 60, exitMinute * 60 + 59, nowMs);
+      let ticks: SecondCloses | null = null;
+      let tickError: string | null = null;
+      if (tickFromSec != null) {
+        // A little before the switch, so each series' price as of it is known.
+        const startMs = Math.max(
+          istMinuteToMs(date, 0) + (tickFromSec - 300) * 1000,
+          nowMs - TICK_RETENTION_MS + 5 * 60_000,
+        );
+        const today = istDate(nowMs) === date;
+        try {
+          const [spot, ce, pe] = await Promise.all([
+            nbFetchSeconds(exchange, series.type, series.symbol, date, startMs, today),
+            nbFetchSeconds(exchange, 'OPT', ceName, date, startMs, today),
+            nbFetchSeconds(exchange, 'OPT', peName, date, startMs, today),
+          ]);
+          if (spot.length && ce.length && pe.length) ticks = { spot, ce, pe };
+          else tickError = 'the broker returned no ticks for this day';
+        } catch (e) {
+          // Minute closes still score the day; say why it isn't tick by tick.
+          tickError = nbErrorMessage(e);
+        }
+      }
+
+      const result = replayDecay({
+        legs,
+        date,
+        entryMinute,
+        exitMinute,
+        closes,
+        ticks,
+        tickFromSec: ticks ? tickFromSec : null,
+      });
+      console.log(
+        `NubraBacktest decay ${underlying} ${date} ${entryTime}→${exitTime}: ${result.cases.length} cases, ${result.resolution} (${result.steps} steps) in ${Date.now() - t0}ms`,
+      );
+      return {
+        ok: true,
+        resolution: result.resolution,
+        tickFrom:
+          ticks && tickFromSec != null ? formatHms(Math.max(tickFromSec, entryMinute * 60)) : null,
+        tickError,
+        cases: result.cases.map(decayCaseDto),
+      };
+    } catch (e) {
+      console.error('NubraBacktest decay error:', e);
+      reply.code(500);
+      return { ok: false, error: nbErrorMessage(e) };
     }
   });
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   describeUpstreamError,
+  isConnectError,
   isTransportError,
   upstreamPostRetries,
   upstreamTimeoutMs,
@@ -54,6 +55,23 @@ describe('describeUpstreamError', () => {
   test('reads a non-Error value without throwing', () => {
     expect(describeUpstreamError('plain string').message).toBe('plain string');
     expect(describeUpstreamError(null).detail).toBe('unknown error');
+  });
+});
+
+describe('isConnectError', () => {
+  const failed = (code: string) =>
+    new TypeError('fetch failed', { cause: Object.assign(new Error(code), { code }) });
+
+  test('true only when the connection was never established', () => {
+    expect(isConnectError(failed('UND_ERR_CONNECT_TIMEOUT'))).toBe(true);
+    expect(isConnectError(failed('ECONNREFUSED'))).toBe(true);
+  });
+
+  test('false once the request may have been sent', () => {
+    // A socket that dies mid-request may already have delivered a POST body.
+    expect(isConnectError(failed('UND_ERR_SOCKET'))).toBe(false);
+    expect(isConnectError(failed('ECONNRESET'))).toBe(false);
+    expect(isConnectError(new TypeError('fetch failed'))).toBe(false);
   });
 });
 

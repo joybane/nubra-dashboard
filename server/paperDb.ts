@@ -420,7 +420,7 @@ const _insertPnlTick = () =>
     @unrealized_pnl, @realized_pnl, @total_pnl)`,
   ));
 
-export function dbInsertPnlTick(t: {
+interface PnlTickRow {
   ts: number;
   ref_id: number;
   ltp: number;
@@ -429,8 +429,144 @@ export function dbInsertPnlTick(t: {
   unrealized_pnl: number;
   realized_pnl: number;
   total_pnl: number;
-}): void {
-  _insertPnlTick().run(t);
+}
+
+// Rows are buffered and written in one transaction per second. This table takes a row every fifth
+// tick of every open position — around 100k rows a trading day — and each row used to commit on its
+// own, and every commit appends whole table and index pages to the WAL: kilobytes of disk writes
+// per ~60-byte row, all session long. `ts` is taken when the row is queued, so batching changes
+// when a row reaches disk, never what it says. dbFlushPnlTicks runs on shutdown (closeDb).
+const PNL_FLUSH_MS = 1_000;
+let pnlBuffer: PnlTickRow[] = [];
+let pnlFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function dbInsertPnlTick(t: PnlTickRow): void {
+  pnlBuffer.push(t);
+  if (!pnlFlushTimer) {
+    pnlFlushTimer = setTimeout(dbFlushPnlTicks, PNL_FLUSH_MS);
+    pnlFlushTimer.unref?.();
+  }
+}
+
+export function dbFlushPnlTicks(): void {
+  if (pnlFlushTimer) {
+    clearTimeout(pnlFlushTimer);
+    pnlFlushTimer = null;
+  }
+  if (pnlBuffer.length === 0) return;
+  const rows = pnlBuffer;
+  pnlBuffer = [];
+  try {
+    const stmt = _insertPnlTick();
+    db.transaction(() => {
+      for (const r of rows) stmt.run(r);
+    })();
+  } catch (e) {
+    // Off the tick path now, so a failure here must not take the process down with it.
+    console.error(`[paperDb] dropped ${rows.length} pnl tick(s):`, (e as Error).message);
+  }
+}
+
+// ── PnL tick archive ────────────────────────────────────────────────────────
+// pnl_ticks is write-only — nothing in the app reads it — and grows by megabytes a trading day,
+// which every copy of paper.db then carries. Rows older than the retention window are moved, not
+// deleted, into pnl_ticks_archive.db beside paper.db (same columns, same ids, same index), so the
+// live book stays small and no history is lost.
+
+/** The archive file: beside paper.db, so a test's PAPER_DB_PATH keeps it in the scratch dir. */
+export const PNL_ARCHIVE_PATH = path.join(path.dirname(DB_PATH), 'pnl_ticks_archive.db');
+
+export interface PnlArchiveResult {
+  moved: number;
+  vacuumed: boolean;
+  /** Bytes paper.db occupies after the run (page_count × page_size). */
+  bytesAfter: number;
+}
+
+/**
+ * Move every pnl_ticks row with `ts < cutoffMs` into the archive file.
+ *
+ * Two commits, copy then delete, on purpose. With paper.db in WAL mode SQLite does not make a
+ * transaction spanning two files atomic, so a single one could in principle land the delete and
+ * lose the copy. Copy-then-delete can only fail the other way: a crash between the two leaves the
+ * rows in both files, and the next run's INSERT OR IGNORE (ids are kept) skips them and finishes
+ * the delete. Nothing is ever deleted that the archive has not already committed.
+ *
+ * `vacuumOverBytes`: rewrite paper.db when at least this much of it is free pages. Deleting rows
+ * frees pages for SQLite to reuse but never shrinks the file; the first archive run frees tens of
+ * megabytes that only VACUUM gives back. Pass it at startup only — VACUUM rewrites the whole file.
+ */
+export function dbArchivePnlTicks(
+  cutoffMs: number,
+  opts: { vacuumOverBytes?: number } = {},
+): PnlArchiveResult {
+  dbFlushPnlTicks();
+  let moved = 0;
+
+  // Rows are appended in time order, so the oldest by rowid is the oldest there is: an O(1) check
+  // that makes the common case — nothing old enough yet — cost nothing.
+  const oldest = db.prepare('SELECT ts FROM pnl_ticks ORDER BY id LIMIT 1').get() as
+    { ts: number } | undefined;
+  if (oldest && oldest.ts < cutoffMs) {
+    const { maxId } = db
+      .prepare('SELECT MAX(id) AS maxId FROM pnl_ticks WHERE ts < ?')
+      .get(cutoffMs) as { maxId: number };
+    db.prepare('ATTACH DATABASE ? AS archive').run(PNL_ARCHIVE_PATH);
+    try {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS archive.pnl_ticks (
+          id               INTEGER PRIMARY KEY,
+          ts               INTEGER NOT NULL,
+          ref_id           INTEGER NOT NULL,
+          ltp              INTEGER NOT NULL,
+          qty              INTEGER NOT NULL,
+          avg_price        INTEGER NOT NULL,
+          unrealized_pnl   INTEGER NOT NULL,
+          realized_pnl     INTEGER NOT NULL,
+          total_pnl        INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS archive.idx_pnl_ref_ts ON pnl_ticks(ref_id, ts);
+      `);
+      // `id <= maxId` pins both statements to the same rows even if the clock moved between them.
+      db.transaction(() =>
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO archive.pnl_ticks
+               SELECT id, ts, ref_id, ltp, qty, avg_price, unrealized_pnl, realized_pnl, total_pnl
+               FROM main.pnl_ticks WHERE ts < ? AND id <= ?`,
+          )
+          .run(cutoffMs, maxId),
+      )();
+      moved = db.transaction(
+        () =>
+          db.prepare('DELETE FROM main.pnl_ticks WHERE ts < ? AND id <= ?').run(cutoffMs, maxId)
+            .changes,
+      )();
+    } finally {
+      db.exec('DETACH DATABASE archive');
+    }
+  }
+
+  const pageSize = db.pragma('page_size', { simple: true }) as number;
+  let vacuumed = false;
+  if (opts.vacuumOverBytes != null) {
+    const freeBytes = (db.pragma('freelist_count', { simple: true }) as number) * pageSize;
+    if (freeBytes >= opts.vacuumOverBytes) {
+      db.exec('VACUUM');
+      // VACUUM writes the rewritten file through the WAL; hand that space back too.
+      db.pragma('wal_checkpoint(TRUNCATE)');
+      vacuumed = true;
+    }
+  }
+  const bytesAfter = (db.pragma('page_count', { simple: true }) as number) * pageSize;
+  return { moved, vacuumed, bytesAfter };
+}
+
+/** Flush buffered writes and close the database, checkpointing the WAL. Safe to call twice. */
+export function closeDb(): void {
+  if (!db?.open) return;
+  dbFlushPnlTicks();
+  db.close();
 }
 
 // ── Name Map ────────────────────────────────────────────────────────────────

@@ -142,6 +142,11 @@ export interface GreekIndicatorPaneProps {
   /** Trading day to open on ('YYYY-MM-DD') — e.g. the session the trade ran in. */
   initialDay?: string;
   /**
+   * 'local' reconstructs from the local parquet files instead of the broker — for a host replaying
+   * a day from before broker history. See `useGreekOverlay`'s `dataSource`.
+   */
+  dataSource?: 'nubra' | 'local';
+  /**
    * The host's own chart metrics, so this pane's plot area starts and ends where its siblings'
    * do — price-scale gutter widths in px, and the axis font size.
    *
@@ -190,6 +195,7 @@ export default function GreekIndicatorPane({
   theme,
   histDays,
   initialDay,
+  dataSource,
   axisMetrics = { leftWidth: 75, rightWidth: 75, fontSize: 12 },
   onChartReady,
   pins,
@@ -265,8 +271,9 @@ export default function GreekIndicatorPane({
       vScale: readVScale,
       histDays,
       initialDay,
+      dataSource,
     }),
-    [readVScale, histDays, initialDay],
+    [readVScale, histDays, initialDay, dataSource],
   );
   const vega = useGreekOverlay({ greek: 'vega', ...overlayDeps });
   const theta = useGreekOverlay({ greek: 'theta', ...overlayDeps });

@@ -133,53 +133,91 @@ export function registerMarketDataRoutes({
   });
 
   // ─── Option chain ─────────────────────────────────────────────────────────────
+  // Several panes poll the same chain — the watchlist, an option-chain pane, the basket builder —
+  // and their timers line up, so identical requests routinely arrive together. Each used to make
+  // its own broker round-trip and enrichment pass. Now the requests that overlap share one; there
+  // is no cache, so the next request after it settles fetches fresh, exactly as before.
+  const inflightChains = new Map<string, Promise<Record<string, unknown>>>();
+  // Last logged enrichment count per chain, so the line below reports changes instead of printing
+  // on every poll (it was a log line every couple of seconds per open pane, all day).
+  const lastEnrichLog = new Map<string, string>();
+
+  function loadChain(
+    instrument: string,
+    exchange: string,
+    expiry: string | undefined,
+  ): Promise<Record<string, unknown>> {
+    const key = `${instrument}|${exchange}|${expiry ?? ''}`;
+    let pending = inflightChains.get(key);
+    if (!pending) {
+      pending = fetchEnrichedChain(instrument, exchange, expiry).finally(() =>
+        inflightChains.delete(key),
+      );
+      inflightChains.set(key, pending);
+    }
+    return pending;
+  }
+
+  async function fetchEnrichedChain(
+    instrument: string,
+    exchange: string,
+    expiry: string | undefined,
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, string> = { exchange };
+    if (expiry) params.expiry = expiry;
+    const data = await nubraGet(`/optionchains/${instrument}`, params);
+    const chain = (data.chain || data) as Record<string, unknown>;
+
+    // Enrich legs with stock_name from refdata so frontend can call historical timeseries.
+    //
+    // This used to `await getRefdata` unconditionally, which meant the first chain for an
+    // exchange we had not downloaded yet (MCX, typically — only NSE is warmed at startup) paid
+    // a full multi-megabyte instrument dump *inside* the request, and the pane sat on
+    // "Loading option chain…" for as long as that took. Now we only wait a short budget for a
+    // cold exchange. Dropping the enrichment is not free — useGreekOverlay and useOIProfile key
+    // off leg.symbol and bail out entirely without it — so we still wait, just not forever, and
+    // the losing download populates the cache for the next request.
+    try {
+      const refdata = peekRefdata(exchange) ?? (await refdataWithinBudget(exchange));
+      if (!refdata) throw new Error(`refdata for ${exchange} not ready`);
+      // Shared with /api/instruments/lookup and built at most once per day's master. This loop
+      // used to rebuild a ~100k-entry map on every request, and the chain is polled every 5s per
+      // open pane.
+      const refById = refIdIndexFor(refdata);
+      let enriched = 0;
+      for (const side of ['ce', 'pe'] as const) {
+        const legs = chain[side];
+        if (!Array.isArray(legs)) continue;
+        for (const leg of legs as Record<string, unknown>[]) {
+          const stockName = refById.get(Number(leg.ref_id))?.stock_name;
+          if (stockName) leg.symbol = String(stockName);
+          if (leg.symbol) enriched++;
+        }
+      }
+      const logKey = `${instrument}|${exchange}|${expiry ?? ''}`;
+      const summary = `${enriched}/${refById.size}`;
+      if (lastEnrichLog.get(logKey) !== summary) {
+        if (lastEnrichLog.size > 500) lastEnrichLog.clear(); // one key per chain ever opened
+        lastEnrichLog.set(logKey, summary);
+        console.log(
+          `[OC] Enriched ${enriched} legs with symbol from refdata (${refById.size} ref entries)`,
+        );
+      }
+    } catch (e) {
+      console.warn('[OC] refdata enrichment failed:', e);
+    }
+
+    return data;
+  }
+
   fastify.get<{
     Params: { instrument: string };
     Querystring: { exchange?: string; expiry?: string };
   }>('/api/optionchain/:instrument', async (req, reply) => {
     if (!requireAuth(reply)) return;
     try {
-      const { instrument } = req.params;
       const { exchange = 'NSE', expiry } = req.query;
-      const params: Record<string, string> = { exchange };
-      if (expiry) params.expiry = expiry;
-      const data = await nubraGet(`/optionchains/${instrument}`, params);
-      const chain = (data.chain || data) as Record<string, unknown>;
-
-      // Enrich legs with stock_name from refdata so frontend can call historical timeseries.
-      //
-      // This used to `await getRefdata` unconditionally, which meant the first chain for an
-      // exchange we had not downloaded yet (MCX, typically — only NSE is warmed at startup) paid
-      // a full multi-megabyte instrument dump *inside* the request, and the pane sat on
-      // "Loading option chain…" for as long as that took. Now we only wait a short budget for a
-      // cold exchange. Dropping the enrichment is not free — useGreekOverlay and useOIProfile key
-      // off leg.symbol and bail out entirely without it — so we still wait, just not forever, and
-      // the losing download populates the cache for the next request.
-      try {
-        const refdata = peekRefdata(exchange) ?? (await refdataWithinBudget(exchange));
-        if (!refdata) throw new Error(`refdata for ${exchange} not ready`);
-        // Shared with /api/instruments/lookup and built at most once per day's master. This loop
-        // used to rebuild a ~100k-entry map on every request, and the chain is polled every 5s per
-        // open pane.
-        const refById = refIdIndexFor(refdata);
-        let enriched = 0;
-        for (const side of ['ce', 'pe'] as const) {
-          const legs = chain[side];
-          if (!Array.isArray(legs)) continue;
-          for (const leg of legs as Record<string, unknown>[]) {
-            const stockName = refById.get(Number(leg.ref_id))?.stock_name;
-            if (stockName) leg.symbol = String(stockName);
-            if (leg.symbol) enriched++;
-          }
-        }
-        console.log(
-          `[OC] Enriched ${enriched} legs with symbol from refdata (${refById.size} ref entries)`,
-        );
-      } catch (e) {
-        console.warn('[OC] refdata enrichment failed:', e);
-      }
-
-      return reply.send(data);
+      return reply.send(await loadChain(req.params.instrument, exchange, expiry));
     } catch (err: unknown) {
       return sendUpstreamError(
         reply,

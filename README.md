@@ -46,7 +46,8 @@ Optional: `NUBRA_MARGIN_BASE_URL`, `SERVER_HOST`, `CORS_ORIGINS`, and the local-
 overrides read by `server/marginEngine.ts` — `LOCAL_MARGIN_ELM_INDEX`,
 `LOCAL_MARGIN_ELM_DEEP_OTM`, `LOCAL_MARGIN_ELM_LONG_DATED`, `LOCAL_MARGIN_ELM_EXPIRY_ADDON`,
 `LOCAL_MARGIN_ELM_STOCK`, `LOCAL_MARGIN_MCX_RATE_FLOOR`, `LOCAL_MARGIN_MCX_RATE_CAP`,
-`LOCAL_MARGIN_SHORT_OPTION_MIN`, `LOCAL_MARGIN_DEFAULT_IV`.
+`LOCAL_MARGIN_SHORT_OPTION_MIN`, `LOCAL_MARGIN_DEFAULT_IV`; and `PNL_TICKS_RETENTION_DAYS`
+(default 30, `0` disables archiving — see _Database schema_).
 
 > **`.env`, `session.json` and `uat-session.json` must never be committed.** They hold the
 > MPIN, the phone number, and a live broker auth token. All three were tracked until
@@ -82,6 +83,11 @@ Then open http://localhost:8000 and complete the OTP → MPIN login.
 > HMR. A source edit is invisible at :3000 until `npm run build` runs, so when a change
 > "didn't take effect" there, compare `dist/` mtimes against the file before re-reading the
 > logic.
+
+Stop with Ctrl+C. The server traps SIGINT/SIGTERM/SIGHUP, flushes buffered writes and closes
+`paper.db` (checkpointing the WAL) before exiting, so a stop never loses the last second of
+`pnl_ticks`. Behind `:3000`, Vite's content-hashed bundles under `dist/assets/` are served as
+`immutable` for a year; `index.html` is never cached, so a rebuild is always picked up.
 
 ---
 
@@ -258,6 +264,26 @@ twice the other (`legMismatchPct` 50). Pairs rank by the gap between the legs. E
 `maxCasesPerDay`: first pairs whose start and end are both `spacingMinutes` from every kept case,
 then free slots go to pairs that are near a kept case at one end only.
 
+### Signal backtest (first mismatch case → option trade)
+
+| Method | Path                       | Purpose                                                       |
+| ------ | -------------------------- | ------------------------------------------------------------- |
+| POST   | `/api/signal-backtest/run` | Per day: first mismatch case → one option trade → exit, P&L |
+
+Code lives in `server/signalBacktest/`; the tab is `src/SignalBacktest.tsx`. It reads the Analysis
+cache (Nubra wins per date, local-only days while the data check passes unless told otherwise) and
+never syncs or writes it. The signal is the Analysis case definition applied **causally**: t2 is
+the first minute at which any earlier minute pairs with it under the finder's conditions, so no
+hindsight ranking is involved (the Analysis list ranks whole days and must not be traded on).
+
+The trade enters `delayMinutes` after t2 at the mean of that minute's open and close (close alone
+where no open exists), on ATM ± `otmSteps` from spot at the entry minute, and exits at `exitTime`
+(15:29 default). Max profit / max loss are mark-to-market extremes from the minute after entry to
+the exit, using max(high, close) / min(low, close) per minute. Option open/high/low come only from
+the local parquet tree (via `server/backtest/dataLayer.ts`, when its expiry matches the day's); other
+days are close-only and flagged `basis: 'close'`. With both legs the extremes are a per-minute
+best/worst-case bound; final P&L is exact. Figures are gross of charges and slippage.
+
 ### Paper trading
 
 | Method       | Path                            | Purpose                                               |
@@ -398,6 +424,13 @@ Option-chain flow is:
 
 `simSpread(ltp)` supplies a price-sensitive half-spread for simulated execution.
 
+`onLtp` runs once per option leg per chain message, so SimBroker keeps two per-`ref_id` indexes
+beside its maps — every position (open or closed) and the open orders only — and a tick touches
+just its own instrument's rows. It used to scan the whole book's history on every leg, a cost
+that grew with every trade ever made. Any new code that adds an order or position, or moves an
+order out of `ORDER_STATUS_OPEN`, must keep those indexes in step (`indexPosition`,
+`indexOpenOrder`, `unindexOpenOrder`).
+
 ---
 
 ## Database schema
@@ -443,6 +476,21 @@ pinned the row to the first entry it ever had — which then mis-dated it after 
 `entry_time` is what the end-of-day snapshot groups a strategy's trade date by. `strategy_name`
 is deliberately **not** in the conflict clause: renames go through `dbRenameStrategy`, and a
 later fill still carries the name its order was placed under.
+
+`pnl_ticks` is write-only — nothing in the app reads it — and takes a row every fifth tick of an
+open position, about 100k rows a trading day. Rows are buffered and committed once a second in
+one transaction (`dbFlushPnlTicks`); `ts` is stamped when the row is queued, so batching changes
+when a row reaches disk, not what it records. `closeDb` flushes the tail on shutdown.
+
+Rows older than `PNL_TICKS_RETENTION_DAYS` (default 30) are **moved, not deleted**, into
+`pnl_ticks_archive.db` beside `paper.db` — same columns, same ids, same `(ref_id, ts)` index, and
+git-ignored like every `*.db`. It runs at server startup and once a day between 00:00 and 08:59
+IST, before any exchange opens (`dbArchivePnlTicks`). The copy commits before the delete, so a
+crash between the two leaves rows in both files and the next run finishes the job without
+duplicating them. Deleting rows frees pages inside `paper.db` without shrinking it, so the startup
+run also `VACUUM`s when 16 MB or more is free. Measured on the 2026-09-26 book: 485,829 of
+1,486,525 rows archived, `paper.db` 104 → 75 MB, 2.8 s once; the daily run is a no-op until a day
+ages out.
 
 `server/paperDb.test.ts` exercises the DDL and both migration paths against a scratch file via
 the `PAPER_DB_PATH` override, which exists for exactly that reason — the app itself always uses

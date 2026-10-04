@@ -92,8 +92,39 @@ export class SimBroker {
   private nextId = 1;
   private pnlTickCounter = 0;
 
+  // Per-instrument indexes over the two maps above, for the tick path. `onLtp` runs once per
+  // option leg per chain message — hundreds of times a second in session — and used to scan every
+  // position ever recorded (closed ones included) and every order ever placed to find the handful
+  // on the ticking ref_id. Both maps only grow, so that cost grew with the book's history rather
+  // than with what was open. Insertion order within each bucket matches the maps', so positions
+  // update and orders fill in exactly the order the full scans visited them.
+  private positionsByRef = new Map<number, SimPosition[]>(); // every position, open or closed
+  private openOrdersByRef = new Map<number, Set<SimOrder>>(); // ORDER_STATUS_OPEN only
+
   private posKey(refId: number, basketGroupId?: string): string {
     return `${refId}:${basketGroupId || ''}`;
+  }
+
+  private indexPosition(pos: SimPosition): void {
+    const bucket = this.positionsByRef.get(pos.ref_id);
+    if (bucket) bucket.push(pos);
+    else this.positionsByRef.set(pos.ref_id, [pos]);
+  }
+
+  private indexOpenOrder(order: SimOrder): void {
+    let bucket = this.openOrdersByRef.get(order.ref_id);
+    if (!bucket) {
+      bucket = new Set();
+      this.openOrdersByRef.set(order.ref_id, bucket);
+    }
+    bucket.add(order);
+  }
+
+  private unindexOpenOrder(order: SimOrder): void {
+    const bucket = this.openOrdersByRef.get(order.ref_id);
+    if (!bucket) return;
+    bucket.delete(order);
+    if (bucket.size === 0) this.openOrdersByRef.delete(order.ref_id);
   }
 
   restore(): void {
@@ -126,6 +157,7 @@ export class SimBroker {
         margin_required: row.margin_required as number | undefined,
       };
       this.orders.set(o.order_id, o);
+      if (o.order_status === 'ORDER_STATUS_OPEN') this.indexOpenOrder(o);
       if (o.order_id >= this.nextId) this.nextId = o.order_id + 1;
     }
 
@@ -148,6 +180,7 @@ export class SimBroker {
         entry_qty: (row.entry_qty as number | null) ?? undefined,
       };
       this.positions.set(this.posKey(p.ref_id, p.basket_group_id), p);
+      this.indexPosition(p);
       if (p.qty !== 0) this.ticks.set(p.ref_id, p.last_traded_price);
     }
     console.log(
@@ -173,8 +206,7 @@ export class SimBroker {
     const prev = this.ticks.get(refId);
     this.ticks.set(refId, ltpPaise);
     const changed: { ref_id: number; ltp: number }[] = [];
-    for (const pos of this.positions.values()) {
-      if (pos.ref_id !== refId) continue;
+    for (const pos of this.positionsByRef.get(refId) ?? []) {
       if (pos.qty !== 0 && pos.last_traded_price !== ltpPaise) {
         changed.push({ ref_id: pos.ref_id, ltp: ltpPaise });
       }
@@ -210,8 +242,10 @@ export class SimBroker {
     const half = simSpread(ltp);
     const bid = ltp - half;
     const ask = ltp + half;
-    for (const order of this.orders.values()) {
-      if (order.ref_id !== refId) continue;
+    const open = this.openOrdersByRef.get(refId);
+    if (!open) return;
+    // Snapshot: a fill removes its order from this very set.
+    for (const order of [...open]) {
       if (order.order_status !== 'ORDER_STATUS_OPEN') continue;
       this.tryFill(order, bid, ask);
     }
@@ -262,6 +296,7 @@ export class SimBroker {
     order.avg_filled_price = Math.round(fillPaise);
     order.order_status = 'ORDER_STATUS_FILLED';
     order.filled_time = timeNs ?? Date.now() * 1_000_000;
+    this.unindexOpenOrder(order);
 
     const isBuy = order.order_side === 'ORDER_SIDE_BUY';
     const delta = isBuy ? order.order_qty : -order.order_qty;
@@ -283,6 +318,7 @@ export class SimBroker {
         margin_required: order.margin_required,
       };
       this.positions.set(key, pos);
+      this.indexPosition(pos);
     }
 
     const prev = pos.qty;
@@ -410,6 +446,7 @@ export class SimBroker {
       margin_required: p.margin_required,
     };
     this.orders.set(id, order);
+    this.indexOpenOrder(order);
     this.registerName(p.nubraName, p.liveRefId);
     dbInsertOrder(order);
     dbSetMeta('nextOrderId', String(this.nextId));
@@ -471,6 +508,7 @@ export class SimBroker {
       margin_required: p.margin_required,
     };
     this.orders.set(id, order);
+    this.indexOpenOrder(order);
     this.registerName(p.nubraName, p.liveRefId);
     dbInsertOrder(order);
     dbSetMeta('nextOrderId', String(this.nextId));
@@ -505,6 +543,7 @@ export class SimBroker {
     const o = this.orders.get(id);
     if (!o || o.order_status !== 'ORDER_STATUS_OPEN') return false;
     o.order_status = 'ORDER_STATUS_CANCELLED';
+    this.unindexOpenOrder(o);
     dbUpdateOrder({
       order_id: o.order_id,
       filled_qty: o.filled_qty,

@@ -8,7 +8,8 @@ import {
   type LineSeriesOptions,
 } from 'lightweight-charts';
 import { useWs } from './hooks/useWsContext';
-import { useGreekOverlay } from './hooks/useGreekOverlay';
+import { TICK_WINDOW_MAX_MS, useGreekOverlay } from './hooks/useGreekOverlay';
+import ChartNavigator from './components/ChartNavigator';
 import { GreekButton } from './components/GreekControls';
 import { bindGreekCrosshair } from './lib/greekTooltip';
 import { fetchRange, nubraType } from './CandleChart';
@@ -39,6 +40,9 @@ const TICK_IV = '1s'; // today's session loads at 1s, stitched onto the 1m histo
 const HIST_DAYS = 7; // last 7 days of 1-minute history
 const CHUNK_DAYS = 5; // load-more chunk when scrolling further back
 const TICK_VIEW_BARS = 5_400; // initial visible window when today is 1s (~90 min)
+// Settle time before a zoom/pan asks the greek overlays for 1s history. Each window is a few MB
+// per measure, so a drag must not fire one per frame.
+const TICK_WINDOW_DEBOUNCE_MS = 400;
 type Resolution = '1m' | '1s';
 
 function normalizeChartName(name: string): string {
@@ -163,6 +167,11 @@ export default function Tracker({ instrument, theme }: Props) {
   const symRef = useRef('');
 
   const [loading, setLoading] = useState<string | null>('Loading…');
+  // The chart as state (not only a ref) so the navigator re-binds once it exists: a child's
+  // effects run before this component's, when `chartRef` is still empty.
+  const [chartApi, setChartApi] = useState<IChartApi | null>(null);
+  const [navVersion, setNavVersion] = useState(0);
+  const tickTimerRef = useRef<number | null>(null);
   const [priceDisplay, setPriceDisplay] = useState<{
     price: number;
     diff: number;
@@ -178,6 +187,7 @@ export default function Tracker({ instrument, theme }: Props) {
     currentInstRef,
     allBarsRef,
     inline: true,
+    tickWindows: true,
   });
   const theta = useGreekOverlay({
     greek: 'theta',
@@ -185,8 +195,12 @@ export default function Tracker({ instrument, theme }: Props) {
     currentInstRef,
     allBarsRef,
     inline: true,
+    tickWindows: true,
   });
   const iv = useGreekOverlay({ greek: 'iv', chartRef, currentInstRef, allBarsRef, inline: true });
+  // The chart's range subscription is bound once at mount; it reads the overlays through this.
+  const tickGreeksRef = useRef([vega, theta]);
+  tickGreeksRef.current = [vega, theta];
 
   const sym = getSymbol(tracked);
   symRef.current = sym;
@@ -242,6 +256,7 @@ export default function Tracker({ instrument, theme }: Props) {
     });
     chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
       handleResolutionRange(range);
+      scheduleTickWindow();
     });
 
     const onDblClick = () => {
@@ -265,7 +280,11 @@ export default function Tracker({ instrument, theme }: Props) {
           })
         : () => {};
 
+    setChartApi(chart);
+
     return () => {
+      setChartApi(null);
+      if (tickTimerRef.current != null) clearTimeout(tickTimerRef.current);
       containerRef.current?.removeEventListener('dblclick', onDblClick);
       observer.disconnect();
       unbindCrosshair();
@@ -354,7 +373,8 @@ export default function Tracker({ instrument, theme }: Props) {
     if (visibleRange && chartRef.current) {
       requestAnimationFrame(() => {
         try {
-          if (isChartLive(chartRef.current)) chartRef.current?.timeScale().setVisibleRange(visibleRange as any);
+          if (isChartLive(chartRef.current))
+            chartRef.current?.timeScale().setVisibleRange(visibleRange as any);
         } catch {
           /* ignore */
         }
@@ -383,6 +403,36 @@ export default function Tracker({ instrument, theme }: Props) {
       setActiveResolution('1s', range);
     }
   }
+
+  /**
+   * Once the view settles on today's 1s bars zoomed in to TICK_WINDOW_MAX_MS or less, ask Vega and
+   * Theta for per-second history of that span — their stored history is 1m, so without this the
+   * greek lines are straight segments between minutes under a tick-by-tick price line.
+   */
+  function scheduleTickWindow() {
+    if (tickTimerRef.current != null) clearTimeout(tickTimerRef.current);
+    tickTimerRef.current = window.setTimeout(() => {
+      tickTimerRef.current = null;
+      if (activeResRef.current !== '1s' || !isChartLive(chartRef.current)) return;
+      let range: { from: unknown; to: unknown } | null = null;
+      try {
+        range = chartRef.current?.timeScale().getVisibleRange() ?? null;
+      } catch {
+        return;
+      }
+      if (!range) return;
+      const fromMs = (Number(range.from) - IST_OFFSET) * 1000;
+      const toMs = (Number(range.to) - IST_OFFSET) * 1000;
+      if (!(toMs > fromMs) || toMs - fromMs > TICK_WINDOW_MAX_MS) return;
+      for (const g of tickGreeksRef.current)
+        if (g.enabledRef.current) g.loadTickWindow(fromMs, toMs);
+    }, TICK_WINDOW_DEBOUNCE_MS);
+  }
+
+  // Turning a measure on while already zoomed in moves no range, so nothing else would ask.
+  useEffect(() => {
+    if (vega.on || theta.on) scheduleTickWindow();
+  }, [vega.on, theta.on]);
 
   function upsertLastBar(bars: OhlcBar[], bar: OhlcBar): OhlcBar {
     const last = bars[bars.length - 1];
@@ -533,6 +583,7 @@ export default function Tracker({ instrument, theme }: Props) {
       // price axis frozen at the previous instrument's range, which clips the new line.
       lineRef.current.priceScale().applyOptions({ autoScale: true });
       setLoading(null);
+      setNavVersion((v) => v + 1);
       updatePrice(allBarsRef.current[allBarsRef.current.length - 1].close, dayOpenRef.current);
 
       subscribeChart({ indexes: [sym] }, TRACK_IV, tracked.exchange || 'NSE');
@@ -565,6 +616,7 @@ export default function Tracker({ instrument, theme }: Props) {
         earliestRef.current = start;
         lineRef.current?.setData(toLine(allBarsRef.current));
         refreshGreekGrid();
+        setNavVersion((v) => v + 1);
       }
     } catch {
       /* ignore */
@@ -619,6 +671,7 @@ export default function Tracker({ instrument, theme }: Props) {
           </div>
         )}
       </div>
+      <ChartNavigator chart={chartApi} bars={() => minuteBarsRef.current} version={navVersion} />
     </div>
   );
 }

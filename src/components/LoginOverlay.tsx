@@ -96,22 +96,34 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
   };
 
   return (
-    <div className="fixed inset-0 bg-black/85 flex items-center justify-center z-[1000]">
+    <div
+      className="fixed inset-0 bg-black/85 flex items-center justify-center z-[1000]"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="login-title"
+      aria-describedby="login-description"
+    >
       <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-xl p-9 w-[360px] flex flex-col gap-4">
         <div>
-          <h2 className="text-xl font-semibold text-[var(--text-primary)]">
+          <h2 id="login-title" className="text-xl font-semibold text-[var(--text-primary)]">
             Nubra <span className="text-[var(--accent)]">Dashboard</span>
           </h2>
-          <p className="text-xs text-[var(--text-secondary)] mt-1">Sign in to continue</p>
+          <p id="login-description" className="text-xs text-[var(--text-secondary)] mt-1">
+            Sign in to continue
+          </p>
         </div>
 
         {/* Step 1: Phone & Send OTP */}
         {step === 1 && (
           <div className="flex flex-col gap-3">
-            <label className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
+            <label
+              htmlFor="phone-input"
+              className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-secondary)]"
+            >
               Phone Number
             </label>
             <input
+              id="phone-input"
               type="text"
               placeholder="10-digit Phone Number"
               value={phone}
@@ -139,7 +151,10 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
         {/* Step 2: Enter OTP & MPIN */}
         {step === 2 && (
           <div className="flex flex-col gap-3">
-            <label className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
+            <label
+              htmlFor="otp-input"
+              className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-secondary)]"
+            >
               Enter OTP
             </label>
             <input
@@ -153,10 +168,14 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
               onChange={(e) => setOtp(e.target.value)}
               className="w-full px-3 py-2 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-[var(--text-primary)] text-sm focus:outline-none focus:border-[var(--accent)] transition-colors"
             />
-            <label className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-secondary)]">
+            <label
+              htmlFor="mpin-input"
+              className="text-[11px] font-medium uppercase tracking-wide text-[var(--text-secondary)]"
+            >
               Enter MPIN
             </label>
             <input
+              id="mpin-input"
               type="password"
               inputMode="numeric"
               maxLength={4}
@@ -185,7 +204,11 @@ export default function LoginOverlay({ onAuthenticated }: LoginOverlayProps) {
 
         {/* Status message */}
         {status && (
-          <p className={`text-xs px-2.5 py-2 rounded-md ${statusColors[status.type]}`}>
+          <p
+            role="status"
+            aria-live="polite"
+            className={`text-xs px-2.5 py-2 rounded-md ${statusColors[status.type]}`}
+          >
             {status.msg}
           </p>
         )}

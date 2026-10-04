@@ -14,6 +14,7 @@ import type {
 import { exchangeFromName } from '../types';
 import { strategyPositionExchange } from '../lib/strategyPositionMeta';
 import { fmtPrice } from '../lib/utils';
+import { terminalHeight } from '../lib/workspaceSizing';
 import { liveLevels } from '../lib/positionRuleLevels';
 import { isOnLocalDay, openPositionPnlPaise, summarizeTodayPositions } from '../lib/paperPnl';
 import {
@@ -98,7 +99,6 @@ const STATUS_LABEL: Record<string, string> = {
   ORDER_STATUS_REJECTED: 'REJECTED',
 };
 
-const MIN_H = 120;
 const DEFAULT_H = 220;
 const HEADER_H = 40; // collapsed height = just header bar
 
@@ -2325,6 +2325,16 @@ export default function OrderTerminal({
   const [fullscreen, setFullscreen] = useState(false);
   const [preFullH, setPreFullH] = useState(DEFAULT_H);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [availableHeight, setAvailableHeight] = useState(window.innerHeight);
+  useEffect(() => {
+    const parent = containerRef.current?.parentElement;
+    if (!parent) return;
+    const update = () => setAvailableHeight(parent.clientHeight);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(parent);
+    return () => observer.disconnect();
+  }, []);
 
   // ── resize drag (pointer capture survives charts, live renders and leaving the handle) ────
   function onHandlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
@@ -2333,6 +2343,7 @@ export default function OrderTerminal({
     const startY = e.clientY;
     const el = containerRef.current;
     if (!el) return;
+    setFullscreen(false);
     const handle = e.currentTarget;
     const pointerId = e.pointerId;
     const startH = el.getBoundingClientRect().height;
@@ -2347,7 +2358,10 @@ export default function OrderTerminal({
 
     const onMove = (ev: PointerEvent) => {
       if (ev.pointerId !== pointerId) return;
-      finalH = Math.max(MIN_H, startH + (startY - ev.clientY));
+      finalH = terminalHeight(
+        startH + (startY - ev.clientY),
+        el.parentElement?.clientHeight || availableHeight,
+      );
       el.style.height = `${finalH}px`;
     };
 
@@ -2375,7 +2389,7 @@ export default function OrderTerminal({
   function toggleCollapse() {
     if (collapsed) {
       setCollapsed(false);
-      setHeight(fullscreen ? window.innerHeight * 0.7 : DEFAULT_H);
+      setHeight((value) => terminalHeight(value, availableHeight));
     } else {
       setFullscreen(false);
       setCollapsed(true);
@@ -2390,7 +2404,7 @@ export default function OrderTerminal({
       setPreFullH(height);
       setFullscreen(true);
       setCollapsed(false);
-      setHeight(window.innerHeight * 0.7);
+      setHeight(terminalHeight(availableHeight * 0.7, availableHeight));
     }
   }
 
@@ -2430,7 +2444,7 @@ export default function OrderTerminal({
     [openTicket],
   );
 
-  const effectiveH = collapsed ? HEADER_H : height;
+  const effectiveH = collapsed ? HEADER_H : terminalHeight(height, availableHeight);
 
   const TAB_STYLE = (t: string) =>
     `px-4 py-0 h-full flex items-center text-[12px] font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
@@ -2452,6 +2466,19 @@ export default function OrderTerminal({
       {!collapsed && (
         <div
           onPointerDown={onHandlePointerDown}
+          role="separator"
+          aria-label="Resize order terminal"
+          aria-orientation="horizontal"
+          aria-valuenow={Math.round(effectiveH)}
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+            event.preventDefault();
+            setFullscreen(false);
+            setHeight(
+              terminalHeight(effectiveH + (event.key === 'ArrowUp' ? 24 : -24), availableHeight),
+            );
+          }}
           className="h-1.5 bg-[var(--border)] hover:bg-[var(--accent)] cursor-row-resize shrink-0 transition-colors"
           style={{ touchAction: 'none' }}
         />
@@ -2495,7 +2522,12 @@ export default function OrderTerminal({
             </button>
           )}
 
-          <button onClick={refreshAuthStatus} title="Refresh" className={iconBtn}>
+          <button
+            onClick={refreshAuthStatus}
+            title="Refresh"
+            aria-label="Refresh terminal"
+            className={iconBtn}
+          >
             ↻
           </button>
 
@@ -2504,6 +2536,8 @@ export default function OrderTerminal({
           <button
             onClick={toggleCollapse}
             title={collapsed ? 'Expand' : 'Collapse'}
+            aria-label={collapsed ? 'Expand terminal' : 'Collapse terminal'}
+            aria-expanded={!collapsed}
             className={iconBtn}
           >
             {collapsed ? '▲' : '▼'}
@@ -2511,6 +2545,7 @@ export default function OrderTerminal({
           <button
             onClick={toggleFullscreen}
             title={fullscreen ? 'Restore' : 'Full screen'}
+            aria-label={fullscreen ? 'Restore terminal size' : 'Enlarge terminal'}
             className={iconBtn}
           >
             {fullscreen ? '⤡' : '⤢'}
@@ -2519,7 +2554,7 @@ export default function OrderTerminal({
       </div>
 
       {/* body */}
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 min-h-0 overflow-hidden" inert={collapsed}>
         {!uatAuth ? (
           <div className="flex flex-col h-full items-center justify-center gap-2 text-[var(--text-muted)]">
             <span className="text-[28px] opacity-50">🔒</span>

@@ -4,10 +4,11 @@ node_modules/
 # Build output
 dist/
 
-# SQLite runtime files
+# SQLite runtime files, and dated copies of them (paper.db.before-<change>-<date>)
 *.db
 *.db-wal
 *.db-shm
+*.db.*
 
 # Environment
 .env
@@ -42,6 +43,7 @@ _archive/
 # Analysis tab dataset: per-day spot + option ladders from Nubra and the parquet tree, rebuildable
 # with scripts/analysisSync.ts (see server/analysis/sync.ts)
 .analysis-cache/
+.signal-cache/
 
 # Runtime logs & editor scratch files
 *.log

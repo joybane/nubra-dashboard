@@ -17,6 +17,7 @@ type HistoricalResp = {
   result?: Array<{ values?: Array<Record<string, Record<string, TsV[]>>> }>;
 } | null;
 type BandContractsResp = {
+  availableExpiries?: string[];
   ok?: boolean;
   expiry?: string;
   contracts?: BandContractMeta[];
@@ -27,6 +28,7 @@ type IvHistoryResp = { observations?: IvObservation[]; from?: string; to?: strin
 import { getChainAsset, getSymbol } from '../types';
 import {
   IST_OFFSET,
+  clampSubMinuteStart,
   expiryInstantMs,
   isMarketOpenNow,
   isMarketSessionChartTime,
@@ -115,11 +117,17 @@ function fetchIvHistoryShared(sym: string, days: number): Promise<IvHistoryResp>
   });
 }
 
+/** `/api/historical`'s twin over the local parquet files — same request, same response shape. */
+const LOCAL_HISTORICAL_URL = '/api/nubra-backtest/local-historical';
+
 /** One `/api/historical` POST, shared by body. Response is treated as read-only. */
-function fetchHistoricalShared(body: unknown): Promise<HistoricalResp> {
+function fetchHistoricalShared(
+  body: unknown,
+  url: string = '/api/historical',
+): Promise<HistoricalResp> {
   const payload = JSON.stringify(body);
-  return sharedJson<HistoricalResp>(`hist:${payload}`, HIST_TTL_MS, async () => {
-    const res = await fetch('/api/historical', {
+  return sharedJson<HistoricalResp>(`hist:${url}:${payload}`, HIST_TTL_MS, async () => {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: payload,
@@ -150,8 +158,12 @@ function fetchBandContractsShared(
   date: string,
   expiry: string | undefined,
   exchange: string,
+  source?: 'nubra' | 'local',
 ): Promise<BandContractsResp> {
   const params = new URLSearchParams({ underlying, date, exchange });
+  // Pinned rather than left to the server's 'auto': on a day both sources cover, a host that forced
+  // one must get that one's contracts.
+  if (source) params.set('source', source);
   // The route matches against its own 'YYYY-MM-DD' list; a chain-style '20260915' never matches
   // and silently falls back to the nearest expiry.
   if (expiry) params.set('expiry', toDashedExpiry(expiry));
@@ -167,6 +179,20 @@ function fetchBandContractsShared(
 // Reference Vega/Theta history uses the vendor's stored book and Greek fields directly.
 // IV is a separate close/delta/iv_mid request and retains its own price-inversion fallback.
 const HIST_INTERVAL = '1m';
+// Tick windows: 1s Band history loaded on demand for the span a host is zoomed into, spliced over
+// the 1m history there. A whole session at 1s is ~380 MB of JSON for the ~76-contract band
+// (measured 2026-09-28: 30 min of it = 30 MB, 3.3 s), so only a bounded window around the view is
+// ever fetched — never the day.
+const TICK_INTERVAL = '1s';
+/** Widest view a host should ask a tick window for; wider requests are ignored. */
+export const TICK_WINDOW_MAX_MS = 30 * 60_000;
+const TICK_WINDOW_PAD_MS = 5 * 60_000; // fetched either side, so a small pan stays covered
+// Fetched ahead of the window and discarded: the builder carries each field's last print forward,
+// and without a warm-up a contract that has not printed yet in the window's first seconds is
+// missing from those snapshots — which the Band reads as it leaving the band.
+const TICK_WARMUP_MS = 60_000;
+const TICK_MIN_GAP_MS = 60_000; // an uncovered sliver shorter than this is not worth a fetch
+const TICK_MAX_SNAPSHOTS = 4 * 3600; // ~4 h of 1s snapshots held before old windows are dropped
 const BAND_HIST_FIELDS = ['l1bid', 'l1ask', 'cumulative_oi', 'delta', 'vega', 'theta'];
 const IV_HIST_FIELDS = ['close', 'delta', 'iv_mid'];
 
@@ -301,6 +327,12 @@ export interface GreekOverlayApi {
    */
   applyVScale: () => void;
   clearForInstrumentChange: () => void;
+  /**
+   * Load 1-second history for [fromMs, toMs] (epoch ms) and splice it over the 1m history there.
+   * A no-op unless the host passed `tickWindows`, and for spans wider than TICK_WINDOW_MAX_MS.
+   * Safe to call on every visible-range change: covered spans are not refetched.
+   */
+  loadTickWindow: (fromMs: number, toMs: number) => void;
   enabledRef: React.RefObject<boolean>;
 }
 
@@ -344,6 +376,18 @@ interface Deps {
    * last loaded bar, which is both the date picker's max and the newest day with data.
    */
   initialDay?: string;
+  /**
+   * Allow `loadTickWindow` — per-second history for a zoomed-in span. Only a host whose own bars
+   * are 1s (the Tracker) has a grid fine enough to show it; on a 1m grid it would collapse back
+   * onto the minute anyway. Vega/Theta only: IV's per-point reconstruction is not wired for it.
+   */
+  tickWindows?: boolean;
+  /**
+   * 'local' reads the local parquet files instead of the broker: the contract list, the history
+   * and the spot all come from the server's local routes, and nothing live is subscribed — the
+   * host is replaying a day the broker has no history for. Default (absent / 'nubra') is unchanged.
+   */
+  dataSource?: 'nubra' | 'local';
 }
 
 // Distinct CE/PE palette per greek so overlapping Vega + Theta lines stay tellable apart.
@@ -380,9 +424,12 @@ export function useGreekOverlay({
   vScale,
   histDays,
   initialDay,
+  tickWindows,
+  dataSource,
 }: Deps): GreekOverlayApi {
   const { subscribe, subscribeOC, unsubscribeOC } = useWs();
   const isIv = greek === 'iv';
+  const isLocal = dataSource === 'local';
   const greekLabel = KIND_LABEL[greek];
   const palette = GREEK_PALETTE[greek];
 
@@ -480,6 +527,17 @@ export function useGreekOverlay({
   const lastDrawSigRef = useRef('');
   // Cached bar-time grid for `buildTimeMapper`, keyed by `barsSignature()`.
   const mapperRef = useRef<{ sig: string; times: number[] } | null>(null);
+  // ── Tick windows (see `loadTickWindow`) ──
+  // The dated Band contracts of the current history load; a tick window picks its universe here.
+  const bandContractsRef = useRef<BandContractMeta[]>([]);
+  // 1s snapshots, kept apart from `snapshotsRef` so the 1m history underneath survives intact and
+  // a dropped window falls straight back to it.
+  const tickSnapsRef = useRef<Map<number, ChainSnapshot>>(new Map());
+  // Sorted, disjoint [fromMs, toMs] spans `tickSnapsRef` covers. Inside them the 1m points are hidden.
+  const tickCoverRef = useRef<Array<[number, number]>>([]);
+  const tickGenRef = useRef(0); // bumped on every reset; an in-flight window from before is discarded
+  const tickBusyRef = useRef(false);
+  const tickPendingRef = useRef<[number, number] | null>(null); // latest request made while busy
 
   // Mirror settings into refs so the WS callback and redraw read fresh values.
   const cfgRef = useRef({
@@ -781,7 +839,7 @@ export function useGreekOverlay({
     ].join('|');
     if (sig === lastDrawSigRef.current) return;
 
-    const snaps = [...snapshotsRef.current.values()];
+    const snaps = [...withTicks(snapshotsRef.current).values()];
     if (!snaps.length) return;
     // Recorded only once the draw is committed to, so an early return above leaves the next call
     // free to try again.
@@ -952,6 +1010,139 @@ export function useGreekOverlay({
     snapVersionRef.current++;
   }
 
+  function tickCovered(ts: number): boolean {
+    for (const [from, to] of tickCoverRef.current) {
+      if (ts < from) return false; // sorted — nothing further can contain it
+      if (ts <= to) return true;
+    }
+    return false;
+  }
+
+  /**
+   * `base` with the tick windows spliced in: its points inside a covered span give way to the 1s
+   * snapshots there. Returns `base` itself when no window is loaded, which is the common case.
+   */
+  function withTicks(base: Map<number, ChainSnapshot>): Map<number, ChainSnapshot> {
+    if (!tickSnapsRef.current.size) return base;
+    const out = new Map<number, ChainSnapshot>();
+    for (const [ts, snap] of base) if (!tickCovered(ts)) out.set(ts, snap);
+    for (const [ts, snap] of tickSnapsRef.current) out.set(ts, snap);
+    return out;
+  }
+
+  function resetTicks() {
+    tickSnapsRef.current = new Map();
+    tickCoverRef.current = [];
+    tickPendingRef.current = null;
+    tickGenRef.current++;
+  }
+
+  /** Spans of [from, to] no loaded window covers. */
+  function uncoveredSpans(from: number, to: number): Array<[number, number]> {
+    const gaps: Array<[number, number]> = [];
+    let cursor = from;
+    for (const [c0, c1] of tickCoverRef.current) {
+      if (c1 < cursor) continue;
+      if (c0 > to) break;
+      if (c0 > cursor) gaps.push([cursor, c0]);
+      cursor = Math.max(cursor, c1);
+      if (cursor >= to) break;
+    }
+    if (cursor < to) gaps.push([cursor, to]);
+    return gaps;
+  }
+
+  function addCover(from: number, to: number) {
+    const spans = [...tickCoverRef.current, [from, to] as [number, number]].sort(
+      (a, b) => a[0] - b[0],
+    );
+    const merged: Array<[number, number]> = [];
+    for (const span of spans) {
+      const last = merged[merged.length - 1];
+      if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
+      else merged.push([span[0], span[1]]);
+    }
+    tickCoverRef.current = merged;
+  }
+
+  async function loadTickWindow(fromMs: number, toMs: number) {
+    if (!tickWindows || isIv || isLocal || !enabledRef.current) return;
+    if (!(toMs > fromMs) || toMs - fromMs > TICK_WINDOW_MAX_MS) return;
+    const inst = currentInstRef.current;
+    if (!inst) return;
+    // Until the 1m history has landed there is no Band universe to pick from, and a rebuild now
+    // would race the one `fetchHistoryForDay` is about to do. Park the request; `apply` retries it.
+    if (tickBusyRef.current || referenceRebuildingRef.current || !bandContractsRef.current.length) {
+      tickPendingRef.current = [fromMs, toMs];
+      return;
+    }
+    const now = Date.now();
+    const from = clampSubMinuteStart(
+      new Date(fromMs - TICK_WINDOW_PAD_MS),
+      TICK_INTERVAL,
+      now,
+    ).getTime();
+    const to = Math.min(toMs + TICK_WINDOW_PAD_MS, now);
+    // Only what is not already loaded. Near the live edge `to` creeps forward every call; the
+    // sliver that opens up is already drawn from live ticks, so it is not worth a refetch.
+    const gaps = uncoveredSpans(from, to).filter(([a, b]) => b - a >= TICK_MIN_GAP_MS);
+    if (!gaps.length) return;
+    const start = gaps[0][0];
+    const end = gaps[gaps.length - 1][1];
+
+    tickBusyRef.current = true;
+    const gen = tickGenRef.current;
+    const exchange = inst.exchange || 'NSE';
+    try {
+      const fetchFrom = new Date(start - TICK_WARMUP_MS);
+      const fetchTo = new Date(end);
+      const spot = await fetchSpotHistory(exchange, fetchFrom, fetchTo, TICK_INTERVAL);
+      if (gen !== tickGenRef.current || !spot.length) return;
+      const universe = referenceBandUniverse(
+        bandContractsRef.current,
+        spot.map((point) => point.v),
+      );
+      const selectedMeta = new Map([...metaRef.current].filter(([name]) => universe.has(name)));
+      if (!selectedMeta.size) return;
+      const perName = await requestHistory(
+        [...selectedMeta.keys()],
+        'OPT',
+        exchange,
+        fetchFrom,
+        fetchTo,
+        BAND_HIST_FIELDS,
+        TICK_INTERVAL,
+      );
+      if (gen !== tickGenRef.current || !enabledRef.current) return;
+      const built = buildReferenceHistorySnapshots(perName, spot, selectedMeta);
+      let kept = 0;
+      if (tickSnapsRef.current.size + built.size > TICK_MAX_SNAPSHOTS) {
+        // Memory bound. The dropped spans fall back to their 1m history, which is still underneath.
+        tickSnapsRef.current = new Map();
+        tickCoverRef.current = [];
+      }
+      for (const [ts, snap] of built) {
+        if (ts < start) continue; // warm-up only
+        tickSnapsRef.current.set(ts, snap);
+        kept++;
+      }
+      if (!kept) return;
+      addCover(start, end);
+      if (!referenceRebuildingRef.current) rebuildReferenceHistory(withTicks(snapshotsRef.current));
+      else snapVersionRef.current++;
+      setHistGranularity(`${HIST_INTERVAL}, ${TICK_INTERVAL} when zoomed in`);
+      requestDraw();
+    } catch (e) {
+      console.warn(`[${greekLabel}] tick window failed:`, e);
+    } finally {
+      tickBusyRef.current = false;
+      const pending = tickPendingRef.current;
+      tickPendingRef.current = null;
+      // `resetTicks` clears the parked request, so one still here was made after any reset.
+      if (pending) void loadTickWindow(pending[0], pending[1]);
+    }
+  }
+
   function finishReferenceBuffer() {
     const buffered = referenceLiveBufferRef.current;
     referenceLiveBufferRef.current = [];
@@ -1093,6 +1284,10 @@ export function useGreekOverlay({
     const inst = currentInstRef.current;
     if (!inst) return;
     const sym = getChainAsset(inst);
+    if (isLocal) {
+      await loadLocalChain(inst, sym);
+      return;
+    }
     try {
       const data = await fetchChainShared(sym, undefined, inst.exchange);
       if (!data.chain) return;
@@ -1113,11 +1308,101 @@ export function useGreekOverlay({
     }
   }
 
+  /** The day a local enable reads its contract list for: the one shown, else the host's seed. */
+  function localDay(): string {
+    return greekDateRef.current || initialDay || defaultGreekDay();
+  }
+
+  /**
+   * `loadChain` for a local host. There is no live chain for a date the broker never served, so
+   * the expiry list comes from the day's local contract list instead.
+   */
+  async function loadLocalChain(inst: Instrument, sym: string) {
+    try {
+      const data = await fetchBandContractsShared(
+        sym,
+        localDay(),
+        undefined,
+        inst.exchange || 'NSE',
+        'local',
+      );
+      const exps = (data.availableExpiries ?? (data.expiry ? [data.expiry] : [])).map(
+        toChainExpiry,
+      );
+      setExpiries(exps);
+      const kept = selExpiries.filter((e) => exps.includes(e));
+      const initial = kept.length ? kept : data.expiry ? [toChainExpiry(data.expiry)] : [];
+      setSelExpiries(initial);
+      anchorExpiryRef.current = initial[0] || '';
+      await reloadAll(initial);
+    } catch (e) {
+      console.warn(`[${greekLabel}] local loadChain failed:`, e);
+    }
+  }
+
+  /**
+   * `reloadAll` for a local host: the basket is the day's local contract list, and nothing live is
+   * seeded, subscribed or polled. Everything after the meta is the same path the broker takes.
+   */
+  async function reloadAllLocal(inst: Instrument, selected: string[]) {
+    const sym = getChainAsset(inst);
+    const meta = new Map<string, { sp: number; type: 'CE' | 'PE'; exp: string }>();
+    for (const exp of selected) {
+      const data = await fetchBandContractsShared(
+        sym,
+        localDay(),
+        exp,
+        inst.exchange || 'NSE',
+        'local',
+      );
+      for (const c of data.contracts ?? []) {
+        if (c.side === 'CE' || c.side === 'PE')
+          meta.set(c.name, { sp: c.strike, type: c.side, exp: toChainExpiry(c.expiry) });
+      }
+    }
+    if (!meta.size) {
+      setHistState('nogreeks');
+      return;
+    }
+    metaRef.current = meta;
+    underlyingRef.current = sym.toUpperCase();
+    liveLegsRef.current = new Map();
+    snapshotsRef.current = new Map();
+    referenceMachineRef.current = new ReferenceBandMachine();
+    referencePointsRef.current = new Map();
+    referenceLiveBufferRef.current = [];
+    referenceRebuildingRef.current = !isIv;
+    lastSnapMsRef.current = 0;
+    resetTicks();
+    snapVersionRef.current++;
+
+    const today = defaultGreekDay();
+    setLatestDay(today);
+    const day = localDay();
+    greekDateRef.current = day;
+    setGreekDateState(day);
+
+    enabledRef.current = true;
+    setOn(true);
+    syncPanes(cfgRef.current.method);
+    requestDraw();
+    cancelDayFetch();
+    fetchHistoryForDay(day);
+  }
+
   async function reloadAll(expiriesSel: string[]) {
     const inst = currentInstRef.current;
     if (!inst || !expiriesSel.length) return;
     const selected = isIv ? expiriesSel : expiriesSel.slice(0, 1);
     if (selected.length !== expiriesSel.length) setSelExpiries(selected);
+    if (isLocal) {
+      try {
+        await reloadAllLocal(inst, selected);
+      } catch (e) {
+        console.warn(`[${greekLabel}] local reload failed:`, e);
+      }
+      return;
+    }
     // On MCX the chain is keyed by the commodity, not by the futures contract that
     // underlies it; everywhere else the two are the same string.
     const sym = getChainAsset(inst);
@@ -1167,6 +1452,7 @@ export function useGreekOverlay({
       referenceLiveBufferRef.current = [];
       referenceRebuildingRef.current = !isIv;
       lastSnapMsRef.current = 0;
+      resetTicks();
       snapVersionRef.current++;
 
       // Default to the latest trading day; preserve a past day the user already picked.
@@ -1241,6 +1527,8 @@ export function useGreekOverlay({
     referenceLiveBufferRef.current = [];
     referenceRebuildingRef.current = !isIv;
     lastSnapMsRef.current = 0;
+    bandContractsRef.current = [];
+    resetTicks();
     snapVersionRef.current++;
     // Re-seed the live point only when returning to TODAY during market hours — not merely to
     // the last loaded bar's day, which on a historical host is a past session.
@@ -1275,6 +1563,7 @@ export function useGreekOverlay({
     start: Date,
     end: Date,
     fields: string[] = isIv ? IV_HIST_FIELDS : BAND_HIST_FIELDS,
+    interval: string = HIST_INTERVAL,
   ) {
     const BATCH = 10;
     const chunks: string[][] = [];
@@ -1284,21 +1573,24 @@ export function useGreekOverlay({
     const results = await Promise.all(
       chunks.map(async (chunk) => {
         try {
-          return await fetchHistoricalShared({
-            query: [
-              {
-                exchange,
-                type,
-                values: chunk,
-                fields,
-                startDate: start.toISOString(),
-                endDate: end.toISOString(),
-                interval: HIST_INTERVAL,
-                intraDay: false,
-                realTime: false,
-              },
-            ],
-          });
+          return await fetchHistoricalShared(
+            {
+              query: [
+                {
+                  exchange,
+                  type,
+                  values: chunk,
+                  fields,
+                  startDate: start.toISOString(),
+                  endDate: end.toISOString(),
+                  interval,
+                  intraDay: false,
+                  realTime: false,
+                },
+              ],
+            },
+            isLocal ? LOCAL_HISTORICAL_URL : undefined,
+          );
         } catch {
           return null;
         }
@@ -1383,25 +1675,33 @@ export function useGreekOverlay({
     return out;
   }
 
-  async function fetchSpotHistory(exchange: string, start: Date, end: Date): Promise<TsV[]> {
+  async function fetchSpotHistory(
+    exchange: string,
+    start: Date,
+    end: Date,
+    interval: string = HIST_INTERVAL,
+  ): Promise<TsV[]> {
     if (!underlyingRef.current) return [];
     try {
-      const data = await fetchHistoricalShared({
-        query: [
-          {
-            exchange,
-            // MCX has no spot index — the underlying is a futures contract.
-            type: exchange.toUpperCase() === 'MCX' ? 'FUT' : 'INDEX',
-            values: [underlyingRef.current],
-            fields: ['close'],
-            startDate: start.toISOString(),
-            endDate: end.toISOString(),
-            interval: HIST_INTERVAL,
-            intraDay: false,
-            realTime: false,
-          },
-        ],
-      });
+      const data = await fetchHistoricalShared(
+        {
+          query: [
+            {
+              exchange,
+              // MCX has no spot index — the underlying is a futures contract.
+              type: exchange.toUpperCase() === 'MCX' ? 'FUT' : 'INDEX',
+              values: [underlyingRef.current],
+              fields: ['close'],
+              startDate: start.toISOString(),
+              endDate: end.toISOString(),
+              interval,
+              intraDay: false,
+              realTime: false,
+            },
+          ],
+        },
+        isLocal ? LOCAL_HISTORICAL_URL : undefined,
+      );
       const out: TsV[] = [];
       for (const row of data?.result?.[0]?.values || []) {
         for (const series of Object.values(row) as Record<string, TsV[]>[]) {
@@ -1433,13 +1733,16 @@ export function useGreekOverlay({
     const exchange = inst.exchange || 'NSE';
     let meta = metaRef.current;
     let bandContracts: BandContractMeta[] = [];
-    if (!isIv) {
+    // A local day has no live chain behind it, so its IV basket comes from the dated contract list
+    // too — the broker path keeps IV on the chain's names as before.
+    if (!isIv || isLocal) {
       try {
         const dated = await fetchBandContractsShared(
           getChainAsset(inst),
           dateStr,
           [...wsExpiriesRef.current][0] || selExpiries[0],
           exchange,
+          isLocal ? 'local' : undefined,
         );
         if (gen !== histGenRef.current) return;
         // Normalised to the chain spelling so history legs, live legs and `selExpiries` all agree.
@@ -1457,6 +1760,7 @@ export function useGreekOverlay({
           ]),
         );
         metaRef.current = meta;
+        if (!isIv) bandContractsRef.current = bandContracts;
         if (datedExpiry !== selExpiries[0]) {
           setSelExpiries([datedExpiry]);
           anchorExpiryRef.current = datedExpiry;
@@ -1466,7 +1770,7 @@ export function useGreekOverlay({
       } catch (error) {
         if (gen !== histGenRef.current) return;
         console.error(`[${greekLabel}] dated contract lookup failed:`, error);
-        rebuildReferenceHistory(new Map());
+        if (!isIv) rebuildReferenceHistory(new Map());
         setHistState('nogreeks');
         setHistGranularity('');
         return;
@@ -1489,12 +1793,13 @@ export function useGreekOverlay({
       day: dateStr,
       windowDays,
       withIv: isIv,
+      ...(isLocal ? { source: 'local' as const } : {}),
     };
 
     /** Apply a reconstruction and report it through the status pill. Shared by both paths below. */
     const apply = (value: { snapshots: Map<number, ChainSnapshot>; dropped: number }) => {
       const added = commitHistory(value.snapshots);
-      if (!isIv) rebuildReferenceHistory(value.snapshots);
+      if (!isIv) rebuildReferenceHistory(withTicks(value.snapshots));
       // `added` is 0 on a re-apply of the same buckets — already committed is still loaded, so the
       // pill must read off the reconstruction's own size, not off what this call happened to add.
       const ok = value.snapshots.size > 0;
@@ -1505,6 +1810,13 @@ export function useGreekOverlay({
       if (value.dropped > 0)
         console.warn(`[${greekLabel}] dropped ${value.dropped} unpriceable legs for ${dateStr}.`);
       if (added || ok) requestDraw();
+      // A tick window asked for while this history was still loading was parked; run it now.
+      // (`resetTicks` clears the parked one, so anything still here was asked for after it.)
+      const pending = tickPendingRef.current;
+      if (pending && !tickBusyRef.current) {
+        tickPendingRef.current = null;
+        void loadTickWindow(pending[0], pending[1]);
+      }
     };
 
     /** The expensive path: fetch the window and pivot it. Runs at most once per cache key. */
@@ -1952,6 +2264,7 @@ export function useGreekOverlay({
       destroyPanes();
       unsubscribeWsAll();
       liveLegsRef.current = new Map();
+      resetTicks();
       applyIvLegend(null);
     } else if (currentInstRef.current) {
       loadChain();
@@ -1987,6 +2300,8 @@ export function useGreekOverlay({
     referenceLiveBufferRef.current = [];
     referenceRebuildingRef.current = false;
     metaRef.current = new Map();
+    bandContractsRef.current = [];
+    resetTicks();
     greekDateRef.current = '';
     lastSnapMsRef.current = 0;
     snapVersionRef.current++;
@@ -2045,6 +2360,7 @@ export function useGreekOverlay({
     resetScales,
     applyVScale,
     clearForInstrumentChange,
+    loadTickWindow: (fromMs: number, toMs: number) => void loadTickWindow(fromMs, toMs),
     enabledRef,
   };
 }

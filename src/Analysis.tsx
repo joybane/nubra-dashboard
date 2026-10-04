@@ -16,12 +16,12 @@ import { isChartLive, removeChart } from './lib/chartLifecycle';
 import { syncChartPanes } from './lib/syncChartPanes';
 import { bindPinTrigger, usePinnedTimes } from './lib/chartPins';
 import { setNubraBtHandoff } from './lib/nubraBtHandoff';
-import { blackScholes, impliedVolatility, RISK_FREE } from './lib/GexService';
 import PinnedCrosshairLayer from './components/PinnedCrosshairLayer';
 import PinCompareStrip, { type CompareRow } from './components/PinCompareStrip';
 import PaneDivider, { type PaneSpec } from './components/PaneDivider';
 import GreekIndicatorPane from './components/GreekIndicatorPane';
 import { PnlTooltipBody, PriceTooltipBody } from './components/ChartTooltips';
+import { blackScholes, impliedVolatility, RISK_FREE } from './lib/GexService';
 
 // ── Server shapes — mirrors of server/analysis/*.ts (the two tsconfigs are disjoint) ─────────
 
@@ -562,9 +562,11 @@ export default function Analysis({ theme, onChangeView }: Props) {
       ? (selectedMain.groupCandidates?.[selected.group] ?? null)
       : selectedMain;
 
-  const nubraFrom = status?.coverage.nubra.from ?? null;
-  const nubraAvailable = (day: ScanDay) =>
-    day.source === 'nubra' || (!!nubraFrom && day.date >= nubraFrom);
+  /** What the Nubra BT button says it will do: a local day opens on the same local data. */
+  const nubraBtTitle = (source: ScanDay['source']) =>
+    source === 'local'
+      ? 'Open this day in Nubra BT with these legs, on the same local data'
+      : 'Open this day in Nubra BT with these legs';
 
   const openInNubraBt = useCallback(
     (day: ScanDay) => {
@@ -576,6 +578,9 @@ export default function Analysis({ theme, onChangeView }: Props) {
         expiry: day.expiry,
         entryTime: day.legs.entryTime,
         exitTime: p.exitTime,
+        // A local case opens on local data even where the broker overlaps it, so Nubra BT replays
+        // exactly the prices the case was found on.
+        source: day.source === 'local' ? 'local' : 'auto',
         legs: [
           { strike: day.legs.peStrike, optionType: 'PE', side: p.side, lots },
           { strike: day.legs.ceStrike, optionType: 'CE', side: p.side, lots },
@@ -1029,14 +1034,9 @@ export default function Analysis({ theme, onChangeView }: Props) {
                       <div className="flex justify-end px-3 pt-1">
                         <button
                           type="button"
-                          disabled={!nubraAvailable(day)}
                           onClick={() => openInNubraBt(day)}
-                          className="rounded border border-[var(--border)] px-2 py-0.5 text-[11px] hover:border-[var(--accent)] disabled:opacity-40"
-                          title={
-                            nubraAvailable(day)
-                              ? 'Open this day in Nubra BT with these legs'
-                              : `Nubra has no history for this date${nubraFrom ? ` (it starts ${nubraFrom})` : ''}`
-                          }
+                          className="rounded border border-[var(--border)] px-2 py-0.5 text-[11px] hover:border-[var(--accent)]"
+                          title={nubraBtTitle(day.source)}
                         >
                           Open in Nubra BT ↗
                         </button>
@@ -1079,7 +1079,7 @@ export default function Analysis({ theme, onChangeView }: Props) {
               day={selectedDay}
               selected={selectedCase}
               params={scan.params}
-              nubraAvailable={nubraAvailable(selectedDay)}
+              nubraBtTitle={nubraBtTitle(selectedDay.source)}
               onOpenNubraBt={() => openInNubraBt(selectedDay)}
             />
           ) : (
@@ -1362,7 +1362,7 @@ interface CaseChartProps {
   day: ScanDay;
   selected: CaseWindow | null;
   params: FinderParams;
-  nubraAvailable: boolean;
+  nubraBtTitle: string;
   onOpenNubraBt: () => void;
 }
 
@@ -1373,7 +1373,7 @@ function CaseChart({
   day,
   selected,
   params,
-  nubraAvailable,
+  nubraBtTitle,
   onOpenNubraBt,
 }: CaseChartProps) {
   const isDark = theme !== 'light';
@@ -1445,21 +1445,6 @@ function CaseChart({
     const cePnlAt: Grid = [];
     const pePnlAt: Grid = [];
     const totalAt: Grid = [];
-    // Per-option Greeks for the fixed ATM CE and PE nearest the selected match's spot. Historical
-    // Greeks are not stored, so IV is back-solved from each option's traded premium before the
-    // Black-76 values are reconstructed.
-    const expirySec = expirySeconds(data.expiry);
-    const greekSeries: Record<
-      'CE' | 'PE',
-      Record<GreekKey, Array<{ time: UTCTimestamp; value: number }>>
-    > = {
-      CE: { delta: [], gamma: [], theta: [], vega: [] },
-      PE: { delta: [], gamma: [], theta: [], vega: [] },
-    };
-    const greeksAt: Record<'CE' | 'PE', Record<GreekKey, Grid>> = {
-      CE: { delta: [], gamma: [], theta: [], vega: [] },
-      PE: { delta: [], gamma: [], theta: [], vega: [] },
-    };
     for (let i = 0; i < data.minutes.length; i++) {
       const time = (start + i * 60) as UTCTimestamp;
       const s = data.spot[i];
@@ -1500,7 +1485,43 @@ function CaseChart({
       cePnlAt.push(cp);
       pePnlAt.push(pp);
       totalAt.push(tp);
+    }
+    return {
+      start,
+      candles,
+      spotLine,
+      ce,
+      pe,
+      cePnl,
+      pePnl,
+      total,
+      cePnlAt,
+      pePnlAt,
+      totalAt,
+    };
+  }, [data, params.side, params.qty, params.exitTime]);
 
+  const [greeksVisible, setGreeksVisible] = useState(false);
+
+  // Per-option Greeks for the fixed ATM CE and PE nearest the selected match's spot. Historical
+  // Greeks are not stored, so IV is back-solved from each option's traded premium before the
+  // Black-76 values are reconstructed.
+  const greekBuilt = useMemo(() => {
+    const series = {} as Record<
+      'CE' | 'PE',
+      Record<GreekKey, Array<{ time: UTCTimestamp; value: number }>>
+    >;
+    const at = {} as Record<'CE' | 'PE', Record<GreekKey, Grid>>;
+    for (const side of ['CE', 'PE'] as const) {
+      series[side] = { delta: [], gamma: [], theta: [], vega: [] };
+      at[side] = { delta: [], gamma: [], theta: [], vega: [] };
+    }
+    if (!data) return { series, at };
+    const start = sessionStart(data.date);
+    const expirySec = expirySeconds(data.expiry);
+    for (let i = 0; i < data.minutes.length; i++) {
+      const time = (start + i * 60) as UTCTimestamp;
+      const s = data.spot[i];
       const atmPrices = { CE: data.atmCe[i], PE: data.atmPe[i] };
       for (const side of ['CE', 'PE'] as const) {
         let values: GreekValues = { delta: null, gamma: null, theta: null, vega: null };
@@ -1516,28 +1537,14 @@ function CaseChart({
           const g = blackScholes(s, strike, T, RISK_FREE, iv, side, true);
           values = { delta: g.delta, gamma: g.gamma, theta: g.theta, vega: g.vega };
           for (const key of GREEK_KEYS) {
-            greekSeries[side][key].push({ time, value: values[key]! });
+            series[side][key].push({ time, value: values[key]! });
           }
         }
-        for (const key of GREEK_KEYS) greeksAt[side][key].push(values[key]);
+        for (const key of GREEK_KEYS) at[side][key].push(values[key]);
       }
     }
-    return {
-      start,
-      candles,
-      spotLine,
-      ce,
-      pe,
-      cePnl,
-      pePnl,
-      total,
-      cePnlAt,
-      pePnlAt,
-      totalAt,
-      greekSeries,
-      greeksAt,
-    };
-  }, [data, params.side, params.qty, params.exitTime]);
+    return { series, at };
+  }, [data]);
 
   const pricePaneRef = useRef<HTMLDivElement>(null);
   const priceEl = useRef<HTMLDivElement>(null);
@@ -1556,7 +1563,6 @@ function CaseChart({
   const hoverTimeRef = useRef<number | null>(null);
 
   // ── Greeks / Indicators panes — resizable, toggled independently of price/P&L ──
-  const [greeksVisible, setGreeksVisible] = useState(false);
   const [greeksHeight, setGreeksHeight] = useState(150);
   const [indicatorsVisible, setIndicatorsVisible] = useState(false);
   const [indicatorsHeight, setIndicatorsHeight] = useState(200);
@@ -1645,7 +1651,7 @@ function CaseChart({
             lastValueVisible: true,
             priceLineVisible: false,
           });
-          s.setData(built.greekSeries[side][gk]);
+          s.setData(greekBuilt.series[side][gk]);
         }
       }
     }
@@ -1663,7 +1669,16 @@ function CaseChart({
       removeChart(pnl);
       if (greeks) removeChart(greeks);
     };
-  }, [built, theme, greeksVisible, data?.atmStrike, data?.atmCeStrike, data?.atmPeStrike, isDark]);
+  }, [
+    built,
+    greekBuilt,
+    theme,
+    greeksVisible,
+    data?.atmStrike,
+    data?.atmCeStrike,
+    data?.atmPeStrike,
+    isDark,
+  ]);
 
   /**
    * Cross-pane scroll sync, crosshair→hoverIdx, and pin binding — for every pane currently on
@@ -1746,15 +1761,15 @@ function CaseChart({
         total: built.totalAt[i],
         atmGreeks: {
           CE: Object.fromEntries(
-            GREEK_KEYS.map((key) => [key, built.greeksAt.CE[key][i]]),
+            GREEK_KEYS.map((key) => [key, greekBuilt.at.CE[key][i] ?? null]),
           ) as GreekValues,
           PE: Object.fromEntries(
-            GREEK_KEYS.map((key) => [key, built.greeksAt.PE[key][i]]),
+            GREEK_KEYS.map((key) => [key, greekBuilt.at.PE[key][i] ?? null]),
           ) as GreekValues,
         },
       };
     },
-    [data, built],
+    [data, built, greekBuilt],
   );
 
   const indexOfTime = useCallback(
@@ -1894,14 +1909,9 @@ function CaseChart({
         </button>
         <button
           type="button"
-          disabled={!nubraAvailable}
           onClick={onOpenNubraBt}
-          className="rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-semibold text-white disabled:opacity-40"
-          title={
-            nubraAvailable
-              ? 'Open this day in Nubra BT with these legs'
-              : 'Nubra has no history for this date'
-          }
+          className="rounded bg-[var(--accent)] px-3 py-1 text-[12px] font-semibold text-white"
+          title={nubraBtTitle}
         >
           Open in Nubra BT ↗
         </button>

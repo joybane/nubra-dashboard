@@ -11,6 +11,9 @@ import path from 'path';
 import dotenv from 'dotenv';
 import {
   initDb,
+  closeDb,
+  dbArchivePnlTicks,
+  PNL_ARCHIVE_PATH,
   dbUpsertOcSub,
   dbLoadOcSubs,
   dbDeleteOcSub,
@@ -21,6 +24,7 @@ import { buildBasketSnapshot, istDateString, type SnapPosition } from './snapsho
 import { registerBacktestRoutes } from './backtest/routes.ts';
 import { registerNubraBacktestRoutes } from './nubraBacktestRoutes.ts';
 import { registerAnalysisRoutes } from './analysis/routes.ts';
+import { registerSignalBacktestRoutes } from './signalBacktest/routes.ts';
 import { createBacktestRefdataStore } from './backtestRefdataStore.ts';
 import { createBacktestBarStore } from './backtestBarStore.ts';
 import { registerMarketDataRoutes } from './marketDataRoutes.ts';
@@ -50,8 +54,10 @@ import { buildAllowedOrigins, isAllowedOrigin } from './corsPolicy.ts';
 import { createRefdataCache } from './refdataCache.ts';
 import { createRefdataQueue } from './refdataQueue.ts';
 import { previousTradingDay } from './tradingDay.ts';
+import { Agent } from 'undici';
 import {
   describeUpstreamError,
+  isConnectError,
   isTransportError,
   upstreamPostRetries,
   upstreamTimeoutMs,
@@ -61,6 +67,53 @@ import protobuf from 'protobufjs';
 
 dotenv.config();
 initDb();
+
+// ─── pnl_ticks retention ──────────────────────────────────────────────────────
+// Rows older than PNL_TICKS_RETENTION_DAYS (default 30; 0 turns archiving off) are moved into
+// pnl_ticks_archive.db beside paper.db — see dbArchivePnlTicks. Runs at startup, before anything
+// else touches the book, and then once a day between 00:00 and 08:59 IST, before any exchange
+// opens, so the delete never stalls a live session. Only the startup run may VACUUM: the first
+// archive frees tens of megabytes that SQLite would otherwise keep inside the file forever.
+const PNL_RETENTION_DAYS = (() => {
+  const raw = process.env.PNL_TICKS_RETENTION_DAYS;
+  if (raw == null || raw.trim() === '') return 30;
+  const days = Number(raw);
+  if (Number.isFinite(days) && days >= 0) return days;
+  console.warn(`[pnl archive] PNL_TICKS_RETENTION_DAYS=${raw} is not a number of days; using 30`);
+  return 30;
+})();
+const PNL_VACUUM_OVER_BYTES = 16 * 1024 * 1024;
+
+function archivePnlTicks(when: 'startup' | 'daily'): void {
+  if (PNL_RETENTION_DAYS === 0) return;
+  const startedAt = Date.now();
+  try {
+    const { moved, vacuumed, bytesAfter } = dbArchivePnlTicks(
+      startedAt - PNL_RETENTION_DAYS * 86_400_000,
+      when === 'startup' ? { vacuumOverBytes: PNL_VACUUM_OVER_BYTES } : {},
+    );
+    if (moved > 0 || vacuumed) {
+      console.log(
+        `[pnl archive] ${when}: moved ${moved} row(s) older than ${PNL_RETENTION_DAYS}d to ` +
+          `${path.basename(PNL_ARCHIVE_PATH)}${vacuumed ? ', vacuumed' : ''}; paper.db is ` +
+          `${(bytesAfter / 1_048_576).toFixed(1)} MB (${Date.now() - startedAt}ms)`,
+      );
+    }
+  } catch (e) {
+    // Housekeeping only. A failure leaves every row where it was and must never stop the server.
+    console.error(`[pnl archive] ${when} run failed:`, (e as Error).message);
+  }
+}
+
+archivePnlTicks('startup');
+let pnlArchivedIstDate = new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 10);
+setInterval(() => {
+  const ist = new Date(Date.now() + 5.5 * 3_600_000);
+  const istDate = ist.toISOString().slice(0, 10);
+  if (ist.getUTCHours() >= 9 || istDate === pnlArchivedIstDate) return;
+  pnlArchivedIstDate = istDate;
+  archivePnlTicks('daily');
+}, 10 * 60_000).unref();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -292,6 +345,36 @@ async function nubraPost(
 // finally surfacing as an opaque `fetch failed`. Both now run under a per-endpoint budget and log
 // their duration; see upstreamError.ts for the budget table.
 
+/**
+ * A dedicated connection pool for the broker.
+ *
+ * The broker drops a large share of NEW connections from this machine (measured: ~60% of TLS
+ * connects never answered, while other hosts accept every one). Node's default fetch pool opens a
+ * fresh socket per parallel request and waits undici's 10 s connect timeout on each dropped one, so
+ * a 6-batch chain fan-out failed as "fetch failed" after 2 × 10 s. This pool:
+ *  - caps sockets per origin, so parallel batches queue onto sockets that already connected;
+ *  - keeps them alive longer between requests (bounded by the broker's own Keep-Alive hint);
+ *  - gives up on an unanswered connect after 3 s — a good one takes ~80 ms — so the retry below
+ *    gets a fresh chance quickly instead of burning 10 s.
+ */
+const brokerAgent = new Agent({
+  connections: 6,
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 120_000,
+  connect: { timeout: 3_000 },
+});
+/**
+ * Node's fetch takes an undici dispatcher; the undici package's types and the copy Node's globals
+ * are typed against differ only nominally (same major, 7.x), hence the one cast.
+ */
+const viaBrokerPool = { dispatcher: brokerAgent } as unknown as RequestInit;
+
+/**
+ * Extra attempts for a connect that was never established. Safe for every method (nothing was
+ * sent), and separate from the transport-retry budget. At a ~60% drop rate, 6 tries leave ~5%.
+ */
+const MAX_CONNECT_RETRIES = 5;
+
 /** Log every upstream call, not just the slow ones. Useful when hunting a stall. */
 const LOG_ALL_UPSTREAM = process.env.NUBRA_HTTP_LOG === '1';
 const SLOW_UPSTREAM_MS = 1_500;
@@ -348,11 +431,13 @@ async function nubraPostAt(
   // zero, because a re-sent /sendphoneotp means a second SMS to the user; that reasoning now lives
   // in upstreamPostRetries' docblock, which is where the opt-in list is.
   const maxRetries = upstreamPostRetries(endpoint);
+  let connectFailures = 0;
 
   for (let attempt = 0; ; attempt++) {
     const startedAt = Date.now();
     try {
       const res = await fetch(`${baseUrl}${endpoint}`, {
+        ...viaBrokerPool,
         method: 'POST',
         headers: baseHeaders(extraHeaders),
         body: JSON.stringify(body),
@@ -367,6 +452,11 @@ async function nubraPostAt(
       const wrapped = asTimeoutError(err, 'POST', endpoint, timeoutMs);
       const failure = describeUpstreamError(wrapped);
       logUpstream('POST', endpoint, Date.now() - startedAt, `FAIL ${failure.detail}`);
+      if (isConnectError(wrapped) && connectFailures < MAX_CONNECT_RETRIES) {
+        connectFailures++;
+        attempt--; // a connect that never happened does not spend the transport-retry budget
+        continue;
+      }
       if (attempt >= maxRetries || !isTransportError(wrapped)) throw wrapped;
       console.warn(`[upstream] retrying POST ${endpoint} after ${failure.detail}`);
     }
@@ -389,10 +479,12 @@ async function nubraGet(
   // Explicitly NOT retried: our own timeouts (retrying doubles the wall clock back into a hang)
   // and HTTP statuses (a 401/403 has already fired onBrokerAuthFailure, and re-firing it would
   // hammer the re-auth path).
+  let connectFailures = 0;
   for (let attempt = 0; ; attempt++) {
     const startedAt = Date.now();
     try {
       const res = await fetch(url, {
+        ...viaBrokerPool,
         headers: baseHeaders({ Authorization: `Bearer ${authState.sessionToken}` }),
         signal: AbortSignal.timeout(timeoutMs),
       });
@@ -404,6 +496,11 @@ async function nubraGet(
       const wrapped = asTimeoutError(err, 'GET', endpoint, timeoutMs);
       const failure = describeUpstreamError(wrapped);
       logUpstream('GET', endpoint, Date.now() - startedAt, `FAIL ${failure.detail}`);
+      if (isConnectError(wrapped) && connectFailures < MAX_CONNECT_RETRIES) {
+        connectFailures++;
+        attempt--;
+        continue;
+      }
       if (attempt >= 1 || !isTransportError(wrapped)) throw wrapped;
       console.warn(`[upstream] retrying GET ${endpoint} after ${failure.detail}`);
     }
@@ -438,16 +535,21 @@ await fastify.register(fastifyCompress, { global: true, threshold: 1024 });
 
 // Serve built frontend in production
 const distPath = path.join(__dirname, '..', 'dist');
+/** dist/assets/<name>-<8-char content hash>.<ext>, as Vite names every bundle it emits. */
+const HASHED_ASSET = /[\\/]assets[\\/][^\\/]+-[A-Za-z0-9_-]{8}\.[a-z0-9]+$/;
 if (existsSync(distPath)) {
   await fastify.register(fastifyStatic, {
     root: distPath,
     // @fastify/static v10 hands `setHeaders` a FastifyReply where v8 passed the raw
     // ServerResponse, so this is `reply.header(...)` rather than `res.setHeader(...)`.
-    // The caching intent is unchanged: never cache the HTML entry point (it names the
-    // hashed asset bundles), revalidate everything else.
+    // Never cache the HTML entry point (it names the hashed asset bundles). Vite's content-hashed
+    // bundles under assets/ get a new name whenever their content changes, so they are cached
+    // for good — a reload used to revalidate all ~20 of them. Anything else revalidates.
     setHeaders: (reply, filePath) => {
       if (filePath.endsWith('.html')) {
         reply.header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+      } else if (HASHED_ASSET.test(filePath)) {
+        reply.header('Cache-Control', 'public, max-age=31536000, immutable');
       } else {
         reply.header('Cache-Control', 'public, max-age=0');
       }
@@ -602,13 +704,11 @@ function clearOcTsGuard(asset: string, expiry: string, exchange: string): void {
 function decodeBinaryMsg(rawBuffer: Buffer): { type: string; data: unknown } | null {
   if (!pbAny) return null;
   try {
-    const outer = pbAny.decode(rawBuffer);
-    const outerObj = pbAny.toObject(outer, { longs: String }) as {
-      typeUrl?: string;
-      value: Uint8Array;
-    };
-    const inner = pbAny.decode(outerObj.value);
-    const innerObj = pbAny.toObject(inner, { longs: String }) as {
+    // The two AnyMsg envelopes are read straight off the decoded messages. They hold only a string
+    // and a bytes field, so the toObject copies they used to go through produced the same two
+    // values — as an extra pair of allocations on every message of the feed.
+    const outer = pbAny.decode(rawBuffer) as unknown as { value: Uint8Array };
+    const innerObj = pbAny.decode(outer.value) as unknown as {
       typeUrl?: string;
       value: Uint8Array;
     };
@@ -893,9 +993,14 @@ function noteOcTick(decoded: { type: string; data: unknown }): void {
 }
 
 function broadcast(obj: unknown): void {
-  const msg = JSON.stringify(obj);
+  // The server keeps the broker feed, SimBroker and the rules running with no browser open —
+  // for hours on end — and every tick used to be serialised to JSON regardless. Serialise lazily,
+  // once, only when someone is actually listening.
+  let msg: string | null = null;
   for (const client of browserClients) {
-    if (client.readyState === WebSocket.OPEN) client.send(msg);
+    if (client.readyState !== WebSocket.OPEN) continue;
+    msg ??= JSON.stringify(obj);
+    client.send(msg);
   }
 }
 
@@ -1320,7 +1425,9 @@ function routeTickToSim(decoded: { type: string; data: unknown }): void {
     // Live mismatch tracker (mismatchRoutes.ts). After everything above, and isolated from it: a
     // failure here must never reach fills, position P&L or SL/target evaluation.
     try {
-      mismatchTracker?.onChain(decoded.data as Parameters<MismatchOnChain>[0]);
+      mismatchTracker?.onChain(
+        decoded.data as Parameters<ReturnType<typeof registerMismatchRoutes>['onChain']>[0],
+      );
     } catch (e) {
       console.warn('[Mismatch] tick failed:', (e as Error).message);
     }
@@ -1394,6 +1501,10 @@ function buildPaperDebugResponse(): Record<string, unknown> {
   };
 }
 
+// Declared before registerPaperRoutes so its route handlers can nudge the mismatch/decay tracker
+// the moment an order is placed, instead of only on that tracker's own poll — see onOrdersPlaced.
+let mismatchTracker: ReturnType<typeof registerMismatchRoutes> | null = null;
+
 // ─── Paper trading routes ─────────────────────────────────────────────────────
 registerPaperRoutes({
   fastify,
@@ -1407,6 +1518,7 @@ registerPaperRoutes({
   nubraGet,
   nubraPostAt,
   marginBaseUrl: MARGIN_BASE_URL,
+  onOrdersPlaced: () => mismatchTracker?.sync(),
 });
 
 // Backdated paper entries ("I entered at 09:25:30"): new routes only, see backdatedRoutes.ts.
@@ -1425,8 +1537,7 @@ registerBackdatedRoutes({
   broadcastRuleEvents,
 });
 
-type MismatchOnChain = ReturnType<typeof registerMismatchRoutes>['onChain'];
-const mismatchTracker: { onChain: MismatchOnChain } | null = registerMismatchRoutes({
+mismatchTracker = registerMismatchRoutes({
   fastify,
   requireAuth,
   simBroker,
@@ -1623,6 +1734,7 @@ registerNubraBacktestRoutes({
   getSessionToken: () => authState.sessionToken,
   refdataStore: backtestRefdata,
   barStore: backtestBars,
+  analysisCacheDir: path.join(__dirname, '..', '.analysis-cache'),
 });
 
 // ─── Analysis (profit-mismatch scenarios) ────────────────────────────────────
@@ -1637,6 +1749,47 @@ registerAnalysisRoutes({
             Authorization: `Bearer ${authState.sessionToken!}`,
           })
       : null,
+});
+
+// ─── Signal backtest (first mismatch case → option trade) ────────────────────
+// Read-only over .analysis-cache and the parquet tree. Talks to the broker only for its own wide
+// option download (into .signal-cache), and only while a session exists.
+registerSignalBacktestRoutes({
+  fastify,
+  rootDir: path.join(__dirname, '..'),
+  getPost: () =>
+    authState.status === 'authenticated' && authState.sessionToken
+      ? (body) =>
+          nubraPost('/charts/timeseries', body, {
+            Authorization: `Bearer ${authState.sessionToken!}`,
+          })
+      : null,
+});
+
+// ─── Shutdown ─────────────────────────────────────────────────────────────────
+// Ctrl+C (directly or through `npm start`'s concurrently), a service stop, or closing the console
+// window used to kill the process mid-write. Now the buffered pnl ticks are flushed and the
+// database closed — which also checkpoints the WAL — before exiting. `exit` covers every other
+// path that ends the process through process.exit().
+let shuttingDown = false;
+function shutdown(signal: NodeJS.Signals): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[server] ${signal} received — flushing and closing the paper book.`);
+  try {
+    closeDb();
+  } catch (e) {
+    console.error('[server] closing the database failed:', (e as Error).message);
+  }
+  process.exit(0);
+}
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.once(signal, shutdown);
+process.once('exit', () => {
+  try {
+    closeDb();
+  } catch {
+    /* already closed, or closing failed and was reported above */
+  }
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────

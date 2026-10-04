@@ -203,3 +203,33 @@ test('replies un-enriched rather than hanging when a cold refdata download stall
     vi.useRealTimers();
   }
 });
+
+test('overlapping requests for one chain share a single broker call; later ones fetch fresh', async () => {
+  peekRefdata.mockReturnValue([{ ref_id: 7, stock_name: 'NIFTY_TEST_CE' }]);
+  let release!: (v: Record<string, unknown>) => void;
+  nubraGet.mockImplementationOnce(
+    () => new Promise((resolve) => (release = resolve as typeof release)) as never,
+  );
+
+  const url = '/api/optionchain/NIFTY?exchange=NSE&expiry=20260929';
+  const a = app.inject({ method: 'GET', url });
+  const b = app.inject({ method: 'GET', url });
+  // A different expiry is a different chain and must not ride along.
+  nubraGet.mockResolvedValueOnce({ chain: { ce: [], pe: [] } } as never);
+  const other = app.inject({
+    method: 'GET',
+    url: '/api/optionchain/NIFTY?exchange=NSE&expiry=20261006',
+  });
+  await vi.waitFor(() => expect(nubraGet).toHaveBeenCalledTimes(2));
+  release({ chain: { ce: [{ ref_id: 7 }], pe: [] } });
+
+  const [ra, rb] = await Promise.all([a, b]);
+  await other;
+  expect(ra.json()).toEqual({ chain: { ce: [{ ref_id: 7, symbol: 'NIFTY_TEST_CE' }], pe: [] } });
+  expect(rb.json()).toEqual(ra.json());
+  expect(nubraGet).toHaveBeenCalledTimes(2);
+
+  nubraGet.mockResolvedValueOnce({ chain: { ce: [], pe: [] } } as never);
+  await app.inject({ method: 'GET', url });
+  expect(nubraGet).toHaveBeenCalledTimes(3);
+});

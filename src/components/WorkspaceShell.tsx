@@ -25,23 +25,44 @@ export default function WorkspaceShell({ children }: { children: ReactNode }) {
   const activeGroup = GROUPS.find((group) => group.views.includes(pane?.view)) || GROUPS[0];
   const openView = (view: ViewType) => paneId && setPaneView(paneId, view);
 
-  return <div className="workspace-shell-frame">
-    <aside className="workspace-rail" aria-label="Workspace groups">
-      <span className="workspace-rail-label">Workspace</span>
-      {GROUPS.map((group) => <button key={group.id} className={`workspace-rail-item ${activeGroup.id === group.id ? 'is-active' : ''}`} aria-current={activeGroup.id === group.id ? 'page' : undefined} onClick={() => openView(group.views[0])}>
-        <UiIcon name={group.icon} size={20} />
-        <span>{group.label}</span>
-      </button>)}
-      <span className="workspace-rail-spacer" />
-      <div className="workspace-rail-hint"><UiIcon name="command" size={17} /><span>Commands</span></div>
-    </aside>
-    <section className="workspace-shell-content">
-      <nav className="workspace-view-tabs" aria-label={`${activeGroup.label} views`}>
-        <strong>{activeGroup.label}</strong>
-        {activeGroup.views.map((view) => <button key={view} className={pane?.view === view ? 'is-active' : ''} aria-current={pane?.view === view ? 'page' : undefined} onClick={() => openView(view)}>{VIEW_LABELS[view]}</button>)}
-        <span>Your workspace</span>
-      </nav>
-      <div className="workspace-shell-body">{children}</div>
-    </section>
-  </div>;
+  return (
+    <div className="workspace-shell-frame">
+      <aside className="workspace-rail" aria-label="Workspace groups">
+        <span className="workspace-rail-label">Workspace</span>
+        {GROUPS.map((group) => (
+          <button
+            key={group.id}
+            className={`workspace-rail-item ${activeGroup.id === group.id ? 'is-active' : ''}`}
+            aria-current={activeGroup.id === group.id ? 'page' : undefined}
+            onClick={() => openView(group.views[0])}
+          >
+            <UiIcon name={group.icon} size={20} />
+            <span>{group.label}</span>
+          </button>
+        ))}
+        <span className="workspace-rail-spacer" />
+        <div className="workspace-rail-hint">
+          <UiIcon name="command" size={17} />
+          <span>Commands</span>
+        </div>
+      </aside>
+      <section className="workspace-shell-content">
+        <nav className="workspace-view-tabs" aria-label={`${activeGroup.label} views`}>
+          <strong>{activeGroup.label}</strong>
+          {activeGroup.views.map((view) => (
+            <button
+              key={view}
+              className={pane?.view === view ? 'is-active' : ''}
+              aria-current={pane?.view === view ? 'page' : undefined}
+              onClick={() => openView(view)}
+            >
+              {VIEW_LABELS[view]}
+            </button>
+          ))}
+          <span>Your workspace</span>
+        </nav>
+        <div className="workspace-shell-body">{children}</div>
+      </section>
+    </div>
+  );
 }

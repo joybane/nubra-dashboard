@@ -23,6 +23,8 @@ interface StripProps {
    * omitted, the open case's history simply isn't drawn on the axis.
    */
   onPickVersion?: (caseNo: number, versionIdx: number) => void;
+  /** Extra px between this layer's left edge and the chart's, e.g. a pane that pads its chart div. */
+  xAdjust?: number;
 }
 
 const STRIP_W = 10;
@@ -45,6 +47,7 @@ export default function MismatchStripLayer({
   activeCase,
   onPick,
   onPickVersion,
+  xAdjust = 0,
 }: StripProps) {
   const [, setTick] = useState(0);
 
@@ -93,7 +96,7 @@ export default function MismatchStripLayer({
   const xOfMinute = (minuteSec: number): number | null => {
     try {
       const c = chart.timeScale().timeToCoordinate(minuteSec as UTCTimestamp);
-      return c == null || !Number.isFinite(c) ? null : c + leftScale;
+      return c == null || !Number.isFinite(c) ? null : c + leftScale + xAdjust;
     } catch {
       return null;
     }
@@ -239,15 +242,30 @@ interface CardProps {
   pinnedVersion: number;
   onPinVersion: (index: number) => void;
   onClose: () => void;
+  /**
+   * A hover preview from the Decay cases list: read-only, and it never takes the pointer. On a
+   * narrow window the card overlaps the list, and a card that caught the pointer would end the
+   * hover that put it there — the row would lose it, the card vanish, the row get it back, and so
+   * on. It also sits under the list rather than over it.
+   */
+  preview?: boolean;
 }
 
 /** Every version of one case, newest (strongest) first. Clicking a version pins its two minutes. */
-export function MismatchCaseCard({ c, pinnedVersion, onPinVersion, onClose }: CardProps) {
+export function MismatchCaseCard({
+  c,
+  pinnedVersion,
+  onPinVersion,
+  onClose,
+  preview = false,
+}: CardProps) {
   const color = mismatchColor(c.color_idx);
   const rows = c.versions.map((v, i) => ({ v, i })).reverse();
   return (
     <div
-      className="absolute z-50 pointer-events-auto flex flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-card,var(--bg-secondary))] shadow-2xl text-[11px]"
+      className={`absolute ${
+        preview ? 'z-[45] pointer-events-none' : 'z-50 pointer-events-auto'
+      } flex flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg-card,var(--bg-secondary))] shadow-2xl text-[11px]`}
       style={{
         top: 8,
         right: 8,
@@ -264,15 +282,17 @@ export function MismatchCaseCard({ c, pinnedVersion, onPinVersion, onClose }: Ca
             {c.versions.length} version{c.versions.length === 1 ? '' : 's'} · recorded tick values
           </span>
         </span>
-        <button
-          type="button"
-          className="text-[var(--text-muted)] hover:text-[var(--text-primary)] leading-none text-sm"
-          onClick={onClose}
-          title="Close this decay case and its pins"
-          aria-label="Close decay case"
-        >
-          ×
-        </button>
+        {!preview && (
+          <button
+            type="button"
+            className="text-[var(--text-muted)] hover:text-[var(--text-primary)] leading-none text-sm"
+            onClick={onClose}
+            title="Close this decay case and its pins"
+            aria-label="Close decay case"
+          >
+            ×
+          </button>
+        )}
       </div>
       <details className="group shrink-0 border-b border-[var(--border)] px-2.5 py-1 text-[10px] text-[var(--text-muted)]">
         <summary className="cursor-pointer select-none hover:text-[var(--text-secondary)]">

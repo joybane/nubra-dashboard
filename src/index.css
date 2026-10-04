@@ -653,6 +653,1000 @@
   height: 34px;
 }
 
+/* ─── Premium experience architecture ───────────────────────────────────────
+   Dark, light and graphite keep the existing classic composition. Bloomberg
+   and Apex use independent shells while sharing the same workspace/data tree. */
+
+.brodha-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-width: max-content;
+  color: var(--text-primary);
+  user-select: none;
+}
+
+.brodha-brand-mark {
+  width: 31px;
+  height: 31px;
+  flex: none;
+  filter: drop-shadow(0 6px 12px color-mix(in srgb, var(--accent) 18%, transparent));
+}
+
+.brodha-mark-frame {
+  fill: color-mix(in srgb, var(--accent) 15%, var(--bg-card));
+  stroke: color-mix(in srgb, var(--accent) 62%, var(--border));
+  stroke-width: 1.3;
+}
+
+.brodha-mark-glyph {
+  fill: var(--text-primary);
+}
+
+.brodha-mark-signal {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+}
+
+.brodha-brand-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.brodha-brand-copy strong {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 760;
+  letter-spacing: -0.035em;
+}
+
+.brodha-brand-copy small {
+  color: var(--accent);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.classic-navbar > .brodha-brand.classic-brand {
+  display: inline-flex;
+}
+
+.classic-navbar > .brodha-brand .brodha-brand-mark {
+  width: 28px;
+  height: 28px;
+}
+
+.theme-swatch-apex {
+  background: linear-gradient(135deg, #070b12 0 48%, #4c8dff 49% 72%, #56c5ff 73%);
+}
+
+[data-theme='apex'] {
+  color-scheme: dark;
+  --bg-primary: #070b12;
+  --bg-secondary: #0d131d;
+  --bg-card: #121b28;
+  --bg-hover: #1b2838;
+  --border: #27364a;
+  --text-primary: #f2f6fa;
+  --text-secondary: #aab8c8;
+  --text-muted: #6f8095;
+  --accent: #4c8dff;
+  --accent-dim: #326fdd;
+  --green: #2ed3a2;
+  --red: #ff647c;
+  --green-dim: rgba(46, 211, 162, 0.11);
+  --red-dim: rgba(255, 100, 124, 0.11);
+  --yellow: #f4b860;
+  --cyan: #56c5ff;
+  --blue: #4c8dff;
+  --scrollbar-thumb: #2a4057;
+  --chart-grid: rgba(86, 197, 255, 0.075);
+  --chart-bg: #070b12;
+  --radius-sm: 5px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 12px 34px rgba(0, 0, 0, 0.36);
+  --shadow-lg: 0 24px 72px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme='apex'] body,
+[data-theme='apex'] #root {
+  background: #070b12;
+}
+
+[data-theme='apex'] body {
+  font-family: Inter, 'Segoe UI Variable', 'Segoe UI', sans-serif;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+
+[data-theme='apex'] :is(.font-mono, code, kbd, table td, .chart-legend, .chart-status) {
+  font-family: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+.experience-frame {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+/* A single stable workspace ancestry prevents theme changes from resetting views. */
+.experience-body {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.experience-stage,
+.experience-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.experience-content > main {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+}
+
+.experience-icon-button {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  transition: 140ms ease;
+}
+
+.experience-icon-button:hover,
+.experience-icon-button.is-active {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+.experience-picker,
+.experience-layout-picker {
+  position: relative;
+}
+
+.experience-menu,
+.experience-layout-menu {
+  position: absolute;
+  top: calc(100% + 9px);
+  right: 0;
+  z-index: 500;
+  width: 294px;
+  padding: 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--bg-card) 97%, transparent);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(18px);
+}
+
+.experience-menu-label {
+  display: block;
+  padding: 7px 9px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.experience-menu > button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 24px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px;
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  text-align: left;
+}
+
+.experience-menu > button:hover,
+.experience-menu > button.is-active {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: color-mix(in srgb, var(--accent) 25%, var(--border));
+}
+
+.experience-menu > button > span:nth-child(2) {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.experience-menu strong {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.experience-menu small {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.experience-menu em {
+  color: var(--accent);
+  font-style: normal;
+}
+
+.experience-layout-menu {
+  width: 276px;
+}
+
+.experience-layout-menu > div {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.experience-layout-menu > div > button {
+  min-height: 62px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 9px;
+}
+
+.experience-layout-menu > div > button:hover,
+.experience-layout-menu > div > button.is-active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg-card));
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--border));
+}
+
+.layout-glyph {
+  width: 25px;
+  height: 18px;
+  display: block;
+  border: 1px solid currentColor;
+  background-color: transparent;
+  opacity: 0.85;
+}
+
+.layout-hsplit {
+  background: linear-gradient(90deg, transparent 48%, currentColor 49% 52%, transparent 53%);
+}
+.layout-vsplit {
+  background: linear-gradient(transparent 48%, currentColor 49% 52%, transparent 53%);
+}
+.layout-grid {
+  background:
+    linear-gradient(90deg, transparent 48%, currentColor 49% 52%, transparent 53%),
+    linear-gradient(transparent 48%, currentColor 49% 52%, transparent 53%);
+}
+.layout-tleft {
+  background:
+    linear-gradient(90deg, transparent 59%, currentColor 60% 63%, transparent 64%),
+    linear-gradient(transparent 48%, currentColor 49% 52%, transparent 53%);
+}
+.layout-tright {
+  background:
+    linear-gradient(90deg, transparent 37%, currentColor 38% 41%, transparent 42%),
+    linear-gradient(transparent 48%, currentColor 49% 52%, transparent 53%);
+}
+
+.experience-command-dialog .command-result {
+  width: 100%;
+  border: 0;
+  text-align: left;
+}
+
+/* Bloomberg: independently composed command terminal. */
+.bb-command-deck {
+  min-height: 54px;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  background: #050709;
+  border-bottom: 1px solid #303840;
+}
+
+[data-theme='bloomberg'] .bb-command-deck .brodha-brand {
+  padding-right: 9px;
+  border-right: 1px solid #303840;
+}
+
+[data-theme='bloomberg'] .brodha-mark-frame {
+  fill: #f2a900;
+  stroke: #f2a900;
+}
+
+[data-theme='bloomberg'] .brodha-mark-glyph {
+  fill: #080a0d;
+}
+
+[data-theme='bloomberg'] .brodha-mark-signal {
+  stroke: #080a0d;
+}
+
+.bb-command-code {
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  color: #f2a900;
+  background: #17130a;
+  border: 1px solid #574718;
+  font:
+    700 9px/1 'Cascadia Mono',
+    Consolas,
+    monospace;
+  letter-spacing: 0.08em;
+}
+
+.bb-search {
+  width: clamp(180px, 17vw, 280px);
+  position: relative;
+  flex: none;
+}
+
+.bb-search input {
+  height: 31px;
+  padding-left: 30px;
+  padding-left: 10px;
+  padding-right: 34px;
+  color: #eef0f2;
+  background: #090c0f;
+  border-color: #35404a;
+  border-radius: 1px;
+  font:
+    600 10px/1 'Cascadia Mono',
+    Consolas,
+    monospace;
+}
+
+.bb-search > kbd {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  color: #69747e;
+  background: transparent;
+  border: 1px solid #303840;
+}
+
+.bb-functions {
+  height: 100%;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.bb-functions button {
+  height: 100%;
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 6px;
+  color: #7f8992;
+  border-left: 1px solid #20262c;
+  border-radius: 0 !important;
+  font:
+    650 11px/1.3 'Cascadia Mono',
+    Consolas,
+    monospace;
+  text-transform: uppercase;
+}
+
+.bb-functions button small {
+  color: #54606a;
+  font-size: 10px;
+}
+
+.bb-functions button:hover {
+  color: #d9dde0;
+  background: #101419;
+}
+
+.bb-functions button.is-active {
+  color: #fff;
+  background: #15130c;
+  box-shadow: inset 0 -2px #f2a900;
+}
+
+.bb-functions button.is-active small {
+  color: #f2a900;
+}
+
+.bb-deck-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.bb-feed {
+  padding: 4px 6px;
+  color: #e78187;
+  border: 1px solid #71353b;
+  font:
+    750 8px/1 'Cascadia Mono',
+    Consolas,
+    monospace;
+}
+
+.bb-feed.is-live {
+  color: #62c997;
+  border-color: #236347;
+}
+
+.bb-status-line {
+  height: 28px;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 0;
+  color: #7e8992;
+  background: #0a0d10;
+  border-bottom: 1px solid #252c32;
+  font:
+    500 10px/1 'Cascadia Mono',
+    Consolas,
+    monospace;
+  letter-spacing: 0.035em;
+}
+
+.bb-status-line > * {
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border-right: 1px solid #252c32;
+  font-style: normal;
+}
+
+.bb-status-line > span:first-child {
+  color: #f2a900;
+}
+.bb-status-line strong {
+  color: #eef0f2;
+}
+.bb-status-line em {
+  flex: 1;
+  color: #62c997;
+}
+
+.bb-workspace {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.bb-rail {
+  width: 94px;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  background: #080b0e;
+  border-right: 1px solid #2b333a;
+}
+
+.bb-rail button {
+  min-height: 40px;
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  color: #747f88;
+  border-bottom: 1px solid #1d2328;
+  border-radius: 0 !important;
+  text-align: left;
+}
+
+.bb-rail button span {
+  color: #4f5961;
+  font:
+    700 7px/1 'Cascadia Mono',
+    Consolas,
+    monospace;
+}
+
+.bb-rail button strong {
+  overflow: hidden;
+  font:
+    650 8px/1 'Cascadia Mono',
+    Consolas,
+    monospace;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+}
+
+.bb-rail button:hover,
+.bb-rail button.is-active {
+  color: #fff;
+  background: #11161a;
+  box-shadow: inset 2px 0 #f2a900;
+}
+
+.bb-rail button.is-active span {
+  color: #f2a900;
+}
+.bb-rail-spacer {
+  flex: 1;
+}
+
+.bb-canvas {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: #080a0d;
+}
+
+.bb-canvas > main,
+.apex-stage-content > main {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+}
+
+/* Apex: a separate institutional product composition. */
+.apex-global-bar {
+  height: 58px;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 9px;
+  padding: 0 14px;
+  background: rgba(13, 19, 29, 0.97);
+  border-bottom: 1px solid #27364a;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(18px);
+  z-index: 80;
+}
+
+.apex-global-bar > .brodha-brand {
+  min-width: 132px;
+  padding-right: 14px;
+  border-right: 1px solid #27364a;
+}
+
+.apex-omnibox {
+  width: clamp(310px, 31vw, 500px);
+  position: relative;
+  display: flex;
+  align-items: center;
+  color: #6f8095;
+}
+
+.apex-omnibox > svg {
+  position: absolute;
+  left: 11px;
+  z-index: 2;
+}
+
+.apex-omnibox > div {
+  width: 100%;
+}
+
+.apex-omnibox input {
+  height: 36px;
+  padding-left: 38px;
+  padding-right: 42px;
+  color: #f2f6fa;
+  background: #0a111a;
+  border: 1px solid #2b3d53;
+  border-radius: 8px;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025);
+  font-size: 12px;
+}
+
+.apex-omnibox input:focus {
+  border-color: #4c8dff;
+  box-shadow: 0 0 0 3px rgba(76, 141, 255, 0.13);
+}
+
+.apex-omnibox > kbd {
+  position: absolute;
+  right: 9px;
+  color: #6f8095;
+  background: #121b28;
+  border-color: #27364a;
+}
+
+.apex-market-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding-right: 11px;
+  border-right: 1px solid #27364a;
+}
+
+.apex-market-state > span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f4b860;
+  box-shadow: 0 0 0 4px rgba(244, 184, 96, 0.08);
+}
+
+.apex-market-state > span.is-live {
+  background: #2ed3a2;
+  box-shadow:
+    0 0 0 4px rgba(46, 211, 162, 0.09),
+    0 0 15px rgba(46, 211, 162, 0.2);
+}
+
+.apex-market-state > div {
+  display: flex;
+  flex-direction: column;
+}
+
+.apex-market-state small {
+  color: #6f8095;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.apex-market-state strong {
+  margin-top: 1px;
+  color: #dce7ef;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.apex-sim-badge {
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  color: #8fb5ff;
+  background: rgba(76, 141, 255, 0.09);
+  border: 1px solid rgba(76, 141, 255, 0.25);
+  border-radius: 5px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+}
+
+.apex-shell {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.apex-rail {
+  width: 156px;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 7px;
+  background: #0b111a;
+  border-right: 1px solid #223044;
+}
+
+.apex-rail-caption {
+  padding: 5px 8px 8px;
+  color: #91a3b8;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.apex-rail button {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 9px;
+  color: #9bacc0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.apex-rail button svg {
+  flex: none;
+}
+.apex-rail button:hover {
+  color: #dce7ef;
+  background: #111d2a;
+}
+
+.apex-rail button.is-active {
+  color: #f2f6fa;
+  background: linear-gradient(90deg, rgba(76, 141, 255, 0.18), rgba(76, 141, 255, 0.07));
+  border-color: rgba(76, 141, 255, 0.22);
+  box-shadow: inset 2px 0 #4c8dff;
+}
+
+.apex-rail-spacer {
+  flex: 1;
+}
+
+.apex-stage {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  background: #070b12;
+}
+
+.apex-context-bar {
+  height: 48px;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 11px;
+  padding: 0 12px;
+  background: #0b121c;
+  border-bottom: 1px solid #202e40;
+}
+
+.apex-context-bar > div {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: baseline;
+  gap: 1px 7px;
+}
+
+.apex-context-bar small {
+  grid-column: 1 / -1;
+  color: #91a3b8;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.apex-context-bar strong {
+  color: #e9f0f6;
+  font-size: 12px;
+}
+.apex-context-bar div > span {
+  color: #6f8095;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.apex-context-divider {
+  width: 1px;
+  height: 22px;
+  background: #27364a;
+}
+.apex-context-spacer {
+  flex: 1;
+}
+.apex-status-positive,
+.apex-status-warning {
+  font-size: 11px;
+  font-weight: 650;
+}
+.apex-status-positive {
+  color: #2ed3a2;
+}
+.apex-status-warning {
+  color: #f4b860;
+}
+
+.apex-stage-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.apex-inspector {
+  width: 270px;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 10px;
+  padding: 11px;
+  overflow-y: auto;
+  background: #0c131d;
+  border-left: 1px solid #27364a;
+}
+
+.apex-inspector-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 2px 10px;
+  border-bottom: 1px solid #223044;
+}
+
+.apex-inspector-heading > span {
+  display: flex;
+  flex-direction: column;
+}
+.apex-inspector-heading small {
+  color: #6f8095;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.apex-inspector-heading strong {
+  margin-top: 4px;
+  color: #f2f6fa;
+  font-size: 13px;
+}
+.apex-inspector-heading button {
+  color: #6f8095;
+}
+
+.apex-inspector-card {
+  padding: 12px;
+  background: #111b28;
+  border: 1px solid #25364a;
+  border-radius: 9px;
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.018);
+}
+
+.apex-inspector-card > small {
+  color: #6f8095;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.apex-inspector-card dl {
+  margin: 9px 0 0;
+}
+.apex-inspector-card dl > div {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-top: 1px solid #202e40;
+}
+.apex-inspector-card dt {
+  color: #71849a;
+  font-size: 12px;
+}
+.apex-inspector-card dd {
+  color: #e4edf4;
+  font:
+    650 12px/1.4 'JetBrains Mono',
+    'Cascadia Mono',
+    monospace;
+}
+
+.apex-inspector-actions {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.apex-inspector-actions button {
+  min-height: 30px;
+  padding: 0 9px;
+  color: #aab8c8;
+  background: #0c141e;
+  border: 1px solid #293c52;
+  border-radius: 6px;
+  font-size: 12px;
+  text-align: left;
+}
+
+.apex-inspector-actions button:hover {
+  color: #fff;
+  background: rgba(76, 141, 255, 0.1);
+  border-color: rgba(76, 141, 255, 0.5);
+}
+
+.apex-inspector-note {
+  display: flex;
+  gap: 8px;
+  margin-top: auto;
+  padding: 10px;
+  color: #71849a;
+  background: rgba(76, 141, 255, 0.045);
+  border: 1px solid rgba(76, 141, 255, 0.13);
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.apex-inspector-note svg {
+  flex: none;
+  color: #4c8dff;
+}
+
+[data-theme='apex'] .pane-surface.is-active {
+  box-shadow: inset 0 0 0 1px rgba(76, 141, 255, 0.55);
+}
+
+[data-theme='apex'] .option-chain-toolbar,
+[data-theme='apex'] .chart-toolbar {
+  background: #0d151f;
+  border-bottom-color: #26374c;
+}
+
+[data-theme='apex'] main table:not(.tv-lightweight-charts table) th {
+  color: #71849a;
+  background: #0e1722;
+  border-color: #243449;
+  font-size: 9px;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+}
+
+[data-theme='apex'] main table:not(.tv-lightweight-charts table) td {
+  color: #d9e4ec;
+  border-color: #1d2a3a;
+  font-variant-numeric: tabular-nums;
+}
+
+[data-theme='apex'] main table:not(.tv-lightweight-charts table) tbody tr:hover td {
+  background: #142234;
+}
+
+[data-theme='apex'] .order-terminal {
+  background: #0a111a;
+  border-top-color: #2b3c52;
+  box-shadow: 0 -14px 34px rgba(0, 0, 0, 0.18);
+}
+
+[data-theme='apex'] :is(.theme-menu, .classic-layout-menu, .command-dialog) {
+  background: rgba(18, 27, 40, 0.98);
+  border-color: #30445d;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.56);
+  backdrop-filter: blur(20px);
+}
+
+@media (max-width: 1439px) {
+  .apex-inspector {
+    width: 236px;
+  }
+  .apex-rail {
+    width: 144px;
+  }
+  .apex-rail button {
+    padding-inline: 7px;
+  }
+  .bb-functions button {
+    padding-inline: 3px;
+  }
+}
+
 /* Optional grouped workspace shell—the previously removed rail layout. */
 .classic-navbar.is-workspace-shell .classic-view-tabs {
   display: none;
@@ -948,17 +1942,20 @@ kbd {
 }
 
 /* Dense data stays aligned; comfortable mode adds room to scan. */
-main table {
+main table:not(.tv-lightweight-charts table) {
   font-variant-numeric: tabular-nums;
 }
-main table th {
+main table:not(.tv-lightweight-charts table) th {
   font-weight: 550;
 }
-[data-density='comfortable'] main table:not([role='presentation']) :is(th, td) {
+[data-density='comfortable']
+  main
+  table:not(.tv-lightweight-charts table):not([role='presentation'])
+  :is(th, td) {
   padding-top: var(--table-padding-y);
   padding-bottom: var(--table-padding-y);
 }
-[data-density='comfortable'] main :is(button, input, select):not([role='checkbox']) {
+[data-density='comfortable'] main :is(button, input, select):not([role='checkbox']):not(table *) {
   min-height: var(--control-height);
 }
 [data-density='comfortable'] main :is(.text-\[9px\], .text-\[10px\], .text-\[11px\]) {
@@ -1173,14 +2170,19 @@ input::placeholder {
 }
 @container (max-width: 900px) {
   .chart-quote-row {
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .chart-quote-row::-webkit-scrollbar {
-    display: none;
+    flex-wrap: wrap;
+    gap: 6px;
   }
   .chart-inline-tools {
-    margin-left: 10px;
+    flex: 1 1 calc(100% - 150px);
+    flex-wrap: wrap;
+    margin-left: 0;
+  }
+  .chart-quote-row > span {
+    white-space: nowrap;
+  }
+  .chart-market-label {
+    margin-left: auto;
   }
 }
 @container (max-width: 700px) {
@@ -1477,9 +2479,15 @@ svg {
 /* ─── Option chain table ────────────────────────────────── */
 .oc-table {
   width: 100%;
-  border-collapse: collapse;
+  min-width: 720px;
+  border-collapse: separate;
+  border-spacing: 0;
   table-layout: fixed;
   font-size: 12px;
+}
+
+.oc-table.has-greeks {
+  min-width: 1120px;
 }
 
 .oc-table th {
@@ -1490,9 +2498,6 @@ svg {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 4px 6px;
-  position: sticky;
-  top: 0;
-  z-index: 2;
   border-bottom: 1px solid var(--border);
 }
 
@@ -1522,9 +2527,13 @@ svg {
   font-size: 11px;
 }
 
-/* Sticky second-row header needs higher z-index */
-.oc-table thead tr:nth-child(2) th {
-  top: 28px;
+/* Stick the complete, opaque header. Its natural height works for every font,
+   theme and density without a fixed offset or a seam exposing scrolling prices. */
+.oc-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--bg-secondary);
 }
 
 .oc-table tr:hover td {
@@ -2106,13 +3115,12 @@ body {
 }
 
 /* Bloomberg's primary surface is the data grid. */
-[data-theme='bloomberg'] main table {
+[data-theme='bloomberg'] main table:not(.tv-lightweight-charts table) {
   font-family: 'Roboto Mono', 'Cascadia Mono', Consolas, monospace;
   font-variant-numeric: tabular-nums slashed-zero;
-  border-collapse: collapse;
 }
 
-[data-theme='bloomberg'] main table th {
+[data-theme='bloomberg'] main table:not(.tv-lightweight-charts table) th {
   background: #080808;
   color: #e2a71c;
   border-color: #493400;
@@ -2122,11 +3130,11 @@ body {
   text-transform: uppercase;
 }
 
-[data-theme='bloomberg'] main table td {
+[data-theme='bloomberg'] main table:not(.tv-lightweight-charts table) td {
   border-color: #312500;
 }
 
-[data-theme='bloomberg'] main table tbody tr:hover td {
+[data-theme='bloomberg'] main table:not(.tv-lightweight-charts table) tbody tr:hover td {
   background-color: #211700;
 }
 
@@ -2326,7 +3334,15 @@ body {
   background: radial-gradient(circle at 50% -20%, rgba(44, 79, 94, 0.14), transparent 34%), #080b0f;
 }
 
-[data-theme='bloomberg'] :is(.font-mono, code, kbd, main table td, .chart-legend, .chart-status) {
+[data-theme='bloomberg']
+  :is(
+    .font-mono,
+    code,
+    kbd,
+    main table:not(.tv-lightweight-charts table) td,
+    .chart-legend,
+    .chart-status
+  ) {
   font-family: 'Cascadia Mono', 'SFMono-Regular', Consolas, monospace;
   font-variant-numeric: tabular-nums slashed-zero;
   letter-spacing: -0.025em;
@@ -2780,12 +3796,12 @@ body {
 }
 
 /* Dense grids become readable through contrast and rhythm, not glowing rules. */
-[data-theme='bloomberg'] main table {
+[data-theme='bloomberg'] main table:not(.tv-lightweight-charts table) {
   color: #d9e0e4;
   background: #06090b;
   font-family: 'Cascadia Mono', Consolas, monospace;
 }
-[data-theme='bloomberg'] main table th {
+[data-theme='bloomberg'] main table:not(.tv-lightweight-charts table) th {
   height: 32px;
   padding: 6px 10px;
   color: #96a6b1;
@@ -2796,15 +3812,15 @@ body {
   font-weight: 800;
   letter-spacing: 0.09em;
 }
-[data-theme='bloomberg'] main table td {
+[data-theme='bloomberg'] main table:not(.tv-lightweight-charts table) td {
   padding-right: 10px;
   padding-left: 10px;
   border-color: #1d282f;
 }
-[data-theme='bloomberg'] main table tbody tr:nth-child(even) td {
+[data-theme='bloomberg'] main table:not(.tv-lightweight-charts table) tbody tr:nth-child(even) td {
   background: rgba(18, 25, 30, 0.32);
 }
-[data-theme='bloomberg'] main table tbody tr:hover td {
+[data-theme='bloomberg'] main table:not(.tv-lightweight-charts table) tbody tr:hover td {
   background: #162027;
 }
 [data-theme='bloomberg'] .oc-table {

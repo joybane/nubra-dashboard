@@ -505,6 +505,7 @@ import {
   type MismatchTrackerState,
 } from '../lib/mismatchCases';
 import { usePinnedTimes, bindPinTrigger, PIN_COLORS } from '../lib/chartPins';
+import { useMismatchPreview } from '../lib/mismatchPreview';
 
 // Nearest sample at or before `targetTime`. Shared by the hover tooltips and the pinned cards,
 // which is why it sits outside the crosshair effect that used to own it.
@@ -1614,7 +1615,7 @@ export default function StrategyAnalysisView({
   // ── Pinned crosshairs (middle-click) ──
   // Entirely additive: pins never touch lightweight-charts' crosshair state, so the hover sync
   // below behaves exactly as it did before when no pin exists.
-  const { pins, togglePinAt, removePin, clearPins, pinTimes } = usePinnedTimes(2);
+  const { pins: heldPins, togglePinAt, removePin, clearPins, pinTimes } = usePinnedTimes(2);
 
   // ── Live mismatch cases (server/mismatchRoutes.ts) ──
   // Read-only: strips on the time axis and a versions card. Empty for any strategy the tracker
@@ -1681,8 +1682,16 @@ export default function StrategyAnalysisView({
     }
     loadMismatchTracker();
   }, [basketGroupId, mismatchTracker, loadMismatchTracker]);
-  const pickedMismatch = mismatchPick
-    ? mismatchCases.find((c) => c.case_no === mismatchPick.caseNo)
+  // Hovering a row of the Decay cases list previews that case: its pins, card and strips stand in
+  // for the held ones while the pointer is on the row, and the held ones come back untouched.
+  const { preview: mismatchPreview, setHovered: hoverMismatchRow } = useMismatchPreview(
+    mismatchCases,
+    mismatchPopupOpen,
+  );
+  const pins = mismatchPreview?.pins ?? heldPins;
+  const shownPick = mismatchPreview?.pick ?? mismatchPick;
+  const pickedMismatch = shownPick
+    ? mismatchCases.find((c) => c.case_no === shownPick.caseNo)
     : undefined;
   const pinMismatch = useCallback(
     (caseNo: number, version?: number) => {
@@ -1718,8 +1727,8 @@ export default function StrategyAnalysisView({
   );
   // Esc (or anything else) clearing the pins closes the card with them.
   useEffect(() => {
-    if (mismatchPick && pins.length === 0) setMismatchPick(null);
-  }, [mismatchPick, pins.length]);
+    if (mismatchPick && heldPins.length === 0) setMismatchPick(null);
+  }, [mismatchPick, heldPins.length]);
   const togglePinRef = useRef(togglePinAt);
   togglePinRef.current = togglePinAt;
   // Time under the cursor as of the last crosshair move — already snapped to a bar, so a pin
@@ -3519,6 +3528,12 @@ export default function StrategyAnalysisView({
                               pinMismatch(mc.case_no);
                               setMismatchPopupOpen(false);
                             }}
+                            // Leaving only clears this row's own hover: moving to the next row
+                            // may deliver its enter first, and that one must win.
+                            onMouseEnter={() => hoverMismatchRow(mc.case_no)}
+                            onMouseLeave={() =>
+                              hoverMismatchRow((h) => (h === mc.case_no ? null : h))
+                            }
                             className={`w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-left hover:bg-[var(--bg-hover)] transition-colors ${
                               activeRow ? 'bg-[var(--bg-hover)]' : ''
                             }`}
@@ -3531,7 +3546,8 @@ export default function StrategyAnalysisView({
                               #{mc.case_no}
                             </span>
                             <span className="text-[var(--text-muted)] whitespace-nowrap">
-                              {mismatchClock(v.t1_ns).slice(0, 5)} → {mismatchClock(v.t2_ns).slice(0, 5)}
+                              {mismatchClock(v.t1_ns).slice(0, 5)} →{' '}
+                              {mismatchClock(v.t2_ns).slice(0, 5)}
                             </span>
                             <span className="ml-auto font-semibold text-[var(--text-secondary)]">
                               ₹{fmtPrice(v.gap)}
@@ -3597,16 +3613,17 @@ export default function StrategyAnalysisView({
               cases={mismatchCases}
               chart={priceChartRef.current}
               epoch={chartEpoch}
-              activeCase={mismatchPick?.caseNo ?? null}
+              activeCase={shownPick?.caseNo ?? null}
               onPick={pickMismatchStrip}
               onPickVersion={pinMismatch}
             />
-            {pickedMismatch && mismatchPick && (
+            {pickedMismatch && shownPick && (
               <MismatchCaseCard
                 c={pickedMismatch}
-                pinnedVersion={mismatchPick.version}
+                pinnedVersion={shownPick.version}
                 onPinVersion={(i) => pinMismatch(pickedMismatch.case_no, i)}
                 onClose={clearMismatchPick}
+                preview={!!mismatchPreview}
               />
             )}
             <PinnedCrosshairLayer
@@ -3667,16 +3684,17 @@ export default function StrategyAnalysisView({
                 cases={mismatchCases}
                 chart={pnlChartRef.current}
                 epoch={chartEpoch}
-                activeCase={mismatchPick?.caseNo ?? null}
+                activeCase={shownPick?.caseNo ?? null}
                 onPick={pickMismatchStrip}
                 onPickVersion={pinMismatch}
               />
-              {!priceVisible && pickedMismatch && mismatchPick && (
+              {!priceVisible && pickedMismatch && shownPick && (
                 <MismatchCaseCard
                   c={pickedMismatch}
-                  pinnedVersion={mismatchPick.version}
+                  pinnedVersion={shownPick.version}
                   onPinVersion={(i) => pinMismatch(pickedMismatch.case_no, i)}
                   onClose={clearMismatchPick}
+                  preview={!!mismatchPreview}
                 />
               )}
               <PinnedCrosshairLayer

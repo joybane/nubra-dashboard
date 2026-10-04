@@ -24,6 +24,8 @@ export interface NubraBtHandoff {
   expiry: string;
   entryTime: string;
   exitTime: string;
+  /** Which data Nubra BT should read; absent means 'auto' (local only before broker history). */
+  source?: 'auto' | 'nubra' | 'local';
   legs: NubraBtHandoffLeg[];
 }
 

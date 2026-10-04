@@ -1,10 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
-import type { Instrument, ShellLayout, Theme } from './types';
+import type { Instrument, Theme } from './types';
 import { WsProvider, useWs } from './hooks/useWsContext';
 import { PaperTradingProvider } from './hooks/usePaperTrading';
 import { WatchlistProvider } from './hooks/useWatchlistContext';
 import { BasketProvider } from './hooks/useBasketContext';
-import Navbar from './components/Navbar';
 import LoginOverlay from './components/LoginOverlay';
 import OrderTerminal from './components/OrderTerminal';
 import OrderTicket from './components/OrderTicket';
@@ -12,7 +11,8 @@ import WorkspaceRoot from './workspace/WorkspaceRoot';
 import ErrorBoundary from './components/ErrorBoundary';
 import { WorkspaceProvider } from './workspace/WorkspaceProvider';
 import { useWorkspaceState } from './workspace/useWorkspaceState';
-import WorkspaceShell from './components/WorkspaceShell';
+import ExperienceShell from './components/ExperienceShell';
+import { parseTheme } from './lib/experience';
 
 // The strategy analysis view is the single largest module and is only shown when
 // a saved strategy is opened — load it on demand.
@@ -28,11 +28,9 @@ type AuthStatus = 'unknown' | 'authenticated' | 'unauthenticated';
 
 function AppInner() {
   const [theme, setTheme] = useState<Theme>(() => {
-    const saved = localStorage.getItem('nubra-theme');
-    return saved === 'light' || saved === 'bloomberg' || saved === 'graphite' ? saved : 'dark';
+    return parseTheme(localStorage.getItem('nubra-theme'));
   });
   const [auth, setAuth] = useState<AuthStatus>('unknown');
-  const [shellLayout, setShellLayout] = useState<ShellLayout>(() => localStorage.getItem('nubra-shell-layout') === 'workspace' ? 'workspace' : 'classic');
   const [strategyChart, setStrategyChart] = useState<StrategyChartTarget | null>(null);
 
   const { loadInstrumentInActivePane } = useWorkspaceState();
@@ -56,10 +54,6 @@ function AppInner() {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('nubra-theme', theme);
   }, [theme]);
-
-  useEffect(() => {
-    localStorage.setItem('nubra-shell-layout', shellLayout);
-  }, [shellLayout]);
 
   useEffect(() => {
     fetch('/auth/status')
@@ -114,30 +108,22 @@ function AppInner() {
     );
   }
 
+  const workspace = (
+    <main className="flex-1 overflow-hidden min-h-0">
+      <div className="flex flex-col h-full">
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <WorkspaceRoot theme={theme} />
+        </div>
+        <OrderTerminal onOpenStrategyChart={openStrategyChart} />
+      </div>
+    </main>
+  );
+
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
-      <Navbar
-        onInstrumentSelect={selectInstrument}
-        theme={theme}
-        onThemeChange={setTheme}
-        shellLayout={shellLayout}
-        onShellLayoutChange={setShellLayout}
-      />
-      {shellLayout === 'workspace' ? <WorkspaceShell>
-        <main className="flex-1 overflow-hidden min-h-0">
-          <div className="flex flex-col h-full">
-            <div className="flex-1 min-h-0 overflow-hidden"><WorkspaceRoot theme={theme} /></div>
-            <OrderTerminal onOpenStrategyChart={openStrategyChart} />
-          </div>
-        </main>
-      </WorkspaceShell> : <main className="flex-1 overflow-hidden min-h-0">
-        <div className="flex flex-col h-full">
-          <div className="flex-1 min-h-0 overflow-hidden">
-            <WorkspaceRoot theme={theme} />
-          </div>
-          <OrderTerminal onOpenStrategyChart={openStrategyChart} />
-        </div>
-      </main>}
+      <ExperienceShell theme={theme} onThemeChange={setTheme} onInstrumentSelect={selectInstrument}>
+        {workspace}
+      </ExperienceShell>
       <OrderTicket />
       {auth === 'unauthenticated' && (
         <LoginOverlay onAuthenticated={() => setAuth('authenticated')} />

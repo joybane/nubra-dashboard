@@ -15,12 +15,19 @@ const NubraBacktest = lazy(() => import('../NubraBacktest'));
 const Watchlist = lazy(() => import('../Watchlist'));
 const Tracker = lazy(() => import('../Tracker'));
 const Analysis = lazy(() => import('../Analysis'));
+const SignalBacktest = lazy(() => import('../SignalBacktest'));
 
 function PaneLoading() {
   return (
     <div className="pane-loading" role="status" aria-label="Loading view">
-      <div className="pane-loading-header"><div className="skeleton h-7 w-32" /><div className="skeleton h-7 w-20" /><div className="skeleton h-7 w-20" /></div>
-      <div className="pane-loading-grid"><span>Preparing your workspace…</span></div>
+      <div className="pane-loading-header">
+        <div className="skeleton h-7 w-32" />
+        <div className="skeleton h-7 w-20" />
+        <div className="skeleton h-7 w-20" />
+      </div>
+      <div className="pane-loading-grid">
+        <span>Preparing your workspace…</span>
+      </div>
     </div>
   );
 }
@@ -79,6 +86,8 @@ export default function PaneShell({
         return <Tracker instrument={pane.instrument} theme={theme} />;
       case 'analysis':
         return <Analysis theme={theme} onChangeView={onViewChange} />;
+      case 'signalbacktest':
+        return <SignalBacktest theme={theme} />;
     }
   })();
 
@@ -94,7 +103,18 @@ export default function PaneShell({
           <Suspense fallback={<PaneLoading />}>{viewEl}</Suspense>
         </ErrorBoundary>
       </div>
-      {pane.view !== 'optionchain' && <button ref={focusButton} className="shell-icon-button pane-focus-button" aria-label={maximized ? 'Restore pane' : 'Maximize pane'} aria-expanded={maximized} title={maximized ? 'Restore pane (Esc)' : 'Maximize pane'} onClick={() => setMaximized((v) => !v)}><UiIcon name={maximized ? 'restore' : 'expand'} size={16} /></button>}
+      {pane.view !== 'optionchain' && (
+        <button
+          ref={focusButton}
+          className="shell-icon-button pane-focus-button"
+          aria-label={maximized ? 'Restore pane' : 'Maximize pane'}
+          aria-expanded={maximized}
+          title={maximized ? 'Restore pane (Esc)' : 'Maximize pane'}
+          onClick={() => setMaximized((v) => !v)}
+        >
+          <UiIcon name={maximized ? 'restore' : 'expand'} size={16} />
+        </button>
+      )}
     </div>
   );
 }

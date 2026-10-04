@@ -14,6 +14,7 @@ export const VIEW_LABELS: Record<ViewType, string> = {
   watchlist: 'Watchlist',
   tracker: 'Tracker',
   analysis: 'Analysis',
+  signalbacktest: 'Signal Backtest',
 };
 
 export const VIEW_ORDER = Object.keys(VIEW_LABELS) as ViewType[];

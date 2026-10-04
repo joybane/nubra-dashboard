@@ -2082,7 +2082,13 @@ export default function BasketOrder({ instrument }: Props) {
             window.addEventListener('pointercancel', finish, true);
             window.addEventListener('blur', finish);
           }}
-          style={{ width: 5, cursor: 'col-resize', background: 'var(--border)', flexShrink: 0, touchAction: 'none' }}
+          style={{
+            width: 5,
+            cursor: 'col-resize',
+            background: 'var(--border)',
+            flexShrink: 0,
+            touchAction: 'none',
+          }}
           onMouseEnter={(e) => (e.currentTarget.style.background = '#5865f2')}
           onMouseLeave={(e) => {
             if (!resizeRef.current) e.currentTarget.style.background = 'var(--border)';

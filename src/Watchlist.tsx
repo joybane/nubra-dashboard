@@ -22,12 +22,34 @@ interface WatchlistProps {
   onNavigateToChart?: (inst: Instrument) => void;
 }
 
+/** [underlying, expiry, exchange] — one option-chain feed the watchlist holds. */
+type OcHold = [string, string, string];
+
+/** A live chain tick younger than this stands in for the REST poll (as in OptionChain.tsx). */
+const WS_FRESH_MS = 10_000;
+
+/** Expiry compared on digits alone, so `20260929`, `2026-09-29` and a number all agree. */
+function expiryDigits(expiry: string | number | undefined | null): string {
+  return String(expiry ?? '').replace(/\D/g, '');
+}
+
+function chainKey(asset: string, expiry: string | number | undefined | null): string {
+  return `${asset.toUpperCase()}|${expiryDigits(expiry)}`;
+}
+
 export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
   const { items, removeItem } = useWatchlist();
   const { subscribe } = useWs();
   const { openTicket } = usePaperTrading();
   const [prices, setPrices] = useState<Record<string, LivePrice>>({});
   const pollRef = useRef<number | null>(null);
+  // Mirrors `prices` for the poll below, which runs from a closure created once per item set.
+  const pricesRef = useRef(prices);
+  pricesRef.current = prices;
+  // When the live option-chain feed last delivered each asset/expiry (key: chainKey). The REST poll
+  // is a fallback for a silent feed; while the feed is flowing it was fetching a whole chain from
+  // the broker every 2s per group just to re-read prices the socket had already pushed.
+  const wsLastTickRef = useRef(new Map<string, number>());
 
   // Poll option chain REST API for option prices
   useEffect(() => {
@@ -39,7 +61,7 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
       return;
     }
 
-    async function fetchPrices() {
+    async function fetchPrices(initial = false) {
       const groups = new Map<
         string,
         { underlying: string; expiry: string; exchange: string; items: WatchlistItem[] }
@@ -57,6 +79,16 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
       }
 
       for (const { underlying, expiry, exchange, items: gItems } of groups.values()) {
+        // Always fetch on the first pass, and whenever an item still has no price: a strike that
+        // has not traded since the feed came up would otherwise never get one.
+        const lastWs = wsLastTickRef.current.get(chainKey(underlying, expiry)) ?? 0;
+        if (
+          !initial &&
+          Date.now() - lastWs < WS_FRESH_MS &&
+          gItems.every((item) => pricesRef.current[item.id] != null)
+        ) {
+          continue;
+        }
         try {
           const res = await fetch(
             `/api/optionchain/${encodeURIComponent(underlying)}?exchange=${exchange}&expiry=${expiry}`,
@@ -73,7 +105,11 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
             });
             if (leg?.ltp != null) {
               const ltp = Number(leg.ltp) / 100;
-              setPrices((prev) => ({ ...prev, [item.id]: { ltp, chg: leg.ltpchg ?? undefined } }));
+              const chg = leg.ltpchg ?? undefined;
+              setPrices((prev) => {
+                if (prev[item.id]?.ltp === ltp && prev[item.id]?.chg === chg) return prev;
+                return { ...prev, [item.id]: { ltp, chg } };
+              });
             }
           }
         } catch (e) {
@@ -82,8 +118,8 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
       }
     }
 
-    fetchPrices();
-    pollRef.current = window.setInterval(fetchPrices, 2000);
+    fetchPrices(true);
+    pollRef.current = window.setInterval(() => void fetchPrices(), 2000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
@@ -91,7 +127,15 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
   }, [JSON.stringify(items.filter((i) => i.optionType).map((i) => i.id))]);
 
   // Subscribe OHLCV feeds + listen for index_tick & ohlcv for non-option watchlist items
-  const { subscribeOC, subscribeChart, unsubscribeChart } = useWs();
+  const { subscribeOC, unsubscribeOC, subscribeChart, unsubscribeChart } = useWs();
+  const ocHeldRef = useRef(new Map<string, OcHold>());
+  useEffect(
+    () => () => {
+      for (const hold of ocHeldRef.current.values()) unsubscribeOC(...hold);
+      ocHeldRef.current = new Map();
+    },
+    [unsubscribeOC],
+  );
   useEffect(() => {
     const spotItems = items.filter((i) => !i.optionType);
     if (!spotItems.length) return;
@@ -163,18 +207,22 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
     const optItems = items.filter(
       (i) => i.optionType && i.strike != null && i.expiry && i.underlying,
     );
-    if (!optItems.length) return;
-    const seen = new Set<string>();
+    // Diffed against what is already held, so adding or removing one chain never drops and
+    // re-subscribes the others. These holds used to be taken and never released: every chain the
+    // watchlist ever showed stayed subscribed for the life of the tab.
+    const want = new Map<string, OcHold>();
     for (const item of optItems) {
-      const key = `${item.underlying}:${item.expiry}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        subscribeOC(item.underlying, item.expiry!, item.exchange);
-      }
+      const key = `${item.underlying}:${item.expiry}:${item.exchange}`;
+      if (!want.has(key)) want.set(key, [item.underlying, item.expiry!, item.exchange]);
     }
+    const held = ocHeldRef.current;
+    for (const [key, hold] of want) if (!held.has(key)) subscribeOC(...hold);
+    for (const [key, hold] of held) if (!want.has(key)) unsubscribeOC(...hold);
+    ocHeldRef.current = want;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     subscribeOC,
+    unsubscribeOC,
     JSON.stringify(
       items
         .filter((i) => i.optionType)
@@ -190,16 +238,23 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
       if (msg.type !== 'option_chain') return;
       const data = msg.data as OptionChainData;
       const asset = (data.asset || '').toUpperCase();
-      const allLegs = [...(data.ce || []), ...(data.pe || [])];
+      if (data.expiry) wsLastTickRef.current.set(chainKey(asset, data.expiry), Date.now());
       for (const item of optItems) {
         if (item.underlying.toUpperCase() !== asset) continue;
-        const leg = allLegs.find((l) => {
-          const leg_ = l as OptionLeg & Record<string, unknown>;
-          const refId = Number(leg_.ref_id ?? leg_.refId ?? 0);
-          if (item.ref_id && refId === item.ref_id) return true;
-          const sp = l.sp > 10000 ? l.sp / 100 : l.sp;
-          return sp === item.strike;
-        }) as (OptionLeg & Record<string, unknown>) | undefined;
+        // Only this item's own side. CE and PE legs used to be searched together, and since a
+        // leg matched on ref_id *or* strike, a PE item took the price of the same-strike CE,
+        // which comes first — the price flickered between the two until the REST poll reset it.
+        const legs = (item.optionType === 'CE' ? data.ce : data.pe) || [];
+        const byRef = item.ref_id
+          ? legs.find((l) => Number(l.ref_id ?? l.refId ?? 0) === item.ref_id)
+          : undefined;
+        // A strike match means nothing on another expiry's chain; ref_id is unique per contract.
+        const sameExpiry =
+          !data.expiry || !item.expiry || expiryDigits(data.expiry) === expiryDigits(item.expiry);
+        const leg = (byRef ??
+          (sameExpiry
+            ? legs.find((l) => (l.sp > 10000 ? l.sp / 100 : l.sp) === item.strike)
+            : undefined)) as (OptionLeg & Record<string, unknown>) | undefined;
         if (leg?.ltp != null && Number(leg.ltp) > 0) {
           const ltp = Number(leg.ltp) / 100;
           setPrices((prev) => {

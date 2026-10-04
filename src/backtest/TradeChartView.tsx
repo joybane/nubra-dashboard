@@ -102,10 +102,18 @@ function fmtInr(v: number): string {
   return `${sign}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`;
 }
 
-function chartOpts(theme = (document.documentElement.dataset.theme || 'dark'), hideTimeScale = false, hideLeftScale = false) {
+function chartOpts(
+  theme = document.documentElement.dataset.theme || 'dark',
+  hideTimeScale = false,
+  hideLeftScale = false,
+) {
   return {
     autoSize: true,
-    ...chartTheme(theme === 'light' || theme === 'bloomberg' || theme === 'graphite' ? theme : 'dark'),
+    ...chartTheme(
+      theme === 'light' || theme === 'bloomberg' || theme === 'graphite' || theme === 'apex'
+        ? theme
+        : 'dark',
+    ),
     leftPriceScale: { visible: !hideLeftScale, borderVisible: false, minimumWidth: 75 },
     rightPriceScale: { visible: true, borderVisible: false, minimumWidth: 75 },
     timeScale: {

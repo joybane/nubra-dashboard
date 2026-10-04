@@ -3,6 +3,7 @@ import type { Instrument, Theme, ViewType } from '../types';
 import { useWorkspaceState } from './useWorkspaceState';
 import PaneShell from './PaneShell';
 import SplitDivider from './SplitDivider';
+import { resizePair } from '../lib/workspaceSizing';
 
 interface WorkspaceRootProps {
   theme: Theme;
@@ -17,8 +18,7 @@ export default function WorkspaceRoot({ theme }: WorkspaceRootProps) {
     setSizes((prev) => {
       const next = [...prev];
       const pct = (delta / containerSize) * 100;
-      next[idx] = Math.max(15, next[idx] + pct);
-      next[idx + 1] = Math.max(15, next[idx + 1] - pct);
+      [next[idx], next[idx + 1]] = resizePair(next[idx], next[idx + 1], pct);
       return next;
     });
   }, []);

@@ -38,6 +38,11 @@ export interface GreekHistoryKey {
    * their snapshots are isolated even when every other key component is identical.
    */
   withIv: boolean;
+  /**
+   * 'local' when reconstructed from the local parquet files. A host can force either source onto a
+   * day both cover, and the two must never answer for each other.
+   */
+  source?: 'nubra' | 'local';
 }
 
 export interface GreekHistoryValue {
@@ -69,6 +74,8 @@ function keyOf(k: GreekHistoryKey): string {
     k.day,
     k.windowDays,
     k.withIv ? 'iv' : 'g',
+    // Appended only for local, so every broker key reads exactly as it always has.
+    ...(k.source === 'local' ? ['local'] : []),
   ].join('|');
 }
 

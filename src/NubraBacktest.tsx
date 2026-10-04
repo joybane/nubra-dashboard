@@ -1,11 +1,6 @@
 import { chartTheme } from './lib/chartTheme';
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import {
-  createChart,
-  LineSeries,
-  CandlestickSeries,
-  MismatchDirection,
-} from 'lightweight-charts';
+import { createChart, LineSeries, CandlestickSeries, MismatchDirection } from 'lightweight-charts';
 import type { IChartApi, ISeriesApi, MouseEventParams, Time } from 'lightweight-charts';
 import SvgChart from './components/SvgChart';
 import type { Instrument, Theme } from './types';
@@ -36,10 +31,19 @@ import {
   GreeksTooltipBody,
 } from './components/ChartTooltips';
 import PinnedCrosshairLayer from './components/PinnedCrosshairLayer';
+import MismatchStripLayer, { MismatchCaseCard } from './components/MismatchStripLayer';
+import {
+  mismatchClock,
+  mismatchColor,
+  nsToChartMinute,
+  strongestVersion,
+  type MismatchCaseDto,
+} from './lib/mismatchCases';
 import PaneDivider, { type PaneSpec } from './components/PaneDivider';
 import PinCompareStrip, { type CompareRow } from './components/PinCompareStrip';
 import GreekIndicatorPane from './components/GreekIndicatorPane';
 import { usePinnedTimes, bindPinTrigger, PIN_COLORS } from './lib/chartPins';
+import { useMismatchPreview } from './lib/mismatchPreview';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -80,8 +84,20 @@ interface ChainResponse {
    */
   expiriesPartial?: boolean;
   chain: ChainRow[];
+  /** Which data answered: the broker, or the local parquet files. Absent on old servers = broker. */
+  source?: DataSource;
   error?: string;
 }
+
+/** Where a day's bars come from. 'auto' reads local files only for dates before broker history. */
+type DataSource = 'nubra' | 'local';
+type SourcePref = 'auto' | DataSource;
+
+const SOURCE_PREF_LABEL: Record<SourcePref, string> = {
+  auto: 'Auto',
+  nubra: 'Nubra',
+  local: 'Local',
+};
 
 interface Leg {
   id: string;
@@ -139,6 +155,30 @@ interface EvalResponse {
   legPriceData?: LegPriceSeries[];
   legPnlData?: LegPnlSeries[];
   basketPnlData?: Array<{ time: number; value: number }>;
+  error?: string;
+}
+
+interface DecayRequest {
+  underlying: string;
+  exchange: string;
+  date: string;
+  expiry: string;
+  entryTime: string;
+  exitTime: string;
+  legs: Array<{ strike: number; optionType: 'CALL' | 'PUT'; side: 'BUY' | 'SELL'; lots: number }>;
+  lotSize: number;
+  source: DataSource;
+}
+
+interface DecayResponse {
+  ok: boolean;
+  /** How the "now" side was walked: recorded 1s ticks, minute closes, or minutes then ticks. */
+  resolution?: 'tick' | '1m' | 'mixed';
+  /** IST HH:MM:SS the ticks start at, when there are any. */
+  tickFrom?: string | null;
+  /** Why ticks were wanted but not used. */
+  tickError?: string | null;
+  cases?: MismatchCaseDto[];
   error?: string;
 }
 
@@ -326,6 +366,16 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const [entryTime, setEntryTime] = useState(handoff?.entryTime ?? '09:20');
   const [exitTime, setExitTime] = useState(handoff?.exitTime ?? '15:15');
   const [expiry, setExpiry] = useState(handoff?.expiry ?? '');
+  /**
+   * The user's pick, sent with every chain request; the server resolves 'auto'. `dataSource` is
+   * what actually answered the current chain, and evaluate/decay are pinned to it so a run never
+   * mixes a local chain with broker bars.
+   */
+  const [sourcePref, setSourcePref] = useState<SourcePref>(handoff?.source ?? 'auto');
+  // Seeded from a local hand-off so the tag does not read NUBRA while that day's chain loads.
+  const [dataSource, setDataSource] = useState<DataSource>(
+    handoff?.source === 'local' ? 'local' : 'nubra',
+  );
 
   // Chain state
   const [chain, setChain] = useState<ChainRow[]>([]);
@@ -372,7 +422,8 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
   // Today → live. Only shown when the date is today: "Live" keeps the exit at the current time, and
   // "Execute" places the legs as a backdated paper basket entered at the entry candle's price.
-  const isToday = date === istToday();
+  // Live exit and Execute are broker features; a day replayed from local files has neither.
+  const isToday = date === istToday() && dataSource !== 'local';
   const [exitLive, setExitLive] = useState(false);
   const [liveSource, setLiveSource] = useState<'open' | 'close' | 'vwap'>('close');
   const [liveConfirm, setLiveConfirm] = useState(false);
@@ -840,11 +891,13 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
           date: dt,
           time: tm,
           exchange: activeExchange,
+          source: sourcePref,
         });
         if (exp) qs.set('expiry', exp);
         const res = await fetch(`/api/nubra-backtest/chain?${qs}`);
         const data = (await res.json()) as ChainResponse;
         if (requestId !== chainRequestRef.current) return;
+        setDataSource(data.source === 'local' ? 'local' : 'nubra');
         if (!data.ok) {
           setChainError(data.error || 'Failed to load chain.');
           setChain([]);
@@ -865,7 +918,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         if (requestId === chainRequestRef.current) setChainLoading(false);
       }
     },
-    [activeExchange],
+    [activeExchange, sourcePref],
   );
 
   // Load on date / underlying / entry time change.
@@ -971,6 +1024,28 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
   // ── Simulate ──────────────────────────────────────────────────────────────
 
+  /**
+   * What the result on screen was evaluated on, for the Decay matcher. Kept apart from the live
+   * inputs: legs or times edited after a run must not be scored against the chart of that run.
+   */
+  const evalRequestRef = useRef<DecayRequest | null>(null);
+  const decayRequest = (entry: string, exit: string): DecayRequest => ({
+    underlying,
+    exchange: activeExchange,
+    date,
+    expiry: activeExpiry,
+    entryTime: entry,
+    exitTime: exit,
+    legs: legs.map((l) => ({
+      strike: l.strike,
+      optionType: l.optionType === 'CE' ? 'CALL' : 'PUT',
+      side: l.side,
+      lots: l.lots,
+    })),
+    lotSize,
+    source: dataSource,
+  });
+
   async function simulate() {
     if (!legs.length) return;
     setEvalLoading(true);
@@ -986,6 +1061,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
           date,
           expiry: activeExpiry,
           expiryFlag: activeFlag,
+          source: dataSource,
           entryTime,
           exitTime,
           legs: legs.map((l) => ({
@@ -1002,6 +1078,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         setEvalError(data.error || 'Evaluation failed.');
         return;
       }
+      evalRequestRef.current = decayRequest(entryTime, exitTime);
       setEvalResult(data);
     } catch (e) {
       setEvalError((e as Error).message);
@@ -1009,6 +1086,16 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
       setEvalLoading(false);
     }
   }
+
+  // A run on screen was priced from the source that answered before; when the chain comes back from
+  // the other one (the switch was flipped), replay the same legs on it. Declared ahead of the
+  // auto-simulate effect below so both run in the same commit.
+  const pricedSourceRef = useRef(dataSource);
+  useEffect(() => {
+    if (pricedSourceRef.current === dataSource) return;
+    pricedSourceRef.current = dataSource;
+    if (legs.length && evalResult) autoSimulateRef.current = true;
+  }, [dataSource, legs.length, evalResult]);
 
   useEffect(() => {
     if (!autoSimulateRef.current || !legs.length) return;
@@ -1031,6 +1118,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
           date,
           expiry: activeExpiry,
           expiryFlag: activeFlag,
+          source: dataSource,
           entryTime: newEntry,
           exitTime: newExit,
           legs: legs.map((l) => ({
@@ -1047,6 +1135,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
         setEvalError(data.error || 'Re-evaluation failed.');
         return;
       }
+      evalRequestRef.current = decayRequest(newEntry, newExit);
       setEvalResult(data);
     } catch (e) {
       setEvalError((e as Error).message);
@@ -1169,7 +1258,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   // ── Pinned crosshairs (middle-click) ──
   // Entirely additive: pins never touch lightweight-charts' crosshair state, so with no pin on
   // screen the hover sync below behaves exactly as it did before.
-  const { pins, togglePinAt, removePin, clearPins } = usePinnedTimes(2);
+  const { pins: heldPins, togglePinAt, removePin, clearPins, pinTimes } = usePinnedTimes(2);
   const togglePinRef = useRef(togglePinAt);
   togglePinRef.current = togglePinAt;
   // Time under the cursor as of the last crosshair move — already snapped to a bar.
@@ -1273,6 +1362,120 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   useEffect(() => {
     clearPins();
   }, [evalResult, clearPins]);
+
+  // ── Decay matcher (server/backtestDecay.ts) ──
+  // The live strategy view's Decay tracker, replayed over this run: same rules, same strips and
+  // case card. Additive — it reads the run on screen and never changes it. The server walks the
+  // "now" side on recorded 1s ticks where the broker still has them (7 days) and on minute closes
+  // before that; nothing else in this view uses the ticks.
+  const [decayOn, setDecayOn] = useState(false);
+  const [decay, setDecay] = useState<DecayResponse | null>(null);
+  const [decayLoading, setDecayLoading] = useState(false);
+  const [decayError, setDecayError] = useState<string | null>(null);
+  const [decayPopupOpen, setDecayPopupOpen] = useState(false);
+  const [decayPick, setDecayPick] = useState<{ caseNo: number; version: number } | null>(null);
+  const decayPopupRef = useRef<HTMLDivElement>(null);
+  const decayCases = useMemo(() => (decayOn ? (decay?.cases ?? []) : []), [decayOn, decay]);
+  const decayEligible = (() => {
+    const l = evalResult ? evalRequestRef.current?.legs : undefined;
+    return (
+      !!l &&
+      l.length === 2 &&
+      l.some((x) => x.optionType === 'CALL') &&
+      l.some((x) => x.optionType === 'PUT')
+    );
+  })();
+
+  useEffect(() => {
+    setDecayError(null);
+    const req = evalRequestRef.current;
+    if (!decayOn || !evalResult || !req || !decayEligible) {
+      setDecay(null);
+      return;
+    }
+    // The previous run's cases stay up until these replace them: "Live" re-evaluates every 30 s
+    // and the strips shouldn't blink each time.
+    const ctrl = new AbortController();
+    setDecayLoading(true);
+    fetch('/api/nubra-backtest/decay', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+      signal: ctrl.signal,
+    })
+      .then((r) => r.json() as Promise<DecayResponse>)
+      .then((d) => {
+        if (ctrl.signal.aborted) return;
+        if (!d.ok) setDecayError(d.error || 'Decay matcher failed.');
+        else setDecay(d);
+      })
+      .catch((e: Error) => {
+        if (!ctrl.signal.aborted) setDecayError(e.message);
+      })
+      .finally(() => {
+        if (!ctrl.signal.aborted) setDecayLoading(false);
+      });
+    return () => {
+      ctrl.abort();
+      setDecayLoading(false);
+    };
+  }, [decayOn, evalResult, decayEligible]);
+
+  // Hovering a row of the Decay cases list previews that case: its pins, card and strips stand in
+  // for the held ones while the pointer is on the row, and the held ones come back untouched.
+  const { preview: decayPreview, setHovered: hoverDecayRow } = useMismatchPreview(
+    decayCases,
+    decayPopupOpen,
+  );
+  const pins = decayPreview?.pins ?? heldPins;
+  const shownPick = decayPreview?.pick ?? decayPick;
+  const pickedDecay = shownPick
+    ? decayCases.find((c) => c.case_no === shownPick.caseNo)
+    : undefined;
+  const pinDecay = useCallback(
+    (caseNo: number, version?: number) => {
+      const c = decayCases.find((x) => x.case_no === caseNo);
+      if (!c || c.versions.length === 0) return;
+      const idx = version ?? c.versions.length - 1;
+      const v = c.versions[idx];
+      if (!v) return;
+      setDecayPick({ caseNo, version: idx });
+      pinTimes([nsToChartMinute(v.t1_ns), nsToChartMinute(v.t2_ns)]);
+    },
+    [decayCases, pinTimes],
+  );
+  // A picked case's two pins and its card are one thing, as in the live view: removing either
+  // pin, closing the card, or clicking its strip again clears all of it.
+  const clearDecayPick = useCallback(() => {
+    setDecayPick(null);
+    clearPins();
+  }, [clearPins]);
+  const removePinOrDecay = useCallback(
+    (id: number) => {
+      if (decayPick) clearDecayPick();
+      else removePin(id);
+    },
+    [decayPick, clearDecayPick, removePin],
+  );
+  const pickDecayStrip = useCallback(
+    (caseNo: number) => {
+      if (decayPick?.caseNo === caseNo) clearDecayPick();
+      else pinDecay(caseNo);
+    },
+    [decayPick, clearDecayPick, pinDecay],
+  );
+  useEffect(() => {
+    if (decayPick && heldPins.length === 0) setDecayPick(null);
+  }, [decayPick, heldPins.length]);
+  useEffect(() => {
+    if (!decayPopupOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (decayPopupRef.current && !decayPopupRef.current.contains(e.target as Node))
+        setDecayPopupOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [decayPopupOpen]);
 
   const pinnedSnapshots = useMemo(
     () => pins.map((pin) => ({ pin, snap: buildPaneSnapshots(pin.time) })),
@@ -2356,6 +2559,67 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
           />
         </label>
 
+        {/* Data source: which data this day is read from */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <div
+            role="group"
+            aria-label="Data source"
+            style={{
+              display: 'flex',
+              border: '1px solid var(--border)',
+              borderRadius: 6,
+              overflow: 'hidden',
+            }}
+          >
+            {(['auto', 'nubra', 'local'] as const).map((pref) => (
+              <button
+                key={pref}
+                type="button"
+                onClick={() => setSourcePref(pref)}
+                aria-pressed={sourcePref === pref}
+                title={
+                  pref === 'auto'
+                    ? 'Broker data where it exists; your local files for dates before broker history'
+                    : pref === 'nubra'
+                      ? 'Always read the broker (needs a login)'
+                      : 'Always read your local files (NIFTY and SENSEX, ATM±10 strikes)'
+                }
+                style={{
+                  padding: '3px 7px',
+                  fontSize: 11,
+                  border: 'none',
+                  background: sourcePref === pref ? 'var(--accent)' : 'var(--bg-card)',
+                  color: sourcePref === pref ? '#fff' : 'var(--text-muted)',
+                  cursor: 'pointer',
+                }}
+              >
+                {SOURCE_PREF_LABEL[pref]}
+              </button>
+            ))}
+          </div>
+          <span
+            title={
+              dataSource === 'local'
+                ? 'Read from your local files (ATM Wise data), not the broker. Spot candles are ' +
+                  'drawn from minute closes, Decay runs on minute closes, and only ATM±10 strikes ' +
+                  'exist at any moment. Lot size defaults to the current one — set the lot size in force on this date.'
+                : 'Read from the Nubra broker'
+            }
+            style={{
+              padding: '1px 5px',
+              borderRadius: 4,
+              fontSize: 10,
+              fontWeight: 700,
+              cursor: 'help',
+              background:
+                dataSource === 'local' ? 'rgba(245, 158, 11, 0.2)' : 'rgba(88, 101, 242, 0.2)',
+              color: dataSource === 'local' ? '#f59e0b' : 'var(--accent)',
+            }}
+          >
+            {dataSource === 'local' ? 'LOCAL' : 'NUBRA'}
+          </span>
+        </div>
+
         {/* Entry time */}
         <label style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           <span
@@ -3237,6 +3501,172 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                   );
                 })()}
             </div>
+
+            {/* Decay matcher — the live strategy view's Decay tracker, replayed over this run */}
+            {(() => {
+              const count = decayCases.length;
+              const on = decayOn;
+              const disabled = !on && !decayEligible;
+              const res = decay?.resolution;
+              const basis =
+                res === 'tick'
+                  ? 'recorded tick by tick'
+                  : res === 'mixed'
+                    ? `on minute closes, then tick by tick from ${decay?.tickFrom}`
+                    : res === '1m'
+                      ? `on minute closes${
+                          decay?.tickError
+                            ? ` (ticks unavailable: ${decay.tickError})`
+                            : ' (the broker keeps ticks for 7 days only)'
+                        }`
+                      : '';
+              const title = decayError
+                ? `Decay matcher: ${decayError}`
+                : on
+                  ? decayLoading
+                    ? 'Decay matcher: scoring this run…'
+                    : `Decay matcher on · ${count} case${count === 1 ? '' : 's'}${
+                        basis ? ` · scored ${basis}` : ''
+                      } · click to turn off`
+                  : decayEligible
+                    ? 'Find CE/PE profit decay at the same underlying close (±1 pt, ≥30 min apart, legs diverge ≥50%) — the live Decay tracker replayed over this run, on recorded ticks where the broker still has them. Cases appear as colour strips on the time axis.'
+                    : 'The Decay matcher needs a simulated run of exactly one CE and one PE.';
+              const color = decayError ? 'var(--red)' : on ? '#a78bfa' : 'var(--text-secondary)';
+              const border = decayError
+                ? 'var(--red)'
+                : on
+                  ? 'rgba(167,139,250,0.4)'
+                  : 'var(--border)';
+              const bg = decayError
+                ? 'rgba(239,68,68,0.15)'
+                : on
+                  ? 'rgba(167,139,250,0.15)'
+                  : 'transparent';
+              const base = {
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: disabled ? 'not-allowed' : 'pointer',
+                border: '1px solid ' + border,
+                background: bg,
+                color,
+                opacity: disabled ? 0.5 : 1,
+                transition: 'all 0.15s',
+                display: 'flex',
+                alignItems: 'center',
+              } as const;
+              return (
+                <div
+                  ref={decayPopupRef}
+                  className="relative flex items-stretch"
+                  style={{ height: 24 }}
+                >
+                  <button
+                    onClick={() => {
+                      setDecayOn((v) => !v);
+                      setDecayPopupOpen(false);
+                      if (decayPick) clearDecayPick();
+                    }}
+                    disabled={disabled}
+                    title={title}
+                    style={{
+                      ...base,
+                      padding: '0 8px',
+                      borderRadius: count > 0 ? '4px 0 0 4px' : 4,
+                      ...(count > 0 ? { borderRight: 'none' } : {}),
+                      gap: 5,
+                    }}
+                  >
+                    Decay
+                    {on && (decayLoading ? ' …' : ` · ${count}`)}
+                    {on && !decayLoading && res && (
+                      <span
+                        style={{
+                          fontSize: 9,
+                          fontWeight: 700,
+                          padding: '0 4px',
+                          borderRadius: 3,
+                          border: '1px solid currentColor',
+                          opacity: 0.8,
+                        }}
+                      >
+                        {res === 'tick' ? 'TICK' : res === 'mixed' ? '1m+TICK' : '1m'}
+                      </span>
+                    )}
+                  </button>
+                  {count > 0 && (
+                    <button
+                      onClick={() => setDecayPopupOpen((o) => !o)}
+                      title="List every decay case — jump straight to one instead of hunting for its strip on the chart"
+                      style={{
+                        ...base,
+                        cursor: 'pointer',
+                        padding: '0 4px',
+                        borderRadius: '0 4px 4px 0',
+                        borderLeft: 'none',
+                        fontSize: 10,
+                      }}
+                    >
+                      ▾
+                    </button>
+                  )}
+                  {decayPopupOpen && count > 0 && (
+                    <div className="absolute top-full right-0 mt-1 z-50 w-[300px] max-h-[70vh] overflow-y-auto bg-[var(--bg-card,var(--bg-secondary))] border border-[var(--border)] rounded-xl shadow-2xl">
+                      <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] sticky top-0 bg-[var(--bg-card,var(--bg-secondary))]">
+                        <span className="text-[11px] font-semibold text-[var(--text-primary)]">
+                          Decay cases
+                        </span>
+                        <button
+                          onClick={() => setDecayPopupOpen(false)}
+                          className="text-[var(--text-muted)] hover:text-[var(--text-primary)] text-sm leading-none"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="py-1">
+                        {decayCases.map((mc) => {
+                          const v = strongestVersion(mc);
+                          if (!v) return null;
+                          const c = mismatchColor(mc.color_idx);
+                          const activeRow = decayPick?.caseNo === mc.case_no;
+                          return (
+                            <button
+                              key={mc.case_no}
+                              onClick={() => {
+                                pinDecay(mc.case_no);
+                                setDecayPopupOpen(false);
+                              }}
+                              // Leaving only clears this row's own hover: moving to the next row
+                              // may deliver its enter first, and that one must win.
+                              onMouseEnter={() => hoverDecayRow(mc.case_no)}
+                              onMouseLeave={() =>
+                                hoverDecayRow((h) => (h === mc.case_no ? null : h))
+                              }
+                              className={`w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-left hover:bg-[var(--bg-hover)] transition-colors ${
+                                activeRow ? 'bg-[var(--bg-hover)]' : ''
+                              }`}
+                            >
+                              <span
+                                className="w-2 h-2 rounded-full shrink-0"
+                                style={{ background: c }}
+                              />
+                              <span className="font-semibold shrink-0" style={{ color: c }}>
+                                #{mc.case_no}
+                              </span>
+                              <span className="text-[var(--text-muted)] whitespace-nowrap">
+                                {mismatchClock(v.t1_ns).slice(0, 5)} → {mismatchClock(v.t2_ns)}
+                              </span>
+                              <span className="ml-auto font-semibold text-[var(--text-secondary)]">
+                                ₹{fmtPrice(v.gap)}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </>
         )}
 
@@ -3922,11 +4352,28 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                     <div ref={priceContainerRef} style={{ width: '100%', height: '100%' }} />
 
                     <PriceTooltip ref={priceTooltipRef} />
+                    <MismatchStripLayer
+                      cases={decayCases}
+                      chart={priceChartRef.current}
+                      epoch={chartEpoch}
+                      activeCase={shownPick?.caseNo ?? null}
+                      onPick={pickDecayStrip}
+                      onPickVersion={pinDecay}
+                    />
+                    {pickedDecay && shownPick && (
+                      <MismatchCaseCard
+                        c={pickedDecay}
+                        pinnedVersion={shownPick.version}
+                        onPinVersion={(i) => pinDecay(pickedDecay.case_no, i)}
+                        onClose={clearDecayPick}
+                        preview={!!decayPreview}
+                      />
+                    )}
                     <PinnedCrosshairLayer
                       pins={pins}
                       chart={priceChartRef.current}
                       epoch={chartEpoch}
-                      onRemove={removePin}
+                      onRemove={removePinOrDecay}
                       renderCard={(pin) => {
                         const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
                         if (!snap) return null;
@@ -3987,6 +4434,24 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                     />
 
                     <PnlTooltip ref={pnlTooltipRef} strategyMargin={0} />
+                    <MismatchStripLayer
+                      cases={decayCases}
+                      chart={pnlChartRef.current}
+                      epoch={chartEpoch}
+                      xAdjust={75}
+                      activeCase={shownPick?.caseNo ?? null}
+                      onPick={pickDecayStrip}
+                      onPickVersion={pinDecay}
+                    />
+                    {!priceVisible && pickedDecay && shownPick && (
+                      <MismatchCaseCard
+                        c={pickedDecay}
+                        pinnedVersion={shownPick.version}
+                        onPinVersion={(i) => pinDecay(pickedDecay.case_no, i)}
+                        onClose={clearDecayPick}
+                        preview={!!decayPreview}
+                      />
+                    )}
                     <PinnedCrosshairLayer
                       pins={pins}
                       chart={pnlChartRef.current}
@@ -3994,7 +4459,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                       // hidden), so plot coordinates need the same correction the hover path makes.
                       xAdjust={75}
                       epoch={chartEpoch}
-                      onRemove={removePin}
+                      onRemove={removePinOrDecay}
                       renderCard={(pin) => {
                         const snap = pinnedSnapshots.find((s) => s.pin.id === pin.id)?.snap;
                         if (!snap) return null;
@@ -4114,6 +4579,10 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
                     }}
                   >
                     <GreekIndicatorPane
+                      // Remounted on a source switch: the overlays keep a whole day of
+                      // reconstructed state, and none of it carries across sources.
+                      key={dataSource}
+                      dataSource={dataSource}
                       instrument={indicatorInstrument}
                       bars={indicatorBars}
                       theme={theme}

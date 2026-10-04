@@ -1360,11 +1360,11 @@ export default function OptionChain({
             )}
             {!loading && !error && (
               <table
-                className="oc-table w-full text-[12px] border-collapse"
+                className={`oc-table w-full text-[12px] ${showGreeks ? 'has-greeks' : ''}`}
                 style={{ tableLayout: 'fixed' }}
               >
                 <thead>
-                  <tr className="sticky top-0 z-10">
+                  <tr className="oc-group-row">
                     <th
                       colSpan={showGreeks ? 7 : 3}
                       className="oc-calls-th text-center py-1.5 text-[13px] font-bold"
@@ -1382,7 +1382,7 @@ export default function OptionChain({
                       Puts
                     </th>
                   </tr>
-                  <tr className="sticky top-9 z-10 bg-[var(--bg-secondary)]">
+                  <tr className="oc-columns-row bg-[var(--bg-secondary)]">
                     {showGreeks &&
                       ['Vega', 'Gamma', 'Theta', 'Delta'].map((h) => (
                         <th

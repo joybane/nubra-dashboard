@@ -50,9 +50,16 @@ export function getSymbol(item: Instrument): string {
  * MCX they do not: the underlying is a specific futures contract
  * (`FUT_CRUDEOIL_20260819`) but its chain is fetched and subscribed as `CRUDEOIL`.
  * Refdata already carries that in `asset`, so prefer it and fall back to the symbol.
+ *
+ * The same holds for any derivative charted on its own: an NSE option or future
+ * (`NIFTY26SEP22950CE`) has no chain of its name — the server 500s — so its chain is
+ * the underlying's, `asset` = `NIFTY`. Without this the Vega/Theta/IV/OI overlays
+ * silently never drew on an option contract's chart.
  */
 export function getChainAsset(item: Instrument): string {
   if ((item.exchange || '').toUpperCase() === 'MCX' && item.asset) return item.asset;
+  const type = getInstrumentType(item);
+  if ((type === 'OPT' || type === 'FUT') && item.asset) return item.asset;
   return getSymbol(item);
 }
 
@@ -239,7 +246,8 @@ export type ViewType =
   | 'nubrabacktest'
   | 'watchlist'
   | 'tracker'
-  | 'analysis';
+  | 'analysis'
+  | 'signalbacktest';
 
 export type LayoutType = 'single' | 'hsplit' | 'vsplit' | 'grid' | 'tleft' | 'tright';
 
@@ -270,8 +278,7 @@ export interface WatchlistItem {
 }
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
-export type Theme = 'dark' | 'light' | 'bloomberg' | 'graphite';
-export type ShellLayout = 'classic' | 'workspace';
+export type Theme = 'dark' | 'light' | 'bloomberg' | 'graphite' | 'apex';
 
 // ─── Paper Trading ────────────────────────────────────────────────────────────
 export type PaperOrderType =

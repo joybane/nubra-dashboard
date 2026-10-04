@@ -275,10 +275,11 @@ export function findCases(day: DaySeries, params: FinderParams): DayScan {
       if (a.t2 !== b.t2) return a.t2.localeCompare(b.t2);
       return a.t1.localeCompare(b.t1);
     });
-    
+
     let maxScore = -1;
     for (const g of rawGroup) {
-      const score = params.rankBy === 'legGap' ? Math.abs(g.ceDelta - g.peDelta) : Math.abs(g.totalDelta);
+      const score =
+        params.rankBy === 'legGap' ? Math.abs(g.ceDelta - g.peDelta) : Math.abs(g.totalDelta);
       if (score > maxScore) {
         groupCandidates.push(g);
         maxScore = score;

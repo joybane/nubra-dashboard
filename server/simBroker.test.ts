@@ -299,3 +299,104 @@ test('a stop-loss that triggers and fills still writes through the normal fill p
   // No redundant second write — fill() already persisted sl_triggered.
   expect(db.dbSetOrderSlTriggered).not.toHaveBeenCalled();
 });
+
+// The tick path looks positions and open orders up by ref_id instead of scanning the whole book.
+// These pin the behaviour that lookup must reproduce, including for state restored from the DB.
+test('routes a tick only to its own instrument, across baskets and restored state', () => {
+  db.dbLoadOrders.mockReturnValue([
+    {
+      order_id: 7,
+      ref_id: 303,
+      nubra_name: 'NIFTY_TEST_CE',
+      display_name: 'NIFTY_TEST_CE',
+      order_type: 'ORDER_TYPE_REGULAR',
+      order_side: 'ORDER_SIDE_SELL',
+      order_price: 5_000,
+      trigger_price: 0,
+      order_qty: 65,
+      filled_qty: 0,
+      avg_filled_price: 0,
+      order_status: 'ORDER_STATUS_OPEN',
+      order_time: 1,
+      filled_time: null,
+      order_delivery_type: 'ORDER_DELIVERY_TYPE_IDAY',
+      validity_type: 'DAY',
+      sl_triggered: 0,
+      basket_group_id: 'b2',
+    },
+  ] as never);
+  db.dbLoadPositions.mockReturnValue([
+    {
+      ref_id: 303,
+      nubra_name: 'X',
+      display_name: 'X',
+      qty: 65,
+      avg_price: 4_000,
+      realized_pnl: 0,
+      last_traded_price: 4_000,
+      order_delivery_type: 'ORDER_DELIVERY_TYPE_IDAY',
+      basket_group_id: 'b1',
+    },
+    {
+      ref_id: 303,
+      nubra_name: 'X',
+      display_name: 'X',
+      qty: -65,
+      avg_price: 4_500,
+      realized_pnl: 0,
+      last_traded_price: 4_000,
+      order_delivery_type: 'ORDER_DELIVERY_TYPE_IDAY',
+      basket_group_id: 'b3',
+    },
+    {
+      ref_id: 404,
+      nubra_name: 'Y',
+      display_name: 'Y',
+      qty: 65,
+      avg_price: 9_000,
+      realized_pnl: 0,
+      last_traded_price: 9_000,
+      order_delivery_type: 'ORDER_DELIVERY_TYPE_IDAY',
+      basket_group_id: 'b1',
+    },
+  ] as never);
+  const broker = new SimBroker();
+  broker.restore();
+
+  // A tick on another instrument touches nothing here.
+  expect(broker.onLtp(404, 9_100)).toEqual([{ ref_id: 404, ltp: 9_100 }]);
+  expect(broker.getOrders('live')).toHaveLength(1);
+
+  // Both baskets holding 303 update; the restored open order fills once the bid crosses.
+  const changes = broker.onLtp(303, 5_100);
+  expect(changes).toEqual([
+    { ref_id: 303, ltp: 5_100 },
+    { ref_id: 303, ltp: 5_100 },
+  ]);
+  expect(broker.getOrders('live')).toHaveLength(0);
+  expect(
+    broker
+      .getPositions()
+      .filter((p) => p.ref_id === 303)
+      .map((p) => p.last_traded_price),
+  ).toEqual([5_100, 5_100, 5_100]);
+});
+
+test('a cancelled order never fills on a later tick', () => {
+  const broker = new SimBroker();
+  broker.restore();
+  const o = broker.placeOrder({
+    nubraName: 'NIFTY_TEST_PE',
+    liveRefId: 505,
+    order_type: 'ORDER_TYPE_REGULAR',
+    order_side: 'ORDER_SIDE_BUY',
+    order_qty: 65,
+    order_price: 1_000,
+    order_delivery_type: 'ORDER_DELIVERY_TYPE_IDAY',
+    validity_type: 'DAY',
+  });
+  expect(broker.cancelOrder(o.order_id)).toBe(true);
+  broker.onLtp(505, 500);
+  expect(broker.getPositions()).toHaveLength(0);
+  expect(db.dbInsertFill).not.toHaveBeenCalled();
+});

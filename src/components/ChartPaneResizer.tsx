@@ -275,9 +275,7 @@ export default function ChartPaneResizer({
               height: 2,
               borderRadius: 2,
               background:
-                dragIndex === b.index || hoverIndex === b.index
-                  ? 'var(--accent)'
-                  : 'var(--border)',
+                dragIndex === b.index || hoverIndex === b.index ? 'var(--accent)' : 'var(--border)',
               transition: 'background 120ms',
             }}
           />

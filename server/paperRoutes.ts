@@ -104,6 +104,14 @@ interface PaperRouteDeps {
   nubraGet: NubraGet;
   nubraPostAt: NubraPostAt;
   marginBaseUrl: string;
+  /**
+   * Called after an order (or basket of orders) is placed. A leg with a cached tick fills inline
+   * inside `placeOrder`, so a fresh 2-leg strategy can already be complete by the time this fires —
+   * this lets the mismatch/decay tracker pick it up immediately instead of waiting for its own
+   * poll, which is what previously left a just-entered strategy's Decay toggle needing a manual
+   * click even though a same-second entry elsewhere had already been picked up by that poll.
+   */
+  onOrdersPlaced?: () => void;
 }
 
 export function registerPaperRoutes({
@@ -118,6 +126,7 @@ export function registerPaperRoutes({
   nubraGet,
   nubraPostAt,
   marginBaseUrl,
+  onOrdersPlaced,
 }: PaperRouteDeps): void {
   const marginMarketDataBaseUrl = process.env.NUBRA_BASE_URL || 'https://api2.nubra.io';
   // ─── Paper Trading auth status ────────────────────────────────────────────────
@@ -203,6 +212,7 @@ export function registerPaperRoutes({
         basket_group_id,
         strategy_name,
       });
+      onOrdersPlaced?.();
       return reply.send({ order_id: order.order_id });
     } catch (err: unknown) {
       return reply.status(500).send({ error: (err as Error).message });
@@ -246,6 +256,7 @@ export function registerPaperRoutes({
           validity_type: o.validity_type,
         });
       });
+      onOrdersPlaced?.();
       return reply.send({ orders: results.map((o) => ({ order_id: o.order_id })) });
     } catch (err: unknown) {
       return reply.status(500).send({ error: (err as Error).message });
@@ -377,6 +388,7 @@ export function registerPaperRoutes({
           margin_required: marginRequired,
         });
       });
+      onOrdersPlaced?.();
       return reply.send({
         orders: results.map((o) => ({ order_id: o.order_id })),
         basket_group_id: basketGroupId,

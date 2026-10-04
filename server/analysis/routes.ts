@@ -5,9 +5,12 @@
  *   POST /api/analysis/sync         start filling the cache (Nubra part needs a broker session)
  *   POST /api/analysis/scan         run the profit-mismatch finder over a date range
  *   GET  /api/analysis/day          one day's spot + the two legs, for the case chart
+ *   GET  /api/analysis/greeks       the case chart's greeks: the broker's where it has them, else rebuilt
  *   GET  /api/analysis/validation   the full local-vs-Nubra overlap report
  *
- * Reads never call the broker; everything is served from `.analysis-cache`. Like the parquet
+ * Reads never call the broker; everything is served from `.analysis-cache` — except
+ * `/api/analysis/greeks`, which asks the broker for its stored greeks when a session exists and
+ * quietly falls back to the cache without one. Like the parquet
  * backtest routes, they are not behind `requireAuth` — they expose nothing of the account.
  */
 import type { FastifyInstance } from 'fastify';
@@ -32,7 +35,9 @@ import {
   type Grid,
   type StoredDay,
 } from './daySeries.ts';
-import type { PostTimeseries } from './nubraSource.ts';
+import { fetchBrokerGreeks, mergeGreeks, type BrokerDay } from './brokerGreeks.ts';
+import { dayGreekSeries } from './greeks.ts';
+import { createPacer, type PostTimeseries } from './nubraSource.ts';
 import { createAnalysisSync, type AnalysisSync } from './sync.ts';
 import { readValidationReport } from './validation.ts';
 
@@ -47,6 +52,8 @@ export interface AnalysisRouteDeps {
   /** Injected by tests. */
   store?: DayStore;
   sync?: AnalysisSync;
+  /** Minimum gap between the greeks route's broker calls (default 1500; tests use 0). */
+  greekPaceMs?: number;
 }
 
 export interface ScanDay {
@@ -447,5 +454,102 @@ export function registerAnalysisRoutes(deps: AnalysisRouteDeps): void {
     }
     reply.code(404);
     return { ok: false, error: `no data for ${underlying} on ${q.date}` };
+  });
+
+  // The case chart's greeks for the two ATM contracts. Where the broker stores greeks for a Nubra
+  // day they are used as they are — they are what Nubra shows — and every other minute is rebuilt
+  // off the parity forward (`greeks.ts`). The one read that can reach the broker, so it is paced,
+  // and a finished day's answer is remembered: a past day's stored greeks never change.
+  const brokerPace = createPacer(deps.greekPaceMs ?? 1500);
+  const brokerDays = new Map<string, BrokerDay>();
+  const BROKER_DAYS_MAX = 400;
+  const istToday = () => new Date(Date.now() + 19_800_000).toISOString().slice(0, 10);
+
+  fastify.get<{
+    Querystring: {
+      underlying?: string;
+      date?: string;
+      source?: string;
+      ceStrike?: string;
+      peStrike?: string;
+    };
+  }>('/api/analysis/greeks', async (req, reply) => {
+    const q = req.query;
+    const underlying = normalizeUnderlying(q.underlying);
+    if (!underlying || !q.date || !ISO.test(q.date)) {
+      reply.code(400);
+      return { ok: false, error: 'underlying and date (YYYY-MM-DD) are required' };
+    }
+    if (q.source !== 'nubra' && q.source !== 'local') {
+      reply.code(400);
+      return { ok: false, error: 'source must be nubra or local' };
+    }
+    const ceStrike = Number(q.ceStrike);
+    const peStrike = Number(q.peStrike);
+    if (
+      !Number.isInteger(ceStrike) ||
+      !Number.isInteger(peStrike) ||
+      ceStrike <= 0 ||
+      peStrike <= 0
+    ) {
+      reply.code(400);
+      return { ok: false, error: 'ceStrike and peStrike must be strike prices' };
+    }
+    const day = await store.read(underlying, q.source, q.date);
+    if (!day || isEmptyDay(day)) {
+      reply.code(404);
+      return { ok: false, error: `no ${q.source} data for ${underlying} on ${q.date}` };
+    }
+    if (!day.ce[String(ceStrike)] || !day.pe[String(peStrike)]) {
+      reply.code(404);
+      return { ok: false, error: `${q.date} holds no ${ceStrike} CE / ${peStrike} PE` };
+    }
+    const rebuilt = dayGreekSeries(day, { ceStrike, peStrike });
+
+    let broker: BrokerDay | null = null;
+    let brokerNote: string | null = null;
+    if (q.source === 'local') {
+      brokerNote = 'local-source day: rebuilt from the cache';
+    } else {
+      const key = `${underlying}|${q.date}|${day.expiry}|${ceStrike}|${peStrike}`;
+      const post = getPost();
+      broker = brokerDays.get(key) ?? null;
+      if (!broker && !post) {
+        brokerNote = 'no broker session: rebuilt from the cache';
+      } else if (!broker && post) {
+        const res = await fetchBrokerGreeks(post, brokerPace, {
+          underlying,
+          date: q.date,
+          expiry: day.expiry,
+          monthly: day.monthly,
+          ceStrike,
+          peStrike,
+        });
+        broker = res.day;
+        if (res.error) {
+          brokerNote = `broker request failed (${res.error}): rebuilt from the cache`;
+        } else if (q.date < istToday()) {
+          brokerDays.set(key, broker);
+          if (brokerDays.size > BROKER_DAYS_MAX) brokerDays.delete(brokerDays.keys().next().value!);
+        }
+      }
+      if (broker && !broker.CE && !broker.PE && !brokerNote) {
+        brokerNote = 'the broker holds no greeks for this day: rebuilt from the cache';
+      }
+    }
+    const merged = mergeGreeks(rebuilt, broker);
+    return {
+      ok: true,
+      underlying,
+      date: day.date,
+      source: q.source,
+      expiry: day.expiry,
+      ceStrike,
+      peStrike,
+      CE: merged.CE,
+      PE: merged.PE,
+      greekSource: merged.source,
+      brokerNote,
+    };
   });
 }

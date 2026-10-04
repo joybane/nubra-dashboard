@@ -102,6 +102,32 @@ export function isTransportError(err: unknown): boolean {
 }
 
 /**
+ * Codes that mean the TCP/TLS connection was never established, so the request never left.
+ *
+ * Measured 2026-09-27: the broker (api2.nubra.io) silently drops ~60% of NEW connections from this
+ * machine while www.google.com accepts 12/12 — a SYN that is never answered, so undici waits out
+ * its connect timeout. Existing keep-alive sockets are unaffected, which is why warm single calls
+ * worked while the backtest chain (6–8 parallel batches, each wanting a fresh socket) failed.
+ */
+const CONNECT_CODES = new Set([
+  'UND_ERR_CONNECT_TIMEOUT',
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EAI_AGAIN',
+]);
+
+/**
+ * True when the request provably never reached the broker. Re-sending is then safe for ANY method,
+ * including POSTs with side effects — unlike isTransportError, which also covers a socket that
+ * died after the body went out.
+ */
+export function isConnectError(err: unknown): boolean {
+  const code = describeUpstreamError(err).code;
+  return code != null && CONNECT_CODES.has(code);
+}
+
+/**
  * Per-endpoint time budget, matched on the endpoint path prefix.
  *
  * Deriving this from the endpoint rather than taking it as an argument keeps the NubraGet/NubraPost

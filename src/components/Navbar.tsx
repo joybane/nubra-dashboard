@@ -1,19 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useWs } from '../hooks/useWsContext';
-import type { Instrument, LayoutType, ShellLayout, Theme } from '../types';
+import type { Instrument, LayoutType, Theme } from '../types';
 import InstrumentSearch from './InstrumentSearch';
 import ConfirmDialog from './ConfirmDialog';
 import UiIcon from './UiIcon';
 import { useWorkspaceState } from '../workspace/useWorkspaceState';
 import { VIEW_LABELS, VIEW_ORDER, LAYOUT_OPTIONS } from '../workspace/viewConfig';
+import BrandMark from './BrandMark';
+import { EXPERIENCE_OPTIONS } from '../lib/experience';
+import { useDensity } from '../hooks/useDensity';
+import { useMenuKeyboard } from '../hooks/useMenuKeyboard';
 
 interface NavbarProps {
   onInstrumentSelect: (item: Instrument) => void;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
-  shellLayout: ShellLayout;
-  onShellLayoutChange: (layout: ShellLayout) => void;
 }
 
 function LayoutIcon({ type, active = false }: { type: LayoutType; active?: boolean }) {
@@ -60,27 +62,12 @@ function LayoutIcon({ type, active = false }: { type: LayoutType; active?: boole
   );
 }
 
-const THEME_OPTIONS: { id: Theme; label: string; detail: string }[] = [
-  { id: 'dark', label: 'Dark', detail: 'Modern low-light palette' },
-  { id: 'light', label: 'Light', detail: 'Bright daytime palette' },
-  { id: 'bloomberg', label: 'Bloomberg', detail: 'Dense black & amber terminal' },
-  { id: 'graphite', label: 'Graphite', detail: 'Neutral black charting workspace' },
-];
-
-export default function Navbar({
-  onInstrumentSelect,
-  theme,
-  onThemeChange,
-  shellLayout,
-  onShellLayoutChange,
-}: NavbarProps) {
+export default function Navbar({ onInstrumentSelect, theme, onThemeChange }: NavbarProps) {
   const { wsReady } = useWs();
   const { state, setPaneView, setLayout } = useWorkspaceState();
   const paneId = state.activePane || state.panes[0]?.id;
   const pane = state.panes.find((p) => p.id === paneId) || state.panes[0];
-  const [density, setDensity] = useState(() =>
-    localStorage.getItem('nubra-density') === 'comfortable' ? 'comfortable' : 'compact',
-  );
+  const { density, toggleDensity } = useDensity();
   const [layoutOpen, setLayoutOpen] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -92,17 +79,10 @@ export default function Navbar({
   const searchRef = useRef<HTMLDivElement>(null);
   const layoutRef = useRef<HTMLDivElement>(null);
   const themeRef = useRef<HTMLDivElement>(null);
+  useMenuKeyboard(layoutRef, layoutOpen, () => setLayoutOpen(false));
+  useMenuKeyboard(themeRef, themeOpen, () => setThemeOpen(false));
   const focusSearchAfterClose = useRef(false);
   const commandInput = useRef<HTMLInputElement>(null);
-  const toggleDensity = useCallback(
-    () => setDensity((value) => (value === 'compact' ? 'comfortable' : 'compact')),
-    [],
-  );
-
-  useEffect(() => {
-    document.documentElement.dataset.density = density;
-    localStorage.setItem('nubra-density', density);
-  }, [density]);
 
   useEffect(() => {
     const closeLayout = (event: MouseEvent) => {
@@ -165,21 +145,7 @@ export default function Navbar({
         key: '',
         run: () => setLayout(layout.id),
       })),
-      {
-        id: 'shell-classic',
-        label: 'Use classic navigation',
-        detail: 'All views in the top navigation',
-        key: '',
-        run: () => onShellLayoutChange('classic'),
-      },
-      {
-        id: 'shell-workspace',
-        label: 'Use workspace navigation',
-        detail: 'Grouped views with the left rail',
-        key: '',
-        run: () => onShellLayoutChange('workspace'),
-      },
-      ...THEME_OPTIONS.map((option) => ({
+      ...EXPERIENCE_OPTIONS.map((option) => ({
         id: `theme-${option.id}`,
         label: `Use ${option.label} theme`,
         detail: option.detail,
@@ -194,7 +160,7 @@ export default function Navbar({
         run: toggleDensity,
       },
     ],
-    [paneId, setPaneView, setLayout, onThemeChange, onShellLayoutChange, density, toggleDensity],
+    [paneId, setPaneView, setLayout, onThemeChange, density, toggleDensity],
   );
   const filtered = commands.filter((command) =>
     `${command.label} ${command.detail}`.toLowerCase().includes(query.toLowerCase().trim()),
@@ -227,12 +193,8 @@ export default function Navbar({
 
   return (
     <>
-      <nav className={`classic-navbar ${shellLayout === 'workspace' ? 'is-workspace-shell' : ''}`}>
-        <span className="classic-brand" aria-label="bRODHa terminal">
-          <span className="classic-brand-mark">B</span>
-          <span className="classic-brand-name">RODHA</span>
-          <span className="classic-brand-product">PRO</span>
-        </span>
+      <nav className="classic-navbar">
+        <BrandMark className="classic-brand" />
         <div ref={searchRef} className="classic-search">
           <InstrumentSearch placeholder="Search symbol…" onSelect={onInstrumentSelect} />
           <kbd className="search-key">/</kbd>
@@ -283,39 +245,6 @@ export default function Navbar({
             </button>
             {layoutOpen && (
               <div className="classic-layout-menu" role="menu">
-                <div className="menu-label">Navigation</div>
-                <div className="shell-layout-choices">
-                  <button
-                    role="menuitemradio"
-                    aria-checked={shellLayout === 'classic'}
-                    className={`shell-layout-choice ${shellLayout === 'classic' ? 'is-active' : ''}`}
-                    onClick={() => {
-                      onShellLayoutChange('classic');
-                      setLayoutOpen(false);
-                    }}
-                  >
-                    <span className="shell-layout-preview preview-classic" />
-                    <span>
-                      <strong>Classic</strong>
-                      <small>Top navigation</small>
-                    </span>
-                  </button>
-                  <button
-                    role="menuitemradio"
-                    aria-checked={shellLayout === 'workspace'}
-                    className={`shell-layout-choice ${shellLayout === 'workspace' ? 'is-active' : ''}`}
-                    onClick={() => {
-                      onShellLayoutChange('workspace');
-                      setLayoutOpen(false);
-                    }}
-                  >
-                    <span className="shell-layout-preview preview-workspace" />
-                    <span>
-                      <strong>Workspace</strong>
-                      <small>Left rail</small>
-                    </span>
-                  </button>
-                </div>
                 <div className="menu-label">Pane arrangement</div>
                 <div className="grid grid-cols-3 gap-2">
                   {LAYOUT_OPTIONS.map((layout) => (
@@ -360,7 +289,7 @@ export default function Navbar({
             {themeOpen && (
               <div className="theme-menu" role="menu" aria-label="Appearance theme">
                 <div className="menu-label">Appearance</div>
-                {THEME_OPTIONS.map((option) => (
+                {EXPERIENCE_OPTIONS.map((option) => (
                   <button
                     key={option.id}
                     role="menuitemradio"

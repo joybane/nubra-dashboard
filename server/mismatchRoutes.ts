@@ -528,7 +528,10 @@ export function registerMismatchRoutes({
   }
 
   sync();
-  const syncTimer = setInterval(sync, 5_000);
+  // Short interval: sync() is cheap once a strategy is decided (an early-exit Set lookup per open
+  // basket), and this is the fallback for a leg that fills after order placement already called
+  // sync() and found it not yet eligible. Cut from 5s so a slow second leg doesn't visibly lag.
+  const syncTimer = setInterval(sync, 1_000);
   syncTimer.unref?.();
   let backfillTimer: ReturnType<typeof setInterval> | null = null;
   if (backfillEveryMs) {

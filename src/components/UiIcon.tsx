@@ -1,4 +1,19 @@
-export type IconName = 'trade' | 'strategy' | 'research' | 'monitor' | 'search' | 'layout' | 'sun' | 'moon' | 'logout' | 'command' | 'density' | 'expand' | 'restore' | 'reset' | 'close';
+export type IconName =
+  | 'trade'
+  | 'strategy'
+  | 'research'
+  | 'monitor'
+  | 'search'
+  | 'layout'
+  | 'sun'
+  | 'moon'
+  | 'logout'
+  | 'command'
+  | 'density'
+  | 'expand'
+  | 'restore'
+  | 'reset'
+  | 'close';
 const paths: Record<IconName, string> = {
   trade: 'M5 3v18M2 8h6v8H2zM12 3v18M9 5h6v7H9zM19 3v18M16 11h6v6h-6z',
   strategy: 'M4 17l5-5 4 3 7-9M15 6h5v5M3 21h18',
@@ -17,5 +32,19 @@ const paths: Record<IconName, string> = {
   close: 'M6 6l12 12M18 6L6 18',
 };
 export default function UiIcon({ name, size = 18 }: { name: IconName; size?: number }) {
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d={paths[name]} />
+    </svg>
+  );
 }

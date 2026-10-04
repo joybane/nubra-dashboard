@@ -3,6 +3,7 @@ import type { Instrument, InstrumentType } from '../types';
 import { getInstrumentType } from '../types';
 import { formatInstrumentName, instrumentSearchAlias } from '../lib/instrumentDisplay';
 import { acquireSearchWorker, type SearchWorkerHandle } from '../lib/searchWorkerClient';
+import UiIcon from './UiIcon';
 
 const POPULAR_INDICES: Instrument[] = [
   { stock_name: 'NIFTY 50', nubra_name: 'NIFTY', exchange: 'NSE', derivative_type: 'INDEX' },
@@ -210,13 +211,16 @@ export default function InstrumentSearch({
   const selectedIndex = Math.min(activeResult, Math.max(0, visibleResults.length - 1));
 
   useEffect(() => {
-    if (open) document.getElementById(`${resultsId}-${selectedIndex}`)?.scrollIntoView({ block: 'nearest' });
+    if (open)
+      document
+        .getElementById(`${resultsId}-${selectedIndex}`)
+        ?.scrollIntoView({ block: 'nearest' });
   }, [open, resultsId, selectedIndex]);
 
   return (
     <div className="relative w-full">
       <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] pointer-events-none text-sm">
-        ⌕
+        <UiIcon name="search" size={14} />
       </span>
       <input
         ref={inputRef}
@@ -226,7 +230,9 @@ export default function InstrumentSearch({
         aria-expanded={open}
         aria-controls={resultsId}
         aria-autocomplete="list"
-        aria-activedescendant={open && visibleResults.length ? `${resultsId}-${selectedIndex}` : undefined}
+        aria-activedescendant={
+          open && visibleResults.length ? `${resultsId}-${selectedIndex}` : undefined
+        }
         value={query}
         onChange={handleInput}
         onFocus={handleFocus}
@@ -235,10 +241,14 @@ export default function InstrumentSearch({
           if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
             e.preventDefault();
             if (!open) handleFocus();
-            setActiveResult((selectedIndex + (e.key === 'ArrowDown' ? 1 : -1) + visibleResults.length) % (visibleResults.length || 1));
+            setActiveResult(
+              (selectedIndex + (e.key === 'ArrowDown' ? 1 : -1) + visibleResults.length) %
+                (visibleResults.length || 1),
+            );
           }
           if (e.key === 'Enter' && open && visibleResults[selectedIndex]) {
-            e.preventDefault(); handleSelect(visibleResults[selectedIndex]);
+            e.preventDefault();
+            handleSelect(visibleResults[selectedIndex]);
           }
           if (e.key === 'Tab') setOpen(false);
         }}
@@ -275,49 +285,55 @@ export default function InstrumentSearch({
 
           {/* Results */}
           <div id={resultsId} role="listbox" aria-label="Instruments">
-          {!filtered.length ? (
-            <div className="px-4 py-5 text-center text-[var(--text-muted)] text-[13px]">
-              {searching ? 'Searching instruments…' : 'No matches. Try a symbol or a different category.'}
-            </div>
-          ) : (
-            visibleResults.map((item, i) => {
-              const name = formatInstrumentName(item);
-              const alias = instrumentSearchAlias(item);
-              const exch = (item.exchange || 'NSE').toUpperCase();
-              const type = getInstrumentType(item);
-              return (
-                <div
-                  key={i}
-                  id={`${resultsId}-${i}`}
-                  role="option"
-                  aria-selected={i === selectedIndex}
-                  onMouseMove={() => setActiveResult(i)}
-                  onClick={() => handleSelect(item)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSelect(item)}
-                  className={`flex items-center justify-between px-3.5 py-2.5 cursor-pointer border-b border-[var(--border)]/60 hover:bg-[var(--bg-hover)] transition-colors last:border-0 ${i === selectedIndex ? 'bg-[var(--bg-hover)]' : ''}`}
-                >
-                  <div className="flex items-center gap-2 flex-1 min-w-0">
-                    <span className="font-semibold text-[var(--text-primary)] text-[13px] truncate">
-                      {name}
-                    </span>
-                    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 shrink-0">
-                      {exch}
-                    </span>
+            {!filtered.length ? (
+              <div className="px-4 py-5 text-center text-[var(--text-muted)] text-[13px]">
+                {searching
+                  ? 'Searching instruments…'
+                  : 'No matches. Try a symbol or a different category.'}
+              </div>
+            ) : (
+              visibleResults.map((item, i) => {
+                const name = formatInstrumentName(item);
+                const alias = instrumentSearchAlias(item);
+                const exch = (item.exchange || 'NSE').toUpperCase();
+                const type = getInstrumentType(item);
+                return (
+                  <div
+                    key={i}
+                    id={`${resultsId}-${i}`}
+                    role="option"
+                    aria-selected={i === selectedIndex}
+                    onMouseMove={() => setActiveResult(i)}
+                    onClick={() => handleSelect(item)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleSelect(item)}
+                    className={`flex items-center justify-between px-3.5 py-2.5 cursor-pointer border-b border-[var(--border)]/60 hover:bg-[var(--bg-hover)] transition-colors last:border-0 ${i === selectedIndex ? 'bg-[var(--bg-hover)]' : ''}`}
+                  >
+                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                      <span className="font-semibold text-[var(--text-primary)] text-[13px] truncate">
+                        {name}
+                      </span>
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-400 shrink-0">
+                        {exch}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {alias && (
+                        <span className="text-[11px] text-[var(--text-muted)]">{alias}</span>
+                      )}
+                      <span
+                        className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${BADGE_COLORS[type]}`}
+                      >
+                        {type}
+                      </span>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {alias && <span className="text-[11px] text-[var(--text-muted)]">{alias}</span>}
-                    <span
-                      className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${BADGE_COLORS[type]}`}
-                    >
-                      {type}
-                    </span>
-                  </div>
-                </div>
-              );
-            })
-          )}
+                );
+              })
+            )}
           </div>
-          <div className="px-3 py-2 border-t border-[var(--border)] text-[11px] text-[var(--text-muted)]">↑ ↓ Navigate · Enter Select · Esc Close</div>
+          <div className="px-3 py-2 border-t border-[var(--border)] text-[11px] text-[var(--text-muted)]">
+            ↑ ↓ Navigate · Enter Select · Esc Close
+          </div>
         </div>
       )}
     </div>

@@ -190,3 +190,121 @@ test('an amendment writes only price, trigger and quantity', async () => {
     order_time: 1_234,
   });
 });
+
+// pnl ticks are buffered and written a second at a time; closeDb is what saves the tail on shutdown.
+test('pnl ticks reach disk on the timed flush and on close, unchanged and in order', async () => {
+  vi.useFakeTimers();
+  try {
+    const { initDb, dbInsertPnlTick, closeDb } = await loadDb();
+    initDb();
+    const tick = (ts: number) => ({
+      ts,
+      ref_id: 101,
+      ltp: 10_000 + ts,
+      qty: 65,
+      avg_price: 9_000,
+      unrealized_pnl: 1,
+      realized_pnl: 2,
+      total_pnl: 3,
+    });
+    const count = () => {
+      const reader = registerHandle(new Database(dbPath, { readonly: true }));
+      const n = (reader.prepare('SELECT COUNT(*) AS n FROM pnl_ticks').get() as { n: number }).n;
+      reader.close();
+      return n;
+    };
+
+    dbInsertPnlTick(tick(1));
+    dbInsertPnlTick(tick(2));
+    expect(count()).toBe(0); // still buffered
+    vi.advanceTimersByTime(1_000);
+    expect(count()).toBe(2);
+
+    dbInsertPnlTick(tick(3));
+    closeDb();
+    closeDb(); // idempotent: the exit hook calls it again after a signal already did
+
+    const reader = registerHandle(new Database(dbPath, { readonly: true }));
+    const rows = reader.prepare('SELECT ts, ltp FROM pnl_ticks ORDER BY id').all();
+    expect(rows).toEqual([
+      { ts: 1, ltp: 10_001 },
+      { ts: 2, ltp: 10_002 },
+      { ts: 3, ltp: 10_003 },
+    ]);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+function seedPnlTicks(file: string, stamps: number[]): void {
+  const raw = new Database(file);
+  try {
+    const ins = raw.prepare(
+      `INSERT INTO pnl_ticks (ts, ref_id, ltp, qty, avg_price, unrealized_pnl, realized_pnl, total_pnl)
+       VALUES (?, 101, ?, 65, 9000, 1, 2, 3)`,
+    );
+    raw.transaction(() => stamps.forEach((ts) => ins.run(ts, ts)))();
+  } finally {
+    raw.close();
+  }
+}
+
+function pnlRows(file: string): Array<{ id: number; ts: number; ltp: number }> {
+  const raw = new Database(file, { readonly: true });
+  try {
+    return raw.prepare('SELECT id, ts, ltp FROM pnl_ticks ORDER BY id').all() as never;
+  } finally {
+    raw.close();
+  }
+}
+
+test('archiving moves old pnl ticks, ids and values intact, and is a no-op the second time', async () => {
+  const { initDb, closeDb, dbArchivePnlTicks, PNL_ARCHIVE_PATH } = await loadDb();
+  initDb();
+  seedPnlTicks(dbPath, [100, 200, 300, 400]);
+
+  expect(dbArchivePnlTicks(250)).toMatchObject({ moved: 2, vacuumed: false });
+  expect(dbArchivePnlTicks(250).moved).toBe(0);
+  closeDb();
+
+  expect(pnlRows(dbPath)).toEqual([
+    { id: 3, ts: 300, ltp: 300 },
+    { id: 4, ts: 400, ltp: 400 },
+  ]);
+  expect(pnlRows(PNL_ARCHIVE_PATH)).toEqual([
+    { id: 1, ts: 100, ltp: 100 },
+    { id: 2, ts: 200, ltp: 200 },
+  ]);
+});
+
+test('archiving after a crash between copy and delete neither duplicates nor loses rows', async () => {
+  const { initDb, closeDb, dbArchivePnlTicks, PNL_ARCHIVE_PATH } = await loadDb();
+  initDb();
+  seedPnlTicks(dbPath, [100, 200, 300]);
+  dbArchivePnlTicks(150); // archives id 1 and creates the archive file
+  // Now simulate a run that crashed after committing its copy of id 2 but before the delete.
+  const raw = new Database(PNL_ARCHIVE_PATH);
+  raw.prepare(`INSERT INTO pnl_ticks VALUES (2, 200, 101, 200, 65, 9000, 1, 2, 3)`).run();
+  raw.close();
+
+  expect(dbArchivePnlTicks(250).moved).toBe(1);
+  closeDb();
+  expect(pnlRows(dbPath).map((r) => r.id)).toEqual([3]);
+  expect(pnlRows(PNL_ARCHIVE_PATH).map((r) => r.id)).toEqual([1, 2]);
+});
+
+test('the startup run vacuums once enough of paper.db is free, and the file shrinks', async () => {
+  const { initDb, closeDb, dbArchivePnlTicks } = await loadDb();
+  initDb();
+  seedPnlTicks(
+    dbPath,
+    Array.from({ length: 50_000 }, (_, i) => i + 1),
+  );
+  const before = dbArchivePnlTicks(0).bytesAfter; // nothing is older than 0
+
+  const run = dbArchivePnlTicks(Number.MAX_SAFE_INTEGER, { vacuumOverBytes: 1024 * 1024 });
+  closeDb();
+  expect(run.moved).toBe(50_000);
+  expect(run.vacuumed).toBe(true);
+  expect(run.bytesAfter).toBeLessThan(before / 4);
+});
