@@ -49,6 +49,7 @@ import {
   marketSession,
   clampSubMinuteStart,
 } from './lib/utils';
+import { chartDayKey, dayBaseline, type DayBaseline } from './lib/dayChange';
 
 const INTERVALS = ['1m', '2m', '3m', '5m', '10m', '15m', '30m', '1h', '1d', '1w', '1mt'] as const;
 /**
@@ -238,7 +239,8 @@ export default function CandleChart({ instrument, theme }: Props) {
   const allVolBarsRef = useRef<VolBar[]>([]);
   const earliestRef = useRef<Date | null>(null);
   const lastBarRef = useRef<OhlcBar | null>(null);
-  const dayOpenRef = useRef<number | null>(null);
+  // What the header's day change is measured from — see lib/dayChange.
+  const dayBaselineRef = useRef<DayBaseline | null>(null);
   const currentInstRef = useRef<Instrument | null>(null);
   const isLoadingRef = useRef(false);
   const countdownRef = useRef<number | null>(null);
@@ -701,7 +703,11 @@ export default function CandleChart({ instrument, theme }: Props) {
     candleRef.current?.update(candle as Parameters<typeof candleRef.current.update>[0]);
     lastBarRef.current = candle;
     upsertBar(allBarsRef.current, candle);
-    updatePriceDisplay(candle.close, dayOpenRef.current || candle.open);
+    // A tick from a new session (the open after an overnight-loaded chart) moves the baseline
+    // to the session that just ended.
+    if (!dayBaselineRef.current || chartDayKey(candle.time) !== dayBaselineRef.current.day)
+      dayBaselineRef.current = dayBaseline(allBarsRef.current);
+    updatePriceDisplay(candle.close, dayBaselineRef.current?.price ?? candle.open);
     setOhlc({ o: candle.open, h: candle.high, l: candle.low, c: candle.close, vol });
     updateCountdownPosition();
   }
@@ -865,7 +871,7 @@ export default function CandleChart({ instrument, theme }: Props) {
       allVolBarsRef.current = [];
       earliestRef.current = null;
       lastBarRef.current = null;
-      dayOpenRef.current = null;
+      dayBaselineRef.current = null;
       hasReachedEarliestRef.current = false;
       lastLoadTimeRef.current = 0;
       stopCountdown();
@@ -916,7 +922,7 @@ export default function CandleChart({ instrument, theme }: Props) {
         allVolBarsRef.current = cleanVolBars;
         earliestRef.current = start;
         lastBarRef.current = cleanBars[cleanBars.length - 1];
-        dayOpenRef.current = cleanBars[0].open;
+        dayBaselineRef.current = dayBaseline(cleanBars);
 
         candleRef.current.setData(
           cleanBars.map((b) => ({
@@ -949,7 +955,10 @@ export default function CandleChart({ instrument, theme }: Props) {
         theta.refresh();
         ivOverlay.refresh();
         startCountdown();
-        updatePriceDisplay(lastBarRef.current.close, dayOpenRef.current);
+        updatePriceDisplay(
+          lastBarRef.current.close,
+          dayBaselineRef.current?.price ?? lastBarRef.current.open,
+        );
         setOhlc({
           o: lastBarRef.current.open,
           h: lastBarRef.current.high,
@@ -985,7 +994,6 @@ export default function CandleChart({ instrument, theme }: Props) {
     const mergedVolBars = dedupeAndSortBars([...volBars, ...allVolBarsRef.current]);
     allBarsRef.current = mergedBars;
     allVolBarsRef.current = mergedVolBars;
-    if (mergedBars.length > 0) dayOpenRef.current = mergedBars[0].open;
     // Guarded because callers resume after an await — the pane may be gone by now.
     if (!isChartLive(chartRef.current)) return;
     candleRef.current?.setData(
@@ -1621,6 +1629,9 @@ export default function CandleChart({ instrument, theme }: Props) {
                 </>
               )}
             </div>
+            {oi.oiOn && oi.showTotalOi && oi.totalStatus && (
+              <div className="mt-1 text-[11px] text-[var(--text-muted)]">{oi.totalStatus}</div>
+            )}
           </div>
         )}
 

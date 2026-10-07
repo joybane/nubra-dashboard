@@ -221,6 +221,18 @@ function positionGreekSource(p: PaperPosition): 'CE' | 'PE' | null {
   return optType === 'CE' || optType === 'PE' ? optType : null;
 }
 
+/**
+ * Whether the position held its leg at chart time `t`: from the entry minute through the exit
+ * minute, the same window the P&L pane marks a leg to market. Outside it the position carries no
+ * greeks, so a closed leg stops counting and a re-entry on the same contract (one ref_id, two
+ * positions) is not counted twice.
+ */
+function positionHeldAt(p: PaperPosition, t: number): boolean {
+  const entry = p.entry_time ? nsToChartMinute(p.entry_time) : 0;
+  const exit = p.exit_time ? nsToChartMinute(p.exit_time) : 0;
+  return (!entry || t >= entry) && (!exit || t <= exit);
+}
+
 function parsePositionOption(p: PaperPosition): {
   symbol?: string;
   strike?: number;
@@ -635,6 +647,8 @@ export default function StrategyAnalysisView({
   );
   const [greeksLegFilter, setGreeksLegFilter] = useState<Set<string>>(new Set(['net']));
   const [lotSizeOverride, setLotSizeOverride] = useState<number | null>(null);
+  // Each leg's lot size as the option chain reports it (`ls`), keyed by ref_id.
+  const [legLotSizes, setLegLotSizes] = useState<Map<number, number>>(new Map());
   const [editingLotSize, setEditingLotSize] = useState(false);
 
   // ── Greeks chart refs ──
@@ -650,6 +664,9 @@ export default function StrategyAnalysisView({
     theta: { mid: 0, half: 1 },
     vega: { mid: 0, half: 1 },
   });
+  // Greeks pane badge text, keyed by each plotted line's exact last (normalized) value. Read by
+  // the right axis formatter in section 10, written by the Apply effect.
+  const greekBadgeTextRef = useRef<Map<number, string>>(new Map());
   const [greeksChartHeight, setGreeksChartHeight] = useState(150);
   const greeksTooltipRef = useRef<GreeksTooltipRef>(null);
   const [currentGreeksBySource, setCurrentGreeksBySource] = useState<
@@ -755,6 +772,32 @@ export default function StrategyAnalysisView({
   );
   allPositionsRef.current = allPositions;
   const underlying = useMemo(() => deriveUnderlying(allPositions), [allPositions]);
+  // Lot size per leg: the chain's own, so MCX legs are not divided by NIFTY's 65. The
+  // underlying's default only stands in until the chain answers (and for saved snapshots).
+  const fallbackLotSize = underlying ? (DEFAULT_LOT_SIZES[underlying] ?? 65) : 65;
+  const legLotSize = useCallback(
+    (p: PaperPosition) => legLotSizes.get(p.ref_id) || p.lot_size || fallbackLotSize,
+    [legLotSizes, fallbackLotSize],
+  );
+  // What "1 Lot" multiplies by: the user's override, else the strategy's own lot size.
+  const activeLotSize =
+    lotSizeOverride ?? (allPositions.length ? legLotSize(allPositions[0]) : fallbackLotSize);
+  /**
+   * Per-unit greek → this position's greek. Signed, so a short leg is negative in both modes,
+   * and scaled by the lots held, so 2 lots read twice 1 lot (as Nubra BT does). "1 Unit" is the
+   * per-unit greek × lots; "1 Lot" multiplies that by the lot size (the override when set).
+   */
+  const greekWeight = useCallback(
+    (p: PaperPosition) => {
+      const side = (p.order_side || '').includes('BUY') ? 1 : -1;
+      const lotSize = legLotSize(p);
+      const lots = (p.qty || 0) / lotSize;
+      return side * lots * (greeksMode === 'lot' ? (lotSizeOverride ?? lotSize) : 1);
+    },
+    [legLotSize, greeksMode, lotSizeOverride],
+  );
+  const greekWeightRef = useRef(greekWeight);
+  greekWeightRef.current = greekWeight;
   const underlyingExchange = useMemo(() => deriveExchange(allPositions), [allPositions]);
   const [mcxChartUnderlying, setMcxChartUnderlying] = useState<string | null>(null);
   const positionContractKey = useMemo(
@@ -936,6 +979,7 @@ export default function StrategyAnalysisView({
           { delta: number; gamma: number; theta: number; vega: number; iv: number }
         >();
 
+        const lotSizeUpdates = new Map<number, number>();
         let chainSpotPrice = 0;
         const ocFetches = [...expiries].map((expiry) =>
           fetch(`/api/optionchain/${ul}?expiry=${expiry}${ocExch}`)
@@ -951,6 +995,8 @@ export default function StrategyAnalysisView({
           for (const item of [...(chain.ce || []), ...(chain.pe || [])]) {
             const refId = Number(item.ref_id ?? 0);
             if (!refId || !refIds.has(refId)) continue;
+            const ls = Number(item.ls ?? item.lot_size ?? 0);
+            if (ls > 0) lotSizeUpdates.set(refId, ls);
             greekUpdates.set(refId, {
               delta: Number(item.delta ?? 0),
               gamma: Number(item.gamma ?? 0),
@@ -1033,6 +1079,13 @@ export default function StrategyAnalysisView({
           setLegGreeks((prev) => {
             const next = new Map(prev);
             for (const [k, v] of greekUpdates) next.set(k, v);
+            return next;
+          });
+        }
+        if (lotSizeUpdates.size > 0) {
+          setLegLotSizes((prev) => {
+            const next = new Map(prev);
+            for (const [k, v] of lotSizeUpdates) next.set(k, v);
             return next;
           });
         }
@@ -1737,74 +1790,72 @@ export default function StrategyAnalysisView({
 
   // Pins hold a bare timestamp and recompute their contents, so a pinned card can never end up
   // contradicting the chart behind it after a leg-filter or lot/unit change.
-  const buildPaneSnapshots = useCallback(
-    (t: number) => {
-      const cd = chartDataRef.current;
-      const timeStr = fmtChartTime(t);
+  const buildPaneSnapshots = useCallback((t: number) => {
+    const cd = chartDataRef.current;
+    const timeStr = fmtChartTime(t);
 
-      let spot = 0;
-      let ohlc: { o: number; h: number; l: number; c: number } | null = null;
-      const priceLegs: Array<{ name: string; color: string; value: number }> = [];
-      if (cd) {
-        const b = findLatestAt(cd.underlyingBars, t);
-        if (b) {
-          spot = b.close;
-          ohlc = { o: b.open, h: b.high, l: b.low, c: b.close };
-        }
-        for (const leg of legMetasRef.current) {
-          const d = findLatestAt(cd.legPriceData.get(leg.refId), t);
-          if (d) priceLegs.push({ name: leg.displayName, color: leg.color, value: d.value });
+    let spot = 0;
+    let ohlc: { o: number; h: number; l: number; c: number } | null = null;
+    const priceLegs: Array<{ name: string; color: string; value: number }> = [];
+    if (cd) {
+      const b = findLatestAt(cd.underlyingBars, t);
+      if (b) {
+        spot = b.close;
+        ohlc = { o: b.open, h: b.high, l: b.low, c: b.close };
+      }
+      for (const leg of legMetasRef.current) {
+        const d = findLatestAt(cd.legPriceData.get(leg.refId), t);
+        if (d) priceLegs.push({ name: leg.displayName, color: leg.color, value: d.value });
+      }
+    }
+
+    let totalPnl = 0;
+    const pnlLegs: Array<{ name: string; color: string; value: number }> = [];
+    if (cd) {
+      const p = findLatestAt(cd.basketPnlData, t);
+      if (p) totalPnl = p.value;
+      for (const leg of legMetasRef.current) {
+        const d = findLatestAt(cd.legPnlData.get(leg.refId), t);
+        if (d) pnlLegs.push({ name: leg.displayName, color: leg.color, value: d.value });
+      }
+    }
+
+    const tv: Record<string, Record<string, number>> = {};
+    for (const src of ['net', 'CE', 'PE'] as const)
+      tv[src] = { delta: 0, gamma: 0, theta: 0, vega: 0 };
+    if (cd) {
+      // Per position, not per leg: a re-entry on the same contract is a second position on
+      // the same ref_id, and each counts only while it was held.
+      for (const pos of allPositionsRef.current) {
+        if (!positionHeldAt(pos, t)) continue;
+        const pt = findLatestAt(cd.legGreeksHist.get(pos.ref_id), t);
+        if (!pt) continue;
+        // Through the ref: the hover handler keeps the copy of this function it captured
+        // when the panes were built, so a Unit/Lot switch must still reach it.
+        const weight = greekWeightRef.current(pos);
+        const src = positionGreekSource(pos);
+        tv.net.delta += pt.delta * weight;
+        tv.net.gamma += pt.gamma * weight;
+        tv.net.theta += pt.theta * weight;
+        tv.net.vega += pt.vega * weight;
+        if (src) {
+          tv[src].delta += pt.delta * weight;
+          tv[src].gamma += pt.gamma * weight;
+          tv[src].theta += pt.theta * weight;
+          tv[src].vega += pt.vega * weight;
         }
       }
+    }
+    const f = greekFactorsRef.current['delta'] || { mid: 0, half: 1 };
+    const greekNorm = f.half ? (tv.net.delta - f.mid) / f.half : 0;
 
-      let totalPnl = 0;
-      const pnlLegs: Array<{ name: string; color: string; value: number }> = [];
-      if (cd) {
-        const p = findLatestAt(cd.basketPnlData, t);
-        if (p) totalPnl = p.value;
-        for (const leg of legMetasRef.current) {
-          const d = findLatestAt(cd.legPnlData.get(leg.refId), t);
-          if (d) pnlLegs.push({ name: leg.displayName, color: leg.color, value: d.value });
-        }
-      }
-
-      const tv: Record<string, Record<string, number>> = {};
-      for (const src of ['net', 'CE', 'PE'] as const)
-        tv[src] = { delta: 0, gamma: 0, theta: 0, vega: 0 };
-      if (cd) {
-        for (const leg of legMetasRef.current) {
-          const pt = findLatestAt(cd.legGreeksHist.get(leg.refId), t);
-          if (!pt) continue;
-          const mult = lotSizeOverride || 1;
-          const pos = allPositionsRef.current.find((p) => p.ref_id === leg.refId);
-          const side = pos ? (pos.order_side?.includes('BUY') ? 1 : -1) : 0;
-          const qty = pos ? pos.qty || 0 : 0;
-          const weight = greeksMode === 'lot' ? qty : side * mult;
-          const src = positionGreekSource(pos || ({} as any));
-          tv.net.delta += pt.delta * weight;
-          tv.net.gamma += pt.gamma * weight;
-          tv.net.theta += pt.theta * weight;
-          tv.net.vega += pt.vega * weight;
-          if (src) {
-            tv[src].delta += pt.delta * weight;
-            tv[src].gamma += pt.gamma * weight;
-            tv[src].theta += pt.theta * weight;
-            tv[src].vega += pt.vega * weight;
-          }
-        }
-      }
-      const f = greekFactorsRef.current['delta'] || { mid: 0, half: 1 };
-      const greekNorm = f.half ? (tv.net.delta - f.mid) / f.half : 0;
-
-      return {
-        timeStr,
-        price: { ohlc, legs: priceLegs, spot },
-        pnl: { legs: pnlLegs, total: totalPnl },
-        greeks: { values: tv, greekNorm },
-      };
-    },
-    [greeksMode, lotSizeOverride],
-  );
+    return {
+      timeStr,
+      price: { ohlc, legs: priceLegs, spot },
+      pnl: { legs: pnlLegs, total: totalPnl },
+      greeks: { values: tv, greekNorm },
+    };
+  }, []);
   const buildPaneSnapshotsRef = useRef(buildPaneSnapshots);
   buildPaneSnapshotsRef.current = buildPaneSnapshots;
 
@@ -1815,9 +1866,9 @@ export default function StrategyAnalysisView({
 
   const pinnedSnapshots = useMemo(
     () => pins.map((pin) => ({ pin, snap: buildPaneSnapshots(pin.time) })),
-    // chartData/greeksDataRevision are what make a snapshot's inputs change.
+    // chartData/greeksDataRevision/greekWeight are what make a snapshot's inputs change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [pins, buildPaneSnapshots, chartData, greeksDataRevision, legGreeks],
+    [pins, buildPaneSnapshots, chartData, greeksDataRevision, legGreeks, greekWeight],
   );
 
   // ── 4. Chart scroll & crosshair sync ──
@@ -2410,9 +2461,12 @@ export default function StrategyAnalysisView({
         number,
         { delta: number; gamma: number; theta: number; vega: number; iv: number }
       >();
+      const lotSizes = new Map<number, number>();
       for (const item of [...(data.ce || []), ...(data.pe || [])]) {
         const refId = Number(item.ref_id ?? item.refId ?? 0);
         if (!refId || !ids.has(refId)) continue;
+        const ls = Number(item.ls ?? item.lot_size ?? 0);
+        if (ls > 0) lotSizes.set(refId, ls);
         const delta = Number(item.delta ?? 0);
         const gamma = Number(item.gamma ?? 0);
         const theta = Number(item.theta ?? 0);
@@ -2421,6 +2475,18 @@ export default function StrategyAnalysisView({
         if (delta !== 0 || gamma !== 0 || theta !== 0 || vega !== 0) {
           updates.set(refId, { delta, gamma, theta, vega, iv });
         }
+      }
+      if (lotSizes.size > 0) {
+        // Only a change re-renders; the feed repeats the same lot size on every tick.
+        setLegLotSizes((prev) => {
+          let next: Map<number, number> | null = null;
+          for (const [k, v] of lotSizes) {
+            if (prev.get(k) === v) continue;
+            next ??= new Map(prev);
+            next.set(k, v);
+          }
+          return next ?? prev;
+        });
       }
       if (updates.size > 0) {
         const t = nowChartTime();
@@ -2461,18 +2527,29 @@ export default function StrategyAnalysisView({
     const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
     greeksSeriesRef.current = {};
     // All 4 greeks are min-max normalized to a shared [-1,1] range before setData (see the
-    // "Apply Greeks data" effect below), so they can plot together on one visible axis. That
-    // axis's tick labels take the format of whichever series on it has the lowest z-order —
-    // this invisible, dataless anchor series claims that slot with plain numbers, so the axis
-    // reads as a generic reference scale instead of being denormalized into one greek's units.
-    // The colored last-value badges are unaffected — those use each series' own priceFormat.
+    // "Apply Greeks data" effect below), so they can plot together on one visible axis.
+    //
+    // lightweight-charts formats EVERY label on a scale (ticks, crosshair, and each series'
+    // last-value badge) with one formatter: the first series on that scale. That is this anchor.
+    // Each series' own priceFormat is never used for its badge, which is how the badges came to
+    // show the bare normalized number (a short PE reading "Gamma 0.88"). So the anchor formatter
+    // recognises a badge by its price: the Apply effect records each plotted line's exact last
+    // value with that greek's real, de-normalized text, and gives every line a distinct last value
+    // so no two can collide. Anything else (ticks, crosshair) is a plain number, so the axis still
+    // reads as a generic reference scale. Putting each greek on its own overlay scale was tried
+    // instead: overlay badges are drawn on the left axis as well, which this pane keeps visible
+    // only to line its gutter up with the panes above.
     chart
       .addSeries(LineSeries, {
         priceScaleId: 'right',
         lastValueVisible: false,
         priceLineVisible: false,
         visible: false,
-        priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
+        priceFormat: {
+          type: 'custom',
+          minMove: 0.01,
+          formatter: (price: number) => greekBadgeTextRef.current.get(price) ?? price.toFixed(2),
+        },
       })
       .setData([]);
     for (const src of GREEK_SOURCES) {
@@ -2523,27 +2600,35 @@ export default function StrategyAnalysisView({
   useEffect(() => {
     if (!chartData || !greeksChartRef.current || !greeksVisible) return;
     const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
-    const activeLotSize =
-      lotSizeOverride ?? (underlying ? (DEFAULT_LOT_SIZES[underlying] ?? 65) : 65);
-    const multiplier = greeksMode === 'lot' ? activeLotSize : 1;
 
+    // Sums the positions at every instant any of their legs has a point, each leg carried forward
+    // from its latest point at or before that instant: the same reading the hover tooltip takes
+    // (findLatestAt). Summing only exact-time matches let a minute in which one leg alone ticked
+    // publish that one leg as the "net". A position counts only while it was held.
     const computeByTime = (positions: PaperPosition[]) => {
       const byTime = new Map<
         number,
         { delta: number; gamma: number; theta: number; vega: number }
       >();
-      for (const p of positions) {
-        const data = chartData.legGreeksHist.get(p.ref_id);
-        if (!data) continue;
-        const sign = (p.order_side || '').includes('BUY') ? 1 : -1;
-        for (const pt of data) {
-          const ex = byTime.get(pt.time) || { delta: 0, gamma: 0, theta: 0, vega: 0 };
-          ex.delta += pt.delta * sign * multiplier;
-          ex.gamma += pt.gamma * sign * multiplier;
-          ex.theta += pt.theta * sign * multiplier;
-          ex.vega += pt.vega * sign * multiplier;
-          byTime.set(pt.time, ex);
-        }
+      const legs = positions
+        .map((p) => ({ p, data: chartData.legGreeksHist.get(p.ref_id) ?? [], w: greekWeight(p) }))
+        .filter((l) => l.data.length > 0);
+      const times = [...new Set(legs.flatMap((l) => l.data.map((pt) => pt.time)))].sort(
+        (a, b) => a - b,
+      );
+      const cursor = legs.map(() => -1);
+      for (const t of times) {
+        const ex = { delta: 0, gamma: 0, theta: 0, vega: 0 };
+        legs.forEach((l, i) => {
+          while (cursor[i] + 1 < l.data.length && l.data[cursor[i] + 1].time <= t) cursor[i]++;
+          if (cursor[i] < 0 || !positionHeldAt(l.p, t)) return;
+          const pt = l.data[cursor[i]];
+          ex.delta += pt.delta * l.w;
+          ex.gamma += pt.gamma * l.w;
+          ex.theta += pt.theta * l.w;
+          ex.vega += pt.vega * l.w;
+        });
+        byTime.set(t, ex);
       }
       return byTime;
     };
@@ -2619,17 +2704,41 @@ export default function StrategyAnalysisView({
     // Same full-session grid as the P&L pane so greeks time-align with the other charts (whitespace pad).
     const grid = chartData.underlyingBars.map((b) => b.time as number);
 
+    // Build every line, and record each one's badge text for the right axis formatter (section 10)
+    // before any setData, so the axis never formats against a half-updated table. Each line's last
+    // point is nudged by a distinct few billionths of the normalized range (invisible) so that two
+    // lines ending at the same height, both at the top of their range say, still map to their own
+    // greek's text.
+    const plotted = new Map<string, ReturnType<typeof fillGreeksToGrid>>();
+    const badgeText = new Map<number, string>();
     for (const src of GREEK_SOURCES) {
       const byTime = sourceData[src];
-      const times = [...byTime.keys()].sort((a, b) => a - b);
-      const isActive = greeksLegFilter.has(src);
+      if (!greeksLegFilter.has(src) || byTime.size === 0) continue;
+      for (const k of greekKeys) {
+        if (!selectedGreeks.has(k)) continue;
+        const data = fillGreeksToGrid(grid, byTime, k, factors[k]);
+        let last = data.length - 1;
+        while (last >= 0 && data[last].value == null) last--;
+        if (last >= 0) {
+          const v = data[last].value;
+          const real = v * factors[k].half + factors[k].mid;
+          const nudged = v + (plotted.size + 1) * 1e-9;
+          data[last] = { ...data[last], value: nudged };
+          badgeText.set(nudged, k === 'gamma' ? real.toFixed(4) : real.toFixed(2));
+        }
+        plotted.set(`${src}_${k}`, data);
+      }
+    }
+    greekBadgeTextRef.current = badgeText;
+
+    for (const src of GREEK_SOURCES) {
       for (const k of greekKeys) {
         const key = `${src}_${k}`;
         const s = greeksSeriesRef.current[key];
         if (!s) continue;
-        if (isActive && selectedGreeks.has(k) && times.length > 0) {
-          const f = factors[k];
-          s.setData(fillGreeksToGrid(grid, byTime, k, f) as any);
+        const data = plotted.get(key);
+        if (data) {
+          s.setData(data as any);
           s.applyOptions({ visible: true });
         } else {
           s.setData([]);
@@ -2651,16 +2760,7 @@ export default function StrategyAnalysisView({
     } else {
       requestAnimationFrame(() => greeksChartRef.current?.timeScale().fitContent());
     }
-  }, [
-    chartData,
-    greeksDataRevision,
-    greeksMode,
-    lotSizeOverride,
-    selectedGreeks,
-    greeksVisible,
-    underlying,
-    greeksLegFilter,
-  ]);
+  }, [chartData, greeksDataRevision, greekWeight, selectedGreeks, greeksVisible, greeksLegFilter]);
 
   const toggleVis = useCallback((key: string) => {
     setVisibility((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -3182,9 +3282,6 @@ export default function StrategyAnalysisView({
           </button>
           {greeksPopupOpen &&
             (() => {
-              const activeLotSize =
-                lotSizeOverride ?? (underlying ? (DEFAULT_LOT_SIZES[underlying] ?? 65) : 65);
-              const multiplier = greeksMode === 'lot' ? activeLotSize : 1;
               const greekKeys = ['delta', 'gamma', 'theta', 'vega'] as const;
               const activeGreeks = greekKeys.filter((k) => selectedGreeks.has(k));
               const netGreeks = currentGreeksBySource.net;
@@ -3394,7 +3491,9 @@ export default function StrategyAnalysisView({
                         {allPositions.map((p) => {
                           const g = legGreeks.get(p.ref_id);
                           const side = (p.order_side || '').includes('BUY') ? 'BUY' : 'SELL';
-                          const sign = side === 'BUY' ? 1 : -1;
+                          // A closed leg holds nothing now, so it shows no greeks.
+                          const closed = !!p.exit_time;
+                          const weight = greekWeight(p);
                           const meta = legMetas.find((l) => l.refId === p.ref_id);
                           return (
                             <React.Fragment key={p.ref_id}>
@@ -3413,8 +3512,17 @@ export default function StrategyAnalysisView({
                                 {p.display_name || p.zanskar_name || p.ref_id}
                               </span>
                               {activeGreeks.map((k) => {
+                                if (closed)
+                                  return (
+                                    <span
+                                      key={k}
+                                      className="py-0.5 text-right tabular-nums text-[var(--text-muted)]"
+                                    >
+                                      —
+                                    </span>
+                                  );
                                 const raw = g ? g[k] : 0;
-                                const val = raw * sign * multiplier;
+                                const val = raw * weight;
                                 return (
                                   <span
                                     key={k}

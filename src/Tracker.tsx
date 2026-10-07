@@ -14,6 +14,7 @@ import { GreekButton } from './components/GreekControls';
 import { bindGreekCrosshair } from './lib/greekTooltip';
 import { fetchRange, nubraType } from './CandleChart';
 import { isChartLive, removeChart } from './lib/chartLifecycle';
+import { chartDayKey, dayBaseline, type DayBaseline } from './lib/dayChange';
 import type { Instrument, OhlcBar, OhlcvData, Theme, WsMessage } from './types';
 import { getSymbol } from './types';
 import {
@@ -158,15 +159,21 @@ export default function Tracker({ instrument, theme }: Props) {
   const allBarsRef = useRef<OhlcBar[]>([]);
   const minuteBarsRef = useRef<OhlcBar[]>([]);
   const secondBarsRef = useRef<OhlcBar[]>([]);
+  // Fixed per load: '1s' when today's session loaded at 1s (stitched onto older 1m days), else
+  // '1m'. It never switches with the view — see the note in load().
   const activeResRef = useRef<Resolution>('1m');
-  const switchingRef = useRef(false);
   const currentInstRef = useRef<Instrument | null>(null);
   const earliestRef = useRef<Date | null>(null);
-  const dayOpenRef = useRef<number | null>(null);
+  // What the header's day change is measured from — see lib/dayChange.
+  const dayBaselineRef = useRef<DayBaseline | null>(null);
   const isLoadingRef = useRef(false);
   const symRef = useRef('');
+  // showLatest() was called while the chart had no width; redo it on first size.
+  const latestPendingRef = useRef(false);
 
   const [loading, setLoading] = useState<string | null>('Loading…');
+  // The live (last) bar is off screen — shows the jump-to-now button.
+  const [awayFromLive, setAwayFromLive] = useState(false);
   // The chart as state (not only a ref) so the navigator re-binds once it exists: a child's
   // effects run before this component's, when `chartRef` is still empty.
   const [chartApi, setChartApi] = useState<IChartApi | null>(null);
@@ -246,26 +253,21 @@ export default function Tracker({ instrument, theme }: Props) {
       const el = containerRef.current;
       if (!el) return;
       chart.resize(el.clientWidth, el.clientHeight);
+      if (latestPendingRef.current && el.clientWidth > 0) showLatest();
     });
     observer.observe(containerRef.current);
 
     chart.timeScale().subscribeVisibleLogicalRangeChange(async (range) => {
+      if (range) setAwayFromLive(range.to < allBarsRef.current.length - 1);
       if (!range || isLoadingRef.current || !earliestRef.current) return;
       if (range.from > 10) return;
       await loadMore();
     });
-    chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-      handleResolutionRange(range);
-      scheduleTickWindow();
-    });
+    chart.timeScale().subscribeVisibleTimeRangeChange(() => scheduleTickWindow());
 
-    const onDblClick = () => {
-      const len = allBarsRef.current.length;
-      if (len)
-        chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, len - 120), to: len + 5 });
-      line.priceScale().applyOptions({ autoScale: true });
-    };
-    containerRef.current.addEventListener('dblclick', onDblClick);
+    const container = containerRef.current;
+    const onDblClick = () => showLatest();
+    container.addEventListener('dblclick', onDblClick);
 
     // ── Crosshair tooltip: NIFTY price + every visible greek series at the cursor ─
     const unbindCrosshair =
@@ -285,7 +287,7 @@ export default function Tracker({ instrument, theme }: Props) {
     return () => {
       setChartApi(null);
       if (tickTimerRef.current != null) clearTimeout(tickTimerRef.current);
-      containerRef.current?.removeEventListener('dblclick', onDblClick);
+      container.removeEventListener('dblclick', onDblClick);
       observer.disconnect();
       unbindCrosshair();
       removeChart(chart);
@@ -335,73 +337,10 @@ export default function Tracker({ instrument, theme }: Props) {
     >[0];
   }
 
-  /** True only when BOTH ends of the range fall on today — never a past day, never spilling
-   * into a past day. `secondBarsRef` holds nothing but today's ticks, so this is exactly the
-   * condition under which showing 1s resolution is possible at all. */
-  function rangeWithinToday(from: number, to: number): boolean {
-    const today = new Date(Date.now() + IST_OFFSET * 1000).toISOString().slice(0, 10);
-    const fromDay = new Date(from * 1000).toISOString().slice(0, 10);
-    const toDay = new Date(to * 1000).toISOString().slice(0, 10);
-    return fromDay === today && toDay === today;
-  }
-
   function refreshGreekGrid() {
     vega.refresh();
     theta.refresh();
     iv.refresh();
-  }
-
-  function setActiveResolution(res: Resolution, visibleRange?: { from: unknown; to: unknown }) {
-    const bars =
-      res === '1s' && secondBarsRef.current.length ? secondBarsRef.current : minuteBarsRef.current;
-    if (!bars.length || activeResRef.current === res) return;
-    // This now fires for a plain zoom/pan (not just crossing into/out of today), so it can
-    // land on the same request-animation-frame tick the pane's own teardown is scheduled on
-    // if the view closes mid-gesture. `setData`/`setVisibleRange` on a chart past that point
-    // throw from inside the library rather than from this file's own try/catch.
-    if (!isChartLive(chartRef.current) || !lineRef.current) return;
-    switchingRef.current = true;
-    activeResRef.current = res;
-    allBarsRef.current = bars;
-    lineRef.current?.setData(toLine(bars));
-    // Force a rescale: the 1s and 1m datasets cover very different price ranges (a
-    // session's worth of tick noise vs. a week of daily swings), and switching between
-    // them must not leave the price axis frozen at whichever range was current before —
-    // see the identical note in `load()`, which the resolution switch shares the bug with.
-    lineRef.current?.priceScale().applyOptions({ autoScale: true });
-    refreshGreekGrid();
-    if (visibleRange && chartRef.current) {
-      requestAnimationFrame(() => {
-        try {
-          if (isChartLive(chartRef.current))
-            chartRef.current?.timeScale().setVisibleRange(visibleRange as any);
-        } catch {
-          /* ignore */
-        }
-        switchingRef.current = false;
-      });
-    } else {
-      switchingRef.current = false;
-    }
-  }
-
-  function handleResolutionRange(range: { from: unknown; to: unknown } | null) {
-    if (!range || switchingRef.current || !minuteBarsRef.current.length) return;
-    const from = Number(range.from);
-    const to = Number(range.to);
-    if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return;
-    if (!secondBarsRef.current.length) return; // no 1s data loaded — nothing to switch to
-    // Resolution follows the CALENDAR DAY the view is showing, not how many hours are on
-    // screen: today's whole session (09:15–15:30, well past the old 2-hour cutoff this
-    // replaced) has real per-second data, so zooming out to see it from the open must not
-    // fall back to 1-minute bars. Only a range that actually reaches a past day — where
-    // `secondBarsRef` has nothing — has any reason to.
-    const withinToday = rangeWithinToday(from, to);
-    if (activeResRef.current === '1s' && !withinToday) {
-      setActiveResolution('1m', range);
-    } else if (activeResRef.current === '1m' && withinToday) {
-      setActiveResolution('1s', range);
-    }
   }
 
   /**
@@ -421,7 +360,22 @@ export default function Tracker({ instrument, theme }: Props) {
         return;
       }
       if (!range) return;
-      const fromMs = (Number(range.from) - IST_OFFSET) * 1000;
+      // Only today's section is 1s; a view that also shows yesterday's close at its left edge
+      // would otherwise measure ~18 h (overnight included) and never get per-second greeks.
+      const bars = allBarsRef.current;
+      const midnight =
+        Date.parse(
+          `${new Date(Number(bars[bars.length - 1]?.time) * 1000).toISOString().slice(0, 10)}T00:00:00Z`,
+        ) / 1000; // IST baked in
+      let lo = 0,
+        hi = bars.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (Number(bars[mid].time) < midnight) lo = mid + 1;
+        else hi = mid;
+      }
+      if (lo >= bars.length) return;
+      const fromMs = (Math.max(Number(range.from), Number(bars[lo].time)) - IST_OFFSET) * 1000;
       const toMs = (Number(range.to) - IST_OFFSET) * 1000;
       if (!(toMs > fromMs) || toMs - fromMs > TICK_WINDOW_MAX_MS) return;
       for (const g of tickGreeksRef.current)
@@ -433,6 +387,46 @@ export default function Tracker({ instrument, theme }: Props) {
   useEffect(() => {
     if (vega.on || theta.on) scheduleTickWindow();
   }, [vega.on, theta.on]);
+
+  /**
+   * Jump to the live end, like TradingView's "scroll to realtime": the last ~90 min of today's 1s
+   * session (or the last 120 × 1m when today has no 1s data), price axis re-fitted.
+   *
+   * The window never reaches back past today's open. Early in the session the 1s section is
+   * shorter than TICK_VIEW_BARS and the bars before it are earlier days' 1m — a plain tail would
+   * open on a week-wide view whose centre (which the navigator strip follows) is some past day.
+   */
+  function showLatest() {
+    const chart = chartRef.current;
+    if (!isChartLive(chart) || !lineRef.current) return;
+    // A zero-width chart (the pane not laid out yet, or mounted in a hidden tab) drops the range
+    // below, and the view then shows wherever the library's own fit lands. Redo it on first size.
+    if (!containerRef.current?.clientWidth) {
+      latestPendingRef.current = true;
+      return;
+    }
+    latestPendingRef.current = false;
+    const bars = allBarsRef.current;
+    const len = bars.length;
+    if (!len) return;
+    let from = Math.max(0, len - (activeResRef.current === '1s' ? TICK_VIEW_BARS : 120));
+    if (activeResRef.current === '1s') {
+      const lastDay = new Date(Number(bars[len - 1].time) * 1000).toISOString().slice(0, 10);
+      let dayStart = len - 1;
+      while (
+        dayStart > from &&
+        new Date(Number(bars[dayStart - 1].time) * 1000).toISOString().slice(0, 10) === lastDay
+      )
+        dayStart--;
+      from = dayStart;
+    }
+    try {
+      chart!.timeScale().setVisibleLogicalRange({ from, to: len + 5 });
+      lineRef.current.priceScale().applyOptions({ autoScale: true });
+    } catch {
+      /* chart removed */
+    }
+  }
 
   function upsertLastBar(bars: OhlcBar[], bar: OhlcBar): OhlcBar {
     const last = bars[bars.length - 1];
@@ -503,7 +497,9 @@ export default function Tracker({ instrument, theme }: Props) {
       lineRef.current?.update({ time: activeBar.time, value: activeBar.close } as Parameters<
         NonNullable<typeof lineRef.current>['update']
       >[0]);
-      updatePrice(close, dayOpenRef.current);
+      if (!dayBaselineRef.current || chartDayKey(minuteTime) !== dayBaselineRef.current.day)
+        dayBaselineRef.current = dayBaseline(minuteBarsRef.current);
+      updatePrice(close, dayBaselineRef.current?.price ?? null);
       // 1-second chart time; never decrease — lightweight-charts update() requires
       // non-decreasing time, so out-of-order/same-second ticks overwrite the last point.
       // Keep allBarsRef (the grid the greek overlay snaps to) in sync with the live tail.
@@ -529,9 +525,8 @@ export default function Tracker({ instrument, theme }: Props) {
     minuteBarsRef.current = [];
     secondBarsRef.current = [];
     activeResRef.current = '1m';
-    switchingRef.current = false;
     earliestRef.current = null;
-    dayOpenRef.current = null;
+    dayBaselineRef.current = null;
     setPriceDisplay(null);
     setLoading('Loading historical data…');
 
@@ -566,25 +561,28 @@ export default function Tracker({ instrument, theme }: Props) {
       // to a removed chart throws a frame later from inside lightweight-charts.
       if (!isChartLive(chartRef.current) || !lineRef.current) return;
 
+      // The chart shows this one stitched set for the whole visit — today at 1s, older days
+      // at 1m — and never swaps datasets as the view moves. It used to drop to the 1m set
+      // whenever the view touched a past day: that re-laid the chart out (today shrinks 60×
+      // in bars), so a scroll near the day boundary jumped and rescaled mid-gesture, and the
+      // swap's autoScale reset mid-drag crashed the library's price-scale pan.
       minuteBarsRef.current = bars;
       secondBarsRef.current = secondTail ? combined : [];
       activeResRef.current = secondTail ? '1s' : '1m';
       allBarsRef.current = secondTail ? secondBarsRef.current : minuteBarsRef.current;
       earliestRef.current = start;
-      dayOpenRef.current = allBarsRef.current[0].open;
+      dayBaselineRef.current = dayBaseline(minuteBarsRef.current);
       lineRef.current.setData(toLine(allBarsRef.current));
 
-      const len = allBarsRef.current.length;
-      const tail = secondTail ? TICK_VIEW_BARS : 120; // ~90 min at 1s, else last 120 × 1m
-      chartRef.current
-        .timeScale()
-        .setVisibleLogicalRange({ from: Math.max(0, len - tail), to: len + 5 });
-      // Force a rescale: switching scripts (e.g. NIFTY→BANKNIFTY) must not leave the
-      // price axis frozen at the previous instrument's range, which clips the new line.
-      lineRef.current.priceScale().applyOptions({ autoScale: true });
+      // Opens on the live end. Its autoScale re-fit also matters on a script switch (e.g.
+      // NIFTY→BANKNIFTY): the price axis must not stay frozen at the previous range.
+      showLatest();
       setLoading(null);
       setNavVersion((v) => v + 1);
-      updatePrice(allBarsRef.current[allBarsRef.current.length - 1].close, dayOpenRef.current);
+      updatePrice(
+        allBarsRef.current[allBarsRef.current.length - 1].close,
+        dayBaselineRef.current?.price ?? null,
+      );
 
       subscribeChart({ indexes: [sym] }, TRACK_IV, tracked.exchange || 'NSE');
     } catch (err: unknown) {
@@ -647,7 +645,7 @@ export default function Tracker({ instrument, theme }: Props) {
         )}
 
         <span className="text-[10px] text-[var(--text-muted)] ml-1">
-          line · auto 1m/1s · live tick
+          line · 1s today, 1m history · live tick
         </span>
 
         <div className="ml-auto flex items-center gap-2">
@@ -665,6 +663,24 @@ export default function Tracker({ instrument, theme }: Props) {
           className="absolute z-30 hidden pointer-events-none rounded-md border border-[var(--border)] bg-[var(--bg-card)] px-2.5 py-2 shadow-2xl"
           style={{ minWidth: 120 }}
         />
+        {awayFromLive && !loading && (
+          <button
+            type="button"
+            onClick={showLatest}
+            title="Go to now (double-click the chart does the same)"
+            className="absolute z-20 bottom-9 right-[84px] w-7 h-7 flex items-center justify-center rounded-md border border-[var(--border)] bg-[var(--bg-card)] text-[var(--text-secondary)] shadow-lg hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path
+                d="M3 3l4 4-4 4M8 3l4 4-4 4"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+        )}
         {loading && (
           <div className="absolute inset-0 flex items-center justify-center text-[var(--text-muted)] pointer-events-none">
             {loading}

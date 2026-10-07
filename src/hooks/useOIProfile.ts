@@ -59,6 +59,8 @@ export interface OIProfileApi {
   /** Mirrors showTotalOi for use inside listeners registered once at chart-init time
    * (e.g. subscribeCrosshairMove) — those closures never see a later render's state. */
   showTotalOiRef: React.RefObject<boolean>;
+  /** Why Total has nothing on screen (loading, failed, no data); null once it is drawn. */
+  totalStatus: string | null;
   /** Per-minute call/put totals behind the Total histogram, keyed by chart-time. */
   oiTotalDetailRef: React.RefObject<Map<number, { ce: number; pe: number }>>;
 }
@@ -109,6 +111,10 @@ export function useOIProfile({
     ce: new Map(),
     pe: new Map(),
   });
+  // Every contract in the selected expiries, for the Total histogram. oiSymbolMapRef keeps one
+  // symbol per strike (the strike-profile renderer's lookup), so with two expiries it would sum
+  // only the first expiry's contracts. `oi`/`prevOi` stand in where a contract has no 1m prints.
+  const oiLegsRef = useRef<{ symbol: string; side: 'ce' | 'pe'; oi: number; prevOi: number }[]>([]);
   // Per-minute call/put totals behind the net histogram, keyed by the same chart-time
   // the series points use — lets the hover box break the net figure back into its two legs.
   const oiTotalDetailRef = useRef<Map<number, { ce: number; pe: number }>>(new Map());
@@ -129,6 +135,7 @@ export function useOIProfile({
   const [oiMode, setOiMode] = useState<'oi' | 'oi_change'>('oi');
   const [showStrikeProfile, setShowStrikeProfile] = useState(true);
   const [showTotalOi, setShowTotalOi] = useState(false);
+  const [totalStatus, setTotalStatus] = useState<string | null>(null);
   const [showCalls, setShowCalls] = useState(true);
   const [showPuts, setShowPuts] = useState(true);
   const [oiFromTime, setOiFromTime] = useState('');
@@ -351,6 +358,7 @@ export function useOIProfile({
     const pePrevMap: Record<number, number> = {};
     const ceSymMap = new Map<number, string>();
     const peSymMap = new Map<number, string>();
+    const legs: typeof oiLegsRef.current = [];
 
     const results = await Promise.all(
       expiries.map(async (exp) => {
@@ -375,6 +383,8 @@ export function useOIProfile({
         cePrevMap[sp] = (cePrevMap[sp] || 0) + (Number(ce.prev_oi) || 0);
         if (ce.symbol && !ceSymMap.has(Number(ce.sp)))
           ceSymMap.set(Number(ce.sp), String(ce.symbol));
+        if (ce.symbol)
+          legs.push({ symbol: String(ce.symbol), side: 'ce', oi, prevOi: Number(ce.prev_oi) || 0 });
       }
       for (const pe of data.chain.pe || []) {
         const sp = normalizeStrike(Number(pe.sp));
@@ -383,9 +393,12 @@ export function useOIProfile({
         pePrevMap[sp] = (pePrevMap[sp] || 0) + (Number(pe.prev_oi) || 0);
         if (pe.symbol && !peSymMap.has(Number(pe.sp)))
           peSymMap.set(Number(pe.sp), String(pe.symbol));
+        if (pe.symbol)
+          legs.push({ symbol: String(pe.symbol), side: 'pe', oi, prevOi: Number(pe.prev_oi) || 0 });
       }
     }
     oiSymbolMapRef.current = { ce: ceSymMap, pe: peSymMap };
+    oiLegsRef.current = legs;
     const hasData =
       Object.values(ceMap).some((v) => v > 0) || Object.values(peMap).some((v) => v > 0);
     if (hasData) {
@@ -407,6 +420,9 @@ export function useOIProfile({
     oiHistFailedRef.current = false;
     oiEnabledRef.current = true;
     setOiOn(true);
+    // Total's visibility otherwise only follows its checkbox and the OI toggle, so a reload
+    // with Total already ticked (Apply, or OI carried over a script change) left it hidden.
+    syncTotalVisibility();
     if (expiries.length === 1 && currentInstRef.current) {
       subscribeOiWs(
         getChainAsset(currentInstRef.current).toUpperCase(),
@@ -446,27 +462,20 @@ export function useOIProfile({
   // has — gets discarded instead of overwriting the current data with a mismatch that
   // computeTotalSeries can't find anything for.
   async function fetchOIHistory(force = false) {
-    if (!oiChainRef.current || !currentInstRef.current) return;
+    if (!oiChainRef.current || !currentInstRef.current) {
+      setTotalStatus('Net OI: the option chain has no OI for this expiry yet');
+      return;
+    }
     if (oiHistLoadingRef.current && !force) return;
-    const symMap = oiSymbolMapRef.current;
-    if (!symMap.ce.size) return;
+    const values = [...new Set(oiLegsRef.current.map((l) => l.symbol))];
+    if (!values.length) {
+      setTotalStatus('Net OI: the option chain came back without contract symbols');
+      return;
+    }
     const ticket = ++oiHistTicketRef.current;
     oiHistLoadingRef.current = true;
     oiHistFailedRef.current = false;
-
-    const values: string[] = [];
-    const seen = new Set<string>();
-    for (const [sp, ceSym] of symMap.ce.entries()) {
-      const peSym = symMap.pe.get(sp);
-      if (ceSym && !seen.has(ceSym)) {
-        seen.add(ceSym);
-        values.push(ceSym);
-      }
-      if (peSym && !seen.has(peSym)) {
-        seen.add(peSym);
-        values.push(peSym);
-      }
-    }
+    setTotalStatus(`Net OI: loading history for ${values.length} contracts…`);
 
     try {
       const chartDate = getChartDate();
@@ -489,33 +498,56 @@ export function useOIProfile({
       console.log(`[OI] Fetching ${values.length} instruments in ${chunks.length} batches`);
 
       const map = new Map<string, { ts: number; v: number }[]>();
-      const results = await Promise.all(
-        chunks.map(async (chunk) => {
-          const res = await fetch('/api/historical', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              query: [
-                {
-                  exchange,
-                  type: 'OPT',
-                  values: chunk,
-                  fields: ['cumulative_oi'],
-                  startDate: startDate.toISOString(),
-                  endDate: endDate.toISOString(),
-                  interval: '1m',
-                  intraDay: true,
-                  realTime: false,
-                },
-              ],
-            }),
-          });
-          if (!res.ok) return null;
-          return res.json();
-        }),
-      );
+      const fetchChunk = async (chunk: string[]) => {
+        const res = await fetch('/api/historical', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: [
+              {
+                exchange,
+                type: 'OPT',
+                values: chunk,
+                fields: ['cumulative_oi'],
+                startDate: startDate.toISOString(),
+                endDate: endDate.toISOString(),
+                interval: '1m',
+                intraDay: true,
+                realTime: false,
+              },
+            ],
+          }),
+        });
+        if (!res.ok) throw new Error(`historical ${res.status}`);
+        return res.json();
+      };
+      // A few requests in flight at a time, each retried once. All 48 at once used to go out
+      // together, and one dropped connection rejected the whole Promise.all: Total stayed blank
+      // and, being marked failed, was never fetched again.
+      const results: unknown[] = new Array(chunks.length).fill(null);
+      let next = 0;
+      let failures = 0;
+      const worker = async () => {
+        while (next < chunks.length) {
+          const i = next++;
+          try {
+            results[i] = await fetchChunk(chunks[i]);
+          } catch {
+            try {
+              results[i] = await fetchChunk(chunks[i]);
+            } catch (e) {
+              failures++;
+              console.warn('[OI] Historical batch failed twice:', e);
+            }
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(6, chunks.length) }, worker));
+      if (failures === chunks.length) throw new Error('every historical batch failed');
 
-      for (const data of results) {
+      for (const data of results as {
+        result?: { values?: Record<string, { cumulative_oi?: { ts: number; v: number }[] }>[] }[];
+      }[]) {
         if (!data?.result?.[0]?.values) continue;
         for (const row of data.result[0].values) {
           for (const [name, series] of Object.entries(row) as [
@@ -536,7 +568,12 @@ export function useOIProfile({
       computeTotalSeries();
     } catch (e) {
       console.error('[OI] Historical fetch failed:', e);
-      if (ticket === oiHistTicketRef.current) oiHistFailedRef.current = true;
+      if (ticket === oiHistTicketRef.current) {
+        oiHistFailedRef.current = true;
+        setTotalStatus(
+          `Net OI: history request failed (${(e as Error).message}). Untick and re-tick Total to retry.`,
+        );
+      }
     } finally {
       if (ticket === oiHistTicketRef.current) oiHistLoadingRef.current = false;
     }
@@ -552,43 +589,49 @@ export function useOIProfile({
    */
   function computeTotalSeries() {
     const seriesApi = oiTotalSeriesRef.current;
-    if (!seriesApi) return;
-    const symMap = oiSymbolMapRef.current;
+    if (!seriesApi) {
+      setTotalStatus('Net OI: chart series missing (reload the page)');
+      return;
+    }
     const hist = oiHistoricalRef.current;
-    const ceSeriesList = Array.from(symMap.ce.values())
-      .map((sym) => hist.get(sym))
-      .filter((s): s is { ts: number; v: number }[] => !!s?.length);
-    const peSeriesList = Array.from(symMap.pe.values())
-      .map((sym) => hist.get(sym))
-      .filter((s): s is { ts: number; v: number }[] => !!s?.length);
-    if (!ceSeriesList.length && !peSeriesList.length) {
+    // Most far strikes never trade on a given day, and the broker returns no 1m OI for them
+    // (about two-thirds of a weekly chain). Their OI did not move, so they count at their chain
+    // OI all session; a strike that does trade counts at yesterday's OI until its first print.
+    // Leaving both out made the net a sum over whichever strikes had traded so far: huge
+    // swings in the first minutes, and nowhere near the live bar, which sums the full chain.
+    let baseCe = 0;
+    let basePe = 0;
+    const traded: { side: 'ce' | 'pe'; s: { ts: number; v: number }[]; before: number }[] = [];
+    for (const leg of oiLegsRef.current) {
+      const s = hist.get(leg.symbol);
+      if (s?.length) traded.push({ side: leg.side, s, before: leg.prevOi || s[0].v });
+      else if (leg.side === 'ce') baseCe += leg.oi;
+      else basePe += leg.oi;
+    }
+    if (!traded.length) {
       oiTotalDetailRef.current = new Map();
       seriesApi.setData([]);
+      setTotalStatus('Net OI: the broker returned no 1m OI history for this session');
       return;
     }
 
     const tsSet = new Set<number>();
-    for (const s of ceSeriesList) for (const pt of s) tsSet.add(pt.ts);
-    for (const s of peSeriesList) for (const pt of s) tsSet.add(pt.ts);
+    for (const t of traded) for (const pt of t.s) tsSet.add(pt.ts);
     const allTs = Array.from(tsSet).sort((a, b) => a - b);
 
-    const cePtrs = new Array(ceSeriesList.length).fill(0);
-    const pePtrs = new Array(peSeriesList.length).fill(0);
+    const ptrs = new Array(traded.length).fill(0);
     const iv = intervalRef.current;
     const points: { time: number; value: number; color: string }[] = [];
     const detail = new Map<number, { ce: number; pe: number }>();
     for (const ts of allTs) {
-      let sumCe = 0;
-      for (let i = 0; i < ceSeriesList.length; i++) {
-        const s = ceSeriesList[i];
-        while (cePtrs[i] + 1 < s.length && s[cePtrs[i] + 1].ts <= ts) cePtrs[i]++;
-        if (s[cePtrs[i]].ts <= ts) sumCe += s[cePtrs[i]].v;
-      }
-      let sumPe = 0;
-      for (let i = 0; i < peSeriesList.length; i++) {
-        const s = peSeriesList[i];
-        while (pePtrs[i] + 1 < s.length && s[pePtrs[i] + 1].ts <= ts) pePtrs[i]++;
-        if (s[pePtrs[i]].ts <= ts) sumPe += s[pePtrs[i]].v;
+      let sumCe = baseCe;
+      let sumPe = basePe;
+      for (let i = 0; i < traded.length; i++) {
+        const { side, s, before } = traded[i];
+        while (ptrs[i] + 1 < s.length && s[ptrs[i] + 1].ts <= ts) ptrs[i]++;
+        const v = s[ptrs[i]].ts <= ts ? s[ptrs[i]].v : before;
+        if (side === 'ce') sumCe += v;
+        else sumPe += v;
       }
       const net = sumCe - sumPe;
       const chartTime = toChartTime(ts, iv) as number;
@@ -597,6 +640,7 @@ export function useOIProfile({
     }
     oiTotalDetailRef.current = detail;
     seriesApi.setData(points as Parameters<typeof seriesApi.setData>[0]);
+    setTotalStatus(null);
   }
 
   /**
@@ -639,7 +683,7 @@ export function useOIProfile({
     if (!showTotalOi) return;
     if (oiHistFetchedRef.current) {
       computeTotalSeries();
-    } else if (!oiHistLoadingRef.current && !oiHistFailedRef.current && oiChainRef.current) {
+    } else if (!oiHistLoadingRef.current && oiChainRef.current) {
       fetchOIHistory();
     }
     requestDraw();
@@ -830,7 +874,7 @@ export function useOIProfile({
       syncTotalVisibility();
       if (showTotalOiRef.current) {
         if (oiHistFetchedRef.current) computeTotalSeries();
-        else if (!oiHistLoadingRef.current && !oiHistFailedRef.current) fetchOIHistory();
+        else if (!oiHistLoadingRef.current) fetchOIHistory();
       }
     } else if (currentInstRef.current) {
       loadOIChain();
@@ -848,26 +892,46 @@ export function useOIProfile({
   }
 
   function clearForInstrumentChange() {
+    const wasOn = oiEnabledRef.current;
     if (oiEnabledRef.current) {
       oiEnabledRef.current = false;
       setOiOn(false);
     }
     stopSnapshotTimer();
     oiChainRef.current = null;
+    oiLegsRef.current = [];
+    oiSymbolMapRef.current = { ce: new Map(), pe: new Map() };
     oiHistoricalRef.current = new Map();
     oiHistFetchedRef.current = false;
     oiHistFailedRef.current = false;
+    oiHistLoadingRef.current = false;
+    oiHistTicketRef.current++; // a fetch still in flight for the old script is discarded
     oiHistDateRef.current = '';
     oiSnapshotsRef.current = new Map();
     oiBaselineRef.current = null;
     oiToSnapRef.current = null;
     unsubscribeOiWs();
-    setShowStrikeProfile(true);
-    setShowTotalOi(false);
-    showTotalOiRef.current = false;
+    // The expiry list belongs to the old script. Kept, the popup offered (and Apply
+    // requested) e.g. NIFTY's weekly date against BANKNIFTY, which has no such expiry, so
+    // the chain came back empty and Total had nothing to sum.
+    setOiExpiries([]);
+    setSelExpiries([]);
     oiTotalDetailRef.current = new Map();
     oiTotalSeriesRef.current?.setData([]);
     oiTotalSeriesRef.current?.applyOptions({ visible: false });
+    if (wasOn) {
+      // OI was on: carry it, and the Strike Profile / Total choices, over to the new script.
+      // Next task, because the host points currentInstRef at the new script after this call.
+      setTotalStatus(null);
+      setTimeout(() => {
+        if (currentInstRef.current) loadOIChain();
+      }, 0);
+    } else {
+      setShowStrikeProfile(true);
+      setShowTotalOi(false);
+      showTotalOiRef.current = false;
+      setTotalStatus(null);
+    }
   }
 
   return {
@@ -909,6 +973,7 @@ export function useOIProfile({
     drawOIRef,
     oiDrawPendingRef,
     showTotalOiRef,
+    totalStatus,
     oiTotalDetailRef,
   };
 }
