@@ -227,6 +227,140 @@ describe('simulateSignalTrade', () => {
   });
 });
 
+describe('stop paths', () => {
+  test('closes only: a step each time the loss goes deeper, starting from the previous close', () => {
+    // Short CE at 100: 105 (−325), 101 just before 110 (−650), 108 just before 120 (−1,300).
+    const day = makeDay(grid(100, { 40: 105, 49: 101, 50: 110, 59: 108, 60: 120 }));
+    const r = simulateSignalTrade(day, SIGNAL, params({ legs: 'CE' }), null);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.trade.stop.trade).toEqual({
+      premium: 6500,
+      steps: [
+        [40, 325, 0],
+        [50, 650, 65],
+        [60, 1300, 520],
+      ],
+    });
+    // One leg: its own path is the trade's.
+    expect(r.trade.stop.legs).toEqual([r.trade.stop.trade]);
+  });
+
+  test('both legs: one leg at its extreme with the other at its close, not both extremes added', () => {
+    // At 10:15 the CE trades up to 110 and the PE down to 70 inside the minute; both close flat.
+    const ce = { o: grid(100), h: grid(100, { 60: 110 }), l: grid(100), c: grid(100) };
+    const pe = { o: grid(80), h: grid(80, { 60: 95 }), l: grid(80, { 60: 70 }), c: grid(80) };
+    const r = simulateSignalTrade(
+      makeDay(grid(100), grid(80)),
+      SIGNAL,
+      params({ legs: 'BOTH' }),
+      ohlcOf({ CE: ce, PE: pe }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // The per-minute bound adds the CE high and the PE high: (10 + 15) × 65.
+    expect(r.trade.maxLoss).toBe(-1625);
+    // The stop path takes the worse leg alone: PE at 95 with the CE at its close, 15 × 65.
+    expect(r.trade.stop.trade.steps).toEqual([[60, 975, 0]]);
+    expect(r.trade.stop.trade.premium).toBe(11700);
+    expect(r.trade.stop.legs.map((p) => p.steps)).toEqual([[[60, 650, 0]], [[60, 975, 0]]]);
+  });
+
+  test('an open beyond the previous close is where a jump through the stop fills', () => {
+    const o = grid(100, { 50: 130 });
+    const h = grid(100, { 50: 135 });
+    const c = grid(100, { 50: 125 });
+    const r = simulateSignalTrade(
+      makeDay(c),
+      SIGNAL,
+      params({ legs: 'CE' }),
+      ohlcOf({ CE: { o, h, l: grid(100), c } }),
+    );
+    // Opened 30 against (₹1,950), reached 35 (₹2,275).
+    expect(r.ok && r.trade.stop.trade.steps).toEqual([[50, 2275, 1950]]);
+  });
+
+  test('after a missing minute the loss starts at the closes where the data resumes', () => {
+    const day = makeDay(grid(100, { 49: null, 50: 120 }));
+    const r = simulateSignalTrade(day, SIGNAL, params({ legs: 'CE' }), null);
+    expect(r.ok && r.trade.stop.trade.steps).toEqual([[50, 1300, 1300]]);
+  });
+
+  test('a long trade loses on the way down', () => {
+    const day = makeDay(grid(100, { 45: 90 }));
+    const r = simulateSignalTrade(day, SIGNAL, params({ legs: 'CE', side: 'BUY' }), null);
+    expect(r.ok && r.trade.stop.trade.steps).toEqual([[45, 650, 0]]);
+  });
+});
+
+describe('target paths and the spot range', () => {
+  test('a step each time the profit goes higher; a short gains as the premium falls', () => {
+    // Short CE at 100: 95 (+325), back up, 91 just before 85 (+975).
+    const day = makeDay(grid(100, { 40: 95, 49: 91, 50: 85, 60: 102 }));
+    const r = simulateSignalTrade(day, SIGNAL, params({ legs: 'CE' }), null);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.trade.target).toEqual({
+      premium: 6500,
+      steps: [
+        [40, 325, 0],
+        [49, 585, 0],
+        [50, 975, 585],
+      ],
+    });
+  });
+
+  test('both legs: one leg at its low with the other at its close, not both lows added', () => {
+    const ce = { o: grid(100), h: grid(100), l: grid(100, { 60: 90 }), c: grid(100) };
+    const pe = { o: grid(80), h: grid(80), l: grid(80, { 60: 74 }), c: grid(80) };
+    const r = simulateSignalTrade(
+      makeDay(grid(100), grid(80)),
+      SIGNAL,
+      params({ legs: 'BOTH' }),
+      ohlcOf({ CE: ce, PE: pe }),
+    );
+    // The per-minute bound adds both lows: (10 + 6) × 65; the target path takes the CE alone.
+    expect(r.ok && r.trade.maxProfit).toBe(1040);
+    expect(r.ok && r.trade.target.steps).toEqual([[60, 650, 0]]);
+  });
+
+  test('a long gains on the way up', () => {
+    const day = makeDay(grid(100, { 45: 110 }));
+    const r = simulateSignalTrade(day, SIGNAL, params({ legs: 'CE', side: 'BUY' }), null);
+    expect(r.ok && r.trade.target.steps).toEqual([[45, 650, 0]]);
+  });
+
+  test('the loss series: close loss every minute, and how much worse the minute got', () => {
+    const c = grid(100, { 40: 110, 41: null, [EXIT]: 95 });
+    const h = grid(100, { 40: 115 });
+    const r = simulateSignalTrade(
+      makeDay(c),
+      SIGNAL,
+      params({ legs: 'CE' }),
+      ohlcOf({ CE: { o: grid(100), h, l: grid(100), c } }),
+    );
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const s = r.trade.series;
+    expect(s.from).toBe(ENTRY + 1);
+    expect(s.close).toHaveLength(EXIT - ENTRY);
+    // 09:55: closed 10 against (₹650), the high 15 against: ₹325 worse than the close.
+    expect(s.close[40 - s.from]).toBe(650);
+    expect(s.worst[40 - s.from]).toBe(325);
+    // A minute with no close is null; the exit minute closes 5 in favour.
+    expect(s.close[41 - s.from]).toBeNull();
+    expect(s.close.at(-1)).toBe(-325);
+  });
+
+  test('spot at exit and its range over the trade', () => {
+    const day = makeDay(grid(100));
+    day.spot = grid(23250, { 10: 23500, 100: 23310, 200: 23180, [EXIT]: 23240 });
+    const r = simulateSignalTrade(day, SIGNAL, params({ legs: 'CE' }), null);
+    // The 23500 at 09:25 is before entry and does not count.
+    expect(r.ok && r.trade).toMatchObject({ exitSpot: 23240, spotHigh: 23310, spotLow: 23180 });
+  });
+});
+
 describe('premium-range strikes', () => {
   const premium = (over: Partial<TradeParams> = {}) =>
     params({

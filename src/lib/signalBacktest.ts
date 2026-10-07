@@ -116,6 +116,31 @@ export interface SignalTrade {
   maxLoss: number;
   maxLossTime: string;
   basis: 'ohlc' | 'close' | 'mixed';
+  /** Where a stop-loss would fire (see lib/stopLoss). Absent from a server older than the Stop-loss view. */
+  stop?: { trade: StopPath; legs: StopPath[] };
+  /** Where a target on the whole trade would fire: the same shape, toward profit. Absent from older servers. */
+  target?: StopPath;
+  /**
+   * The whole trade's loss each minute, ₹ for the run's lots (positive = loss): index i is session
+   * minute `from + i`; `worst[i]` is how much worse than `close[i]` that minute got. Absent from older servers.
+   */
+  series?: { from: number; close: Array<number | null>; worst: Array<number | null> };
+  /** Spot at exit, and its highest / lowest close from entry to exit. Absent from older servers. */
+  exitSpot?: number | null;
+  spotHigh?: number | null;
+  spotLow?: number | null;
+}
+
+/**
+ * Every minute after entry at which the loss went deeper than before. A stop of ₹X fires in the
+ * first step whose depth reaches X and fills at X, or at the minute's starting loss when it began
+ * past X. For both legs a minute's depth is one leg at its extreme with the other at its close.
+ */
+export interface StopPath {
+  /** ₹ premium at entry over the legs it covers, for the run's lots. */
+  premium: number;
+  /** [session minute index, deepest ₹ loss that minute, ₹ loss as it began]; losses positive. */
+  steps: Array<[number, number, number]>;
 }
 
 /** One option's greeks, per option unit. `iv` is in vol points (14.5 = 14.5%); vega is per vol point. */

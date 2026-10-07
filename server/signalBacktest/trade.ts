@@ -24,6 +24,12 @@
  * With both legs the combined extremes add each leg's same-direction extreme minute by minute, so
  * they are a best-case/worst-case bound (two legs need not peak at the same second of a minute).
  * Final P&L is exact: exit close − entry price. Everything is gross — no charges or slippage.
+ *
+ * Stop paths (`trade.stop`) are what a stop-loss is judged on, and they do NOT use that bound: in a
+ * strangle the call's high and the put's high rarely fall in the same minute, so adding them makes
+ * every dip look deeper than it was. A minute's combined loss is instead the legs at their closes,
+ * or one leg at its adverse extreme with the others at their closes, whichever is worse. The
+ * target path (`trade.target`) is the same thing toward profit. See `excursionPathOf`.
  */
 import {
   SESSION_BARS,
@@ -143,6 +149,43 @@ export interface SignalTrade {
   maxLoss: number;
   maxLossTime: string;
   basis: 'ohlc' | 'close' | 'mixed';
+  /** Where a stop-loss would fire: on the whole trade, and on each leg alone (same order as `legs`). */
+  stop: { trade: StopPath; legs: StopPath[] };
+  /**
+   * Where a profit target on the whole trade would fire: a `StopPath` toward profit — each step is a
+   * minute the profit went higher than before, [minute, best ₹ profit that minute, ₹ profit as it began].
+   */
+  target: StopPath;
+  /** The whole trade's loss every minute from entry to exit (see `LossSeries`). */
+  series: LossSeries;
+  /** Spot at the exit minute (the last leg's), and its highest and lowest close from entry to exit. */
+  exitSpot: number | null;
+  spotHigh: number | null;
+  spotLow: number | null;
+}
+
+/**
+ * Every minute after entry at which the loss went deeper than it had been, which is all a stop-loss
+ * needs: a stop of ₹X fires in the first step whose `depth` reaches X, and fills at X, or at `start`
+ * when the minute already began past X (a jump through the stop).
+ */
+export interface StopPath {
+  /** ₹ premium at entry (entry price × qty, over the legs it covers) — what a % stop is a share of. */
+  premium: number;
+  /** [minute index, deepest ₹ loss in that minute, ₹ loss as the minute began]; losses are positive. */
+  steps: Array<[number, number, number]>;
+}
+
+/**
+ * A trade's loss minute by minute, ₹ for the run's lots, rounded to the rupee; positive = a loss,
+ * negative = a profit. Index i is session minute `from + i`, through the exit minute; null where a
+ * leg had no price. `worst[i]` is how much worse than `close[i]` the minute got (0 or more), by the
+ * same one-leg-at-its-extreme rule as the stop path, so close + worst is that minute's stop depth.
+ */
+export interface LossSeries {
+  from: number;
+  close: Array<number | null>;
+  worst: Array<number | null>;
 }
 
 export type TradeResult = { ok: true; trade: SignalTrade } | { ok: false; reason: string };
@@ -380,6 +423,19 @@ export function simulateSignalTrade(
   }
 
   const bases = new Set(legs.map((l) => l.basis));
+  const pathOf = (covered: typeof perLeg, toward: 'loss' | 'profit' = 'loss') =>
+    excursionPathOf(covered, sign, qty, entryIdx, exitIdx, toward);
+  const exitTime = legs.reduce((t, l) => (l.exitTime > t ? l.exitTime : t), legs[0].exitTime);
+  let spotHigh: number | null = null;
+  let spotLow: number | null = null;
+  let exitSpot: number | null = null;
+  for (let m = entryIdx; m <= minuteIndex(exitTime); m++) {
+    const v = day.spot[m];
+    if (v == null) continue;
+    if (spotHigh == null || v > spotHigh) spotHigh = v;
+    if (spotLow == null || v < spotLow) spotLow = v;
+    exitSpot = v;
+  }
   return {
     ok: true,
     trade: {
@@ -391,15 +447,124 @@ export function simulateSignalTrade(
       qty,
       side: params.side,
       legs,
-      exitTime: legs.reduce((t, l) => (l.exitTime > t ? l.exitTime : t), legs[0].exitTime),
+      exitTime,
       pnl: round2(legs.reduce((s, l) => s + l.pnl, 0)),
       maxProfit,
       maxProfitTime,
       maxLoss,
       maxLossTime,
       basis: bases.size > 1 ? 'mixed' : legs[0].basis,
+      stop: { trade: pathOf(perLeg), legs: perLeg.map((p) => pathOf([p])) },
+      target: pathOf(perLeg, 'profit'),
+      series: lossSeriesOf(perLeg, sign, qty, entryIdx, exitIdx),
+      exitSpot,
+      spotHigh,
+      spotLow,
     },
   };
+}
+
+/**
+ * The stop path (toward 'loss') or target path (toward 'profit') of a set of legs held together:
+ * the minutes whose depth (see `minuteMarks`) went past every minute before.
+ */
+function excursionPathOf(
+  legs: Array<{ prices: LegPrices; entry: number }>,
+  sign: number,
+  qty: number,
+  entryIdx: number,
+  exitIdx: number,
+  toward: 'loss' | 'profit',
+): StopPath {
+  const steps: StopPath['steps'] = [];
+  let deepest = 0;
+  for (const { m, depth, start } of minuteMarks(legs, sign, qty, entryIdx, exitIdx, toward)) {
+    if (depth > deepest) {
+      deepest = depth;
+      steps.push([m, round2(depth), round2(start)]);
+    }
+  }
+  return {
+    premium: round2(legs.reduce((s, l) => s + l.entry, 0) * qty),
+    steps,
+  };
+}
+
+/**
+ * The whole trade's loss every minute from entry to exit, as the stop path marks it: the close,
+ * and how much worse the minute got than its close. What the Losses view follows after a loss
+ * level is hit.
+ */
+function lossSeriesOf(
+  legs: Array<{ prices: LegPrices; entry: number }>,
+  sign: number,
+  qty: number,
+  entryIdx: number,
+  exitIdx: number,
+): LossSeries {
+  const from = entryIdx + 1;
+  const close: LossSeries['close'] = new Array(Math.max(0, exitIdx - entryIdx)).fill(null);
+  const worst: LossSeries['worst'] = new Array(close.length).fill(null);
+  for (const mark of minuteMarks(legs, sign, qty, entryIdx, exitIdx, 'loss')) {
+    close[mark.m - from] = Math.round(mark.close);
+    worst[mark.m - from] = Math.round(mark.depth - mark.close);
+  }
+  return { from, close, worst };
+}
+
+/**
+ * Each minute after entry (only where every leg has a close), toward 'loss' or 'profit':
+ *  - `close`: the value at the closes;
+ *  - `depth`: the worse (better) of that and each leg alone at its extreme — high when short for
+ *    a loss, low for a profit — with the other legs at their closes: one leg spiking at a time,
+ *    not all at once;
+ *  - `start`: the value as the minute began: at the opens when every leg has one, else at the
+ *    previous minute's closes, else (the minute before is missing) at this minute's closes, so an
+ *    order that falls in a data gap fills where the data resumes rather than at a price nobody saw.
+ * Without high/low (close-only runs) the depth is simply the value at the closes.
+ */
+function minuteMarks(
+  legs: Array<{ prices: LegPrices; entry: number }>,
+  sign: number,
+  qty: number,
+  entryIdx: number,
+  exitIdx: number,
+  toward: 'loss' | 'profit',
+): Array<{ m: number; close: number; depth: number; start: number }> {
+  const dir = toward === 'loss' ? 1 : -1;
+  const lossAt = (entry: number, price: number) => -dir * sign * (price - entry) * qty;
+  const sumLoss = (pick: (p: LegPrices) => number | null): number | null => {
+    let total = 0;
+    for (const { prices, entry } of legs) {
+      const v = pick(prices);
+      if (v == null) return null;
+      total += lossAt(entry, v);
+    }
+    return total;
+  };
+
+  const marks: Array<{ m: number; close: number; depth: number; start: number }> = [];
+  let prevClose = sumLoss((p) => p.close(entryIdx));
+  for (let m = entryIdx + 1; m <= exitIdx; m++) {
+    const closeLoss = sumLoss((p) => p.close(m));
+    if (closeLoss == null) {
+      prevClose = null;
+      continue;
+    }
+    let depth = closeLoss;
+    for (const { prices, entry } of legs) {
+      const x = extremes(prices, m);
+      if (!x) continue;
+      const close = prices.close(m)!;
+      const alone = closeLoss - lossAt(entry, close) + lossAt(entry, sign * dir > 0 ? x.lo : x.hi);
+      if (alone > depth) depth = alone;
+    }
+    const start = sumLoss((p) => p.open(m)) ?? prevClose ?? closeLoss;
+    if (start > depth) depth = start;
+    marks.push({ m, close: closeLoss, depth, start });
+    prevClose = closeLoss;
+  }
+  return marks;
 }
 
 /** PREMIUM mode: the strike whose entry price is inside the leg's range, closest to its middle. */

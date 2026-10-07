@@ -9,6 +9,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import PremiumSetsPicker from './components/PremiumSetsPicker';
 import RowFilter from './components/RowFilter';
 import SignalDayChart from './components/SignalDayChart';
+import LossAnalysisPanel from './components/LossAnalysisPanel';
+import PnlAnalysisPanel from './components/PnlAnalysisPanel';
+import StopLossPanel from './components/StopLossPanel';
 import type { Theme } from './types';
 import {
   DEFAULT_SIGNAL_PARAMS,
@@ -42,6 +45,8 @@ import {
   type TradeParams,
   type WideStatus,
 } from './lib/signalBacktest';
+import type { ExitPlan } from './lib/pnlAnalysis';
+import { applyStop, type StopRule } from './lib/stopLoss';
 
 const SETTINGS_KEY = 'nubra-signal-backtest-settings';
 const SETTINGS_VERSION = 1;
@@ -67,8 +72,17 @@ interface Settings {
   showGreekColumns: boolean;
   /** The Signal and Trade rows. Folded away they leave the table and the day chart the screen. */
   settingsOpen: boolean;
+  /** The trades table, or the Losses, Stop-loss or P&L analysis of the same rows. */
+  view: 'trades' | 'losses' | 'stoploss' | 'pnl';
+  /** The stop the Stop-loss view tries; value 0 = none. The trades table marks the days it fires. */
+  stop: StopRule;
+  /** The target and SL the P&L analysis tries; 0 = none. */
+  pnlPlan: ExitPlan;
   version: number;
 }
+
+const NO_STOP: StopRule = { scope: 'trade', unit: 'pct', value: 0 };
+const NO_PLAN: ExitPlan = { unit: 'pct', target: 0, sl: 0 };
 
 function defaultSettings(underlying: SignalUnderlying = 'NIFTY'): Settings {
   return {
@@ -82,6 +96,9 @@ function defaultSettings(underlying: SignalUnderlying = 'NIFTY'): Settings {
     sort: 'oldest',
     showGreekColumns: false,
     settingsOpen: true,
+    view: 'trades',
+    stop: { ...NO_STOP },
+    pnlPlan: { ...NO_PLAN },
     version: SETTINGS_VERSION,
   };
 }
@@ -100,6 +117,12 @@ function loadSettings(): Settings {
       underlying,
       signal: { ...defaultSettings(underlying).signal, ...(saved.signal ?? {}) },
       trade: normalizeTrade({ ...DEFAULT_TRADE_PARAMS, ...(saved.trade ?? {}) }),
+      view:
+        saved.view === 'losses' || saved.view === 'stoploss' || saved.view === 'pnl'
+          ? saved.view
+          : 'trades',
+      stop: { ...NO_STOP, ...(saved.stop ?? {}) },
+      pnlPlan: { ...NO_PLAN, ...(saved.pnlPlan ?? {}) },
     };
   } catch {
     return fallback;
@@ -145,6 +168,12 @@ function downloadFile(name: string, content: string, mime: string): void {
   a.download = name;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/** 'HH:MM' of a session minute index (0 = 09:15). */
+function slotTime(slot: number): string {
+  const t = 9 * 60 + 15 + slot;
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
 }
 
 function fmtDate(iso: string): string {
@@ -324,6 +353,20 @@ export default function SignalBacktest({ theme }: { theme: Theme }) {
   }, [shownRows, settings.sort]);
   const filtered = filterActive(dayFilter);
   const filteredStats = useMemo(() => tradeStats(shownRows), [shownRows]);
+  // The Stop-loss view's stop, marked on the trades it fires on.
+  const stopped = useMemo(() => {
+    const out = new Map<string, ReturnType<typeof applyStop>>();
+    const lots = result?.tradeParams.lots ?? 1;
+    if (!(settings.stop.value > 0)) return out;
+    for (const r of result?.rows ?? []) {
+      if (!r.trade.stop) continue;
+      const s = applyStop(r.trade, settings.stop, lots);
+      if (s.stopped) out.set(r.date, s);
+    }
+    return out;
+  }, [result, settings.stop]);
+  const stopOf = (r: SignalBacktestRow) => stopped.get(r.date);
+  const stopText = `${settings.stop.unit === 'pct' ? `${settings.stop.value}% of premium` : `₹${settings.stop.value}/lot`}${settings.stop.scope === 'leg' ? ' per leg' : ''}`;
   // A new run, or a filter, may leave the day out; then there is simply no chart.
   const chartIdx = rows.findIndex((r) => r.date === chartDate);
   const chartRow = chartIdx >= 0 ? rows[chartIdx] : null;
@@ -742,6 +785,35 @@ export default function SignalBacktest({ theme }: { theme: Theme }) {
       {result && (
         <>
           <div className="flex items-center gap-3 px-3 py-1.5 text-[11px] text-[var(--text-muted)]">
+            <div className="flex h-6 shrink-0 overflow-hidden rounded border border-[var(--border)]">
+              {(
+                [
+                  ['trades', 'Trades'],
+                  ['losses', 'Losses'],
+                  ['stoploss', 'Stop-loss'],
+                  ['pnl', 'P&L analysis'],
+                ] as const
+              ).map(([v, text]) => (
+                <button
+                  key={v}
+                  type="button"
+                  aria-pressed={settings.view === v}
+                  title={
+                    v === 'losses'
+                      ? 'Losses only, ₹ per lot, for all days and each day to expiry: exit levels taken from the data, and what the loss did after each was hit'
+                      : v === 'stoploss'
+                        ? 'How far trades went against you before closing, and what a stop of each size would have done'
+                        : v === 'pnl'
+                          ? 'Targets and SLs (where they hit, where they never do, and together), how results are spread, the paths trades take, and what drives the biggest losses and wins'
+                          : undefined
+                  }
+                  onClick={() => update({ view: v })}
+                  className={`px-2 text-[11px] ${settings.view === v ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-secondary)] text-[var(--text-primary)]'}`}
+                >
+                  {text}
+                </button>
+              ))}
+            </div>
             <span>
               {rows.length}
               {filtered && ` of ${result.rows.length}`} trades · max profit / loss are
@@ -752,27 +824,31 @@ export default function SignalBacktest({ theme }: { theme: Theme }) {
             <span className="ml-auto">
               <RowFilter rows={result.rows} value={dayFilter} onChange={setDayFilter} />
             </span>
-            <label
-              className="flex items-center gap-1"
-              title="The reference CE and PE greeks at t1 and t2 and how much each moved between them, next to the Ref ΔCE / ΔPE column. Per option unit; rebuilt with Black-76 off the put-call-parity forward."
-            >
-              <input
-                type="checkbox"
-                checked={settings.showGreekColumns}
-                onChange={(e) => update({ showGreekColumns: e.target.checked })}
-              />
-              Greeks
-            </label>
-            <select
-              className="h-6 rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-1 text-[11px]"
-              value={settings.sort}
-              onChange={(e) => update({ sort: e.target.value as SortBy })}
-            >
-              <option value="oldest">Oldest first</option>
-              <option value="newest">Newest first</option>
-              <option value="best">Best P&L</option>
-              <option value="worst">Worst P&L</option>
-            </select>
+            {settings.view === 'trades' && (
+              <>
+                <label
+                  className="flex items-center gap-1"
+                  title="The reference CE and PE greeks at t1 and t2 and how much each moved between them, next to the Ref ΔCE / ΔPE column. Per option unit; rebuilt with Black-76 off the put-call-parity forward."
+                >
+                  <input
+                    type="checkbox"
+                    checked={settings.showGreekColumns}
+                    onChange={(e) => update({ showGreekColumns: e.target.checked })}
+                  />
+                  Greeks
+                </label>
+                <select
+                  className="h-6 rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-1 text-[11px]"
+                  value={settings.sort}
+                  onChange={(e) => update({ sort: e.target.value as SortBy })}
+                >
+                  <option value="oldest">Oldest first</option>
+                  <option value="newest">Newest first</option>
+                  <option value="best">Best P&L</option>
+                  <option value="worst">Worst P&L</option>
+                </select>
+              </>
+            )}
           </div>
           {filtered && (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 border-y border-[var(--border)] bg-[var(--accent)]/5 px-3 py-1 text-[11px]">
@@ -823,6 +899,32 @@ export default function SignalBacktest({ theme }: { theme: Theme }) {
                 : 'Running…'
               : 'Set the parameters and press Run.'}
           </div>
+        ) : settings.view === 'losses' ? (
+          <LossAnalysisPanel
+            rows={shownRows}
+            lots={result.tradeParams.lots}
+            filterLabel={filtered ? describeFilter(dayFilter) : null}
+            onOpenDay={(date) => {
+              update({ view: 'trades' });
+              setChartDate(date);
+            }}
+          />
+        ) : settings.view === 'pnl' ? (
+          <PnlAnalysisPanel
+            rows={shownRows}
+            lots={result.tradeParams.lots}
+            plan={settings.pnlPlan}
+            onPlan={(patch) => update({ pnlPlan: { ...settings.pnlPlan, ...patch } })}
+            filterLabel={filtered ? describeFilter(dayFilter) : null}
+          />
+        ) : settings.view === 'stoploss' ? (
+          <StopLossPanel
+            rows={shownRows}
+            lots={result.tradeParams.lots}
+            rule={settings.stop}
+            onRule={(patch) => update({ stop: { ...settings.stop, ...patch } })}
+            filterLabel={filtered ? describeFilter(dayFilter) : null}
+          />
         ) : (
           <>
             <table className="w-full border-collapse text-[11px]">
@@ -1066,6 +1168,14 @@ export default function SignalBacktest({ theme }: { theme: Theme }) {
                       className={`sticky right-0 z-10 whitespace-nowrap bg-inherit px-2 py-1 text-right font-mono font-semibold shadow-[inset_1px_0_0_var(--border)] ${pnlClass(r.trade.pnl)}`}
                     >
                       {inr(r.trade.pnl)}
+                      {stopOf(r) && (
+                        <div
+                          className={`text-[10px] font-normal ${pnlClass(stopOf(r)!.pnl)}`}
+                          title={`With your stop (${stopText}): stopped at ${slotTime(stopOf(r)!.slot!)}`}
+                        >
+                          SL {slotTime(stopOf(r)!.slot!)} → {inr(stopOf(r)!.pnl)}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1100,7 +1210,7 @@ export default function SignalBacktest({ theme }: { theme: Theme }) {
         )}
       </div>
 
-      {chartRow && (
+      {chartRow && settings.view === 'trades' && (
         <div className="h-[46%] min-h-[260px] shrink-0">
           <SignalDayChart
             theme={theme}
