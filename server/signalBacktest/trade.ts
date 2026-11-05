@@ -19,7 +19,9 @@
  * the exit minute. Each minute contributes max(high, close) and min(low, close) — the close may come
  * from a different source than the high/low (Nubra closes, parquet highs/lows), so taking the
  * extreme of both keeps the band honest. Without a high/low the close alone is used. A missing
- * minute is skipped, never filled forward.
+ * minute is skipped, never filled forward — except in the combined figures of a two-leg trade,
+ * where a leg that has gone quiet is held at its last close while the other still trades (see
+ * `holdQuietLegs`).
  *
  * With both legs the combined extremes add each leg's same-direction extreme minute by minute, so
  * they are a best-case/worst-case bound (two legs need not peak at the same second of a minute).
@@ -179,7 +181,8 @@ export interface StopPath {
 /**
  * A trade's loss minute by minute, ₹ for the run's lots, rounded to the rupee; positive = a loss,
  * negative = a profit. Index i is session minute `from + i`, through the exit minute; null where a
- * leg had no price. `worst[i]` is how much worse than `close[i]` the minute got (0 or more), by the
+ * leg had no price (a quiet leg of a two-leg trade is held at its last close, see
+ * `holdQuietLegs`). `worst[i]` is how much worse than `close[i]` the minute got (0 or more), by the
  * same one-leg-at-its-extreme rule as the stop path, so close + worst is that minute's stop depth.
  */
 export interface LossSeries {
@@ -382,12 +385,13 @@ export function simulateSignalTrade(
     perLeg.push({ prices, entry: entryPrice });
   }
 
+  const marked = holdQuietLegs(perLeg, entryIdx, exitIdx);
   let maxProfit = legs[0].maxProfit;
   let maxProfitTime = legs[0].maxProfitTime;
   let maxLoss = legs[0].maxLoss;
   let maxLossTime = legs[0].maxLossTime;
-  if (perLeg.length > 1) {
-    // Combined bound: only minutes where every leg has a price.
+  if (marked.length > 1) {
+    // Combined bound: only minutes where every leg has a price (a quiet leg held at its last close).
     let best = -Infinity;
     let bestIdx = -1;
     let worst = Infinity;
@@ -396,7 +400,7 @@ export function simulateSignalTrade(
       let fav = 0;
       let adv = 0;
       let complete = true;
-      for (const { prices, entry } of perLeg) {
+      for (const { prices, entry } of marked) {
         const x = extremes(prices, m);
         if (!x) {
           complete = false;
@@ -454,14 +458,46 @@ export function simulateSignalTrade(
       maxLoss,
       maxLossTime,
       basis: bases.size > 1 ? 'mixed' : legs[0].basis,
-      stop: { trade: pathOf(perLeg), legs: perLeg.map((p) => pathOf([p])) },
-      target: pathOf(perLeg, 'profit'),
-      series: lossSeriesOf(perLeg, sign, qty, entryIdx, exitIdx),
+      stop: { trade: pathOf(marked), legs: perLeg.map((p) => pathOf([p])) },
+      target: pathOf(marked, 'profit'),
+      series: lossSeriesOf(marked, sign, qty, entryIdx, exitIdx),
       exitSpot,
       spotHigh,
       spotLow,
     },
   };
+}
+
+/**
+ * Combined figures need every leg priced each minute. A far out-of-the-money leg often stops
+ * printing hours before the close while the other leg keeps moving; such a leg is held at its last
+ * close — the same price its exit falls back to — for as long as another leg still has a price, so
+ * the trade stays marked to the end and its max loss covers the whole day. A minute no leg has
+ * stays a gap. One leg alone is returned as it is.
+ */
+function holdQuietLegs(
+  legs: Array<{ prices: LegPrices; entry: number }>,
+  entryIdx: number,
+  exitIdx: number,
+): Array<{ prices: LegPrices; entry: number }> {
+  if (legs.length < 2) return legs;
+  const anyPriced = (m: number) => legs.some(({ prices }) => prices.close(m) != null);
+  return legs.map(({ prices, entry }) => {
+    const held: Array<number | null> = [];
+    let last = prices.close(entryIdx);
+    for (let m = entryIdx; m <= exitIdx; m++) {
+      const own = prices.close(m);
+      if (own != null) last = own;
+      held.push(own ?? (anyPriced(m) ? last : null));
+    }
+    return {
+      entry,
+      prices: {
+        ...prices,
+        close: (m) => (m >= entryIdx && m <= exitIdx ? held[m - entryIdx] : prices.close(m)),
+      },
+    };
+  });
 }
 
 /**

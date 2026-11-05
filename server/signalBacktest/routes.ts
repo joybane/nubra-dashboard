@@ -338,7 +338,7 @@ function countTradeSkips(skipped: Record<string, number>): number {
   return n;
 }
 
-export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): void {
+export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSync: WideSync } {
   const { fastify, rootDir } = deps;
   const rawStore = deps.store ?? createDayStore(path.join(rootDir, '.analysis-cache'));
   const loadOhlc = deps.loadOhlc ?? createParquetOhlcLoaderFor(path.join(rootDir, '.signal-cache'));
@@ -695,4 +695,6 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): void {
       return { ok: true, started, sync: wideSync.getState() };
     },
   );
+
+  return { wideSync };
 }

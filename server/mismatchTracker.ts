@@ -13,8 +13,8 @@
  * becomes a new version, when its CE-vs-PE gap is wider, or is ignored. Every version is kept, so
  * the exact reading a trader acted on can still be looked at after it has been superseded. Once a
  * case's latest version is 30 minutes old nothing can be a near-copy of it any more: it is frozen
- * by construction, with no timer. A match that is a near-copy of two cases at once is ignored, so
- * no case is ever pulled onto another.
+ * by construction, with no timer. If a match is near more than one case, the nearest case wins
+ * (the first case wins an exact tie), matching the Android tracker.
  *
  * Pure: no I/O, no clock. server/mismatchRoutes.ts feeds it ticks and broker minute closes.
  */
@@ -288,18 +288,22 @@ export class StrategyMismatchTracker {
     const changed = new Set<MismatchCase>();
     for (const cand of candidates) {
       const near = this.cases.filter((c) => isNear(c, cand));
-      if (near.length === 1) {
-        const [match] = near;
+      if (near.length > 0) {
+        // The Android tracker assigns an ambiguous reading to the case whose latest version is
+        // nearest across both endpoints. Keep the first-created case when the distances tie.
+        const distance = (c: MismatchCase) => {
+          const latest = c.versions[c.versions.length - 1];
+          return Math.abs(cand.t1Ns - latest.t1Ns) + Math.abs(cand.t2Ns - latest.t2Ns);
+        };
+        const match = near.reduce((nearest, current) =>
+          distance(current) < distance(nearest) ? current : nearest,
+        );
         if (cand.gap > match.versions[match.versions.length - 1].gap) {
           match.versions.push(cand);
           changed.add(match);
         }
         continue;
       }
-      // Near two cases at once: it belongs to neither. Giving it to one would pull that case onto
-      // the other — on the 2026-09-16 replay that left 5 pairs of cases ending as the same
-      // 09:55→afternoon moment. Skipping keeps every case distinct from every other.
-      if (near.length > 1) continue;
       if (replay && this.cases.some((c) => c.versions.some((v) => isNearVersion(v, cand))))
         continue;
       // After old duplicates are pruned the numbers can have gaps; never reuse one.

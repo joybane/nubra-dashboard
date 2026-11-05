@@ -5,9 +5,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { createDayStore, emptyGrid, type DaySeries, type DayStore } from '../analysis/daySeries.ts';
 import { nseOptionSymbol } from '../analysis/optionNames.ts';
 import {
+  ALL_WIDE_FIELDS,
+  OHLC_FIELDS,
   createWideStore,
   createWideSync,
   fetchWideDay,
+  pickWideFields,
   wideOhlcSource,
   wideStrikes,
   type WideStore,
@@ -89,6 +92,57 @@ describe('fetchWideDay', () => {
     expect(calls.some((c) => c.length === 1 && c[0] === bad)).toBe(true);
   });
 
+  test('asks for every field and keeps the extras: bid/ask in rupees, volume/greeks/IV as sent', async () => {
+    const asked: string[][] = [];
+    const post = async (b: object) => {
+      const q = (b as { query: Array<{ values: string[]; fields: string[] }> }).query;
+      asked.push(q[0].fields);
+      const pt = (v: number) => [{ ts: ns('09:46'), v }];
+      return {
+        result: [
+          {
+            values: q.map(({ values: [s] }) => ({
+              [s]: {
+                open: pt(1000),
+                high: pt(1200),
+                low: pt(900),
+                close: pt(1100),
+                l1bid: pt(1090),
+                cumulative_volume: pt(0),
+                delta: pt(-0.31),
+                iv_mid: pt(0.142),
+              },
+            })),
+          },
+        ],
+      };
+    };
+    const wide = (await fetchWideDay({ post, pace: noPace }, nubraDay()))!;
+    expect(asked[0]).toEqual([...ALL_WIDE_FIELDS]);
+    expect(wide.v).toBe(2);
+    const m = wide.more!.pe['23150']!;
+    const i = 31;
+    expect([m.l1bid![i], m.cumulative_volume![i], m.delta![i], m.iv_mid![i]]).toEqual([
+      10.9, 0, -0.31, 0.142,
+    ]);
+    expect(m.gamma).toBeUndefined(); // a field with no data is not stored
+  });
+
+  test('prices only when Nubra refuses the extra fields but answers open/high/low/close', async () => {
+    const calls: string[][] = [];
+    const base = fakePost(new Set(), calls);
+    const picky = async (b: object) => {
+      const f = (b as { query: Array<{ fields: string[] }> }).query[0].fields;
+      if (f.includes('iv_mid')) throw new Error('unexpected status 404 unknown field');
+      return base(b);
+    };
+    const fields = await pickWideFields({ post: picky, pace: noPace }, nubraDay());
+    expect(fields).toEqual([...OHLC_FIELDS]);
+    const wide = (await fetchWideDay({ post: picky, pace: noPace }, nubraDay(), fields!))!;
+    expect(wide.fields).toEqual([...OHLC_FIELDS]);
+    expect(wideOhlcSource(wide).strikes('CE')).toHaveLength(14);
+  });
+
   test('an outage (every request failing) is null, not an empty day', async () => {
     const wide = await fetchWideDay(
       {
@@ -131,7 +185,13 @@ describe('createWideSync', () => {
     expect(sync.start('NIFTY')).toBe(true);
     expect(sync.start('NIFTY')).toBe(false); // already running
     await sync.whenIdle();
-    expect(sync.getState()).toMatchObject({ running: false, done: 2, total: 2, failed: 0 });
+    expect(sync.getState()).toMatchObject({
+      running: false,
+      done: 2,
+      total: 2,
+      failed: 0,
+      fields: 'all',
+    });
     expect(await wide.list('NIFTY')).toEqual(['2026-01-05', '2026-01-06']);
     expect((await wide.read('NIFTY', '2026-01-06'))?.expiry).toBe(EXPIRY);
 

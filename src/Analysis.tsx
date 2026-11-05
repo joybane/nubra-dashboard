@@ -150,6 +150,8 @@ interface StatusResponse {
     local: SyncProgress;
     nubra: SyncProgress & { start: string | null; skipped: string | null };
     validation: { running: boolean; done: number; total: number; ok: boolean | null };
+    /** The full-detail option download that ends "Update data" (null on an older server). */
+    detail?: { done: number; total: number; failed: number; lastError: string | null } | null;
     errors: string[];
   };
   brokerSession: boolean;
@@ -667,7 +669,9 @@ export default function Analysis({ theme, onChangeView }: Props) {
               <span className="spinner mr-1 inline-block h-3 w-3 align-middle" />
               {sync.phase === 'validation'
                 ? `Checking local data ${progressText(sync.validation)}`
-                : `Updating · local ${progressText(sync.local)} · Nubra ${progressText(sync.nubra)}`}
+                : sync.phase === 'detail' && sync.detail
+                  ? `Downloading full option detail (prices, bid/ask, volume, OI, greeks, IV) ${progressText(sync.detail)}`
+                  : `Updating · local ${progressText(sync.local)} · Nubra ${progressText(sync.nubra)}`}
             </span>
           ) : (
             status &&

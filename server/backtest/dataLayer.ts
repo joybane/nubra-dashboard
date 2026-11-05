@@ -9,11 +9,17 @@
 import { readdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { asyncBufferFromFile, parquetReadObjects } from 'hyparquet';
 import { compressors } from 'hyparquet-compressors';
 import type { ExpiryFlag, OptionType, Underlying } from './types.ts';
 
-export const DATA_ROOT = process.env.BACKTEST_DATA_ROOT || 'E:/Derivativesproject/ATM Wise data';
+// Defaults to the "ATM Wise data" folder beside the nubra-dashboard checkout, so the tree is found
+// whichever drive the project lives on. Set in the shell, not .env: this is read at import time,
+// before server/index.ts calls dotenv.config().
+export const DATA_ROOT =
+  process.env.BACKTEST_DATA_ROOT ||
+  fileURLToPath(new URL('../../../ATM Wise data', import.meta.url));
 
 const IST_OFFSET_SEC = 5.5 * 3600;
 

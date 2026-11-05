@@ -25,6 +25,7 @@ import { registerBacktestRoutes } from './backtest/routes.ts';
 import { registerNubraBacktestRoutes } from './nubraBacktestRoutes.ts';
 import { registerAnalysisRoutes } from './analysis/routes.ts';
 import { registerSignalBacktestRoutes } from './signalBacktest/routes.ts';
+import type { WideSync } from './signalBacktest/wideSource.ts';
 import { createBacktestRefdataStore } from './backtestRefdataStore.ts';
 import { createBacktestBarStore } from './backtestBarStore.ts';
 import { registerMarketDataRoutes } from './marketDataRoutes.ts';
@@ -1739,9 +1740,19 @@ registerNubraBacktestRoutes({
 
 // ─── Analysis (profit-mismatch scenarios) ────────────────────────────────────
 // Serves from .analysis-cache; only a sync talks to the broker, and only while a session exists.
+// "Update data" ends with the signal backtest's full-detail option download (every field Nubra
+// serves), registered below — so one download gets everything.
+let detailSync: WideSync | null = null;
 registerAnalysisRoutes({
   fastify,
   rootDir: path.join(__dirname, '..'),
+  afterNubra: async (underlying) => {
+    if (!detailSync) return;
+    await detailSync.whenIdle(); // one started from the Signal Backtest tab finishes first
+    detailSync.start(underlying);
+    await detailSync.whenIdle();
+  },
+  detailState: () => detailSync?.getState() ?? null,
   getPost: () =>
     authState.status === 'authenticated' && authState.sessionToken
       ? (body) =>
@@ -1754,7 +1765,7 @@ registerAnalysisRoutes({
 // ─── Signal backtest (first mismatch case → option trade) ────────────────────
 // Read-only over .analysis-cache and the parquet tree. Talks to the broker only for its own wide
 // option download (into .signal-cache), and only while a session exists.
-registerSignalBacktestRoutes({
+detailSync = registerSignalBacktestRoutes({
   fastify,
   rootDir: path.join(__dirname, '..'),
   getPost: () =>
@@ -1764,7 +1775,7 @@ registerSignalBacktestRoutes({
             Authorization: `Bearer ${authState.sessionToken!}`,
           })
       : null,
-});
+}).wideSync;
 
 // ─── Shutdown ─────────────────────────────────────────────────────────────────
 // Ctrl+C (directly or through `npm start`'s concurrently), a service stop, or closing the console

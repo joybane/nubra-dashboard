@@ -38,7 +38,7 @@ import {
 import { fetchBrokerGreeks, mergeGreeks, type BrokerDay } from './brokerGreeks.ts';
 import { dayGreekSeries } from './greeks.ts';
 import { createPacer, type PostTimeseries } from './nubraSource.ts';
-import { createAnalysisSync, type AnalysisSync } from './sync.ts';
+import { createAnalysisSync, type AnalysisSync, type DetailProgress } from './sync.ts';
 import { readValidationReport } from './validation.ts';
 
 const UNDERLYINGS = ['NIFTY', 'SENSEX'] as const;
@@ -49,6 +49,9 @@ export interface AnalysisRouteDeps {
   /** Repo root; the cache and the instrument-master directories hang off it. */
   rootDir: string;
   getPost: () => PostTimeseries | null;
+  /** The full-detail option download "Update data" runs after its Nubra phase (see sync.ts). */
+  afterNubra?: (underlying: AnalysisUnderlying) => Promise<void>;
+  detailState?: () => DetailProgress | null;
   /** Injected by tests. */
   store?: DayStore;
   sync?: AnalysisSync;
@@ -195,6 +198,8 @@ export function registerAnalysisRoutes(deps: AnalysisRouteDeps): void {
       store,
       masterDirs: [path.join(rootDir, '.refdata-cache'), path.join(rootDir, '.refdata-live')],
       getPost,
+      afterNubra: deps.afterNubra,
+      detailState: deps.detailState,
       log: (msg) => console.log(msg),
     });
 

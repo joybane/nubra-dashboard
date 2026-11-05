@@ -352,6 +352,35 @@ describe('target paths and the spot range', () => {
     expect(s.close.at(-1)).toBe(-325);
   });
 
+  test('a leg that goes quiet is held at its last close while the other still trades', () => {
+    // Short CE 100 / PE 80. The PE last prints 60 at minute 99 and is silent after; the CE climbs
+    // to 130 from minute 200 (12:35) to the close.
+    const ce = grid(100);
+    for (let m = 200; m <= EXIT; m++) ce[m] = 130;
+    const pe = grid(80, { 99: 60 });
+    for (let m = 100; m <= EXIT; m++) pe[m] = null;
+    const r = simulateSignalTrade(makeDay(ce, pe), SIGNAL, params({ legs: 'BOTH' }), null);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const t = r.trade;
+    // CE −30 × 65 = −₹1,950; PE held at 60, +20 × 65 = +₹1,300.
+    expect(t.legs[1]).toMatchObject({ exitPrice: 60, exitFallback: true });
+    expect(t.pnl).toBe(-650);
+    // Without holding the PE every minute after 10:54 would be skipped and the max loss would be 0.
+    expect(t).toMatchObject({ maxLoss: -650, maxLossTime: '12:35' });
+    expect(t.series.close.at(-1)).toBe(650);
+    expect(t.stop.trade.steps).toEqual([[200, 650, -1300]]);
+    // Each leg's own stop path is unchanged: the PE alone never loses.
+    expect(t.stop.legs[1].steps).toEqual([]);
+  });
+
+  test('a minute neither leg has stays a gap', () => {
+    const ce = grid(100, { 50: null });
+    const pe = grid(80, { 50: null });
+    const r = simulateSignalTrade(makeDay(ce, pe), SIGNAL, params({ legs: 'BOTH' }), null);
+    expect(r.ok && r.trade.series.close[50 - r.trade.series.from]).toBeNull();
+  });
+
   test('spot at exit and its range over the trade', () => {
     const day = makeDay(grid(100));
     day.spot = grid(23250, { 10: 23500, 100: 23310, 200: 23180, [EXIT]: 23240 });

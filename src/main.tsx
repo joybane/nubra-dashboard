@@ -52,15 +52,9 @@ if (typeof window !== 'undefined') {
   );
 }
 
-// Force high-DPI rendering for Canvas/Lightweight-Charts on 100% scale displays
-if (typeof window !== 'undefined') {
-  const originalDPR = window.devicePixelRatio || 1;
-  if (originalDPR < 2) {
-    Object.defineProperty(window, 'devicePixelRatio', {
-      get: () => 2,
-    });
-  }
-}
+// Canvas charts draw at the screen's own pixel ratio. This used to report 2 on every screen below
+// it, which on a 150%-scaled laptop meant ~1.8x the pixels per redraw for no sharpness the screen
+// could show — and every chart pane redraws on each tick.
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

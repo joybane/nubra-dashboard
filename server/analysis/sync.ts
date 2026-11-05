@@ -1,6 +1,7 @@
 /**
  * The job that fills the analysis cache: every local trading day from the parquet tree, every
- * Nubra day from where its history starts, then the overlap validation report.
+ * Nubra day from where its history starts, then (when wired) the full-detail option download for
+ * the Nubra days — every field Nubra serves, wider ladder — then the overlap validation report.
  *
  * Local and Nubra run side by side — one is disk and CPU, the other is network waiting on the
  * pacer — so neither slows the other. Both skip dates already on disk, so a sync after the first
@@ -40,7 +41,18 @@ export interface SyncState {
   local: SyncProgress;
   nubra: SyncProgress & { start: string | null; skipped: string | null };
   validation: { running: boolean; done: number; total: number; ok: boolean | null };
+  /** The full-detail download's progress while it runs as part of this sync; null when not wired. */
+  detail: DetailProgress | null;
   errors: string[];
+}
+
+export interface DetailProgress {
+  running: boolean;
+  done: number;
+  total: number;
+  failed: number;
+  lastError: string | null;
+  fields: 'all' | 'prices' | null;
 }
 
 export interface AnalysisSyncDeps {
@@ -48,6 +60,12 @@ export interface AnalysisSyncDeps {
   masterDirs: string[];
   /** A timeseries poster, or null when there is no broker session (Nubra phase is skipped). */
   getPost: () => PostTimeseries | null;
+  /**
+   * Runs after the Nubra phase (only when it ran): the full-detail option download, so one
+   * "Update data" gets every field. Its progress is read through `detailState`.
+   */
+  afterNubra?: (underlying: Underlying) => Promise<void>;
+  detailState?: () => DetailProgress | null;
   /** Minimum spacing between Nubra requests. 1400ms ≈ 43/min, under the shared 60/min ceiling. */
   minIntervalMs?: number;
   log?: (msg: string) => void;
@@ -97,6 +115,7 @@ export function createAnalysisSync(deps: AnalysisSyncDeps) {
     local: freshProgress(),
     nubra: { ...freshProgress(), start: null, skipped: null },
     validation: { running: false, done: 0, total: 0, ok: null },
+    detail: null,
     errors: [],
   };
   let current: Promise<void> = Promise.resolve();
@@ -191,6 +210,12 @@ export function createAnalysisSync(deps: AnalysisSyncDeps) {
           noteError(`[analysis nubra] ${(e as Error).message}`),
         ),
       ]);
+      if (deps.afterNubra && state.nubra.start && !state.nubra.skipped) {
+        state.phase = 'detail';
+        await deps
+          .afterNubra(underlying)
+          .catch((e) => noteError(`[analysis detail] ${(e as Error).message}`));
+      }
       state.phase = 'validation';
       state.validation.running = true;
       const report = await buildValidationReport(
@@ -218,7 +243,7 @@ export function createAnalysisSync(deps: AnalysisSyncDeps) {
   }
 
   return {
-    getState: (): SyncState => state,
+    getState: (): SyncState => ({ ...state, detail: deps.detailState?.() ?? null }),
     /** @returns false when a sync is already running. */
     start(underlying: Underlying): boolean {
       if (state.running) return false;

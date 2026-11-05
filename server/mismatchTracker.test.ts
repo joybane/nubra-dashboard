@@ -267,7 +267,7 @@ describe('StrategyMismatchTracker', () => {
     expect(t.cases[0].versions[0].gap).toBeGreaterThan(t.cases[1].versions[0].gap);
   });
 
-  test('a match near two cases at once is ignored, so cases never converge', () => {
+  test('a match near two cases is assigned to the nearest case, first case on an exact tie', () => {
     // NIFTY at 23,226 at 09:20 and 09:50: two cases 30 minutes apart at the start.
     const spot = (i: number) => (i === 5 || i === 35 ? 23226 : 23300);
     const t = tracker(
@@ -277,14 +277,16 @@ describe('StrategyMismatchTracker', () => {
     );
     t.onTick({ spot: 23226, ce: 110, pe: 115 }, at('11:00:00'));
     expect(t.cases.map((c) => hhmmss(c.versions[0].t1Ns))).toEqual(['09:20:00', '09:50:00']);
-    // The broker later shows 23,226 at 09:35 too — 15 minutes from both cases.
+    // The broker later shows 23,226 at 09:35 too — 15 minutes from both cases. Give that minute a
+    // much wider mismatch so it is processed first and must become a new version of one case.
     t.setBrokerCloses(DATE, 'spot', [{ minute: 9 * 60 + 35, close: 23226 }]);
+    t.setBrokerCloses(DATE, 'ce', [{ minute: 9 * 60 + 35, close: 130 }]);
+    t.setBrokerCloses(DATE, 'pe', [{ minute: 9 * 60 + 35, close: 100 }]);
     t.onTick({ spot: 23226, ce: 105, pe: 117 }, at('11:00:10'));
     expect(t.cases).toHaveLength(2);
-    const t1s = t.cases.flatMap((c) => c.versions.map((v) => hhmmss(v.t1Ns)));
-    expect(t1s).not.toContain('09:35:00');
-    // Each case still took its own wider reading.
-    expect(t.cases.map((c) => c.versions.length)).toEqual([2, 2]);
+    // Both distances tie, so the Android rule keeps the first-created case.
+    expect(t.cases[0].versions.map((v) => hhmmss(v.t1Ns))).toEqual(['09:20:00', '09:35:00']);
+    expect(t.cases[1].versions.map((v) => hhmmss(v.t1Ns))).toEqual(['09:50:00', '09:50:00']);
   });
 
   test('BUY legs flip the sign of each delta', () => {
