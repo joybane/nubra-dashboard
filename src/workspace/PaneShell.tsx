@@ -16,6 +16,7 @@ const Watchlist = lazy(() => import('../Watchlist'));
 const Tracker = lazy(() => import('../Tracker'));
 const Analysis = lazy(() => import('../Analysis'));
 const SignalBacktest = lazy(() => import('../SignalBacktest'));
+const TradeExplorer = lazy(() => import('../TradeExplorer'));
 
 function PaneLoading() {
   return (
@@ -88,6 +89,8 @@ export default function PaneShell({
         return <Analysis theme={theme} onChangeView={onViewChange} />;
       case 'signalbacktest':
         return <SignalBacktest theme={theme} />;
+      case 'tradeexplorer':
+        return <TradeExplorer theme={theme} />;
     }
   })();
 

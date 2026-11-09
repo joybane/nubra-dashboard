@@ -247,7 +247,8 @@ export type ViewType =
   | 'watchlist'
   | 'tracker'
   | 'analysis'
-  | 'signalbacktest';
+  | 'signalbacktest'
+  | 'tradeexplorer';
 
 export type LayoutType = 'single' | 'hsplit' | 'vsplit' | 'grid' | 'tleft' | 'tright';
 

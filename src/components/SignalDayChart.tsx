@@ -176,6 +176,8 @@ interface Props {
   /** Move to the previous (-1) or next (1) day in the table. */
   onStep?: (delta: -1 | 1) => void;
   canStep?: { prev: boolean; next: boolean };
+  /** Prices for minutes the stored data does not hold, for a leg whose prices ran out. */
+  fillLegs?: Array<{ kind: 'CE' | 'PE'; strike: number; close: Grid }>;
 }
 
 export default function SignalDayChart({
@@ -185,6 +187,7 @@ export default function SignalDayChart({
   onClose,
   onStep,
   canStep,
+  fillLegs,
 }: Props) {
   const [data, setData] = useState<SignalDayResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -284,10 +287,12 @@ export default function SignalDayChart({
     createSeriesMarkers(spot, spotMarks);
 
     // The prices of the legs the trade sold, the entry price drawn across each.
-    const closes = trade.legs.map(
-      (leg) =>
-        data.legs!.find((l) => l.kind === leg.kind && l.strike === leg.strike)?.close ?? null,
-    );
+    const closes = trade.legs.map((leg) => {
+      const got =
+        data.legs!.find((l) => l.kind === leg.kind && l.strike === leg.strike)?.close ?? null;
+      const fill = fillLegs?.find((l) => l.kind === leg.kind && l.strike === leg.strike)?.close;
+      return got && fill ? got.map((v, i) => v ?? fill[i]) : got;
+    });
     const readable: Array<{
       label: string;
       series: ISeriesApi<'Line' | 'Baseline'>;
@@ -470,7 +475,7 @@ export default function SignalDayChart({
       chart.unsubscribeCrosshairMove(onMove);
       removeChart(chart);
     };
-  }, [view, data, theme, row.trade, row.signal.t1, row.signal.t2]);
+  }, [view, data, theme, row.trade, row.signal.t1, row.signal.t2, fillLegs]);
 
   // ── Greeks view ─────────────────────────────────────────────────────────────
   useEffect(() => {

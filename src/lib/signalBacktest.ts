@@ -502,10 +502,21 @@ export function tradePnlSeries(
     }
     return series;
   });
+  // A leg with no print is held at its last value, as the trade itself is, so the total's last
+  // point is the trade's P&L even when one leg's prices stop early.
   const total: Grid = new Array(SESSION_SLOTS).fill(null);
+  const held: Array<number | null> = legs.map(() => null);
   for (let m = 0; m < SESSION_SLOTS; m++) {
-    if (!legs.length || legs.some((s) => s[m] == null)) continue;
-    total[m] = Math.round(legs.reduce((sum, s) => sum + s[m]!, 0) * 100) / 100;
+    let printed = false;
+    legs.forEach((s, n) => {
+      const v = s[m];
+      if (v != null) {
+        held[n] = v;
+        printed = true;
+      }
+    });
+    if (!printed || !legs.length || held.some((v) => v == null)) continue;
+    total[m] = Math.round(held.reduce<number>((sum, v) => sum + v!, 0) * 100) / 100;
   }
   return { legs, total };
 }

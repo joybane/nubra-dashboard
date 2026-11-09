@@ -460,7 +460,8 @@ export default function ExperienceShell({
                         ? 'strategy'
                         : view === 'nubrabacktest' ||
                             view === 'analysis' ||
-                            view === 'signalbacktest'
+                            view === 'signalbacktest' ||
+                            view === 'tradeexplorer'
                           ? 'research'
                           : 'monitor'
                   }

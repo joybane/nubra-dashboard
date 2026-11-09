@@ -15,6 +15,7 @@ export const VIEW_LABELS: Record<ViewType, string> = {
   tracker: 'Tracker',
   analysis: 'Analysis',
   signalbacktest: 'Signal Backtest',
+  tradeexplorer: 'Trade Explorer',
 };
 
 export const VIEW_ORDER = Object.keys(VIEW_LABELS) as ViewType[];

@@ -326,12 +326,18 @@ describe('tradePnlSeries', () => {
     expect(legs[0][9]).toBeNull();
   });
 
-  test('the total needs every leg priced that minute', () => {
+  test('the total holds a leg with no price at its last value', () => {
     const { total } = tradePnlSeries(trade, [ce, pe]);
     expect(total[5]).toBe(0);
     expect(total[6]).toBe(-65); // 65 - 130
-    expect(total[7]).toBeNull(); // the CE has no price
+    expect(total[7]).toBe(-130); // the CE has no price: 65 held, - 195
     expect(total[8]).toBe(-65); // 260 - 325
+  });
+
+  test('when one leg stops early the total still ends on the trade P&L', () => {
+    const stopped = { ...trade, legs: [{ ...trade.legs[0], exitTime: '09:21' }, trade.legs[1]] };
+    const { total } = tradePnlSeries(stopped, [ce, pe]);
+    expect(total[8]).toBe(-260); // the CE held at +65, the PE at -325
   });
 
   test('BUY is the mirror image', () => {

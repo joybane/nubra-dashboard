@@ -3,6 +3,8 @@
  *
  *   POST /api/signal-backtest/run          first mismatch case per day → one option trade → exit
  *   GET  /api/signal-backtest/day          one day's spot, reference-leg closes and greeks, for the chart
+ *   GET  /api/signal-backtest/chain        one day's option chain at one minute, for the Trade Explorer
+ *   GET  /api/signal-backtest/saved-run    the run saved on disk that the Trade Explorer reads
  *   GET  /api/signal-backtest/wide/status  wide Nubra ladder coverage and download progress
  *   POST /api/signal-backtest/wide/sync    download the wide ladder for Nubra days missing it
  *
@@ -12,6 +14,8 @@
  * `parseFinderParams`; nothing in server/analysis is changed or re-registered here.
  */
 import type { FastifyInstance } from 'fastify';
+import { createReadStream } from 'fs';
+import { stat } from 'fs/promises';
 import path from 'path';
 import type { FinderParams } from '../analysis/caseFinder.ts';
 import {
@@ -32,6 +36,7 @@ import {
   type DayGreekSeries,
   type SignalGreeks,
 } from '../analysis/greeks.ts';
+import { buildChain } from './chain.ts';
 import { daysToExpiry } from './expiry.ts';
 import { createParquetOhlcLoaderFor, type OhlcLoader } from './ohlc.ts';
 import { createPremiumSetsBuilder, type PremiumSetsResponse } from './premiumSets.ts';
@@ -59,6 +64,8 @@ import {
 const UNDERLYINGS = ['NIFTY', 'SENSEX'] as const;
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
+/** A run response saved under `.signal-cache/<UND>/`, for the Trade Explorer. */
+const SAVED_RUN_FILE = 'explorer-run.json';
 
 export interface SignalBacktestDeps {
   fastify: FastifyInstance;
@@ -650,6 +657,72 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
     };
     return response;
   });
+
+  // The Trade Explorer's trade detail: the chain at one minute of a stored day.
+  fastify.get<{
+    Querystring: { underlying?: string; date?: string; source?: string; time?: string };
+  }>('/api/signal-backtest/chain', async (req, reply) => {
+    const q = req.query;
+    const underlying = String(q.underlying ?? 'NIFTY').toUpperCase();
+    if (!(UNDERLYINGS as readonly string[]).includes(underlying)) {
+      reply.code(400);
+      return { ok: false, error: `unsupported underlying ${q.underlying}` };
+    }
+    const date = String(q.date ?? '');
+    const time = String(q.time ?? '');
+    if (!ISO.test(date) || !HHMM.test(time)) {
+      reply.code(400);
+      return { ok: false, error: 'date must be YYYY-MM-DD and time HH:MM' };
+    }
+    if (q.source !== 'nubra' && q.source !== 'local') {
+      reply.code(400);
+      return { ok: false, error: 'source must be nubra or local' };
+    }
+    const index = minuteIndex(time);
+    const day = await readDay(underlying, q.source, date);
+    if (index < 0 || !day || isEmptyDay(day)) {
+      reply.code(404);
+      return { ok: false, error: `no ${q.source} data for ${date} at ${time}` };
+    }
+    const { ohlc, ohlcSource } = await resolveOhlc(underlying, date, q.source, day.expiry, true);
+    const wide = ohlcSource === 'nubra-wide' ? await wideStore.read(underlying, date) : null;
+    const chain = buildChain(day, index, ohlc, wide);
+    if (!chain) {
+      reply.code(404);
+      return { ok: false, error: `no spot on ${date} at ${time}` };
+    }
+    return {
+      ok: true,
+      underlying,
+      date,
+      time,
+      expiry: day.expiry,
+      priceSource: ohlcSource,
+      ...chain,
+    };
+  });
+
+  // The saved run the Trade Explorer reads: a full run response kept on disk, so opening the tab
+  // never recalculates anything.
+  fastify.get<{ Querystring: { underlying?: string } }>(
+    '/api/signal-backtest/saved-run',
+    async (req, reply) => {
+      const underlying = String(req.query.underlying ?? 'NIFTY').toUpperCase();
+      if (!(UNDERLYINGS as readonly string[]).includes(underlying)) {
+        reply.code(400);
+        return { ok: false, error: `unsupported underlying ${req.query.underlying}` };
+      }
+      const file = path.join(rootDir, '.signal-cache', underlying, SAVED_RUN_FILE);
+      try {
+        await stat(file);
+      } catch {
+        reply.code(404);
+        return { ok: false, error: `no saved ${underlying} run at ${file}` };
+      }
+      reply.type('application/json');
+      return reply.send(createReadStream(file));
+    },
+  );
 
   fastify.get<{ Querystring: { underlying?: string } }>(
     '/api/signal-backtest/wide/status',
