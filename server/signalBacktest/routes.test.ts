@@ -1,5 +1,5 @@
 import Fastify from 'fastify';
-import { mkdtemp, rm } from 'fs/promises';
+import { mkdtemp, rm, mkdir, writeFile } from 'fs/promises';
 import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
@@ -476,5 +476,96 @@ describe('premium mode that trades only the distances with a chosen range', () =
       premiumTiersOnly: true,
     });
     expect(typeof parseTradeParams({ premiumTiersOnly: 'yes' })).toBe('string');
+  });
+});
+
+describe('GET /api/signal-backtest/chain: local supplement', () => {
+  for (const unavailable of [false, true]) {
+    test(
+      unavailable
+        ? 'keeps broker prices if the local files cannot be read'
+        : 'fills a partial broker chain from the matching local expiry',
+      async () => {
+        await app.close();
+        app = Fastify();
+        const calls: string[][] = [];
+        const prices = (value: number) => ({
+          o: emptyGrid(),
+          h: emptyGrid(),
+          l: emptyGrid(),
+          c: Array(SESSION_BARS).fill(value),
+        });
+        registerSignalBacktestRoutes({
+          fastify: app,
+          rootDir: dir,
+          store,
+          loadOhlc: async (underlying, date, expiry) => {
+            calls.push([underlying, date, expiry]);
+            if (unavailable) throw new Error('optional local disk unavailable');
+            return { strikes: () => [23350], series: () => prices(123) };
+          },
+        });
+        await app.ready();
+        await store.write(day('2026-01-05', 'nubra'));
+        await createWideStore(path.join(dir, '.signal-cache')).write({
+          v: 1,
+          underlying: 'NIFTY',
+          date: '2026-01-05',
+          expiry: '2026-01-06',
+          monthly: false,
+          ce: { '23450': prices(45) },
+          pe: {},
+        });
+        const response = await app.inject({
+          method: 'GET',
+          url: '/api/signal-backtest/chain?underlying=NIFTY&date=2026-01-05&source=nubra&time=09:45',
+        });
+        expect(response.statusCode).toBe(200);
+        const body = response.json();
+        expect(calls).toEqual([['NIFTY', '2026-01-05', '2026-01-06']]);
+        const reference = body.rows.find((r: { strike: number }) => r.strike === 23350);
+        expect(reference.ce.close).toBe(197);
+        expect(reference.pe).toEqual(
+          unavailable ? null : expect.objectContaining({ close: 123, localFallback: true }),
+        );
+        expect(body.rows.find((r: { strike: number }) => r.strike === 23450).ce.close).toBe(45);
+      },
+    );
+  }
+});
+
+describe('Trade Explorer trade sets', () => {
+  test('preserves the saved run and supplies a real per-day comparison', async () => {
+    await store.write(day('2026-01-05', 'nubra'));
+    const { body } = await run({
+      underlying: 'NIFTY',
+      tradeParams: { legs: 'BOTH', otmSteps: 2 },
+      includeLocalOnly: false,
+    });
+    const folder = path.join(dir, '.signal-cache', 'NIFTY');
+    await mkdir(folder, { recursive: true });
+    await writeFile(path.join(folder, 'explorer-run.json'), JSON.stringify(body));
+    const saved = (await app.inject('/api/signal-backtest/explorer-sets?underlying=NIFTY')).json();
+    expect(saved.rows).toEqual(body.rows);
+    expect(saved.setOptions.some((s: { key: string }) => s.key === 'worst')).toBe(true);
+    const compared = (
+      await app.inject('/api/signal-backtest/explorer-sets?underlying=NIFTY&date=2026-01-05')
+    ).json();
+    expect(compared.rows[0].trade).toEqual(body.rows[0].trade);
+    expect(compared.rows[0].comparisons.some((c: { key: string }) => c.key === 'otm2')).toBe(true);
+    const worst = (
+      await app.inject('/api/signal-backtest/explorer-sets?underlying=NIFTY&set=worst')
+    ).json();
+    expect(worst.rows[0].worstLoss).toBe(
+      Math.max(...worst.rows[0].comparisons.map((c: { maxLoss: number }) => c.maxLoss)),
+    );
+  });
+  test('rejects unsupported markets and sets', async () => {
+    expect(
+      (await app.inject('/api/signal-backtest/explorer-sets?underlying=OTHER')).statusCode,
+    ).toBe(400);
+    expect((await app.inject('/api/signal-backtest/explorer-sets?set=missing')).statusCode).toBe(
+      400,
+    );
   });
 });

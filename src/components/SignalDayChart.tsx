@@ -12,6 +12,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   BaselineSeries,
+  ColorType,
   LineSeries,
   LineStyle,
   createChart,
@@ -159,16 +160,151 @@ const hideTip = (el: HTMLElement | null) => {
 
 /** A chart in `box` with the axes both views share. */
 function baseChart(box: HTMLElement, theme: Theme): IChartApi {
+  const report = box.closest('.te-report-detail');
+  const style = report ? getComputedStyle(box) : null;
+  const reportLayout = style
+    ? {
+        ...chartTheme(theme).layout,
+        background: { type: ColorType.Solid, color: style.getPropertyValue('--bg-card').trim() },
+        textColor: style.getPropertyValue('--text-muted').trim(),
+        fontFamily: 'Report Mono, Consolas, monospace',
+        fontSize: 12,
+      }
+    : null;
   return createChart(box, {
     autoSize: true,
     ...chartTheme(theme),
+    ...(reportLayout ? { layout: reportLayout } : {}),
     leftPriceScale: { visible: true, borderVisible: false, minimumWidth: 70 },
     rightPriceScale: { visible: true, borderVisible: false, minimumWidth: 75 },
     timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
   });
 }
 
+/** Maintain a full-session overview when its container expands or restores. */
+function frameSessionOnResize(chart: IChartApi, box: HTMLElement, last: number) {
+  const fit = () => chart.timeScale().setVisibleLogicalRange({ from: -1, to: last });
+  fit();
+  let width = box.clientWidth;
+  let frame = 0;
+  const observer = new ResizeObserver(() => {
+    if (width === box.clientWidth) return;
+    width = box.clientWidth;
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(fit);
+  });
+  observer.observe(box);
+  return () => {
+    observer.disconnect();
+    cancelAnimationFrame(frame);
+  };
+}
+
+type PnlReading = {
+  label: string;
+  series: ISeriesApi<'Line' | 'Baseline'>;
+  money: boolean;
+  color: string;
+  bold?: boolean;
+};
+
+function addTradePnlPane(
+  chart: IChartApi,
+  trade: SignalBacktestRow['trade'],
+  closes: Array<Grid | null>,
+  timeOf: (i: number) => UTCTimestamp,
+  paneIndex: number,
+): PnlReading[] {
+  const readable: PnlReading[] = [];
+  const colorOf = (kind: 'CE' | 'PE') => (kind === 'CE' ? CE_COLOR : PE_COLOR);
+  const line = (grid: Grid) =>
+    grid.flatMap((v, i) => (v == null ? [] : [{ time: timeOf(i), value: v }]));
+  // Pane 1: P&L. Each leg thin, the total bold and shaded either side of zero. With one leg the
+  // total is that leg, so it is drawn once.
+  const pnl = tradePnlSeries(trade, closes);
+  const pnlFormat = { type: 'price', precision: 0, minMove: 1 } as const;
+  if (trade.legs.length > 1) {
+    trade.legs.forEach((leg, n) => {
+      const s = chart.addSeries(
+        LineSeries,
+        {
+          color: colorOf(leg.kind),
+          lineWidth: 1,
+          title: `${leg.kind} P&L`,
+          priceLineVisible: false,
+          lastValueVisible: true,
+          priceFormat: pnlFormat,
+        },
+        paneIndex,
+      );
+      s.setData(line(pnl.legs[n]));
+      readable.push({
+        label: `${leg.kind} P&L`,
+        series: s,
+        money: true,
+        color: colorOf(leg.kind),
+      });
+    });
+  }
+  const total = chart.addSeries(
+    BaselineSeries,
+    {
+      baseValue: { type: 'price', price: 0 },
+      topLineColor: TOTAL_UP,
+      topFillColor1: 'rgba(34,197,94,0.28)',
+      topFillColor2: 'rgba(34,197,94,0.03)',
+      bottomLineColor: TOTAL_DOWN,
+      bottomFillColor1: 'rgba(239,68,68,0.03)',
+      bottomFillColor2: 'rgba(239,68,68,0.28)',
+      lineWidth: 2,
+      title: trade.legs.length > 1 ? 'Total P&L' : 'P&L',
+      priceLineVisible: false,
+      priceFormat: pnlFormat,
+    },
+    paneIndex,
+  );
+  total.setData(line(pnl.total));
+  total.createPriceLine({
+    price: 0,
+    color: MARK_COLOR,
+    lineWidth: 1,
+    lineStyle: LineStyle.Dotted,
+    axisLabelVisible: false,
+    title: '',
+  });
+  // The extremes are high/low based, so the label carries the amount; the dot sits on the close line.
+  createSeriesMarkers(
+    total,
+    (
+      [
+        [trade.maxProfitTime, 'aboveBar', TOTAL_UP, trade.maxProfit],
+        [trade.maxLossTime, 'belowBar', TOTAL_DOWN, trade.maxLoss],
+      ] as const
+    )
+      .filter(([hhmm]) => pnl.total[slotOf(hhmm)] != null)
+      .sort(([a], [b]) => slotOf(a) - slotOf(b))
+      .map(([hhmm, position, color, value]) => ({
+        time: timeOf(slotOf(hhmm)),
+        position,
+        shape: position === 'aboveBar' ? 'arrowDown' : 'arrowUp',
+        color,
+        text: `${position === 'aboveBar' ? 'max profit' : 'max loss'} ${inr(value)}`,
+      })),
+  );
+  readable.push({
+    label: trade.legs.length > 1 ? 'Total P&L' : 'P&L',
+    series: total,
+    money: true,
+    color: 'sign',
+    bold: true,
+  });
+
+  return readable;
+}
+
 interface Props {
+  /** The detail pane already supplies date navigation and close controls. */
+  embedded?: boolean;
   theme: Theme;
   underlying: SignalUnderlying;
   row: SignalBacktestRow;
@@ -188,6 +324,7 @@ export default function SignalDayChart({
   onStep,
   canStep,
   fillLegs,
+  embedded = false,
 }: Props) {
   const [data, setData] = useState<SignalDayResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -353,85 +490,7 @@ export default function SignalDayChart({
       readable.push({ label: `${leg.strike} ${leg.kind}`, series: s, money: false, color });
     });
 
-    // Pane 1: P&L. Each leg thin, the total bold and shaded either side of zero. With one leg the
-    // total is that leg, so it is drawn once.
-    const pnl = tradePnlSeries(trade, closes);
-    const pnlFormat = { type: 'price', precision: 0, minMove: 1 } as const;
-    if (trade.legs.length > 1) {
-      trade.legs.forEach((leg, n) => {
-        const s = chart.addSeries(
-          LineSeries,
-          {
-            color: colorOf(leg.kind),
-            lineWidth: 1,
-            title: `${leg.kind} P&L`,
-            priceLineVisible: false,
-            lastValueVisible: true,
-            priceFormat: pnlFormat,
-          },
-          1,
-        );
-        s.setData(line(pnl.legs[n]));
-        readable.push({
-          label: `${leg.kind} P&L`,
-          series: s,
-          money: true,
-          color: colorOf(leg.kind),
-        });
-      });
-    }
-    const total = chart.addSeries(
-      BaselineSeries,
-      {
-        baseValue: { type: 'price', price: 0 },
-        topLineColor: TOTAL_UP,
-        topFillColor1: 'rgba(34,197,94,0.28)',
-        topFillColor2: 'rgba(34,197,94,0.03)',
-        bottomLineColor: TOTAL_DOWN,
-        bottomFillColor1: 'rgba(239,68,68,0.03)',
-        bottomFillColor2: 'rgba(239,68,68,0.28)',
-        lineWidth: 2,
-        title: trade.legs.length > 1 ? 'Total P&L' : 'P&L',
-        priceLineVisible: false,
-        priceFormat: pnlFormat,
-      },
-      1,
-    );
-    total.setData(line(pnl.total));
-    total.createPriceLine({
-      price: 0,
-      color: MARK_COLOR,
-      lineWidth: 1,
-      lineStyle: LineStyle.Dotted,
-      axisLabelVisible: false,
-      title: '',
-    });
-    // The extremes are high/low based, so the label carries the amount; the dot sits on the close line.
-    createSeriesMarkers(
-      total,
-      (
-        [
-          [trade.maxProfitTime, 'aboveBar', TOTAL_UP, trade.maxProfit],
-          [trade.maxLossTime, 'belowBar', TOTAL_DOWN, trade.maxLoss],
-        ] as const
-      )
-        .filter(([hhmm]) => pnl.total[slotOf(hhmm)] != null)
-        .sort(([a], [b]) => slotOf(a) - slotOf(b))
-        .map(([hhmm, position, color, value]) => ({
-          time: timeOf(slotOf(hhmm)),
-          position,
-          shape: position === 'aboveBar' ? 'arrowDown' : 'arrowUp',
-          color,
-          text: `${position === 'aboveBar' ? 'max profit' : 'max loss'} ${inr(value)}`,
-        })),
-    );
-    readable.push({
-      label: trade.legs.length > 1 ? 'Total P&L' : 'P&L',
-      series: total,
-      money: true,
-      color: 'sign',
-      bold: true,
-    });
+    readable.push(...addTradePnlPane(chart, trade, closes, timeOf, 1));
 
     const panes = chart.panes();
     panes[0]?.setStretchFactor(2);
@@ -469,9 +528,10 @@ export default function SignalDayChart({
     chart.subscribeCrosshairMove(onMove);
     // The whole day and the empty slots after it. (fitContent would end on the last real minute and
     // leave the padding to push the day off to the right.)
-    chart.timeScale().setVisibleLogicalRange({ from: -1, to: data.spot.length - 1 + EDGE_ROOM });
+    const stopFraming = frameSessionOnResize(chart, box, data.spot.length - 1 + EDGE_ROOM);
 
     return () => {
+      stopFraming();
       chart.unsubscribeCrosshairMove(onMove);
       removeChart(chart);
     };
@@ -545,6 +605,15 @@ export default function SignalDayChart({
       { label: 'CE', series: cePrice, digits: 2 },
       { label: 'PE', series: pePrice, digits: 2 },
     ];
+    const closes = row.trade.legs.map((leg) => {
+      const got =
+        data.legs?.find((l) => l.kind === leg.kind && l.strike === leg.strike)?.close ?? null;
+      const fill = fillLegs?.find((l) => l.kind === leg.kind && l.strike === leg.strike)?.close;
+      return got && fill ? got.map((value, i) => value ?? fill[i]) : got;
+    });
+    const pnlReadings =
+      embedded && data.legs ? addTradePnlPane(chart, row.trade, closes, timeOf, 1) : [];
+    const greekPaneOffset = pnlReadings.length ? 2 : 1;
     const greekRows: Array<{
       label: string;
       ce: ISeriesApi<'Line'>;
@@ -553,7 +622,7 @@ export default function SignalDayChart({
     }> = [];
     shown.forEach((key, n) => {
       const meta = GREEKS.find((g) => g.key === key)!;
-      const pane = n + 1;
+      const pane = n + greekPaneOffset;
       const make = (side: 'CE' | 'PE') => {
         const color = side === 'CE' ? CE_COLOR : PE_COLOR;
         const s = chart.addSeries(
@@ -588,6 +657,7 @@ export default function SignalDayChart({
     const panes = chart.panes();
     panes[0]?.setStretchFactor(1.6);
     for (let i = 1; i < panes.length; i++) panes[i].setStretchFactor(1);
+    if (pnlReadings.length) panes[1]?.setStretchFactor(1.3);
 
     const idle = `t1 ${row.signal.t1} · t2 ${row.signal.t2} · entry ${row.trade.entryTime} — hover for values`;
     if (readoutRef.current) readoutRef.current.textContent = idle;
@@ -599,7 +669,7 @@ export default function SignalDayChart({
         hideTip(tipRef.current);
         return;
       }
-      const val = (s: ISeriesApi<'Line'>) =>
+      const val = (s: ISeriesApi<'Line' | 'Baseline'>) =>
         (param.seriesData.get(s) as LineData<Time> | undefined)?.value;
       const parts = readable.map((r) => `${r.label} ${val(r.series)?.toFixed(r.digits) ?? '—'}`);
       const tip: TipRow[] = [
@@ -607,6 +677,18 @@ export default function SignalDayChart({
         { label: 'CE', value: val(cePrice)?.toFixed(2) ?? '—', color: CE_COLOR },
         { label: 'PE', value: val(pePrice)?.toFixed(2) ?? '—', color: PE_COLOR },
       ];
+      for (const reading of pnlReadings) {
+        const value = val(reading.series);
+        const formatted = value == null ? '—' : inr(value);
+        parts.push(`${reading.label} ${formatted}`);
+        tip.push({
+          label: reading.label,
+          value: formatted,
+          bold: reading.bold,
+          color:
+            reading.color === 'sign' ? ((value ?? 0) >= 0 ? TOTAL_UP : TOTAL_DOWN) : reading.color,
+        });
+      }
       for (const g of greekRows) {
         const f = (v: number | undefined) => (v == null ? '—' : v.toFixed(g.digits));
         parts.push(`${g.label} CE ${f(val(g.ce))} / PE ${f(val(g.pe))}`);
@@ -622,13 +704,14 @@ export default function SignalDayChart({
       }
     };
     chart.subscribeCrosshairMove(onMove);
-    chart.timeScale().fitContent();
+    const stopFraming = frameSessionOnResize(chart, box, data.spot.length - 1);
 
     return () => {
+      stopFraming();
       chart.unsubscribeCrosshairMove(onMove);
       removeChart(chart);
     };
-  }, [view, data, theme, shown, row.signal.t1, row.signal.t2, row.trade.entryTime]);
+  }, [view, data, theme, shown, row.signal.t1, row.signal.t2, row.trade, fillLegs, embedded]);
 
   // Functional update, so two toggles before a re-render cannot overwrite each other.
   const toggle = (key: GreekKey) =>
@@ -640,18 +723,17 @@ export default function SignalDayChart({
 
   const badge = dteBadge(row.dte);
   // Legs whose prices the day's data does not hold: their lines and the P&L stay blank.
-  const noPrices =
-    view === 'trade' && data?.legs
-      ? row.trade.legs.filter(
-          (leg) => !data.legs!.find((l) => l.kind === leg.kind && l.strike === leg.strike)?.close,
-        )
-      : [];
+  const noPrices = data?.legs
+    ? row.trade.legs.filter(
+        (leg) => !data.legs!.find((l) => l.kind === leg.kind && l.strike === leg.strike)?.close,
+      )
+    : [];
   const olderServer = view === 'trade' && data != null && !data.legs;
 
   return (
     <div className="flex h-full min-h-0 flex-col border-t border-[var(--border)] bg-[var(--bg-primary)]">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--border)] px-3 py-1 text-[11px]">
-        {onStep && (
+        {onStep && !embedded && (
           <span className="flex items-center gap-0.5">
             <button
               type="button"
@@ -675,8 +757,8 @@ export default function SignalDayChart({
             </button>
           </span>
         )}
-        <span className="font-semibold">{row.date}</span>
-        {badge && (
+        {!embedded && <span className="font-semibold">{row.date}</span>}
+        {badge && !embedded && (
           <span
             className="rounded px-1 text-[9px] font-semibold"
             style={{
@@ -728,7 +810,8 @@ export default function SignalDayChart({
         ) : (
           <>
             <span className="text-[var(--text-muted)]">
-              reference <span style={{ color: CE_COLOR }}>{ceStrike} CE</span> /{' '}
+              {embedded ? 'Trade P&L + reference' : 'reference'}{' '}
+              <span style={{ color: CE_COLOR }}>{ceStrike} CE</span> /{' '}
               <span style={{ color: PE_COLOR }}>{peStrike} PE</span> · expiry {row.expiry}
             </span>
             <span className="ml-2 flex items-center gap-1">
@@ -753,15 +836,17 @@ export default function SignalDayChart({
             </span>
           </>
         )}
-        <button
-          type="button"
-          onClick={onClose}
-          className="ml-auto text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-          aria-label="Close chart"
-          title="Close chart"
-        >
-          ✕
-        </button>
+        {!embedded && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+            aria-label="Close chart"
+            title="Close chart"
+          >
+            ✕
+          </button>
+        )}
       </div>
       <div
         ref={readoutRef}

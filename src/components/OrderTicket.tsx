@@ -314,12 +314,12 @@ export default function OrderTicket() {
 
   const pill = (active: boolean) =>
     active
-      ? 'bg-[#2f3347] text-white border-[#444a66]'
-      : 'bg-transparent text-[#888] border-[#2a2d3e] hover:text-[#ccc]';
+      ? 'bg-[var(--ticket-active,#2f3347)] text-[var(--ticket-active-ink,#fff)] border-[var(--ticket-active-border,#444a66)]'
+      : 'bg-transparent text-[var(--ticket-muted,#888)] border-[var(--ticket-border,#2a2d3e)] hover:text-[var(--ticket-secondary,#ccc)]';
 
   return (
     <div
-      className="fixed inset-0 z-[500] flex items-center justify-center"
+      className="order-ticket fixed inset-0 z-[500] flex items-center justify-center"
       onClick={(e) => {
         if (e.target === e.currentTarget) closeTicket();
       }}
@@ -330,9 +330,9 @@ export default function OrderTicket() {
         className="relative overflow-hidden flex flex-col max-h-[90vh]"
         style={{
           width: 420,
-          background: '#1c1f2e',
+          background: 'var(--ticket-surface, #1c1f2e)',
           borderRadius: 12,
-          boxShadow: '0 25px 60px rgba(0,0,0,.5)',
+          boxShadow: 'var(--ticket-shadow, 0 25px 60px rgba(0,0,0,.5))',
           transform: `translate(${pos.x}px, ${pos.y}px)`,
         }}
       >
@@ -340,7 +340,11 @@ export default function OrderTicket() {
         <div
           className="flex items-center gap-2 px-4 py-3"
           onMouseDown={onHeaderMouseDown}
-          style={{ borderBottom: '1px solid #2a2d3e', cursor: 'grab', userSelect: 'none' }}
+          style={{
+            borderBottom: '1px solid var(--ticket-border, #2a2d3e)',
+            cursor: 'grab',
+            userSelect: 'none',
+          }}
         >
           <button
             onClick={() => setSide('BUY')}
@@ -349,8 +353,8 @@ export default function OrderTicket() {
               fontWeight: 700,
               padding: '3px 8px',
               borderRadius: 4,
-              background: isBuy ? '#2563eb' : '#252836',
-              color: isBuy ? '#fff' : '#60a5fa',
+              background: isBuy ? '#2563eb' : 'var(--ticket-field, #252836)',
+              color: isBuy ? '#fff' : 'var(--ticket-blue, #60a5fa)',
               cursor: 'pointer',
               border: 'none',
             }}
@@ -364,8 +368,8 @@ export default function OrderTicket() {
               fontWeight: 700,
               padding: '3px 8px',
               borderRadius: 4,
-              background: !isBuy ? '#dc2626' : '#252836',
-              color: !isBuy ? '#fff' : '#f87171',
+              background: !isBuy ? '#dc2626' : 'var(--ticket-field, #252836)',
+              color: !isBuy ? '#fff' : 'var(--ticket-negative, #f87171)',
               cursor: 'pointer',
               border: 'none',
             }}
@@ -377,7 +381,7 @@ export default function OrderTicket() {
               flex: 1,
               fontSize: 13,
               fontWeight: 600,
-              color: '#fff',
+              color: 'var(--ticket-ink, #fff)',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               whiteSpace: 'nowrap',
@@ -394,7 +398,7 @@ export default function OrderTicket() {
               alignItems: 'center',
               justifyContent: 'center',
               borderRadius: 4,
-              color: '#888',
+              color: 'var(--ticket-muted, #888)',
               fontSize: 18,
               cursor: 'pointer',
               background: 'none',
@@ -409,16 +413,25 @@ export default function OrderTicket() {
         {instrument && ltpRs != null && (
           <div
             className="flex items-center gap-1.5 px-4 py-2"
-            style={{ borderBottom: '1px solid #2a2d3e' }}
+            style={{ borderBottom: '1px solid var(--ticket-border, #2a2d3e)' }}
           >
-            <span style={{ fontSize: 14, fontWeight: 600, color: '#fff' }}>{ltpRs.toFixed(2)}</span>
+            <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--ticket-ink, #fff)' }}>
+              {ltpRs.toFixed(2)}
+            </span>
             {chgRs != null && (
-              <span style={{ fontSize: 12, color: chgUp ? '#4ade80' : '#f87171' }}>
+              <span
+                style={{
+                  fontSize: 12,
+                  color: chgUp
+                    ? 'var(--ticket-positive, #4ade80)'
+                    : 'var(--ticket-negative, #f87171)',
+                }}
+              >
                 • {chgUp ? '+' : ''}
                 {chgRs.toFixed(2)} {chgPct != null && `(${chgPct.toFixed(2)}%)`}
               </span>
             )}
-            <span style={{ fontSize: 11, color: '#666', marginLeft: 4 }}>
+            <span style={{ fontSize: 11, color: 'var(--ticket-muted, #666)', marginLeft: 4 }}>
               • {instrument.exchange ?? 'NSE'}
             </span>
           </div>
@@ -434,7 +447,10 @@ export default function OrderTicket() {
           {instrument && (
             <>
               {/* ── Delivery / Intraday pill buttons ── */}
-              <div className="flex gap-2 px-4 py-3" style={{ borderBottom: '1px solid #2a2d3e' }}>
+              <div
+                className="flex gap-2 px-4 py-3"
+                style={{ borderBottom: '1px solid var(--ticket-border, #2a2d3e)' }}
+              >
                 {(['NRML', 'MIS'] as const).map((p) => (
                   <button
                     key={p}
@@ -447,7 +463,10 @@ export default function OrderTicket() {
               </div>
 
               {/* ── Entry: now, or earlier today ── */}
-              <div className="px-4 py-3" style={{ borderBottom: '1px solid #2a2d3e' }}>
+              <div
+                className="px-4 py-3"
+                style={{ borderBottom: '1px solid var(--ticket-border, #2a2d3e)' }}
+              >
                 <BackdatedEntryControl
                   value={backdate}
                   onChange={(next) => {
@@ -467,12 +486,14 @@ export default function OrderTicket() {
                 <div className="flex gap-3 mb-3">
                   <div className="flex-1">
                     <div className="flex items-center justify-between mb-1.5">
-                      <span style={{ fontSize: 11, color: '#888' }}>Qty</span>
-                      <span style={{ fontSize: 11, color: '#888' }}>Lots: {lots}</span>
+                      <span style={{ fontSize: 11, color: 'var(--ticket-muted, #888)' }}>Qty</span>
+                      <span style={{ fontSize: 11, color: 'var(--ticket-muted, #888)' }}>
+                        Lots: {lots}
+                      </span>
                     </div>
                     <div
                       className="flex items-center h-9 rounded overflow-hidden"
-                      style={{ border: '1px solid #2a2d3e' }}
+                      style={{ border: '1px solid var(--ticket-border, #2a2d3e)' }}
                     >
                       <button
                         onClick={() => setLots((l) => Math.max(1, l - 1))}
@@ -480,10 +501,10 @@ export default function OrderTicket() {
                           width: 36,
                           height: '100%',
                           fontSize: 18,
-                          color: '#888',
+                          color: 'var(--ticket-muted, #888)',
                           background: 'none',
                           border: 'none',
-                          borderRight: '1px solid #2a2d3e',
+                          borderRight: '1px solid var(--ticket-border, #2a2d3e)',
                           cursor: 'pointer',
                         }}
                       >
@@ -494,7 +515,7 @@ export default function OrderTicket() {
                           flex: 1,
                           textAlign: 'center',
                           fontSize: 13,
-                          color: '#fff',
+                          color: 'var(--ticket-ink, #fff)',
                           fontWeight: 500,
                         }}
                       >
@@ -506,10 +527,10 @@ export default function OrderTicket() {
                           width: 36,
                           height: '100%',
                           fontSize: 18,
-                          color: '#888',
+                          color: 'var(--ticket-muted, #888)',
                           background: 'none',
                           border: 'none',
-                          borderLeft: '1px solid #2a2d3e',
+                          borderLeft: '1px solid var(--ticket-border, #2a2d3e)',
                           cursor: 'pointer',
                         }}
                       >
@@ -520,7 +541,9 @@ export default function OrderTicket() {
 
                   <div className="flex-1">
                     <div className="mb-1.5">
-                      <span style={{ fontSize: 11, color: '#888' }}>Price</span>
+                      <span style={{ fontSize: 11, color: 'var(--ticket-muted, #888)' }}>
+                        Price
+                      </span>
                     </div>
                     <div className="flex gap-1 h-9">
                       {(['MKT', 'LIMIT', 'SL'] as const).map((t) => (
@@ -535,7 +558,10 @@ export default function OrderTicket() {
                             fontSize: 11,
                             fontWeight: 600,
                             cursor: 'pointer',
-                            background: orderType === t ? 'rgba(59,130,246,.15)' : '#252836',
+                            background:
+                              orderType === t
+                                ? 'rgba(59,130,246,.15)'
+                                : 'var(--ticket-field, #252836)',
                             color: orderType === t ? '#60a5fa' : '#888',
                             border: `1px solid ${orderType === t ? 'rgba(59,130,246,.4)' : '#2a2d3e'}`,
                           }}
@@ -559,10 +585,10 @@ export default function OrderTicket() {
                       width: '100%',
                       padding: '8px 12px',
                       marginBottom: 12,
-                      background: '#252836',
-                      border: '1px solid #2a2d3e',
+                      background: 'var(--ticket-field, #252836)',
+                      border: '1px solid var(--ticket-border, #2a2d3e)',
                       borderRadius: 4,
-                      color: '#fff',
+                      color: 'var(--ticket-ink, #fff)',
                       fontSize: 13,
                       outline: 'none',
                     }}
@@ -575,11 +601,11 @@ export default function OrderTicket() {
                     width: '100%',
                     padding: '10px 0',
                     borderRadius: 6,
-                    background: '#252836',
-                    border: '1px solid #2a2d3e',
+                    background: 'var(--ticket-field, #252836)',
+                    border: '1px solid var(--ticket-border, #2a2d3e)',
                     textAlign: 'center',
                     fontSize: 13,
-                    color: '#fff',
+                    color: 'var(--ticket-ink, #fff)',
                     fontWeight: 500,
                     marginBottom: 4,
                   }}
@@ -589,7 +615,13 @@ export default function OrderTicket() {
                     : 'At Market'}
                 </div>
                 {orderType === 'MKT' && (
-                  <p style={{ fontSize: 10, color: '#666', textAlign: 'center' }}>
+                  <p
+                    style={{
+                      fontSize: 10,
+                      color: 'var(--ticket-muted, #666)',
+                      textAlign: 'center',
+                    }}
+                  >
                     Tick size: 0.05
                   </p>
                 )}
@@ -598,7 +630,7 @@ export default function OrderTicket() {
               {/* ── SL / Target toggles ── */}
               <div
                 className="px-4 pb-3 flex gap-6 pt-3"
-                style={{ borderTop: '1px dashed #2a2d3e' }}
+                style={{ borderTop: '1px dashed var(--ticket-border, #2a2d3e)' }}
               >
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
@@ -611,7 +643,9 @@ export default function OrderTicket() {
                     }}
                     className="accent-blue-500"
                   />
-                  <span style={{ fontSize: 12, color: '#ccc' }}>Stoploss Price</span>
+                  <span style={{ fontSize: 12, color: 'var(--ticket-secondary, #ccc)' }}>
+                    Stoploss Price
+                  </span>
                 </label>
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
@@ -624,7 +658,9 @@ export default function OrderTicket() {
                     }}
                     className="accent-blue-500"
                   />
-                  <span style={{ fontSize: 12, color: '#ccc' }}>Target Price</span>
+                  <span style={{ fontSize: 12, color: 'var(--ticket-secondary, #ccc)' }}>
+                    Target Price
+                  </span>
                 </label>
               </div>
 
@@ -648,10 +684,10 @@ export default function OrderTicket() {
                     style={{
                       width: '100%',
                       padding: '8px 12px',
-                      background: '#252836',
-                      border: '1px solid #2a2d3e',
+                      background: 'var(--ticket-field, #252836)',
+                      border: '1px solid var(--ticket-border, #2a2d3e)',
                       borderRadius: 4,
-                      color: '#fff',
+                      color: 'var(--ticket-ink, #fff)',
                       fontSize: 13,
                       outline: 'none',
                     }}
@@ -660,7 +696,7 @@ export default function OrderTicket() {
               )}
 
               {/* ── Advanced ── */}
-              <div style={{ borderTop: '1px dashed #2a2d3e' }}>
+              <div style={{ borderTop: '1px dashed var(--ticket-border, #2a2d3e)' }}>
                 <button
                   onClick={() => setShowAdv((v) => !v)}
                   style={{
@@ -670,7 +706,7 @@ export default function OrderTicket() {
                     justifyContent: 'space-between',
                     padding: '10px 16px',
                     fontSize: 12,
-                    color: '#888',
+                    color: 'var(--ticket-muted, #888)',
                     background: 'none',
                     border: 'none',
                     cursor: 'pointer',
@@ -689,9 +725,9 @@ export default function OrderTicket() {
                             flex: 1,
                             padding: '6px 0',
                             borderRadius: 6,
-                            border: '1px solid #2a2d3e',
+                            border: '1px solid var(--ticket-border, #2a2d3e)',
                             fontSize: 11,
-                            color: '#888',
+                            color: 'var(--ticket-muted, #888)',
                             background: 'none',
                             cursor: 'pointer',
                           }}
@@ -709,7 +745,9 @@ export default function OrderTicket() {
                           onChange={() => setValidity('DAY')}
                           className="accent-blue-500"
                         />
-                        <span style={{ fontSize: 12, color: '#ccc' }}>Regular</span>
+                        <span style={{ fontSize: 12, color: 'var(--ticket-secondary, #ccc)' }}>
+                          Regular
+                        </span>
                       </label>
                       <label className="flex items-center gap-2 cursor-pointer">
                         <input
@@ -719,11 +757,19 @@ export default function OrderTicket() {
                           onChange={() => setValidity('AMO')}
                           className="accent-blue-500"
                         />
-                        <span style={{ fontSize: 12, color: '#ccc' }}>AMO</span>
+                        <span style={{ fontSize: 12, color: 'var(--ticket-secondary, #ccc)' }}>
+                          AMO
+                        </span>
                       </label>
                     </div>
                     {validity === 'AMO' && (
-                      <p style={{ fontSize: 11, color: '#666', lineHeight: 1.5 }}>
+                      <p
+                        style={{
+                          fontSize: 11,
+                          color: 'var(--ticket-muted, #666)',
+                          lineHeight: 1.5,
+                        }}
+                      >
                         Your order will be placed in the next trading session (AMO validity)
                       </p>
                     )}
@@ -732,7 +778,10 @@ export default function OrderTicket() {
               </div>
 
               {/* ── Margin ── */}
-              <div className="px-4 py-3" style={{ borderTop: '1px solid #2a2d3e' }}>
+              <div
+                className="px-4 py-3"
+                style={{ borderTop: '1px solid var(--ticket-border, #2a2d3e)' }}
+              >
                 {result ? (
                   <div
                     style={{
@@ -740,7 +789,9 @@ export default function OrderTicket() {
                       padding: '8px 12px',
                       borderRadius: 6,
                       background: result.ok ? 'rgba(34,197,94,.1)' : 'rgba(239,68,68,.1)',
-                      color: result.ok ? '#4ade80' : '#f87171',
+                      color: result.ok
+                        ? 'var(--ticket-positive, #4ade80)'
+                        : 'var(--ticket-negative, #f87171)',
                     }}
                   >
                     {result.msg}
@@ -752,7 +803,7 @@ export default function OrderTicket() {
                       padding: '8px 12px',
                       borderRadius: 6,
                       background: 'rgba(239,68,68,.1)',
-                      color: '#f87171',
+                      color: 'var(--ticket-negative, #f87171)',
                     }}
                   >
                     {marginErr.slice(0, 120)}
@@ -766,8 +817,12 @@ export default function OrderTicket() {
                         alignItems: 'center',
                       }}
                     >
-                      <span style={{ fontSize: 11, color: '#888' }}>Margin required</span>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: '#fff' }}>
+                      <span style={{ fontSize: 11, color: 'var(--ticket-muted, #888)' }}>
+                        Margin required
+                      </span>
+                      <span
+                        style={{ fontSize: 12, fontWeight: 600, color: 'var(--ticket-ink, #fff)' }}
+                      >
                         {margin != null ? `₹${fmtPrice(margin)}` : '—'}
                       </span>
                     </div>
@@ -778,8 +833,12 @@ export default function OrderTicket() {
                         alignItems: 'center',
                       }}
                     >
-                      <span style={{ fontSize: 11, color: '#888' }}>Margin available</span>
-                      <span style={{ fontSize: 11, color: '#4ade80' }}>Unlimited (Paper)</span>
+                      <span style={{ fontSize: 11, color: 'var(--ticket-muted, #888)' }}>
+                        Margin available
+                      </span>
+                      <span style={{ fontSize: 11, color: 'var(--ticket-positive, #4ade80)' }}>
+                        Unlimited (Paper)
+                      </span>
                     </div>
                   </div>
                 )}
@@ -817,9 +876,9 @@ export default function OrderTicket() {
                     width: '100%',
                     padding: '8px 0',
                     borderRadius: 6,
-                    border: '1px solid #2a2d3e',
+                    border: '1px solid var(--ticket-border, #2a2d3e)',
                     fontSize: 12,
-                    color: '#888',
+                    color: 'var(--ticket-muted, #888)',
                     background: 'none',
                     cursor: 'pointer',
                   }}

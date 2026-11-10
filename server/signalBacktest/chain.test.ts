@@ -76,4 +76,64 @@ describe('buildChain', () => {
   test('a minute with no spot has no chain', () => {
     expect(buildChain(day, INDEX + 1, null, null)).toBeNull();
   });
+  test('fills missing sides and minute gaps locally while preserving both saved price sources', () => {
+    const missingMinute = series(99);
+    missingMinute.c[INDEX] = null;
+    const broker: OhlcSource = {
+      series: (kind, strike) =>
+        kind === 'CE' && strike === 23200
+          ? series(40)
+          : kind === 'PE' && strike === 23100
+            ? missingMinute
+            : null,
+      strikes: () => [],
+    };
+    const local: OhlcSource = { series: () => series(25), strikes: () => [] };
+    const chain = buildChain(day, INDEX, broker, null, local)!;
+    expect(chain.rows.find((r) => r.strike === 23100)).toMatchObject({
+      ce: { close: 70 },
+      pe: { close: 25, localFallback: true },
+    });
+    expect(chain.rows.find((r) => r.strike === 23200)).toMatchObject({
+      ce: { close: 40 },
+      pe: { close: 25, localFallback: true },
+    });
+    expect(chain.rows.find((r) => r.strike === 23200)!.ce!.localFallback).toBeUndefined();
+    expect(day.ce['23100'][INDEX]).toBe(70);
+    expect(missingMinute.c[INDEX]).toBeNull();
+  });
+
+  test('does not carry local prices from another minute or invent volume and OI', () => {
+    const otherMinute = series(25);
+    otherMinute.c[INDEX] = null;
+    otherMinute.c[INDEX - 1] = 25;
+    const local: OhlcSource = {
+      series: (kind, strike) =>
+        kind === 'PE' && strike === 23100
+          ? otherMinute
+          : kind === 'CE' && strike === 23200
+            ? series(40)
+            : null,
+      strikes: () => [],
+    };
+    const chain = buildChain(day, INDEX, null, null, local)!;
+    expect(chain.rows.find((r) => r.strike === 23100)!.pe).toBeNull();
+    expect(chain.rows.find((r) => r.strike === 23200)!.ce).toMatchObject({
+      close: 40,
+      localFallback: true,
+      oi: null,
+      volume: null,
+      bid: null,
+      ask: null,
+    });
+  });
+
+  test('supplements SENSEX using its 100-point strike spacing', () => {
+    const sensex = { ...day, underlying: 'SENSEX', spot: at(80010), ce: {}, pe: {} };
+    const local: OhlcSource = { series: () => series(100), strikes: () => [] };
+    const chain = buildChain(sensex, INDEX, null, null, local)!;
+    expect(chain.step).toBe(100);
+    expect(chain.rows).toHaveLength(21);
+    expect(chain.rows.every((r) => r.ce?.localFallback && r.pe?.localFallback)).toBe(true);
+  });
 });

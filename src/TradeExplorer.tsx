@@ -44,6 +44,7 @@ const GROUPED_DATE_WIDTH = 230;
 interface Settings {
   underlying: SignalUnderlying;
   columns: string[];
+  detailColumns?: string[];
   filters: Filters;
   sort: SortState;
   plan: GroupPlan;
@@ -69,8 +70,16 @@ function loadSettings(): Settings {
     return {
       underlying: raw.underlying === 'SENSEX' ? 'SENSEX' : 'NIFTY',
       columns: columns.length ? columns : DEFAULT_COLUMN_KEYS,
+      detailColumns: Array.isArray(raw.detailColumns)
+        ? raw.detailColumns.filter((k) => COLUMN_BY_KEY.has(k))
+        : undefined,
       filters: raw.filters && typeof raw.filters === 'object' ? raw.filters : {},
-      sort: raw.sort && COLUMN_BY_KEY.has(raw.sort.key) ? raw.sort : DEFAULT_SETTINGS.sort,
+      sort:
+        raw.sort &&
+        (raw.sort.key === '' || COLUMN_BY_KEY.has(raw.sort.key)) &&
+        (raw.sort.dir === 1 || raw.sort.dir === -1)
+          ? raw.sort
+          : DEFAULT_SETTINGS.sort,
       plan: { ...DEFAULT_SETTINGS.plan, ...raw.plan },
     };
   } catch {
@@ -253,13 +262,25 @@ function RangeFilter({
   );
 }
 
-export default function TradeExplorer(_props: { theme: Theme }) {
+export default function TradeExplorer({ theme }: { theme: Theme }) {
+  const [mobile, setMobile] = useState(() => window.matchMedia('(max-width: 760px)').matches);
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 760px)');
+    const update = () => setMobile(media.matches);
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
   const [palette, setPalette] = useState(
     () => localStorage.getItem('explorer-palette') ?? 'midnight',
   );
+  useEffect(() => {
+    // Follow the app into light mode; the local appearance buttons still work independently.
+    if (theme === 'light') setPalette('paper');
+  }, [theme]);
   const [compareBy, setCompareBy] = useState('dte');
   const [compact, setCompact] = useState(false);
   const [detailWidth, setDetailWidth] = useState(46);
+  const [detailFullscreen, setDetailFullscreen] = useState(false);
   const [showCharts, setShowCharts] = useState(false);
   const ROW_HEIGHT = compact ? 27 : 36;
   const [days, setDays] = useState<DayRow[] | null>(null);
@@ -271,38 +292,69 @@ export default function TradeExplorer(_props: { theme: Theme }) {
   const closeColumns = useCallback(() => setColumnsAnchor(null), []);
   const scroller = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, height: 600 });
-  const loaded = useRef(new Map<SignalUnderlying, DayRow[]>());
+  const [tradeSet, setTradeSet] = useState('saved');
+  const [setOptions, setSetOptions] = useState([{ key: 'saved', label: 'Saved run · OTM 2' }]);
+  const [setLabel, setSetLabel] = useState('Saved run · OTM 2');
+  const [unavailableDays, setUnavailableDays] = useState(0);
+  const [loadingSet, setLoadingSet] = useState(false);
+  const loadedUnderlying = useRef(settings.underlying);
   const underlying = settings.underlying;
 
   useEffect(() => {
-    setError(null);
     setSelected(null);
+  }, [underlying]);
+
+  useEffect(() => {
+    if (!selected) setDetailFullscreen(false);
+  }, [selected]);
+
+  useEffect(() => {
+    if (!detailFullscreen) return;
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || document.querySelector('[role="dialog"], [role="menu"]'))
+        return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setDetailFullscreen(false);
+    };
+    window.addEventListener('keydown', escape, true);
+    return () => window.removeEventListener('keydown', escape, true);
+  }, [detailFullscreen]);
+
+  useEffect(() => {
+    setError(null);
     setOpen(new Set());
-    const known = loaded.current.get(underlying);
-    if (known) {
-      setDays(known);
-      return;
-    }
-    setDays(null);
+    setLoadingSet(true);
+    if (loadedUnderlying.current !== underlying) setDays(null);
+    loadedUnderlying.current = underlying;
     const ctl = new AbortController();
-    fetch(`/api/signal-backtest/saved-run?underlying=${underlying}`, { signal: ctl.signal })
+    fetch(`/api/signal-backtest/explorer-sets?underlying=${underlying}&set=${tradeSet}`, {
+      signal: ctl.signal,
+    })
       .then(async (res) => {
         const body = (await res.json()) as {
           ok: boolean;
           rows?: SavedRow[];
+          setOptions?: Array<{ key: string; label: string }>;
+          setLabel?: string;
+          skipped?: unknown[];
           error?: string;
         };
         if (body.ok && body.rows) {
           const built = buildDayRows(body.rows, underlying);
-          loaded.current.set(underlying, built);
+          if (body.setOptions) setSetOptions(body.setOptions);
+          setSetLabel(body.setLabel ?? tradeSet);
+          setUnavailableDays(body.skipped?.length ?? 0);
           setDays(built);
+          setLoadingSet(false);
         } else setError(body.error ?? 'The saved run could not be read.');
       })
       .catch((e: unknown) => {
+        if (!ctl.signal.aborted) setLoadingSet(false);
         if (!ctl.signal.aborted) setError(`The saved run could not be read: ${String(e)}`);
       });
     return () => ctl.abort();
-  }, [underlying]);
+  }, [underlying, tradeSet]);
 
   useEffect(() => {
     try {
@@ -320,7 +372,26 @@ export default function TradeExplorer(_props: { theme: Theme }) {
     return () => ro.disconnect();
   }, [days]);
 
-  const { columns: columnKeys, filters, sort, plan } = settings;
+  const { filters, sort, plan } = settings;
+  const splitView = !!selected;
+  const detailDefaults = DEFAULT_COLUMN_KEYS.filter(
+    (k) => !['t1', 'gapPct', 'ivNow', 'ivRatio', 'ceSold', 'peSold', 'premium'].includes(k),
+  );
+  const columnKeys = splitView ? (settings.detailColumns ?? detailDefaults) : settings.columns;
+  const setColumns = (keys: string[]) =>
+    update(splitView ? { detailColumns: keys } : { columns: keys });
+  const chooseTradeSet = (key: string) => {
+    setTradeSet(key);
+    if (key === 'worst')
+      setSettings((current) => ({
+        ...current,
+        columns: [...new Set([...current.columns, 'tradeSet'])],
+        detailColumns: [...new Set([...(current.detailColumns ?? detailDefaults), 'tradeSet'])],
+      }));
+  };
+  useEffect(() => {
+    if (scroller.current) scroller.current.scrollLeft = 0;
+  }, [splitView]);
   const columns = useMemo(() => {
     const on = new Set(columnKeys);
     on.add('date');
@@ -399,7 +470,11 @@ export default function TradeExplorer(_props: { theme: Theme }) {
     return <div className="p-4 text-[12px] text-[var(--red)]">{error}</div>;
   }
   if (!days) {
-    return <div className="p-4 text-[12px] text-[var(--text-muted)]">Loading the saved run…</div>;
+    return (
+      <div className="p-4 text-[12px] text-[var(--text-muted)]">
+        Loading stored prices and comparing trade sets… The first load can take a few minutes.
+      </div>
+    );
   }
 
   const activeFilters = Object.values(filters).filter(filterActive).length;
@@ -498,6 +573,15 @@ export default function TradeExplorer(_props: { theme: Theme }) {
             <td
               key={c.key}
               style={{ color: cellColor(c, v) }}
+              title={
+                c.key === 'ivLevel' && v == null
+                  ? it.row.values.ivNow == null
+                    ? 'IV missing at the signal minute'
+                    : Number(it.row.values.ivHistoryCount) < 4
+                      ? `Baseline building: ${it.row.values.ivHistoryCount} of 4 required earlier matching days`
+                      : 'No calibrated thresholds for this distance to expiry; see IV now and IV ratio'
+                  : undefined
+              }
               className={`truncate border-b border-[var(--border)] px-1.5 ${c.type === 'cat' ? 'text-left' : 'text-right font-mono'}`}
             >
               {formatCell(c, v)}
@@ -510,7 +594,7 @@ export default function TradeExplorer(_props: { theme: Theme }) {
 
   return (
     <div
-      className="trade-explorer flex h-full min-h-0 flex-col text-[13px] text-[var(--text-primary)]"
+      className={`trade-explorer flex h-full min-h-0 flex-col text-[13px] text-[var(--text-primary)] ${detailFullscreen ? 'te-detail-fullscreen' : ''}`}
       data-palette={palette}
     >
       <header className="te-masthead">
@@ -555,6 +639,7 @@ export default function TradeExplorer(_props: { theme: Theme }) {
               aria-pressed={u === underlying}
               onClick={() => {
                 setSelected(null);
+                if (u !== underlying) setTradeSet('saved');
                 update({ underlying: u });
               }}
             >
@@ -604,9 +689,24 @@ export default function TradeExplorer(_props: { theme: Theme }) {
                   'lossGroup',
                   'path',
                 ],
+                sales: [
+                  'date',
+                  'dte',
+                  'tradeSet',
+                  'ceSold',
+                  'ceEntry',
+                  'peSold',
+                  'peEntry',
+                  'premium',
+                  'maxLoss',
+                  'maxLossAt',
+                  'pnl',
+                  'worstSet',
+                  'worstLoss',
+                ],
                 quality: ['date', 'source', 'dataEnd', 'maxLoss', 'pnl'],
               };
-              if (presets[e.target.value]) update({ columns: presets[e.target.value] });
+              if (presets[e.target.value]) setColumns(presets[e.target.value]);
             }}
           >
             <option value="">Choose columns…</option>
@@ -614,6 +714,7 @@ export default function TradeExplorer(_props: { theme: Theme }) {
             <option value="signal">Signal & IV</option>
             <option value="loss">Loss Analysis</option>
             <option value="quality">Data Quality</option>
+            <option value="sales">Sale prices & premiums</option>
           </select>
         </label>
         <label>
@@ -634,7 +735,7 @@ export default function TradeExplorer(_props: { theme: Theme }) {
           className={`h-6 ${fieldClass} px-2`}
           onClick={(e) => setColumnsAnchor(e.currentTarget.getBoundingClientRect())}
         >
-          Columns ({columns.length}) ▾
+          {splitView ? 'Detail view columns' : 'Columns'} ({columns.length}) ▾
         </button>
         {columnsAnchor && (
           <Popover anchor={columnsAnchor} onClose={closeColumns}>
@@ -642,14 +743,14 @@ export default function TradeExplorer(_props: { theme: Theme }) {
               <button
                 type="button"
                 className="text-[var(--accent)]"
-                onClick={() => update({ columns: DEFAULT_COLUMN_KEYS })}
+                onClick={() => setColumns(splitView ? detailDefaults : DEFAULT_COLUMN_KEYS)}
               >
                 Key columns
               </button>
               <button
                 type="button"
                 className="text-[var(--accent)]"
-                onClick={() => update({ columns: COLUMNS.map((c) => c.key) })}
+                onClick={() => setColumns(COLUMNS.map((c) => c.key))}
               >
                 All columns
               </button>
@@ -663,11 +764,11 @@ export default function TradeExplorer(_props: { theme: Theme }) {
                       type="checkbox"
                       checked={columnKeys.includes(c.key)}
                       onChange={(e) =>
-                        update({
-                          columns: e.target.checked
+                        setColumns(
+                          e.target.checked
                             ? [...columnKeys, c.key]
                             : columnKeys.filter((k) => k !== c.key),
-                        })
+                        )
                       }
                     />
                     {c.title}
@@ -677,6 +778,37 @@ export default function TradeExplorer(_props: { theme: Theme }) {
             ))}
           </Popover>
         )}
+      </div>
+
+      <div className="te-set-context">
+        <label>
+          Trade set
+          <select
+            aria-label="Trade set"
+            value={tradeSet}
+            onChange={(e) => chooseTradeSet(e.target.value)}
+          >
+            {setOptions.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span>
+          <b>{setLabel}</b> · both legs sold · entry signal + 1 minute · exit 15:29 · 1 current lot
+        </span>
+        <div className="mt-1 text-[var(--text-muted)]">
+          {loadingSet
+            ? 'Loading selected set… currently displayed data stays unchanged until ready. '
+            : ''}
+          {days
+            ? `${days.length.toLocaleString()} days · ${unavailableDays} days unavailable for this selection`
+            : 'Loading stored prices and comparing trade sets… first load may take a moment.'}
+          {
+            ' · Price bands apply to each leg and vary by days to expiry. Worst set uses hindsight across pairs with stored prices.'
+          }
+        </div>
       </div>
 
       <div className="te-grouping flex flex-wrap items-center gap-3 border-b border-[var(--border)] bg-[var(--bg-card)] p-3">
@@ -849,6 +981,11 @@ export default function TradeExplorer(_props: { theme: Theme }) {
           <strong>{summary.days.toLocaleString('en-IN')} trading days</strong>
           <span>Click any day to inspect its chart and signal</span>
         </div>
+        {sort.key && (
+          <button type="button" onClick={() => update({ sort: { key: '', dir: 1 } })}>
+            Clear sorting
+          </button>
+        )}
         <span className="te-sort-hint">
           Click a column heading to sort · click again to reverse
         </span>
@@ -856,7 +993,7 @@ export default function TradeExplorer(_props: { theme: Theme }) {
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 border-b border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1">
         <span className="text-[var(--text-muted)]">
-          saved run to {days[days.length - 1]?.raw.date} · all ₹ for 1 lot of{' '}
+          {setLabel} · data through {days[days.length - 1]?.raw.date} · all ₹ for 1 lot of{' '}
           {days[0]?.raw.trade.qty}, today's lot size in every year
         </span>
         {activeFilters > 0 && (
@@ -886,10 +1023,26 @@ export default function TradeExplorer(_props: { theme: Theme }) {
             step(e.key === 'ArrowDown' ? 1 : -1);
           }}
         >
-          <table className="border-collapse" style={{ tableLayout: 'fixed', width: tableWidth }}>
+          <table
+            className="border-collapse"
+            style={{
+              tableLayout: 'fixed',
+              width: splitView ? '100%' : tableWidth,
+              minWidth: splitView ? Math.max(760, columns.length * 60) : undefined,
+            }}
+          >
             <colgroup>
               {columns.map((c, i) => (
-                <col key={c.key} style={{ width: i === 0 ? firstWidth : c.width }} />
+                <col
+                  key={c.key}
+                  style={{
+                    width: splitView
+                      ? `${((i === 0 ? firstWidth : c.width) / tableWidth) * 100}%`
+                      : i === 0
+                        ? firstWidth
+                        : c.width,
+                  }}
+                />
               ))}
             </colgroup>
             <thead className="sticky top-0 z-10 bg-[var(--bg-card)]">
@@ -898,18 +1051,34 @@ export default function TradeExplorer(_props: { theme: Theme }) {
                   <th
                     key={c.key}
                     title={c.title}
+                    aria-sort={
+                      sort.key === c.key ? (sort.dir === 1 ? 'ascending' : 'descending') : 'none'
+                    }
                     style={i === 0 ? { ...pinned, zIndex: 3 } : undefined}
                     className="bg-[var(--bg-card)] p-0 font-semibold"
                   >
-                    <button
-                      type="button"
-                      className={`flex w-full items-center gap-0.5 truncate px-1.5 py-1 ${c.type === 'cat' || i === 0 ? 'justify-start' : 'justify-end'}`}
-                      style={sort.key === c.key ? { color: 'var(--accent)' } : undefined}
-                      onClick={() => clickSort(c)}
-                    >
-                      <span className="truncate">{c.label}</span>
-                      {sort.key === c.key && <span>{sort.dir === -1 ? '↓' : '↑'}</span>}
-                    </button>
+                    <div className="flex items-center">
+                      <button
+                        type="button"
+                        className={`flex min-w-0 flex-1 items-center gap-0.5 truncate px-1.5 py-1 ${c.type === 'cat' || i === 0 ? 'justify-start' : 'justify-end'}`}
+                        style={sort.key === c.key ? { color: 'var(--accent)' } : undefined}
+                        onClick={() => clickSort(c)}
+                      >
+                        <span className="truncate">{c.label}</span>
+                        {sort.key === c.key && <span>{sort.dir === -1 ? '↓' : '↑'}</span>}
+                      </button>
+                      {sort.key === c.key && (
+                        <button
+                          type="button"
+                          className="te-column-clear"
+                          aria-label={`Clear sorting for ${c.title}`}
+                          title={`Clear sorting for ${c.title}`}
+                          onClick={() => update({ sort: { key: '', dir: 1 } })}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
                   </th>
                 ))}
               </tr>
@@ -920,20 +1089,35 @@ export default function TradeExplorer(_props: { theme: Theme }) {
                     style={i === 0 ? { ...pinned, zIndex: 3 } : undefined}
                     className="border-b border-[var(--border)] bg-[var(--bg-card)] px-0.5 pb-1 font-normal"
                   >
-                    {c.type === 'cat' ? (
-                      <CategoryFilter
-                        column={c}
-                        rows={days}
-                        filter={filters[c.key]}
-                        onChange={(f) => setFilter(c.key, f)}
-                      />
-                    ) : (
-                      <RangeFilter
-                        column={c}
-                        filter={filters[c.key]}
-                        onChange={(f) => setFilter(c.key, f)}
-                      />
-                    )}
+                    <div className="flex items-center gap-0.5">
+                      <div className="min-w-0 flex-1">
+                        {c.type === 'cat' ? (
+                          <CategoryFilter
+                            column={c}
+                            rows={days}
+                            filter={filters[c.key]}
+                            onChange={(f) => setFilter(c.key, f)}
+                          />
+                        ) : (
+                          <RangeFilter
+                            column={c}
+                            filter={filters[c.key]}
+                            onChange={(f) => setFilter(c.key, f)}
+                          />
+                        )}
+                      </div>
+                      {filterActive(filters[c.key]) && (
+                        <button
+                          type="button"
+                          className="te-column-clear"
+                          aria-label={`Clear filter for ${c.title}`}
+                          title={`Clear filter for ${c.title}`}
+                          onClick={() => setFilter(c.key, undefined)}
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
                   </th>
                 ))}
               </tr>
@@ -952,7 +1136,7 @@ export default function TradeExplorer(_props: { theme: Theme }) {
         </div>
         {selectedRow && (
           <div className="te-detail min-w-0 shrink-0" style={{ width: `${detailWidth}%` }}>
-            <label className="flex items-center gap-2 px-3 py-1 text-xs">
+            <label className="te-detail-width flex items-center gap-2 px-3 py-1 text-xs">
               Detail width{' '}
               <input
                 aria-label="Detail width"
@@ -965,7 +1149,10 @@ export default function TradeExplorer(_props: { theme: Theme }) {
             </label>
             <TradeExplorerDetail
               row={selectedRow}
-              theme={palette === 'paper' ? 'light' : 'dark'}
+              onSelectSet={chooseTradeSet}
+              fullscreen={detailFullscreen}
+              onToggleFullscreen={() => setDetailFullscreen((value) => !value)}
+              theme={mobile || palette === 'paper' ? 'light' : 'dark'}
               underlying={underlying}
               position={
                 selectedIndex >= 0

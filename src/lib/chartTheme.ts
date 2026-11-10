@@ -17,7 +17,7 @@ export function chartTheme(appearance: boolean | Theme, fontSize = 12) {
         ? 'rgba(142, 151, 166, 0.075)'
         : isDark
           ? 'rgba(151, 169, 199, 0.08)'
-          : 'rgba(59, 78, 106, 0.08)';
+          : 'rgba(71, 91, 118, 0.10)';
   const crosshair = isBloomberg
     ? '#4ec9d7'
     : isApex
@@ -26,7 +26,7 @@ export function chartTheme(appearance: boolean | Theme, fontSize = 12) {
         ? '#7f8793'
         : isDark
           ? '#7789a4'
-          : '#7a8ba5';
+          : '#647c99';
   const border = isBloomberg
     ? '#26323b'
     : isApex
@@ -35,7 +35,7 @@ export function chartTheme(appearance: boolean | Theme, fontSize = 12) {
         ? '#292d34'
         : isDark
           ? '#2b3340'
-          : '#dce2ec';
+          : '#cdd7e2';
   return {
     layout: {
       background: {
@@ -58,7 +58,7 @@ export function chartTheme(appearance: boolean | Theme, fontSize = 12) {
             ? '#c1c7d0'
             : isDark
               ? '#aebbd0'
-              : '#4b5c73',
+              : '#4b6078',
       fontSize,
       fontFamily: isBloomberg
         ? "'Cascadia Mono', 'SFMono-Regular', Consolas, monospace"

@@ -21,7 +21,26 @@ export interface EstimatedLegs {
   legs: Array<{ kind: 'CE' | 'PE'; strike: number; from: string; close: Array<number | null> }>;
   before: { pnl: number; maxLoss: number; exitTime: string };
 }
-export type SavedRow = SignalBacktestRow & { groups?: ReportGroups; estimated?: EstimatedLegs };
+export interface ExplorerComparison {
+  key: string;
+  label: string;
+  ceStrike: number | null;
+  peStrike: number | null;
+  cePrice: number | null;
+  pePrice: number | null;
+  premium: number;
+  maxLoss: number;
+  maxLossTime: string;
+  pnl: number;
+}
+export type SavedRow = SignalBacktestRow & {
+  groups?: ReportGroups;
+  estimated?: EstimatedLegs;
+  setLabel?: string;
+  worstSet?: string;
+  worstLoss?: number;
+  comparisons?: ExplorerComparison[];
+};
 
 export const LOSS_GROUPS = [
   'Small dip → profit',
@@ -646,6 +665,53 @@ COLUMNS.push(
   },
 );
 
+COLUMNS.push(
+  {
+    key: 'tradeSet',
+    label: 'Trade set',
+    title: 'Selected trade set',
+    section: 'Trade',
+    type: 'cat',
+    width: 180,
+  },
+  {
+    key: 'ceEntry',
+    label: 'Call sale ₹',
+    title: 'Call price sold, per option unit',
+    digits: 2,
+    unit: 'rupee',
+    section: 'Trade',
+    type: 'num',
+    width: 90,
+  },
+  {
+    key: 'peEntry',
+    label: 'Put sale ₹',
+    title: 'Put price sold, per option unit',
+    digits: 2,
+    unit: 'rupee',
+    section: 'Trade',
+    type: 'num',
+    width: 90,
+  },
+  {
+    key: 'worstSet',
+    label: 'Worst set',
+    title: 'Set with the largest max loss on this day, among available pairs',
+    section: 'Trade',
+    type: 'cat',
+    width: 210,
+  },
+  {
+    key: 'worstLoss',
+    label: 'Worst-set loss',
+    title: 'Largest max loss across available sets, ₹ per lot',
+    unit: 'rupee',
+    section: 'Trade',
+    type: 'num',
+    width: 110,
+  },
+);
 export const COLUMN_BY_KEY = new Map(COLUMNS.map((c) => [c.key, c]));
 export const DEFAULT_COLUMN_KEYS = COLUMNS.filter((c) => c.shown).map((c) => c.key);
 
@@ -712,6 +778,11 @@ export function buildDayRows(rows: SavedRow[], underlying: SignalUnderlying): Da
       const peG = g?.PE ?? null;
       const values: Record<string, CellValue> = {
         date: raw.date,
+        tradeSet: raw.setLabel ?? (t.otmSteps == null ? 'Premium selection' : `OTM ${t.otmSteps}`),
+        ceEntry: ce?.entryPrice ?? null,
+        peEntry: pe?.entryPrice ?? null,
+        worstSet: raw.worstSet ?? null,
+        worstLoss: raw.worstLoss ?? null,
         dte: raw.dte ?? null,
         weekday: d.toLocaleDateString('en-GB', { weekday: 'short', timeZone: 'UTC' }),
         year: raw.date.slice(0, 4),
@@ -730,6 +801,7 @@ export function buildDayRows(rows: SavedRow[], underlying: SignalUnderlying): Da
         peIv: peG?.iv ?? null,
         skew: ceG && peG ? peG.iv - ceG.iv : null,
         ivNow: reading?.ivNow ?? null,
+        ivHistoryCount: reading?.historyCount ?? 0,
         ivUsual: reading?.usual ?? null,
         ivRatio: reading?.ratio ?? null,
         ivLevel: reading?.level != null ? IV_LEVELS[reading.level] : null,

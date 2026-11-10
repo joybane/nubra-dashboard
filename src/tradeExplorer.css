@@ -648,3 +648,541 @@
     font-size: 15px;
   }
 }
+/* Expand the selected day without remounting its chart or losing the table state. */
+.trade-explorer.te-detail-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  padding: 0;
+}
+.te-detail-fullscreen .te-detail {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  width: 100% !important;
+  background: var(--bg-primary);
+}
+.te-detail-fullscreen .te-detail-width {
+  display: none;
+}
+.te-detail-fullscreen .te-detail-chart {
+  height: clamp(340px, 65vh, 900px);
+}
+/* Day detail follows the NIFTY/SENSEX loss report's reading layout. */
+@font-face {
+  font-family: 'Report Body';
+  src: url('/fonts/PublicSans.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Report Display';
+  src: url('/fonts/Archivo.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Report Mono';
+  src: url('/fonts/JetBrainsMono.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+.te-report-detail {
+  --bg-primary: #0e1418;
+  --bg-secondary: #1d2830;
+  --bg-card: #151d23;
+  --bg-hover: #1d2830;
+  --border: #28343d;
+  --text-primary: #e2e9ed;
+  --text-secondary: #b6c4cc;
+  --text-muted: #92a3af;
+  --accent: #4db6c0;
+  --green: #5fbf86;
+  --red: #f0705f;
+  --yellow: #e5a643;
+  --blue: #7ea6f2;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  font-family: 'Report Body', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  container-type: inline-size;
+}
+.trade-explorer[data-palette='paper'] .te-report-detail {
+  --bg-primary: #f3f6f7;
+  --bg-secondary: #e7eef1;
+  --bg-card: #fff;
+  --bg-hover: #e7eef1;
+  --border: #d7dfe4;
+  --text-primary: #14212b;
+  --text-secondary: #425867;
+  --text-muted: #586a77;
+  --accent: #0d6b75;
+  --green: #2f7d4f;
+  --red: #bf3a2b;
+  --yellow: #a8620a;
+  --blue: #2f5fc4;
+}
+.te-report-detail .font-mono {
+  font-family: 'Report Mono', Consolas, monospace;
+}
+.te-report-header {
+  padding: 10px 14px;
+  background: var(--bg-card);
+  gap: 10px;
+  flex-shrink: 0;
+}
+.te-report-header > div > div:first-child {
+  font:
+    700 19px/1.3 'Report Display',
+    system-ui,
+    sans-serif;
+  letter-spacing: -0.01em;
+}
+.te-report-header > div > div:last-child {
+  font-size: 12px;
+  margin-top: 3px;
+}
+.te-report-header > button {
+  min-width: 34px;
+  width: 34px;
+  height: 34px;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border-radius: 5px;
+}
+.te-report-header > button:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+.te-report-scroll {
+  padding: 14px 16px 30px !important;
+  display: block !important;
+}
+.te-report-content {
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  min-width: 0;
+}
+.te-report-detail .te-report-facts {
+  gap: 8px;
+  align-items: baseline;
+}
+.te-report-detail .te-report-fact {
+  padding: 5px 10px;
+  background: var(--bg-secondary);
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.te-report-fact > b {
+  font-size: 12px;
+  font-weight: 600;
+}
+.te-report-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+  min-width: 0;
+}
+.te-report-detail .te-report-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  min-width: 0;
+  color: var(--text-primary);
+}
+.te-report-panel > summary,
+.te-report-chart-panel > h3 {
+  font:
+    700 17px/1.4 'Report Display',
+    system-ui,
+    sans-serif;
+  letter-spacing: -0.01em;
+  margin: 0;
+  color: var(--text-primary);
+}
+.te-report-panel > summary {
+  cursor: pointer;
+}
+.te-report-panel[open] > summary {
+  margin-bottom: 14px;
+}
+.te-report-panel > summary::marker {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.te-report-panel-body {
+  overflow-x: auto;
+  min-width: 0;
+}
+.te-report-detail table {
+  width: 100%;
+  min-width: 100%;
+  font-size: 13px;
+  border-collapse: collapse;
+}
+.te-report-detail table th {
+  padding: 8px 10px;
+  font:
+    600 10px/1.5 'Report Mono',
+    Consolas,
+    monospace;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: transparent;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.te-report-detail table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-family: 'Report Mono', Consolas, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.te-report-detail table td:first-child {
+  font:
+    600 13px/1.5 'Report Body',
+    system-ui,
+    sans-serif;
+}
+.te-report-detail table tr:last-child td {
+  border-bottom: 0;
+}
+.te-report-detail .te-report-panel p {
+  font-size: 13px;
+  line-height: 1.65;
+  max-width: 85ch;
+  color: var(--text-muted);
+  margin-top: 12px;
+}
+.te-report-detail .te-report-panel p b {
+  color: var(--text-primary);
+}
+.te-report-detail .te-report-chart-panel {
+  display: grid;
+  gap: 10px;
+}
+.te-report-chart-panel .te-report-note {
+  margin: 0 !important;
+}
+.te-report-detail .te-detail-chart {
+  height: 720px !important;
+  min-width: 0;
+  border: 0;
+  border-radius: 0;
+}
+.te-report-detail .te-detail-chart > div {
+  background: var(--bg-card);
+  border-top: 0;
+}
+.te-report-detail .te-detail-chart > div > div:first-child {
+  background: var(--bg-card);
+  padding: 8px 0;
+  gap: 8px;
+  font-size: 12px;
+}
+.te-report-detail .te-detail-chart button[aria-pressed] {
+  height: 30px;
+  padding: 4px 10px;
+  font-size: 12px;
+  background: var(--bg-card);
+  border-radius: 5px;
+}
+.te-report-detail .te-detail-chart button[aria-pressed='true'] {
+  background: var(--bg-secondary);
+  font-weight: 600;
+}
+.te-report-detail .te-detail-chart > div > div:nth-child(2) {
+  padding: 7px 0;
+  font-size: 11px;
+  white-space: normal;
+  min-height: 32px;
+}
+@container (max-width:900px) {
+  .te-report-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .te-report-detail .te-report-panel {
+    padding: 14px;
+  }
+  .te-report-detail .te-detail-chart {
+    height: 620px !important;
+  }
+  .te-report-header > div > div:first-child {
+    font-size: 16px;
+  }
+  .te-report-scroll {
+    padding: 10px !important;
+  }
+  .te-report-detail .te-report-fact {
+    font-size: 12px;
+  }
+}
+.te-report-detail .te-report-signal-table {
+  table-layout: fixed;
+}
+.te-report-detail .te-report-signal-table th,
+.te-report-detail .te-report-signal-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.te-report-detail .te-report-signal-table th:first-child {
+  width: 30%;
+}
+/* Match the report's daylight reading surface on phones. */
+@media (max-width: 760px) {
+  .trade-explorer,
+  .trade-explorer[data-palette='midnight'],
+  .trade-explorer .te-report-detail {
+    --bg-primary: #f3f6f7;
+    --bg-secondary: #e7eef1;
+    --bg-card: #ffffff;
+    --bg-hover: #e7eef1;
+    --border: #d7dfe4;
+    --text-primary: #14212b;
+    --text-secondary: #425867;
+    --text-muted: #586a77;
+    --accent: #0d6b75;
+    --accent-dim: #dceef0;
+    --green: #2f7d4f;
+    --red: #bf3a2b;
+    --yellow: #a8620a;
+    --blue: #2f5fc4;
+    --cyan: #087b94;
+    color-scheme: light;
+  }
+}
+/* Analysis uses the available workspace rather than a shallow popup. */
+.te-analysis-overlay {
+  inset: 8px;
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+}
+.te-analysis-overlay-heading {
+  flex-shrink: 0;
+  font-size: 16px;
+  margin-bottom: 16px;
+}
+.te-analysis-overlay .te-analysis {
+  flex: 1;
+  min-height: 0;
+  gap: 18px;
+}
+.te-analysis-overlay .te-chart-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 22px;
+}
+.te-analysis-overlay .te-card-heading h2 {
+  font-size: 21px;
+}
+.te-analysis-overlay .te-eyebrow {
+  font-size: 11px;
+}
+.te-analysis-overlay .te-caption {
+  font-size: 13px;
+  margin-bottom: 24px;
+}
+.te-analysis-overlay .te-card-heading select {
+  max-width: 220px;
+  font-size: 13px;
+  padding: 9px;
+}
+.te-analysis-overlay .te-badge {
+  font-size: 12px;
+}
+.te-analysis-overlay .te-histogram {
+  flex: 1;
+  height: auto;
+  min-height: 220px;
+  gap: 12px;
+}
+.te-analysis-overlay .te-bin-track {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+}
+.te-analysis-overlay .te-histogram button {
+  gap: 12px;
+  padding-top: 8px;
+}
+.te-analysis-overlay .te-bin-count {
+  font-size: 14px;
+}
+.te-analysis-overlay .te-bin-label {
+  font-size: 11px;
+  padding-bottom: 8px;
+}
+.te-analysis-overlay .te-comparison {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+}
+.te-analysis-overlay .te-compare-row {
+  font-size: 14px;
+  padding: 16px 0;
+}
+.te-analysis-overlay .te-compare-labels {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-card);
+  font-size: 11px;
+}
+.te-analysis-overlay .te-chart-foot {
+  flex-shrink: 0;
+  font-size: 12px;
+  margin-top: 18px;
+}
+@media (max-width: 1100px) {
+  .te-analysis-overlay .te-analysis {
+    flex: 0 0 auto;
+  }
+  .te-analysis-overlay .te-chart-card {
+    min-height: 420px;
+  }
+  .te-analysis-overlay .te-comparison {
+    max-height: 420px;
+  }
+}
+@media (max-width: 650px) {
+  .te-analysis-overlay {
+    inset: 4px;
+    padding: 10px;
+  }
+  .te-analysis-overlay .te-chart-card {
+    padding: 14px;
+  }
+  .te-analysis-overlay .te-card-heading {
+    flex-wrap: wrap;
+  }
+  .te-analysis-overlay .te-card-heading h2 {
+    font-size: 18px;
+  }
+  .te-analysis-overlay .te-compare-row {
+    font-size: 11px;
+    gap: 5px;
+  }
+  .te-analysis-overlay .te-bin-label {
+    font-size: 8px;
+  }
+  .te-analysis-overlay .te-histogram {
+    gap: 5px;
+  }
+}
+.trade-explorer thead .te-column-clear {
+  flex: 0 0 18px;
+  width: 18px;
+  padding: 0;
+  color: var(--accent);
+  font-size: 15px;
+  text-align: center;
+  border-radius: 3px;
+}
+.trade-explorer thead .te-column-clear:hover {
+  background: var(--bg-hover);
+}
+
+.te-chain-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.te-chain-controls button {
+  color: var(--accent);
+  white-space: nowrap;
+}
+.te-chain-scroll {
+  overflow: auto;
+}
+.te-report-detail .te-centered-chain th,
+.te-report-detail .te-centered-chain td {
+  padding: 4px 3px;
+  font-size: 10px;
+  height: 24px;
+  text-align: right;
+}
+.te-report-detail .te-centered-chain td:first-child {
+  font:
+    10px 'Report Mono',
+    monospace;
+}
+.te-centered-chain .te-chain-atm td {
+  border-top: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-card));
+}
+.te-atm-tag {
+  font-size: 8px;
+  color: var(--accent);
+}
+
+.te-report-detail .te-centered-chain th,
+.te-report-detail .te-centered-chain td {
+  font-size: 12px;
+  padding: 5px 4px;
+  height: 28px;
+}
+.te-report-detail .te-centered-chain td:first-child {
+  font:
+    12px 'Report Mono',
+    monospace;
+}
+.te-report-detail .te-centered-chain {
+  min-width: 640px;
+}
+.te-chain-controls {
+  font-size: 11px;
+}
+.te-atm-tag {
+  font-size: 9px;
+}
+.te-set-context {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.te-set-context label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 16px;
+}
+.te-set-context select {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+}
+.te-set-comparison {
+  overflow: auto;
+  margin-top: 12px;
+}
+
+.te-report-detail .te-centered-chain[data-flow='false'] td:nth-child(4),
+.te-report-detail .te-centered-chain[data-flow='false'] th:nth-child(4),
+.te-report-detail .te-centered-chain[data-flow='true'] td:nth-child(6),
+.te-report-detail .te-centered-chain[data-flow='true'] th:nth-child(6) { text-align:center; }

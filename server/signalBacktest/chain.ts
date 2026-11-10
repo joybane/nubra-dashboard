@@ -18,6 +18,8 @@ export const CHAIN_STEPS = 10;
 
 export interface ChainSide {
   close: number;
+  /** This price filled a missing broker minute from matching local parquet data. */
+  localFallback?: boolean;
   iv: number | null;
   delta: number | null;
   theta: number | null;
@@ -55,14 +57,20 @@ function side(
   forward: number | null,
   ohlc: OhlcSource | null,
   wide: WideDay | null,
+  local: OhlcSource | null,
 ): ChainSide | null {
   const key = String(strike);
-  const close =
-    (kind === 'CE' ? day.ce : day.pe)[key]?.[index] ?? ohlc?.series(kind, strike)?.c[index] ?? null;
-  if (close == null || !(close > 0)) return null;
+  const valid = (value: number | null | undefined) =>
+    value != null && Number.isFinite(value) && value > 0 ? value : null;
+  const primary =
+    valid((kind === 'CE' ? day.ce : day.pe)[key]?.[index]) ??
+    valid(ohlc?.series(kind, strike)?.c[index]);
+  const close = primary ?? valid(local?.series(kind, strike)?.c[index]);
+  if (close == null) return null;
   const more = wide?.more?.[kind === 'CE' ? 'ce' : 'pe']?.[key];
   const out: ChainSide = {
     close: round(close, 2),
+    ...(primary == null ? { localFallback: true } : {}),
     iv: null,
     delta: null,
     theta: null,
@@ -90,6 +98,7 @@ export function buildChain(
   index: number,
   ohlc: OhlcSource | null,
   wide: WideDay | null,
+  local: OhlcSource | null = null,
 ): ChainResult | null {
   const spot = day.spot[index];
   if (spot == null || !(spot > 0)) return null;
@@ -99,8 +108,8 @@ export function buildChain(
   const rows: ChainRow[] = [];
   for (let n = CHAIN_STEPS; n >= -CHAIN_STEPS; n--) {
     const strike = atm + n * step;
-    const ce = side(day, 'CE', strike, index, forward, ohlc, wide);
-    const pe = side(day, 'PE', strike, index, forward, ohlc, wide);
+    const ce = side(day, 'CE', strike, index, forward, ohlc, wide, local);
+    const pe = side(day, 'PE', strike, index, forward, ohlc, wide, local);
     if (ce || pe) rows.push({ strike, ce, pe });
   }
   return {

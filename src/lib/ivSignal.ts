@@ -6,7 +6,7 @@
  * at least 4. Ratio = IV now ÷ usual, placed in five levels by cut-offs per index and days to expiry.
  *
  * The cut-offs are the phone's, from E:\whatsup\src\assets\ivbase.txt (baseline as of 2026-10-19), so
- * a level here means what a level on the phone means. They only cover 0 to 4 days to expiry.
+ * a level here means what a level on the phone means. They only classify 0 to 4 days to expiry; other valid DTEs still accumulate history and ratios.
  */
 import type { SignalBacktestRow, SignalUnderlying } from './signalBacktest';
 
@@ -35,6 +35,8 @@ export const IV_CUTS: Record<SignalUnderlying, ReadonlyArray<readonly number[]>>
 export interface IvReading {
   ivNow: number | null;
   usual: number | null;
+  /** Earlier valid readings in the baseline window, excluding this day. */
+  historyCount: number;
   ratio: number | null;
   /** Index into IV_LEVELS. */
   level: number | null;
@@ -64,10 +66,13 @@ export function ivSignalByDate(
     const t2 = r.signal.greeks?.t2;
     const ce = t2?.CE?.iv;
     const pe = t2?.PE?.iv;
-    const ivNow = ce != null && pe != null && ce > 0 && pe > 0 ? (ce + pe) / 2 : null;
+    const ivNow =
+      ce != null && pe != null && Number.isFinite(ce) && Number.isFinite(pe) && ce > 0 && pe > 0
+        ? (ce + pe) / 2
+        : null;
     const cuts = r.dte != null ? IV_CUTS[underlying][r.dte] : undefined;
-    if (!cuts || r.dte == null) {
-      out.set(r.date, { ivNow, usual: null, ratio: null, level: null });
+    if (r.dte == null || !Number.isInteger(r.dte) || r.dte < 0) {
+      out.set(r.date, { ivNow, usual: null, historyCount: 0, ratio: null, level: null });
       continue;
     }
     const seen = history.get(r.dte) ?? [];
@@ -77,8 +82,9 @@ export function ivSignalByDate(
     out.set(r.date, {
       ivNow,
       usual,
+      historyCount: window.length,
       ratio,
-      level: ratio == null ? null : ivLevelOf(ratio, cuts),
+      level: ratio == null || !cuts ? null : ivLevelOf(ratio, cuts),
     });
     if (ivNow != null) history.set(r.dte, [...seen, ivNow]);
   }

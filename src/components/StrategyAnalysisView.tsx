@@ -1220,12 +1220,12 @@ export default function StrategyAnalysisView({
     setChartEpoch((e) => e + 1);
 
     const basketSeries = chart.addSeries(LineSeries, {
-      color: '#ffffff',
+      color: theme === 'light' ? '#1e3554' : '#ffffff',
       lineWidth: 3,
       title: 'Total P&L',
       lastValueVisible: true,
       priceLineVisible: true,
-      crosshairMarkerBackgroundColor: '#ffffff', // see the leg-price series above
+      crosshairMarkerBackgroundColor: theme === 'light' ? '#1e3554' : '#ffffff', // contrast on both themes
       priceFormat: { type: 'price', precision: 2, minMove: 0.05 },
     });
     seriesRef.current.basketPnl = basketSeries;

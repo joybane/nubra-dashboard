@@ -33,10 +33,10 @@ type ViewMode = 'prebuilt' | 'saved' | 'builder';
 // Helpers
 
 const SENTIMENT_COLORS: Record<Sentiment, string> = {
-  Bullish: '#22c55e',
-  Bearish: '#ef4444',
-  Neutral: '#6366f1',
-  Volatile: '#f59e0b',
+  Bullish: 'var(--basket-bullish, #22c55e)',
+  Bearish: 'var(--basket-bearish, #ef4444)',
+  Neutral: 'var(--basket-neutral, #6366f1)',
+  Volatile: 'var(--basket-volatile, #f59e0b)',
 };
 
 function miniPayoff(
@@ -489,7 +489,8 @@ export default function BasketOrder({ instrument }: Props) {
                 fontWeight: 600,
                 border: 'none',
                 cursor: 'pointer',
-                background: viewMode === 'prebuilt' ? '#5865f2' : 'transparent',
+                background:
+                  viewMode === 'prebuilt' ? 'var(--basket-accent, #5865f2)' : 'transparent',
                 color: viewMode === 'prebuilt' ? '#fff' : 'var(--text-secondary)',
               }}
             >
@@ -506,7 +507,7 @@ export default function BasketOrder({ instrument }: Props) {
                 fontWeight: 600,
                 border: 'none',
                 cursor: 'pointer',
-                background: viewMode === 'saved' ? '#5865f2' : 'transparent',
+                background: viewMode === 'saved' ? 'var(--basket-accent, #5865f2)' : 'transparent',
                 color: viewMode === 'saved' ? '#fff' : 'var(--text-secondary)',
               }}
             >
@@ -544,9 +545,17 @@ export default function BasketOrder({ instrument }: Props) {
                       fontWeight: 500,
                       cursor: 'pointer',
                       border:
-                        sentimentFilter === s ? '1px solid #5865f2' : '1px solid var(--border)',
-                      background: sentimentFilter === s ? '#5865f2' + '20' : 'transparent',
-                      color: sentimentFilter === s ? '#5865f2' : 'var(--text-secondary)',
+                        sentimentFilter === s
+                          ? '1px solid var(--basket-accent, #5865f2)'
+                          : '1px solid var(--border)',
+                      background:
+                        sentimentFilter === s
+                          ? 'var(--basket-accent-soft, #5865f220)'
+                          : 'transparent',
+                      color:
+                        sentimentFilter === s
+                          ? 'var(--basket-accent, #5865f2)'
+                          : 'var(--text-secondary)',
                     }}
                   >
                     {s !== 'All' && (
@@ -603,9 +612,9 @@ export default function BasketOrder({ instrument }: Props) {
                           borderRadius: 4,
                           fontSize: 10,
                           fontWeight: 600,
-                          background: '#5865f2' + '20',
-                          color: '#5865f2',
-                          border: '1px solid #5865f2' + '40',
+                          background: 'var(--basket-accent-soft, #5865f220)',
+                          color: 'var(--basket-accent, #5865f2)',
+                          border: '1px solid var(--basket-accent-border, #5865f240)',
                           cursor: 'pointer',
                         }}
                       >
@@ -632,7 +641,7 @@ export default function BasketOrder({ instrument }: Props) {
                                 y1={zeroY}
                                 x2="41"
                                 y2={zeroY}
-                                stroke="#2a2d42"
+                                stroke="var(--basket-zero, #2a2d42)"
                                 strokeWidth="0.5"
                                 strokeDasharray="2 2"
                               />
@@ -687,7 +696,7 @@ export default function BasketOrder({ instrument }: Props) {
                           borderRadius: 8,
                           border: 'none',
                           cursor: 'pointer',
-                          background: '#5865f2',
+                          background: 'var(--basket-accent, #5865f2)',
                           color: '#fff',
                           fontWeight: 600,
                           fontSize: 12,
@@ -750,7 +759,7 @@ export default function BasketOrder({ instrument }: Props) {
                       y1="100"
                       x2="300"
                       y2="100"
-                      stroke="#2a2d42"
+                      stroke="var(--basket-zero, #2a2d42)"
                       strokeWidth="0.5"
                       strokeDasharray="4 4"
                     />
@@ -804,7 +813,7 @@ export default function BasketOrder({ instrument }: Props) {
                       padding: '10px 24px',
                       borderRadius: 8,
                       border: 'none',
-                      background: '#5865f2',
+                      background: 'var(--basket-accent, #5865f2)',
                       color: '#fff',
                       fontWeight: 600,
                       fontSize: 13,
@@ -866,7 +875,7 @@ export default function BasketOrder({ instrument }: Props) {
                             fontSize: 14,
                             color: 'var(--text-primary)',
                             background: 'var(--bg-card)',
-                            border: '1px solid #5865f2',
+                            border: '1px solid var(--basket-accent, #5865f2)',
                             borderRadius: 4,
                             padding: '2px 6px',
                             outline: 'none',
@@ -941,7 +950,7 @@ export default function BasketOrder({ instrument }: Props) {
                         padding: '7px 0',
                         borderRadius: 8,
                         border: 'none',
-                        background: '#5865f2',
+                        background: 'var(--basket-accent, #5865f2)',
                         color: '#fff',
                         fontWeight: 600,
                         fontSize: 12,
@@ -966,7 +975,7 @@ export default function BasketOrder({ instrument }: Props) {
                     minHeight: 100,
                   }}
                 >
-                  <span style={{ fontSize: 24, color: '#5865f2' }}>+</span>
+                  <span style={{ fontSize: 24, color: 'var(--basket-accent, #5865f2)' }}>+</span>
                   <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>
                     Build New Strategy
                   </span>
@@ -976,7 +985,7 @@ export default function BasketOrder({ instrument }: Props) {
                       padding: '7px 20px',
                       borderRadius: 8,
                       border: 'none',
-                      background: '#5865f2',
+                      background: 'var(--basket-accent, #5865f2)',
                       color: '#fff',
                       fontWeight: 600,
                       fontSize: 12,
@@ -1024,7 +1033,7 @@ export default function BasketOrder({ instrument }: Props) {
           style={{
             background: 'none',
             border: 'none',
-            color: '#5865f2',
+            color: 'var(--basket-accent, #5865f2)',
             fontSize: 12,
             cursor: 'pointer',
             fontWeight: 500,
@@ -1076,7 +1085,7 @@ export default function BasketOrder({ instrument }: Props) {
                     style={{
                       padding: '4px 10px',
                       background: 'var(--bg-card)',
-                      border: '1px solid #5865f2',
+                      border: '1px solid var(--basket-accent, #5865f2)',
                       borderRadius: 6,
                       color: 'var(--text-primary)',
                       fontSize: 13,
@@ -1453,7 +1462,7 @@ export default function BasketOrder({ instrument }: Props) {
                 style={{
                   background: 'none',
                   border: 'none',
-                  color: '#5865f2',
+                  color: 'var(--basket-accent, #5865f2)',
                   cursor: 'pointer',
                   fontWeight: 600,
                   fontSize: 12,
@@ -1468,7 +1477,7 @@ export default function BasketOrder({ instrument }: Props) {
                 style={{
                   background: 'none',
                   border: 'none',
-                  color: '#5865f2',
+                  color: 'var(--basket-accent, #5865f2)',
                   cursor: 'pointer',
                   fontWeight: 600,
                   fontSize: 12,
@@ -1768,7 +1777,7 @@ export default function BasketOrder({ instrument }: Props) {
                   padding: '10px 0',
                   borderRadius: 8,
                   border: 'none',
-                  background: '#5865f2',
+                  background: 'var(--basket-accent, #5865f2)',
                   color: '#fff',
                   fontWeight: 600,
                   fontSize: 13,
@@ -2089,7 +2098,7 @@ export default function BasketOrder({ instrument }: Props) {
             flexShrink: 0,
             touchAction: 'none',
           }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = '#5865f2')}
+          onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--basket-accent, #5865f2)')}
           onMouseLeave={(e) => {
             if (!resizeRef.current) e.currentTarget.style.background = 'var(--border)';
           }}
@@ -2216,7 +2225,7 @@ export default function BasketOrder({ instrument }: Props) {
                       display: 'inline-block',
                       width: 12,
                       height: 2,
-                      background: '#5865f2',
+                      background: 'var(--basket-accent, #5865f2)',
                       marginRight: 4,
                       verticalAlign: 'middle',
                     }}
@@ -2254,10 +2263,10 @@ export default function BasketOrder({ instrument }: Props) {
                           {
                             axis: 'x' as const,
                             value: chain.spot,
-                            color: '#5865f2',
+                            color: 'var(--basket-accent, #5865f2)',
                             dashed: true,
                             label: chain.spot.toLocaleString('en-IN'),
-                            labelColor: '#5865f2',
+                            labelColor: 'var(--basket-accent, #5865f2)',
                           },
                         ]
                       : []),
@@ -2454,7 +2463,7 @@ export default function BasketOrder({ instrument }: Props) {
                   padding: '10px 0',
                   borderRadius: 8,
                   border: 'none',
-                  background: '#5865f2',
+                  background: 'var(--basket-accent, #5865f2)',
                   color: '#fff',
                   fontWeight: 600,
                   fontSize: 13,
@@ -2578,7 +2587,14 @@ export default function BasketOrder({ instrument }: Props) {
                       {inst.lot_size ? ` · Lot: ${inst.lot_size}` : ''}
                     </div>
                   </div>
-                  <span style={{ color: '#5865f2', fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
+                  <span
+                    style={{
+                      color: 'var(--basket-accent, #5865f2)',
+                      fontWeight: 600,
+                      fontSize: 11,
+                      flexShrink: 0,
+                    }}
+                  >
                     + Add
                   </span>
                 </button>

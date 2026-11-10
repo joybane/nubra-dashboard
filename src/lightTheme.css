@@ -1,0 +1,275 @@
+/* Daylight presentation only. All rules are scoped to the existing Light theme.
+   Keep layout, typefaces, virtual row heights, and actions unchanged. */
+html[data-theme='light'] {
+  color-scheme: light;
+  --bg-primary: #f3f6fa;
+  --bg-secondary: #edf2f7;
+  --bg-card: #ffffff;
+  --bg-hover: #e7eef8;
+  --border: #cdd7e2;
+  --text-primary: #1c2b3d;
+  --text-secondary: #435b75;
+  --text-muted: #5d6f83;
+  --accent: #315cc4;
+  --accent-dim: #274aa0;
+  --green: #087451;
+  --red: #bf3349;
+  --green-dim: rgba(8, 116, 81, 0.065);
+  --red-dim: rgba(191, 51, 73, 0.055);
+  --yellow: #916013;
+  --blue: #315cc4;
+  --cyan: #087c91;
+  --chart-grid: rgba(71, 91, 118, 0.1);
+  --chart-bg: #ffffff;
+  --scrollbar-thumb: #a6b6ca;
+  --shadow-sm: 0 1px 3px rgba(25, 45, 72, 0.06);
+  --shadow-md: 0 8px 24px rgba(25, 45, 72, 0.1);
+  --shadow-lg: 0 18px 54px rgba(25, 45, 72, 0.16);
+  --light-accent-soft: #e6edfc;
+  --ticket-surface: #ffffff;
+  --ticket-field: #f3f6fa;
+  --ticket-border: #cdd7e2;
+  --ticket-ink: #1c2b3d;
+  --ticket-muted: #5d6f83;
+  --ticket-secondary: #435b75;
+  --ticket-positive: #087451;
+  --ticket-negative: #bf3349;
+  --ticket-blue: #315cc4;
+  --ticket-active: #e6edfc;
+  --ticket-active-ink: #274aa0;
+  --ticket-active-border: #93ace2;
+  --ticket-shadow: 0 18px 64px rgba(25, 45, 72, 0.22);
+}
+html[data-theme='light'] body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+html[data-theme='light'] ::selection {
+  background: #d7e4ff;
+  color: #162b52;
+}
+html[data-theme='light']
+  :is(button, input, select, textarea, a, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+html[data-theme='light'] :is(input, textarea)::placeholder {
+  color: #6a7c91;
+  opacity: 1;
+}
+html[data-theme='light'] :is(input, select, textarea) {
+  accent-color: var(--accent);
+  caret-color: var(--accent);
+}
+html[data-theme='light'] :is(input, select, textarea):focus {
+  border-color: var(--accent);
+}
+/* Header: quiet white chrome and a clear current location. */
+html[data-theme='light'] .classic-navbar {
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 5px rgba(25, 45, 72, 0.04);
+}
+html[data-theme='light'] .classic-search input {
+  background: #f3f6fa;
+  border-color: var(--border);
+  color: var(--text-primary);
+}
+html[data-theme='light'] .classic-view-tab {
+  color: #52677f;
+}
+html[data-theme='light'] .classic-view-tab:hover {
+  color: var(--text-primary);
+  background: #edf2fa;
+}
+html[data-theme='light'] .classic-view-tab.is-active {
+  background: var(--light-accent-soft);
+  color: #274aa0;
+  box-shadow: inset 0 -2px var(--accent);
+}
+html[data-theme='light'] :is(.shell-icon-button, .experience-icon-button) {
+  color: var(--text-secondary);
+}
+html[data-theme='light'] :is(.shell-icon-button, .experience-icon-button):hover {
+  color: var(--accent);
+  background: var(--light-accent-soft);
+}
+html[data-theme='light'] .mode-badge {
+  color: #274aa0;
+  border-color: #baccea;
+  background: #edf3ff;
+}
+html[data-theme='light'] .brodha-brand-mark {
+  filter: none;
+}
+/* Shared panels, menus, dialogs, and the command palette. */
+html[data-theme='light'] .pane-surface {
+  background: var(--bg-card);
+}
+html[data-theme='light']
+  :is(
+    .theme-menu,
+    .classic-layout-menu,
+    .command-dialog,
+    .experience-menu,
+    .experience-layout-menu,
+    [role='menu']
+  ) {
+  background: #fff;
+  border-color: var(--border);
+  box-shadow: var(--shadow-lg);
+}
+html[data-theme='light'] :is(.theme-option, .classic-layout-option, .command-result):hover {
+  background: #edf3ff;
+}
+html[data-theme='light'] :is(.theme-option.is-active, .classic-layout-option.is-active) {
+  background: var(--light-accent-soft);
+  color: #274aa0;
+}
+html[data-theme='light']
+  :is(.chart-toolbar, .option-chain-toolbar, .analysis-commandbar, .chart-status) {
+  background: #f7f9fc;
+  border-color: var(--border);
+}
+html[data-theme='light'] .chart-legend {
+  color: var(--text-primary);
+}
+html[data-theme='light'] .chart-trade-action.is-buy {
+  background: #e8f5ee;
+  border-color: #9bc9b6;
+  color: #086646;
+}
+html[data-theme='light'] .chart-trade-action.is-sell {
+  background: #fff0f2;
+  border-color: #e4abb5;
+  color: #ad2941;
+}
+html[data-theme='light'] .chart-watchlist-action {
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+/* Table geometry stays intact; make the hierarchy visible through color. */
+html[data-theme='light'] .pane-surface table th {
+  color: #4e637c;
+  border-color: var(--border);
+}
+html[data-theme='light'] .pane-surface table td {
+  border-color: #dde5ee;
+}
+html[data-theme='light'] .oc-table {
+  background: #fff;
+}
+html[data-theme='light'] .oc-table th {
+  background: #f0f4f9;
+  font-weight: 600;
+}
+html[data-theme='light'] .oc-table .oc-calls-th {
+  background: #eaf5ef;
+  color: #087451;
+  border-bottom-color: #6fab91;
+}
+html[data-theme='light'] .oc-table .oc-puts-th {
+  background: #fcf0f2;
+  color: #b42c43;
+  border-bottom-color: #d294a1;
+}
+html[data-theme='light'] .oc-table .ce-side {
+  background: #f2f9f5;
+}
+html[data-theme='light'] .oc-table .pe-side {
+  background: #fdf5f6;
+}
+html[data-theme='light'] .oc-table :is(td.strike-col, td.strike-cell, td.iv-cell) {
+  background: #eaf0f8;
+  color: #233f65;
+  border-color: #cdd9e9;
+}
+html[data-theme='light'] .oc-table tr.atm-row :is(td.strike-col, td.strike-cell, td.iv-cell) {
+  background: #dce8fc;
+  color: #254fa7;
+  font-weight: 700;
+}
+html[data-theme='light'] .oc-table tbody tr:hover td {
+  background: #e5eefb;
+}
+html[data-theme='light'] .oi-bar-wrap {
+  opacity: 0.8;
+}
+/* Preserve neutral surfaces and clear active tabs in the order dock. */
+html[data-theme='light'] .order-terminal {
+  background: #fff;
+  border-top: 1px solid #bccbdd;
+  box-shadow: 0 -2px 8px rgba(25, 45, 72, 0.045);
+}
+html[data-theme='light'] .order-terminal > .h-9 {
+  background: #f7f9fc;
+}
+html[data-theme='light'] .order-terminal table th {
+  background: #edf2f8;
+  color: #4e637c;
+  font-weight: 600;
+}
+html[data-theme='light'] .order-terminal table td {
+  border-color: #dde5ee;
+}
+html[data-theme='light'] .order-terminal .terminal-group-row {
+  background: #f1f5fa;
+}
+html[data-theme='light'] .order-terminal tbody tr:hover {
+  background: #edf3fb;
+}
+html[data-theme='light'] .terminal-new-order {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 3px #23416c16;
+}
+html[data-theme='light'] .order-ticket > div:first-child {
+  background: rgba(31, 48, 71, 0.3);
+}
+html[data-theme='light'] .order-ticket input {
+  color-scheme: light;
+}
+/* Legacy fixed-color order-type buttons within the ticket. */
+html[data-theme='light'] .order-ticket :is(button, input) {
+  outline-color: var(--accent);
+}
+html[data-theme='light'] .tooltip {
+  background: #fff;
+  color: var(--text-primary);
+  border-color: var(--border);
+  box-shadow: var(--shadow-md);
+}
+html[data-theme='light'] .theme-swatch-light {
+  background: linear-gradient(135deg, #f3f6fa 50%, #315cc4 50%);
+}
+/* Match strategy tools and legacy semantic utilities to the daylight palette. */
+html[data-theme='light'] {
+  --basket-accent: #315cc4;
+  --basket-accent-soft: #e6edfc;
+  --basket-accent-border: #b6c8ec;
+  --basket-zero: #cdd7e2;
+  --basket-bullish: #087451;
+  --basket-bearish: #bf3349;
+  --basket-neutral: #5953c9;
+  --basket-volatile: #916013;
+}
+html[data-theme='light']
+  :is(.text-green-400, .text-green-500, .text-emerald-400, .text-emerald-500) {
+  color: var(--green);
+}
+html[data-theme='light'] :is(.text-red-400, .text-red-500, .text-rose-400, .text-rose-500) {
+  color: var(--red);
+}
+html[data-theme='light'] :is(.text-yellow-400, .text-yellow-500, .text-amber-400, .text-amber-500) {
+  color: var(--yellow);
+}
+html[data-theme='light'] [class~='text-[#f59e0b]'],
+html[data-theme='light'] [class~='text-[#fbbf24]'] {
+  color: #916013;
+}
+html[data-theme='light'] [class~='text-[#a78bfa]'] {
+  color: #6750b9;
+}
+html[data-theme='light'] [class~='text-[#38bdf8]'] {
+  color: #086f95;
+}

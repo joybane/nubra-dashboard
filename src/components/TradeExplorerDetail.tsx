@@ -3,8 +3,9 @@
  * key facts, the signal as a t1 / t2 table in words, the greeks, the IV signal with its working, the
  * option chain at the signal minute, then the day's chart.
  */
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import SignalDayChart from './SignalDayChart';
+import UiIcon from './UiIcon';
 import { IV_CUTS, IV_LEVELS } from '../lib/ivSignal';
 import {
   COLUMN_BY_KEY,
@@ -40,16 +41,19 @@ const colorOf = (v: number | null | undefined) =>
 
 function Panel({ title, children }: { title: ReactNode; children: ReactNode }) {
   return (
-    <details open className="rounded border border-[var(--border)] bg-[var(--bg-card)] p-2">
+    <details
+      open
+      className="te-report-panel rounded border border-[var(--border)] bg-[var(--bg-card)] p-2"
+    >
       <summary className="mb-1 cursor-pointer text-[13px] font-semibold">{title}</summary>
-      {children}
+      <div className="te-report-panel-body">{children}</div>
     </details>
   );
 }
 
 function Fact({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <span className="rounded bg-[var(--bg-secondary)] px-1.5 py-0.5">
+    <span className="te-report-fact rounded bg-[var(--bg-secondary)] px-1.5 py-0.5">
       <span className="text-[var(--text-muted)]">{label}</span>{' '}
       <b className="font-mono">{children}</b>
     </span>
@@ -68,7 +72,7 @@ function SignalPanel({ row, underlying }: { row: DayRow; underlying: SignalUnder
     v >= 0 ? `made the seller ${rupee(v)}` : `cost the seller ${rupee(-v)}`;
   return (
     <Panel title="The signal">
-      <table className="w-full border-collapse text-[11px]">
+      <table className="te-report-signal-table w-full border-collapse text-[11px]">
         <thead>
           <tr>
             <th className={`${th} text-left`} />
@@ -188,11 +192,29 @@ function IvPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderlyin
   const cuts = dte != null ? IV_CUTS[underlying][dte] : undefined;
   const ratio = v.ivRatio as number | null;
   if (!cuts || ratio == null) {
+    const history = Number(v.ivHistoryCount ?? 0);
+    const hasIv = v.ivNow != null;
     return (
       <Panel title="IV signal for this day">
+        <div className="flex flex-wrap gap-2">
+          <Fact label="IV at signal">{hasIv ? `${plain(v.ivNow as number)}%` : 'Unavailable'}</Fact>
+          <Fact label="Earlier matching days">{history} / 20</Fact>
+          {ratio != null && (
+            <>
+              <Fact label="Usual IV">{plain(v.ivUsual as number)}%</Fact>
+              <Fact label="IV / usual">{ratio.toFixed(2)}×</Fact>
+            </>
+          )}
+        </div>
         <p className="text-[11px] text-[var(--text-muted)]">
-          No reading: it needs at least 4 earlier days with the same days to expiry, and only covers
-          0 to 4 days to expiry.
+          {!hasIv ? 'A call or put IV reading is missing at the signal minute. ' : ''}
+          {dte == null ? 'Days to expiry are unavailable for this day. ' : ''}
+          {dte != null && history < 4
+            ? `Baseline building: ${history} earlier valid readings with ${dte} trading days to expiry; at least 4 are required. Later days are never used to classify an earlier trade. `
+            : ''}
+          {!cuts && dte != null
+            ? `The ${dte}-day IV level has no calibrated thresholds. Available IV and baseline comparisons are shown without assigning a High/Low label.`
+            : ''}
         </p>
       </Panel>
     );
@@ -243,6 +265,7 @@ function IvPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderlyin
 
 interface ChainSide {
   close: number;
+  localFallback?: boolean;
   iv: number | null;
   delta: number | null;
   volume: number | null;
@@ -260,6 +283,7 @@ interface ChainResponse {
 
 function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderlying }) {
   const { raw } = row;
+  const [showAllStrikes, setShowAllStrikes] = useState(false);
   const [chain, setChain] = useState<ChainResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -298,11 +322,20 @@ function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderl
       </Panel>
     );
   }
+  const atmIndex = chain.rows.findIndex((r) => r.strike === chain.atm);
+  const visibleRows =
+    showAllStrikes || atmIndex < 0
+      ? chain.rows
+      : chain.rows.slice(Math.max(0, atmIndex - 7), atmIndex + 8);
   const sold = (kind: 'CE' | 'PE', strike: number) =>
     raw.trade.legs.some((l) => l.kind === kind && l.strike === strike);
   const ref = (kind: 'CE' | 'PE', strike: number) =>
     (kind === 'CE' ? raw.signal.legs.ceStrike : raw.signal.legs.peStrike) === strike;
   const hasFlow = chain.rows.some((r) => r.ce?.oi != null || r.pe?.oi != null);
+  const localPrices = chain.rows.reduce(
+    (count, r) => count + Number(!!r.ce?.localFallback) + Number(!!r.pe?.localFallback),
+    0,
+  );
   const cls = (kind: 'CE' | 'PE', strike: number, itm: boolean) =>
     `${td} ${sold(kind, strike) ? 'bg-[var(--accent)]/25 font-semibold' : itm ? 'bg-[var(--bg-secondary)]' : ''}`;
   return (
@@ -316,66 +349,86 @@ function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderl
         </>
       }
     >
-      <table className="w-full border-collapse text-[11px]">
-        <thead>
-          <tr>
-            {hasFlow && <th className={th}>OI</th>}
-            {hasFlow && <th className={th}>Vol</th>}
-            <th className={th}>Delta</th>
-            <th className={th}>IV</th>
-            <th className={th}>Call</th>
-            <th className={`${th} text-center`}>Strike</th>
-            <th className={th}>Put</th>
-            <th className={th}>IV</th>
-            <th className={th}>Delta</th>
-            {hasFlow && <th className={th}>Vol</th>}
-            {hasFlow && <th className={th}>OI</th>}
-          </tr>
-        </thead>
-        <tbody>
-          {chain.rows.map((r) => {
-            const ceItm = r.strike < chain.spot;
-            const peItm = r.strike > chain.spot;
-            return (
-              <tr key={r.strike}>
-                {hasFlow && <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.oi, 0)}</td>}
-                {hasFlow && (
-                  <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.volume, 0)}</td>
-                )}
-                <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.delta)}</td>
-                <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.iv)}</td>
-                <td className={cls('CE', r.strike, ceItm)}>
-                  {ref('CE', r.strike) && (
-                    <span className="mr-1 text-[9px] text-[var(--yellow)]">09:15</span>
+      <div className="te-chain-controls">
+        <span>ATM ± 7 strikes · OTM calls above ATM / OTM puts below ATM</span>
+        <button type="button" onClick={() => setShowAllStrikes((v) => !v)}>
+          {showAllStrikes ? 'ATM ± 7 strikes' : 'Show entire chain'}
+        </button>
+      </div>
+      <div className="te-chain-scroll">
+        <table
+          className="te-centered-chain w-full border-collapse text-[11px]"
+          data-flow={hasFlow}
+          style={{ tableLayout: 'fixed' }}
+        >
+          <colgroup>
+            {Array.from({ length: hasFlow ? 11 : 7 }, (_, i) => (
+              <col key={i} />
+            ))}
+          </colgroup>
+          <thead>
+            <tr>
+              {hasFlow && <th className={th}>OI</th>}
+              {hasFlow && <th className={th}>Vol</th>}
+              <th className={th}>Delta</th>
+              <th className={th}>IV</th>
+              <th className={th}>Call</th>
+              <th className={`${th} text-center`}>Strike</th>
+              <th className={th}>Put</th>
+              <th className={th}>IV</th>
+              <th className={th}>Delta</th>
+              {hasFlow && <th className={th}>Vol</th>}
+              {hasFlow && <th className={th}>OI</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {visibleRows.map((r) => {
+              const ceItm = r.strike < chain.spot;
+              const peItm = r.strike > chain.spot;
+              return (
+                <tr key={r.strike} className={r.strike === chain.atm ? 'te-chain-atm' : undefined}>
+                  {hasFlow && <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.oi, 0)}</td>}
+                  {hasFlow && (
+                    <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.volume, 0)}</td>
                   )}
-                  {plain(r.ce?.close)}
-                </td>
-                <td
-                  className={`${td} text-center font-semibold`}
-                  style={r.strike === chain.atm ? { color: 'var(--accent)' } : undefined}
-                >
-                  {r.strike}
-                </td>
-                <td className={cls('PE', r.strike, peItm)}>
-                  {plain(r.pe?.close)}
-                  {ref('PE', r.strike) && (
-                    <span className="ml-1 text-[9px] text-[var(--yellow)]">09:15</span>
+                  <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.delta)}</td>
+                  <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.iv)}</td>
+                  <td className={cls('CE', r.strike, ceItm)}>
+                    {ref('CE', r.strike) && (
+                      <span className="mr-1 text-[9px] text-[var(--yellow)]">09:15</span>
+                    )}
+                    {plain(r.ce?.close)}
+                  </td>
+                  <td
+                    className={`${td} text-center font-semibold`}
+                    style={r.strike === chain.atm ? { color: 'var(--accent)' } : undefined}
+                  >
+                    {r.strike}
+                    {r.strike === chain.atm && <span className="te-atm-tag"> ATM</span>}
+                  </td>
+                  <td className={cls('PE', r.strike, peItm)}>
+                    {plain(r.pe?.close)}
+                    {ref('PE', r.strike) && (
+                      <span className="ml-1 text-[9px] text-[var(--yellow)]">09:15</span>
+                    )}
+                  </td>
+                  <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.iv)}</td>
+                  <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.delta)}</td>
+                  {hasFlow && (
+                    <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.volume, 0)}</td>
                   )}
-                </td>
-                <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.iv)}</td>
-                <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.delta)}</td>
-                {hasFlow && (
-                  <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.volume, 0)}</td>
-                )}
-                {hasFlow && <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.oi, 0)}</td>}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+                  {hasFlow && <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.oi, 0)}</td>}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
       <p className="mt-1 text-[10px] text-[var(--text-muted)]">
         Blue cells are the strikes sold. 09:15 marks the legs the signal and the IV signal read.
         {!hasFlow && ' Volume and OI are stored only for days downloaded from Nubra.'}
+        {localPrices > 0 &&
+          ` ${localPrices} missing prices filled from local files for the same expiry and signal minute. Volume and OI remain broker data; dashes mean no stored reading.`}
       </p>
     </Panel>
   );
@@ -389,6 +442,9 @@ export default function TradeExplorerDetail({
   onClose,
   onStep,
   canStep,
+  fullscreen,
+  onToggleFullscreen,
+  onSelectSet,
 }: {
   row: DayRow;
   theme: Theme;
@@ -397,15 +453,47 @@ export default function TradeExplorerDetail({
   onClose: () => void;
   onStep: (dir: -1 | 1) => void;
   canStep: { prev: boolean; next: boolean };
+  fullscreen: boolean;
+  onToggleFullscreen: () => void;
+  onSelectSet: (key: string) => void;
 }) {
+  const [comparisonRow, setComparisonRow] = useState<DayRow['raw'] | null>(null);
+  const [comparisonError, setComparisonError] = useState<string | null>(null);
+  useEffect(() => {
+    setComparisonRow(null);
+    setComparisonError(null);
+    if (row.raw.comparisons) return;
+    const ctl = new AbortController();
+    fetch(
+      `/api/signal-backtest/explorer-sets?underlying=${underlying}&set=saved&date=${row.raw.date}`,
+      { signal: ctl.signal },
+    )
+      .then(async (res) => {
+        const body = await res.json();
+        if (!body.ok || !body.rows?.[0])
+          throw new Error(body.error ?? 'No comparison prices available');
+        setComparisonRow(body.rows[0]);
+      })
+      .catch((error: unknown) => {
+        if (!ctl.signal.aborted) setComparisonError(String(error));
+      });
+    return () => ctl.abort();
+  }, [row.raw, underlying]);
+  const comparison = row.raw.comparisons ? row.raw : comparisonRow;
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!scrollRef.current) return;
+    scrollRef.current.scrollTop = 0;
+    scrollRef.current.scrollLeft = 0;
+  }, [row.raw.date, underlying]);
   const v = row.values;
   const t = row.raw.trade;
   const col = (k: string) => COLUMN_BY_KEY.get(k) as Column;
   const estimated = row.raw.estimated;
   const button = 'h-6 w-7 rounded border border-[var(--border)] disabled:opacity-30';
   return (
-    <div className="flex h-full min-h-0 flex-col border-l border-[var(--border)]">
-      <div className="flex items-center gap-2 border-b border-[var(--border)] px-2 py-1">
+    <div className="te-report-detail flex h-full min-h-0 flex-col border-l border-[var(--border)]">
+      <div className="te-report-header flex items-center gap-2 border-b border-[var(--border)] px-2 py-1">
         <button
           type="button"
           className={button}
@@ -417,7 +505,7 @@ export default function TradeExplorerDetail({
         </button>
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13px] font-semibold">
-            {row.raw.date} ({v.weekday}) · {formatCell(col('dte'), v.dte)} · OTM 2
+            {row.raw.date} ({v.weekday}) · {formatCell(col('dte'), v.dte)} · {String(v.tradeSet)}
           </div>
           <div className="truncate text-[10px] text-[var(--text-muted)]">{position}</div>
         </div>
@@ -430,57 +518,161 @@ export default function TradeExplorerDetail({
         >
           →
         </button>
+        <button
+          type="button"
+          className={`${button} flex shrink-0 items-center justify-center`}
+          onClick={onToggleFullscreen}
+          aria-label={fullscreen ? 'Restore detail pane' : 'Full screen detail pane'}
+          title={fullscreen ? 'Restore detail pane (Esc)' : 'Full screen detail pane'}
+          aria-pressed={fullscreen}
+        >
+          <UiIcon name={fullscreen ? 'restore' : 'expand'} size={15} />
+        </button>
         <button type="button" className={button} onClick={onClose} aria-label="Close">
           ✕
         </button>
       </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-2 text-[11px]">
-        <div className="flex flex-wrap gap-1.5">
-          <Fact label="1 lot">{t.qty} qty</Fact>
-          <Fact label="Entry">
-            {t.entryTime}, {underlying} {plain(t.entrySpot)}
-          </Fact>
-          <Fact label="Sold">
-            {t.legs.map((l) => `${l.strike} ${l.kind} @ ₹${plain(l.entryPrice)}`).join(' · ')}
-          </Fact>
-          <Fact label="Premium collected">{rupee(v.premium as number)}</Fact>
-          <Fact label="Max loss">
-            {rupee(v.maxLoss as number)}
-            {v.maxLossAt != null && ` at ${formatClock(v.maxLossAt as number)}`}
-          </Fact>
-          <Fact label="Best profit">{rupee(v.bestProfit as number | null)}</Fact>
-          <Fact label={`Result at ${t.exitTime}`}>
-            <span style={{ color: colorOf(t.pnl) }}>{signedRupee(t.pnl)}</span>
-          </Fact>
-          <Fact label="Expiry">{row.raw.expiry}</Fact>
-          <Fact label="Data">{row.raw.source === 'nubra' ? 'Nubra' : 'Local files'}</Fact>
+      <div
+        ref={scrollRef}
+        className="te-report-scroll flex min-h-0 flex-1 flex-col gap-2 overflow-auto p-2 text-[11px]"
+      >
+        <div className="te-report-content">
+          <div className="te-set-context mb-2">
+            <b>{String(v.tradeSet)}</b> · sold{' '}
+            {t.legs
+              .map((leg) => `${leg.strike} ${leg.kind} @ ₹${leg.entryPrice.toFixed(2)}`)
+              .join(' + ')}
+            <div>
+              Premium collected {rupee(v.premium as number)} · max loss {rupee(v.maxLoss as number)}{' '}
+              at {t.maxLossTime}
+            </div>
+            {comparison?.worstSet && (
+              <div>
+                Largest max loss today: <b>{comparison?.worstSet}</b> ·{' '}
+                {rupee(comparison?.worstLoss ?? 0)}
+              </div>
+            )}
+          </div>
+          <ChainPanel key={`${underlying}-${row.raw.date}`} row={row} underlying={underlying} />
+          {!comparison?.comparisons && (
+            <p className="text-[var(--text-muted)]">
+              {comparisonError ?? 'Comparing the available trade sets for this day…'}
+            </p>
+          )}
+          {comparison?.comparisons && (
+            <Panel title="Compare trade sets for this day">
+              <div className="te-set-comparison">
+                <table className="w-full border-collapse">
+                  <thead>
+                    <tr>
+                      {[
+                        'Set',
+                        'Call sold',
+                        'Call ₹',
+                        'Put sold',
+                        'Put ₹',
+                        'Premium ₹',
+                        'Max loss ₹',
+                        'At',
+                        'Exit P&L ₹',
+                      ].map((label) => (
+                        <th key={label} className={th}>
+                          {label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {comparison.comparisons.map((c) => (
+                      <tr key={c.key}>
+                        <td className={td}>
+                          <button
+                            type="button"
+                            className="text-[var(--accent)]"
+                            onClick={() => onSelectSet(c.key)}
+                          >
+                            {c.label}
+                            {c.label === comparison?.worstSet ? ' · largest loss' : ''}
+                          </button>
+                        </td>
+                        <td className={td}>{plain(c.ceStrike, 0)}</td>
+                        <td className={td}>{plain(c.cePrice)}</td>
+                        <td className={td}>{plain(c.peStrike, 0)}</td>
+                        <td className={td}>{plain(c.pePrice)}</td>
+                        <td className={td}>{rupee(c.premium)}</td>
+                        <td className={td}>{rupee(c.maxLoss)}</td>
+                        <td className={td}>{c.maxLossTime}</td>
+                        <td className={td}>{rupee(c.pnl)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p>
+                Click a set to analyze it across all days. Only pairs with stored prices appear;
+                missing pairs are excluded from the daily comparison. This is a hindsight
+                comparison.
+              </p>
+            </Panel>
+          )}
+
+          <div className="te-report-facts flex flex-wrap gap-1.5">
+            <Fact label="1 lot">{t.qty} qty</Fact>
+            <Fact label="Entry">
+              {t.entryTime}, {underlying} {plain(t.entrySpot)}
+            </Fact>
+            <Fact label="Sold">
+              {t.legs.map((l) => `${l.strike} ${l.kind} @ ₹${plain(l.entryPrice)}`).join(' · ')}
+            </Fact>
+            <Fact label="Premium collected">{rupee(v.premium as number)}</Fact>
+            <Fact label="Max loss">
+              {rupee(v.maxLoss as number)}
+              {v.maxLossAt != null && ` at ${formatClock(v.maxLossAt as number)}`}
+            </Fact>
+            <Fact label="Best profit">{rupee(v.bestProfit as number | null)}</Fact>
+            <Fact label={`Result at ${t.exitTime}`}>
+              <span style={{ color: colorOf(t.pnl) }}>{signedRupee(t.pnl)}</span>
+            </Fact>
+            <Fact label="Expiry">{row.raw.expiry}</Fact>
+            <Fact label="Data">{row.raw.source === 'nubra' ? 'Nubra' : 'Local files'}</Fact>
+          </div>
+          {estimated && (
+            <p className="rounded border border-[var(--yellow)] px-2 py-1 text-[11px] text-[var(--yellow)]">
+              <b>Estimated.</b> This day's stored prices stop 10 strikes from spot:{' '}
+              {estimated.legs.map((l) => `${l.strike} ${l.kind} after ${l.from}`).join(', ')}. From
+              there those legs are priced from the IV of the nearest strike that still has a price,
+              so the max loss and result are estimates. Tested on real prices, the error was about{' '}
+              {underlying === 'SENSEX' ? '₹300' : '₹550'} per leg at 8 strikes away, and it grows
+              further out. With those legs frozen instead it read{' '}
+              {signedRupee(estimated.before.pnl)} and a max loss of{' '}
+              {rupee(estimated.before.maxLoss)}.
+            </p>
+          )}
+          <div className="te-report-grid">
+            <SignalPanel row={row} underlying={underlying} />
+            <GreeksPanel row={row} />
+          </div>
+          <IvPanel row={row} underlying={underlying} />
+          <section className="te-report-panel te-report-chart-panel">
+            <h3>Minute by minute</h3>
+            <p className="te-report-note">
+              Compare the trade and reference Greeks through the day. Hover for values; t1 and t2
+              mark the signal moments.
+            </p>
+            <div className="te-detail-chart h-[340px] shrink-0 overflow-hidden rounded border border-[var(--border)]">
+              <SignalDayChart
+                embedded
+                theme={theme}
+                underlying={underlying}
+                row={row.raw}
+                fillLegs={estimated?.legs}
+                onClose={onClose}
+                onStep={onStep}
+                canStep={canStep}
+              />
+            </div>
+          </section>
         </div>
-        {estimated && (
-          <p className="rounded border border-[var(--yellow)] px-2 py-1 text-[11px] text-[var(--yellow)]">
-            <b>Estimated.</b> This day's stored prices stop 10 strikes from spot:{' '}
-            {estimated.legs.map((l) => `${l.strike} ${l.kind} after ${l.from}`).join(', ')}. From
-            there those legs are priced from the IV of the nearest strike that still has a price, so
-            the max loss and result are estimates. Tested on real prices, the error was about{' '}
-            {underlying === 'SENSEX' ? '₹300' : '₹550'} per leg at 8 strikes away, and it grows
-            further out. With those legs frozen instead it read {signedRupee(estimated.before.pnl)}{' '}
-            and a max loss of {rupee(estimated.before.maxLoss)}.
-          </p>
-        )}
-        <div className="h-[340px] shrink-0 overflow-hidden rounded border border-[var(--border)]">
-          <SignalDayChart
-            theme={theme}
-            underlying={underlying}
-            row={row.raw}
-            fillLegs={estimated?.legs}
-            onClose={onClose}
-            onStep={onStep}
-            canStep={canStep}
-          />
-        </div>
-        <SignalPanel row={row} underlying={underlying} />
-        <GreeksPanel row={row} />
-        <IvPanel row={row} underlying={underlying} />
-        <ChainPanel row={row} underlying={underlying} />
       </div>
     </div>
   );

@@ -15,7 +15,8 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { createReadStream } from 'fs';
-import { stat } from 'fs/promises';
+import { stat, readFile } from 'fs/promises';
+import { classifyExplorerSets, explorerDaySets, explorerSetOptions } from './explorerSets.ts';
 import path from 'path';
 import type { FinderParams } from '../analysis/caseFinder.ts';
 import {
@@ -36,7 +37,7 @@ import {
   type DayGreekSeries,
   type SignalGreeks,
 } from '../analysis/greeks.ts';
-import { buildChain } from './chain.ts';
+import { CHAIN_STEPS, buildChain } from './chain.ts';
 import { daysToExpiry } from './expiry.ts';
 import { createParquetOhlcLoaderFor, type OhlcLoader } from './ohlc.ts';
 import { createPremiumSetsBuilder, type PremiumSetsResponse } from './premiumSets.ts';
@@ -686,7 +687,21 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
     }
     const { ohlc, ohlcSource } = await resolveOhlc(underlying, date, q.source, day.expiry, true);
     const wide = ohlcSource === 'nubra-wide' ? await wideStore.read(underlying, date) : null;
-    const chain = buildChain(day, index, ohlc, wide);
+    let chain = buildChain(day, index, ohlc, wide);
+    // A wide broker cache can still lack the ITM half of the chain. Fill individual
+    // missing prices from the same local date/expiry without changing the saved run.
+    if (
+      chain &&
+      ohlcSource === 'nubra-wide' &&
+      (chain.rows.length < 2 * CHAIN_STEPS + 1 || chain.rows.some((row) => !row.ce || !row.pe))
+    ) {
+      try {
+        const local = await loadOhlc(underlying, date, day.expiry);
+        if (local) chain = buildChain(day, index, ohlc, wide, local);
+      } catch (error) {
+        req.log.warn({ err: error, underlying, date }, 'Local chain supplement unavailable');
+      }
+    }
     if (!chain) {
       reply.code(404);
       return { ok: false, error: `no spot on ${date} at ${time}` };
@@ -701,6 +716,109 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
       ...chain,
     };
   });
+
+  const explorerCache = new Map<string, Promise<unknown>>();
+  fastify.get<{ Querystring: { underlying?: string; set?: string; date?: string } }>(
+    '/api/signal-backtest/explorer-sets',
+    async (req, reply) => {
+      const underlying = String(req.query.underlying ?? 'NIFTY').toUpperCase();
+      if (!(UNDERLYINGS as readonly string[]).includes(underlying))
+        return reply.code(400).send({ ok: false, error: 'Unsupported underlying' });
+      if (req.query.date && !ISO.test(req.query.date))
+        return reply.code(400).send({ ok: false, error: 'Invalid date' });
+      const options = explorerSetOptions(underlying);
+      const selected = req.query.set ?? 'saved';
+      if (!options.some((o) => o.key === selected))
+        return reply.code(400).send({ ok: false, error: 'Unknown trade set' });
+      const file = path.join(rootDir, '.signal-cache', underlying, SAVED_RUN_FILE);
+      const stamp = await stat(file);
+      const key = `${underlying}|${selected}|${req.query.date ?? 'all'}|${stamp.mtimeMs}`;
+      let pending = explorerCache.get(key);
+      if (!pending) {
+        pending = (async () => {
+          const saved = JSON.parse(await readFile(file, 'utf8'));
+          const savedLabel =
+            saved.tradeParams?.strikeMode === 'OTM'
+              ? `OTM ${saved.tradeParams.otmSteps}`
+              : 'premium selection';
+          options[0].label = `Saved run · ${savedLabel}`;
+          if (selected === 'saved' && !req.query.date)
+            return { ...saved, skipped: [], setOptions: options, setLabel: options[0].label };
+          if (req.query.date)
+            saved.rows = saved.rows.filter((row: SignalBacktestRow) => row.date === req.query.date);
+          const rows = [];
+          const skipped: Array<{ date: string; reason: string }> = [];
+          for (const base of saved.rows as SignalBacktestRow[]) {
+            const day = await readDay(underlying, base.source, base.date);
+            if (!day || isEmptyDay(day)) {
+              skipped.push({ date: base.date, reason: 'No stored day prices' });
+              continue;
+            }
+            const { ohlc, ohlcSource } = await resolveOhlc(
+              underlying,
+              base.date,
+              base.source,
+              base.expiry,
+              true,
+            );
+            const result = explorerDaySets(base, day, ohlc, underlying, selected);
+            if (selected !== 'saved' && !result.trade) {
+              skipped.push({
+                date: base.date,
+                reason: 'No eligible pair with stored prices for this set',
+              });
+              continue;
+            }
+            rows.push({
+              ...(selected === 'saved' ? base : {}),
+              date: base.date,
+              source: base.source,
+              expiry: base.expiry,
+              dte: base.dte,
+              groups:
+                selected === 'saved'
+                  ? (base as SignalBacktestRow & { groups?: Record<string, unknown> }).groups
+                  : (() => {
+                      const g = (base as SignalBacktestRow & { groups?: Record<string, unknown> })
+                        .groups;
+                      return {
+                        path: g?.path ?? null,
+                        dir: g?.dir ?? null,
+                        moveFifth: g?.moveFifth ?? null,
+                      };
+                    })(),
+              signal: base.signal,
+              ohlcSource: selected === 'saved' ? base.ohlcSource : ohlcSource,
+              trade: selected === 'saved' ? base.trade : result.trade!,
+              setLabel:
+                selected === 'saved'
+                  ? base.trade.otmSteps == null
+                    ? 'Saved premium selection'
+                    : `OTM ${base.trade.otmSteps}`
+                  : result.label,
+              worstSet: result.worst?.label,
+              worstLoss: result.worst?.maxLoss,
+              comparisons: result.comparisons,
+            });
+            await new Promise((resolve) => setImmediate(resolve));
+          }
+          if (selected !== 'saved') classifyExplorerSets(rows, underlying);
+          return {
+            ok: true,
+            underlying,
+            rows,
+            skipped,
+            setOptions: options,
+            setLabel: options.find((o) => o.key === selected)!.label,
+          };
+        })();
+        explorerCache.set(key, pending);
+        if (explorerCache.size > 2) explorerCache.delete(explorerCache.keys().next().value!);
+        pending.catch(() => explorerCache.delete(key));
+      }
+      return pending;
+    },
+  );
 
   // The saved run the Trade Explorer reads: a full run response kept on disk, so opening the tab
   // never recalculates anything.

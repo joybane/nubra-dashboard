@@ -62,4 +62,38 @@ describe('ivSignalByDate', () => {
     expect(out.get('2026-01-01')?.ivNow).toBeNull();
     expect(out.get('2026-01-02')).toMatchObject({ ivNow: 10, level: null });
   });
+  test('DTE 5 accumulates its own history and ratio without borrowing calibrated DTE 4 levels', () => {
+    const rows = ['01', '02', '03', '04'].map((d) => row(`2026-01-${d}`, 5, 10));
+    const out = ivSignalByDate([...rows, row('2026-01-05', 5, 20)], 'SENSEX');
+    expect(out.get('2026-01-04')).toMatchObject({
+      historyCount: 3,
+      usual: null,
+      ratio: null,
+      level: null,
+    });
+    expect(out.get('2026-01-05')).toMatchObject({
+      historyCount: 4,
+      ivNow: 20,
+      usual: 10,
+      ratio: 2,
+      level: null,
+    });
+  });
+
+  test('reports warm-up counts without looking ahead or counting invalid IVs', () => {
+    const out = ivSignalByDate(
+      [
+        row('2026-01-01', 0, 10),
+        row('2026-01-02', 0, Infinity),
+        row('2026-01-03', 0, 10, null),
+        row('2026-01-04', 0, 12),
+        row('2026-01-05', 1, 100),
+      ].reverse(),
+      'NIFTY',
+    );
+    expect(out.get('2026-01-01')).toMatchObject({ historyCount: 0, usual: null });
+    expect(out.get('2026-01-02')?.ivNow).toBeNull();
+    expect(out.get('2026-01-04')).toMatchObject({ historyCount: 1, usual: null });
+    expect(out.get('2026-01-05')).toMatchObject({ historyCount: 0, usual: null });
+  });
 });

@@ -1656,10 +1656,10 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
 
       // Total Basket P&L (White line, width 3)
       basketSeries = pnlChart.addSeries(LineSeries, {
-        color: '#ffffff',
+        color: isDark ? '#ffffff' : '#1e3554',
         lineWidth: 3,
         crosshairMarkerRadius: 4,
-        crosshairMarkerBackgroundColor: '#ffffff', // see the leg-price series above
+        crosshairMarkerBackgroundColor: isDark ? '#ffffff' : '#1e3554', // retain contrast on both themes
         lastValueVisible: true,
         priceLineVisible: true,
         visible: showTotalPnl,
