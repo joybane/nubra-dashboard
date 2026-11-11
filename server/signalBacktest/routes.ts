@@ -17,6 +17,7 @@ import type { FastifyInstance } from 'fastify';
 import { createReadStream } from 'fs';
 import { stat, readFile } from 'fs/promises';
 import { classifyExplorerSets, explorerDaySets, explorerSetOptions } from './explorerSets.ts';
+import { MAX_LOSS_REPORT_FILE, withExplorerHook } from './maxLossReport.ts';
 import path from 'path';
 import type { FinderParams } from '../analysis/caseFinder.ts';
 import {
@@ -817,6 +818,40 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
         pending.catch(() => explorerCache.delete(key));
       }
       return pending;
+    },
+  );
+
+  // The Strangle Max Loss report, shown in the Trade Explorer's Report view. Its day-clicks are
+  // handed to the explorer (see maxLossReport.ts); the file itself is never changed.
+  const reportCache = new Map<string, { mtime: number; html: string }>();
+  fastify.get<{ Querystring: { underlying?: string } }>(
+    '/api/signal-backtest/max-loss-report',
+    async (req, reply) => {
+      const underlying = String(req.query.underlying ?? 'NIFTY').toUpperCase();
+      if (!(UNDERLYINGS as readonly string[]).includes(underlying)) {
+        reply.code(400);
+        return { ok: false, error: `unsupported underlying ${req.query.underlying}` };
+      }
+      const file = path.join(rootDir, '.signal-cache', underlying, MAX_LOSS_REPORT_FILE);
+      let mtime: number;
+      try {
+        mtime = (await stat(file)).mtimeMs;
+      } catch {
+        reply.code(404);
+        reply.type('text/html; charset=utf-8');
+        return `<p style="font:14px system-ui;padding:16px">No ${underlying} report saved at ${file}.</p>`;
+      }
+      let cached = reportCache.get(underlying);
+      if (!cached || cached.mtime !== mtime) {
+        const raw = await readFile(file, 'utf8');
+        const hooked = withExplorerHook(raw);
+        if (!hooked) req.log.warn({ underlying }, 'Max loss report: openDay hook point not found');
+        cached = { mtime, html: hooked ?? raw };
+        reportCache.set(underlying, cached);
+      }
+      reply.type('text/html; charset=utf-8');
+      reply.header('Cache-Control', 'no-cache');
+      return cached.html;
     },
   );
 

@@ -7,14 +7,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import './tradeExplorer.css';
 import TradeExplorerDetail from './components/TradeExplorerDetail';
+import TradeExplorerCharts from './components/TradeExplorerCharts';
 import { IV_LEVELS } from './lib/ivSignal';
 import {
   COLUMNS,
+  PICKABLE_COLUMNS,
   REPORT_GROUPS,
   COLUMN_BY_KEY,
   DEFAULT_COLUMN_KEYS,
+  DEFAULT_SIMILAR_KEYS,
+  SIMILAR_KEY,
+  SMALL_SAMPLE,
   aggregate,
-  bucketRows,
   allGroupIds,
   applyFilters,
   buildDayRows,
@@ -23,13 +27,19 @@ import {
   filterActive,
   formatCell,
   lossSummary,
+  money,
+  share,
+  nearest,
+  withSimilarity,
   type Aggregate,
   type Column,
   type ColumnFilter,
   type DayRow,
   type Filters,
   type GroupPlan,
+  type LossSummary,
   type SavedRow,
+  type SimilarPlan,
   type SortState,
   type TableItem,
 } from './lib/tradeExplorer';
@@ -48,6 +58,9 @@ interface Settings {
   filters: Filters;
   sort: SortState;
   plan: GroupPlan;
+  /** The last choice for "similar days": which columns to compare and how many days to keep. */
+  similarKeys?: string[];
+  similarKeep?: number;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -64,30 +77,106 @@ function loadSettings(): Settings {
       localStorage.getItem(SETTINGS_KEY) ?? 'null',
     ) as Partial<Settings> | null;
     if (!raw) return DEFAULT_SETTINGS;
-    const columns = Array.isArray(raw.columns)
-      ? raw.columns.filter((k) => COLUMN_BY_KEY.has(k))
-      : DEFAULT_COLUMN_KEYS;
+    // The distance column only exists while a similar-days search is running, which is not saved.
+    const known = (k: string) => COLUMN_BY_KEY.has(k) && k !== SIMILAR_KEY;
+    const columns = Array.isArray(raw.columns) ? raw.columns.filter(known) : DEFAULT_COLUMN_KEYS;
+    const filters = raw.filters && typeof raw.filters === 'object' ? { ...raw.filters } : {};
+    delete filters[SIMILAR_KEY];
     return {
       underlying: raw.underlying === 'SENSEX' ? 'SENSEX' : 'NIFTY',
       columns: columns.length ? columns : DEFAULT_COLUMN_KEYS,
-      detailColumns: Array.isArray(raw.detailColumns)
-        ? raw.detailColumns.filter((k) => COLUMN_BY_KEY.has(k))
-        : undefined,
-      filters: raw.filters && typeof raw.filters === 'object' ? raw.filters : {},
+      detailColumns: Array.isArray(raw.detailColumns) ? raw.detailColumns.filter(known) : undefined,
+      filters,
       sort:
         raw.sort &&
-        (raw.sort.key === '' || COLUMN_BY_KEY.has(raw.sort.key)) &&
+        (raw.sort.key === '' || known(raw.sort.key)) &&
         (raw.sort.dir === 1 || raw.sort.dir === -1)
           ? raw.sort
           : DEFAULT_SETTINGS.sort,
       plan: { ...DEFAULT_SETTINGS.plan, ...raw.plan },
+      similarKeys: Array.isArray(raw.similarKeys) ? raw.similarKeys.filter(known) : undefined,
+      similarKeep: typeof raw.similarKeep === 'number' ? raw.similarKeep : undefined,
     };
   } catch {
     return DEFAULT_SETTINGS;
   }
 }
 
-const money = (v: number | null) => (v == null ? '–' : `₹${Math.round(v).toLocaleString('en-IN')}`);
+const signedMoney = (v: number | null) =>
+  v == null
+    ? '–'
+    : `${v < 0 ? '−' : v > 0 ? '+' : ''}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`;
+const signColor = (v: number | null) =>
+  v == null || v === 0 ? undefined : v < 0 ? 'var(--red)' : 'var(--green)';
+/**
+ * The risk figures every group row carries, whatever "Group rows show" is set to: one figure is
+ * not enough to judge a group.
+ */
+const RISK_COLUMNS: Array<{
+  key: string;
+  label: string;
+  title: string;
+  width: number;
+  cell: (s: LossSummary) => string;
+  color?: (s: LossSummary) => string | undefined;
+  /** What a single day shows in this column, so the space is not wasted under an open group. */
+  day?: (v: DayRow['values']) => string;
+  dayColor?: (v: DayRow['values']) => string | undefined;
+}> = [
+  {
+    key: 'median',
+    label: 'Median loss',
+    title: "The group's median max loss, ₹ per lot",
+    width: 88,
+    cell: (s) => money(s.median),
+    day: (v) => (typeof v.maxLoss === 'number' ? money(v.maxLoss) : ''),
+  },
+  {
+    key: 'oneInTen',
+    label: '1 in 10',
+    title: 'One day in ten in the group went past this max loss',
+    width: 80,
+    cell: (s) => money(s.oneInTen),
+  },
+  {
+    key: 'worst',
+    label: 'Worst',
+    title: "The group's largest max loss",
+    width: 80,
+    cell: (s) => money(s.worst),
+    color: () => 'var(--red)',
+  },
+  {
+    key: 'red',
+    label: 'Red',
+    title: 'Share of the group that closed in loss at 15:29',
+    width: 56,
+    cell: (s) => share(s.closedRed),
+    day: (v) => (v.red === 'Yes' ? 'red' : ''),
+    dayColor: () => 'var(--red)',
+  },
+  {
+    key: 'pnl',
+    label: 'Med. 15:29',
+    title: "The group's median result at the 15:29 exit",
+    width: 84,
+    cell: (s) => signedMoney(s.medianPnl),
+    color: (s) => signColor(s.medianPnl),
+    day: (v) => (typeof v.pnl === 'number' ? signedMoney(v.pnl) : ''),
+    dayColor: (v) => (typeof v.pnl === 'number' ? signColor(v.pnl) : undefined),
+  },
+];
+const RISK_WIDTH = RISK_COLUMNS.reduce((a, r) => a + r.width, 0);
+
+const summaries = new WeakMap<DayRow[], LossSummary>();
+function summaryOf(rows: DayRow[]): LossSummary {
+  let s = summaries.get(rows);
+  if (!s) {
+    s = lossSummary(rows);
+    summaries.set(rows, s);
+  }
+  return s;
+}
 
 const fieldClass =
   'rounded border border-[var(--border)] bg-[var(--bg-secondary)] text-[var(--text-primary)]';
@@ -262,7 +351,26 @@ function RangeFilter({
   );
 }
 
-export default function TradeExplorer({ theme }: { theme: Theme }) {
+/** A day clicked in the Strangle Max Loss report, to open here with the report's strike choice. */
+export interface ReportOpenRequest {
+  underlying: SignalUnderlying;
+  date: string;
+  /** The report's combination key: `otm0`…`otm7` or `band<n>`, the same keys as the trade sets. */
+  key: string;
+  seq: number;
+}
+
+/** The report's OTM 2 is the saved run itself (with the report's groups), so open that. */
+const reportSetKey = (key: string) =>
+  key === 'otm2' ? 'saved' : /^(otm[0-7]|band\d{1,2})$/.test(key) ? key : 'saved';
+
+export default function TradeExplorer({
+  theme,
+  openRequest = null,
+}: {
+  theme: Theme;
+  openRequest?: ReportOpenRequest | null;
+}) {
   const [mobile, setMobile] = useState(() => window.matchMedia('(max-width: 760px)').matches);
   useEffect(() => {
     const media = window.matchMedia('(max-width: 760px)');
@@ -278,6 +386,7 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
     if (theme === 'light') setPalette('paper');
   }, [theme]);
   const [compareBy, setCompareBy] = useState('dte');
+  const [gridBy, setGridBy] = useState<[string, string]>(['dte', 'ivLevel']);
   const [compact, setCompact] = useState(false);
   const [detailWidth, setDetailWidth] = useState(46);
   const [detailFullscreen, setDetailFullscreen] = useState(false);
@@ -297,11 +406,18 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
   const [setLabel, setSetLabel] = useState('Saved run · OTM 2');
   const [unavailableDays, setUnavailableDays] = useState(0);
   const [loadingSet, setLoadingSet] = useState(false);
+  /** Which underlying|set the rows in `days` belong to, so a report click waits for the right ones. */
+  const [daysKey, setDaysKey] = useState('');
+  const pendingOpen = useRef<ReportOpenRequest | null>(null);
+  const [openNotice, setOpenNotice] = useState<string | null>(null);
   const loadedUnderlying = useRef(settings.underlying);
   const underlying = settings.underlying;
+  const [similar, setSimilar] = useState<SimilarPlan | null>(null);
+  const sortBeforeSimilar = useRef<SortState | null>(null);
 
   useEffect(() => {
     setSelected(null);
+    setSimilar(null);
   }, [underlying]);
 
   useEffect(() => {
@@ -346,6 +462,7 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
           setSetLabel(body.setLabel ?? tradeSet);
           setUnavailableDays(body.skipped?.length ?? 0);
           setDays(built);
+          setDaysKey(`${underlying}|${tradeSet}`);
           setLoadingSet(false);
         } else setError(body.error ?? 'The saved run could not be read.');
       })
@@ -395,24 +512,37 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
   const columns = useMemo(() => {
     const on = new Set(columnKeys);
     on.add('date');
-    return COLUMNS.filter((c) => on.has(c.key));
-  }, [columnKeys]);
+    on.delete(SIMILAR_KEY);
+    // While a similar-days search runs, the distance and the compared columns are always in view.
+    if (similar) for (const k of similar.keys) on.add(k);
+    const list = COLUMNS.filter((c) => on.has(c.key));
+    if (similar) list.splice(1, 0, COLUMN_BY_KEY.get(SIMILAR_KEY) as Column);
+    return list;
+  }, [columnKeys, similar]);
 
-  const filtered = useMemo(() => (days ? applyFilters(days, filters) : []), [days, filters]);
+  const scored = useMemo(() => (days ? withSimilarity(days, similar) : []), [days, similar]);
+  const filtered = useMemo(() => {
+    const kept = applyFilters(scored, filters);
+    return similar ? nearest(kept, similar.keep) : kept;
+  }, [scored, filters, similar]);
   const items = useMemo(() => buildItems(filtered, sort, plan, open), [filtered, sort, plan, open]);
   const summary = useMemo(() => lossSummary(filtered), [filtered]);
   const baseline = useMemo(() => lossSummary(days ?? []), [days]);
   useEffect(() => {
     if (scroller.current) scroller.current.scrollTop = 0;
     setView((v) => ({ ...v, top: 0 }));
-  }, [filters, plan, compact, underlying]);
+  }, [filters, plan, compact, underlying, similar]);
   const dayItems = useMemo(
     () => items.flatMap((it) => (it.kind === 'day' ? [it.row] : [])),
     [items],
   );
   const selectedRow = useMemo(
-    () => days?.find((d) => d.raw.date === selected) ?? null,
-    [days, selected],
+    () => scored.find((d) => d.raw.date === selected) ?? null,
+    [scored, selected],
+  );
+  const similarRow = useMemo(
+    () => (similar ? (scored.find((d) => d.raw.date === similar.date) ?? null) : null),
+    [scored, similar],
   );
   const selectedIndex = dayItems.findIndex((d) => d.raw.date === selected);
 
@@ -437,6 +567,37 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
           ? { key: c.key, dir: sort.dir === 1 ? -1 : 1 }
           : { key: c.key, dir: c.type === 'cat' ? 1 : -1 },
     });
+  /** Rank every day by how close it is to `date` on the compared columns, closest first. */
+  const startSimilar = (date: string) => {
+    if (!similar) sortBeforeSimilar.current = sort;
+    setSimilar({
+      date,
+      keys: similar?.keys ?? settings.similarKeys ?? DEFAULT_SIMILAR_KEYS,
+      keep: similar?.keep ?? settings.similarKeep ?? 25,
+    });
+    update({ sort: { key: SIMILAR_KEY, dir: 1 } });
+  };
+  const changeSimilar = (patch: Partial<SimilarPlan>) => {
+    if (!similar) return;
+    const next = { ...similar, ...patch };
+    setSimilar(next);
+    update({ similarKeys: next.keys, similarKeep: next.keep });
+  };
+  const stopSimilar = () => {
+    setSimilar(null);
+    setSettings((s) => {
+      const next = { ...s.filters };
+      delete next[SIMILAR_KEY];
+      return {
+        ...s,
+        filters: next,
+        sort:
+          s.sort.key === SIMILAR_KEY
+            ? (sortBeforeSimilar.current ?? DEFAULT_SETTINGS.sort)
+            : s.sort,
+      };
+    });
+  };
   const toggleGroup = (id: string) =>
     setOpen((o) => {
       const next = new Set(o);
@@ -459,6 +620,36 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
     },
     [items],
   );
+  // A day clicked in the report: switch to its index and strike choice, then open it once those
+  // rows have loaded (a price-band set is recalculated on the server first).
+  useEffect(() => {
+    if (!openRequest) return;
+    pendingOpen.current = openRequest;
+    setOpenNotice(null);
+    setSimilar(null);
+    if (openRequest.underlying !== underlying) {
+      setSelected(null);
+      update({ underlying: openRequest.underlying });
+    }
+    const set = reportSetKey(openRequest.key);
+    if (set !== tradeSet) chooseTradeSet(set);
+    // Only a new click should run this; the rest is read as it was at that click.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRequest?.seq]);
+  useEffect(() => {
+    const want = pendingOpen.current;
+    if (!want || !days || loadingSet) return;
+    if (daysKey !== `${want.underlying}|${reportSetKey(want.key)}`) return;
+    pendingOpen.current = null;
+    if (days.some((d) => d.raw.date === want.date)) {
+      setSelected(want.date);
+      setTimeout(() => reveal(want.date), 0);
+    } else {
+      setSelected(null);
+      setOpenNotice(`${want.date} has no trade in ${setLabel}, so it can't be opened here.`);
+    }
+  }, [days, daysKey, loadingSet, setLabel, reveal, openRequest?.seq]);
+
   const step = (dir: -1 | 1) => {
     const next = dayItems[selectedIndex + dir];
     if (!next) return;
@@ -480,11 +671,19 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
   const activeFilters = Object.values(filters).filter(filterActive).length;
   const grouped = plan.first != null;
   const firstWidth = grouped ? GROUPED_DATE_WIDTH : columns[0].width;
-  const tableWidth = columns.reduce((a, c, i) => a + (i === 0 ? firstWidth : c.width), 0);
-  const groupable = COLUMNS.filter(
+  const riskColumns = grouped ? RISK_COLUMNS : [];
+  const tableWidth =
+    columns.reduce((a, c, i) => a + (i === 0 ? firstWidth : c.width), 0) +
+    (grouped ? RISK_WIDTH : 0);
+  const colWidth = (px: number) => (splitView ? `${(px / tableWidth) * 100}%` : px);
+  const groupable = PICKABLE_COLUMNS.filter(
     (c) => c.type === 'cat' || c.type === 'num' || c.type === 'time',
   );
-  const sections = [...new Set(COLUMNS.map((c) => c.section))];
+  const sections = [...new Set(PICKABLE_COLUMNS.map((c) => c.section))];
+  const estimatedDays = filtered.filter((r) => r.raw.estimated).length;
+  const missingDays = filtered.filter((r) =>
+    columns.some((c) => c.key !== SIMILAR_KEY && r.values[c.key] == null),
+  ).length;
   const groupOptions = sections.map((s) => (
     <optgroup key={s} label={s}>
       {groupable
@@ -511,28 +710,54 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
           className="cursor-pointer bg-[var(--bg-secondary)] font-semibold hover:bg-[var(--bg-hover)]"
           onClick={() => toggleGroup(it.id)}
         >
-          {columns.map((c, i) =>
-            i === 0 ? (
-              <td
-                key={c.key}
-                style={{ ...pinned, paddingLeft: 6 + it.depth * 14 }}
-                className="truncate border-b border-[var(--border)] bg-[var(--bg-secondary)] pr-1"
-                title={it.label}
-              >
-                <span className="mr-1 inline-block w-3 text-[var(--text-muted)]">
-                  {it.open ? '▾' : '▸'}
-                </span>
-                {it.label}{' '}
-                <span className="font-normal text-[var(--text-muted)]">({it.rows.length})</span>
-              </td>
-            ) : (
-              <td
-                key={c.key}
-                className="truncate border-b border-[var(--border)] px-1.5 text-right font-mono"
-              >
-                {groupCell(c, it.rows, plan.how)}
-              </td>
-            ),
+          {columns.flatMap((c, i) =>
+            i === 0
+              ? [
+                  <td
+                    key={c.key}
+                    style={{ ...pinned, paddingLeft: 6 + it.depth * 14 }}
+                    className="truncate border-b border-[var(--border)] bg-[var(--bg-secondary)] pr-1"
+                    title={it.label}
+                  >
+                    <span className="mr-1 inline-block w-3 text-[var(--text-muted)]">
+                      {it.open ? '▾' : '▸'}
+                    </span>
+                    {it.label}{' '}
+                    <span
+                      className="font-normal"
+                      style={{
+                        color:
+                          it.rows.length < SMALL_SAMPLE ? 'var(--yellow)' : 'var(--text-muted)',
+                      }}
+                      title={
+                        it.rows.length < SMALL_SAMPLE
+                          ? `Small sample: fewer than ${SMALL_SAMPLE} days, so one day moves these figures a lot`
+                          : undefined
+                      }
+                    >
+                      ({it.rows.length}
+                      {it.rows.length < SMALL_SAMPLE ? ' · few' : ''})
+                    </span>
+                  </td>,
+                  ...riskColumns.map((r) => (
+                    <td
+                      key={`risk-${r.key}`}
+                      title={r.title}
+                      style={{ color: r.color?.(summaryOf(it.rows)) }}
+                      className="te-risk-cell truncate border-b border-[var(--border)] px-1.5 text-right font-mono"
+                    >
+                      {r.cell(summaryOf(it.rows))}
+                    </td>
+                  )),
+                ]
+              : [
+                  <td
+                    key={c.key}
+                    className="truncate border-b border-[var(--border)] px-1.5 text-right font-mono"
+                  >
+                    {groupCell(c, it.rows, plan.how)}
+                  </td>,
+                ],
           )}
         </tr>
       );
@@ -551,42 +776,59 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
         className="cursor-pointer hover:bg-[var(--bg-hover)]"
         onClick={() => setSelected(date)}
       >
-        {columns.map((c, i) => {
+        {columns.flatMap((c, i) => {
           const v = it.row.values[c.key];
-          return i === 0 ? (
-            <td
-              key={c.key}
-              style={{ ...pinned, paddingLeft: 6 + it.depth * 14, background: bg }}
-              className="truncate border-b border-[var(--border)] pr-1 font-semibold"
-            >
-              {date}
-              {it.row.raw.estimated && (
-                <span
-                  title="Includes estimated option prices"
-                  className="ml-1 text-[var(--yellow)]"
+          return i === 0
+            ? [
+                <td
+                  key={c.key}
+                  style={{ ...pinned, paddingLeft: 6 + it.depth * 14, background: bg }}
+                  className="truncate border-b border-[var(--border)] pr-1 font-semibold"
                 >
-                  ≈
-                </span>
-              )}
-            </td>
-          ) : (
-            <td
-              key={c.key}
-              style={{ color: cellColor(c, v) }}
-              title={
-                c.key === 'ivLevel' && v == null
-                  ? it.row.values.ivNow == null
-                    ? 'IV missing at the signal minute'
-                    : Number(it.row.values.ivHistoryCount) < 4
-                      ? `Baseline building: ${it.row.values.ivHistoryCount} of 4 required earlier matching days`
-                      : 'No calibrated thresholds for this distance to expiry; see IV now and IV ratio'
-                  : undefined
-              }
-              className={`truncate border-b border-[var(--border)] px-1.5 ${c.type === 'cat' ? 'text-left' : 'text-right font-mono'}`}
-            >
-              {formatCell(c, v)}
-            </td>
-          );
+                  {date}
+                  {similar?.date === date && (
+                    <span title="The day the others are compared with" className="te-ref-tag">
+                      ★
+                    </span>
+                  )}
+                  {it.row.raw.estimated && (
+                    <span
+                      title="Includes estimated option prices"
+                      className="ml-1 text-[var(--yellow)]"
+                    >
+                      ≈
+                    </span>
+                  )}
+                </td>,
+                ...riskColumns.map((r) => (
+                  <td
+                    key={`risk-${r.key}`}
+                    title={r.day ? "This day's own figure" : undefined}
+                    style={{ color: r.dayColor?.(it.row.values) }}
+                    className="te-risk-cell truncate border-b border-[var(--border)] px-1.5 text-right font-mono"
+                  >
+                    {r.day?.(it.row.values) ?? ''}
+                  </td>
+                )),
+              ]
+            : [
+                <td
+                  key={c.key}
+                  style={{ color: cellColor(c, v) }}
+                  title={
+                    c.key === 'ivLevel' && v == null
+                      ? it.row.values.ivNow == null
+                        ? 'IV missing at the signal minute'
+                        : Number(it.row.values.ivHistoryCount) < 4
+                          ? `Baseline building: ${it.row.values.ivHistoryCount} of 4 required earlier matching days`
+                          : 'No calibrated thresholds for this distance to expiry; see IV now and IV ratio'
+                      : undefined
+                  }
+                  className={`truncate border-b border-[var(--border)] px-1.5 ${c.type === 'cat' ? 'text-left' : 'text-right font-mono'}`}
+                >
+                  {formatCell(c, v)}
+                </td>,
+              ];
         })}
       </tr>
     );
@@ -597,33 +839,6 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
       className={`trade-explorer flex h-full min-h-0 flex-col text-[13px] text-[var(--text-primary)] ${detailFullscreen ? 'te-detail-fullscreen' : ''}`}
       data-palette={palette}
     >
-      <header className="te-masthead">
-        <div>
-          <div className="te-eyebrow">
-            RESEARCH WORKSPACE <span> / SIGNAL BACKTEST</span>
-          </div>
-          <h1>
-            Trade Explorer
-            <span className="te-live-dot" />
-          </h1>
-          <p>Find the pattern. Understand the risk. Inspect the trade.</p>
-        </div>
-        <div className="te-theme">
-          <span>Appearance</span>
-          {['midnight', 'paper'].map((p) => (
-            <button
-              key={p}
-              aria-pressed={palette === p}
-              onClick={() => {
-                setPalette(p);
-                localStorage.setItem('explorer-palette', p);
-              }}
-            >
-              {p === 'midnight' ? '◐ Midnight' : '☀ Paper'}
-            </button>
-          ))}
-        </div>
-      </header>
       <div className="te-toolbar flex flex-wrap items-center gap-x-3 gap-y-1">
         <div className="flex overflow-hidden rounded border border-[var(--border)]">
           {UNDERLYINGS.map((u) => (
@@ -647,6 +862,21 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
             </button>
           ))}
         </div>
+        <label>
+          Trade set{' '}
+          <select
+            aria-label="Trade set"
+            className={select}
+            value={tradeSet}
+            onChange={(e) => chooseTradeSet(e.target.value)}
+          >
+            {setOptions.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <label>
           Date from{' '}
           <input
@@ -730,6 +960,22 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
           Analysis charts
         </label>
         <span className="flex-1" />
+        <div className="te-theme">
+          {['midnight', 'paper'].map((p) => (
+            <button
+              key={p}
+              type="button"
+              aria-pressed={palette === p}
+              title={`Appearance: ${p === 'midnight' ? 'Midnight' : 'Paper'}`}
+              onClick={() => {
+                setPalette(p);
+                localStorage.setItem('explorer-palette', p);
+              }}
+            >
+              {p === 'midnight' ? '◐' : '☀'}
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           className={`h-6 ${fieldClass} px-2`}
@@ -750,7 +996,7 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
               <button
                 type="button"
                 className="text-[var(--accent)]"
-                onClick={() => setColumns(COLUMNS.map((c) => c.key))}
+                onClick={() => setColumns(PICKABLE_COLUMNS.map((c) => c.key))}
               >
                 All columns
               </button>
@@ -758,7 +1004,7 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
             {sections.map((s) => (
               <div key={s} className="mb-1">
                 <div className="font-semibold text-[var(--text-muted)]">{s}</div>
-                {COLUMNS.filter((c) => c.section === s && c.key !== 'date').map((c) => (
+                {PICKABLE_COLUMNS.filter((c) => c.section === s && c.key !== 'date').map((c) => (
                   <label key={c.key} className="flex items-center gap-1.5 py-0.5">
                     <input
                       type="checkbox"
@@ -780,56 +1026,47 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
         )}
       </div>
 
-      <div className="te-set-context">
-        <label>
-          Trade set
-          <select
-            aria-label="Trade set"
-            value={tradeSet}
-            onChange={(e) => chooseTradeSet(e.target.value)}
-          >
-            {setOptions.map((option) => (
-              <option key={option.key} value={option.key}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span>
-          <b>{setLabel}</b> · both legs sold · entry signal + 1 minute · exit 15:29 · 1 current lot
-        </span>
-        <div className="mt-1 text-[var(--text-muted)]">
-          {loadingSet
-            ? 'Loading selected set… currently displayed data stays unchanged until ready. '
-            : ''}
-          {days
-            ? `${days.length.toLocaleString()} days · ${unavailableDays} days unavailable for this selection`
-            : 'Loading stored prices and comparing trade sets… first load may take a moment.'}
-          {
-            ' · Price bands apply to each leg and vary by days to expiry. Worst set uses hindsight across pairs with stored prices.'
-          }
-        </div>
-      </div>
-
       <div className="te-grouping flex flex-wrap items-center gap-3 border-b border-[var(--border)] bg-[var(--bg-card)] p-3">
         <span>Group by</span>
         <div className="te-group-shortcuts">
-          {[{ key: '', label: 'None' }, ...REPORT_GROUPS].map((g) => {
-            const active = (plan.first ?? '') === g.key;
-            return (
-              <button
-                key={g.key}
-                type="button"
-                aria-pressed={active}
-                onClick={() =>
-                  setPlan({ first: g.key || null, second: g.key ? plan.second : null })
-                }
-              >
-                {g.label}
-              </button>
-            );
-          })}
+          <button
+            type="button"
+            aria-pressed={!grouped}
+            onClick={() => setPlan({ first: null, second: null })}
+          >
+            None
+          </button>
         </div>
+        {(
+          [
+            [
+              'entry',
+              'Known at entry',
+              'Known when the trade is placed: these can guide a decision',
+            ],
+            [
+              'after',
+              'What happened after',
+              'How the day went: these explain a loss but cannot predict it',
+            ],
+          ] as const
+        ).map(([when, label, title]) => (
+          <div key={when} className="te-group-set" data-when={when} title={title}>
+            <span>{label}</span>
+            <div className="te-group-shortcuts">
+              {REPORT_GROUPS.filter((g) => g.when === when).map((g) => (
+                <button
+                  key={g.key}
+                  type="button"
+                  aria-pressed={plan.first === g.key}
+                  onClick={() => setPlan({ first: g.key })}
+                >
+                  {g.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
         <select
           aria-label="Group by another column"
           className={select}
@@ -902,46 +1139,156 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
           </>
         )}
       </div>
-      <div className="flex flex-wrap gap-2 px-3 py-2">
-        {Object.entries(filters)
-          .filter(([, f]) => filterActive(f))
-          .map(([key, f]) => {
-            const c = COLUMN_BY_KEY.get(key);
+      {similar && (
+        <div className="te-similar">
+          <span>
+            Days most like <b>{similar.date}</b> on
+          </span>
+          {similar.keys.map((k) => {
+            const c = COLUMN_BY_KEY.get(k);
+            if (!c) return null;
+            const v = similarRow?.values[k] ?? null;
+            const measured = c.type === 'num' || c.type === 'time';
             return (
               <button
-                key={key}
-                className={`${fieldClass} px-2 py-1`}
-                onClick={() => setFilter(key, undefined)}
-                title="Remove filter"
+                key={k}
+                type="button"
+                className="te-similar-chip"
+                title={`${c.title}. ${measured ? 'Closer values rank higher' : 'Must be the same'}. Click to stop comparing on it`}
+                onClick={() => changeSimilar({ keys: similar.keys.filter((x) => x !== k) })}
               >
-                {c?.title ?? key}:{' '}
-                {f.values
-                  ? f.values.length
-                    ? f.values.map((v) => (c ? formatCell(c, v) : String(v))).join(', ')
-                    : 'None'
-                  : `${f.min || 'Any'} → ${f.max || 'Any'}`}{' '}
-                ×
+                {measured ? '' : 'same '}
+                {c.label} <b>{formatCell(c, v)}</b> ×
               </button>
             );
           })}
-      </div>
+          <select
+            aria-label="Compare on another column"
+            className={select}
+            value=""
+            onChange={(e) =>
+              e.target.value && changeSimilar({ keys: [...similar.keys, e.target.value] })
+            }
+          >
+            <option value="">+ Add column…</option>
+            {sections.map((s) => (
+              <optgroup key={s} label={s}>
+                {PICKABLE_COLUMNS.filter(
+                  (c) =>
+                    c.section === s &&
+                    c.type !== 'date' &&
+                    c.type !== 'text' &&
+                    !similar.keys.includes(c.key),
+                ).map((c) => (
+                  <option key={c.key} value={c.key}>
+                    {c.type === 'cat' ? `Same ${c.title}` : c.title}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <label>
+            Show closest
+            <select
+              className={select}
+              value={similar.keep}
+              onChange={(e) => changeSimilar({ keep: Number(e.target.value) })}
+            >
+              {[10, 25, 50, 100].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+              <option value={0}>All</option>
+            </select>
+          </label>
+          {selected && selected !== similar.date && (
+            <button
+              type="button"
+              className="te-similar-action"
+              onClick={() => startSimilar(selected)}
+            >
+              Compare with {selected} instead
+            </button>
+          )}
+          <button type="button" className="te-similar-action" onClick={stopSimilar}>
+            Stop ×
+          </button>
+          {!similar.keys.length ? (
+            <span className="te-similar-note">Add a column to compare on.</span>
+          ) : similarRow &&
+            similar.keys.some((k) => {
+              const c = COLUMN_BY_KEY.get(k);
+              return (
+                (c?.type === 'num' || c?.type === 'time') &&
+                typeof similarRow.values[k] !== 'number'
+              );
+            }) ? (
+            <span className="te-similar-note">
+              {similar.date} has no reading on one of these columns, so nothing can be ranked.
+              Remove that column.
+            </span>
+          ) : (
+            <span className="te-similar-note">
+              Distance 0 is identical; 1 is about one typical spread away on each column. The
+              figures below describe these days only.
+            </span>
+          )}
+        </div>
+      )}
+      {activeFilters > 0 && (
+        <div className="flex flex-wrap gap-2 px-1 pt-1.5">
+          {Object.entries(filters)
+            .filter(([, f]) => filterActive(f))
+            .map(([key, f]) => {
+              const c = COLUMN_BY_KEY.get(key);
+              return (
+                <button
+                  key={key}
+                  className={`${fieldClass} px-2 py-1`}
+                  onClick={() => setFilter(key, undefined)}
+                  title="Remove filter"
+                >
+                  {c?.title ?? key}:{' '}
+                  {f.values
+                    ? f.values.length
+                      ? f.values.map((v) => (c ? formatCell(c, v) : String(v))).join(', ')
+                      : 'None'
+                    : `${f.min || 'Any'} → ${f.max || 'Any'}`}{' '}
+                  ×
+                </button>
+              );
+            })}
+        </div>
+      )}
       <div className="te-metrics">
-        {[
-          ['Days analyzed', String(summary.days), String(days.length)],
-          ['Median max loss', money(summary.median), money(baseline.median)],
-          ['Average max loss', money(summary.mean), money(baseline.mean)],
-          ['1 in 10 past', money(summary.oneInTen), money(baseline.oneInTen)],
-          ['Worst loss', money(summary.worst), money(baseline.worst)],
+        {(
           [
-            'Closed red',
-            summary.closedRed == null ? '–' : `${Math.round(summary.closedRed * 100)}%`,
-            baseline.closedRed == null ? '–' : `${Math.round(baseline.closedRed! * 100)}%`,
-          ],
-        ].map(([label, value, baseline]) => (
-          <div key={label} className="te-metric">
+            ['Days', String(summary.days), String(days.length)],
+            ['Median max loss', money(summary.median), money(baseline.median)],
+            ['Average max loss', money(summary.mean), money(baseline.mean)],
+            ['1 in 10 past', money(summary.oneInTen), money(baseline.oneInTen)],
+            ['Worst loss', money(summary.worst), money(baseline.worst), 'var(--red)'],
+            ['Closed red', share(summary.closedRed), share(baseline.closedRed)],
+            [
+              'Median 15:29',
+              signedMoney(summary.medianPnl),
+              signedMoney(baseline.medianPnl),
+              signColor(summary.medianPnl),
+            ],
+            [
+              'Total 15:29',
+              signedMoney(summary.totalPnl),
+              signedMoney(baseline.totalPnl),
+              signColor(summary.totalPnl),
+            ],
+          ] as Array<[string, string, string, string?]>
+        ).map(([label, value, whole, color]) => (
+          <div key={label} className="te-metric" title={`All ${days.length} days: ${whole}`}>
             <div className="text-xs text-[var(--text-muted)]">{label}</div>
-            <div className="te-metric-value">{value}</div>
-            <div className="text-xs text-[var(--text-muted)]">Full sample: {baseline}</div>
+            <div className="te-metric-value" style={{ color }}>
+              {value}
+            </div>
           </div>
         ))}
       </div>
@@ -953,58 +1300,51 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
               Close ×
             </button>
           </div>
-          <ExplorerCharts
+          <TradeExplorerCharts
             rows={filtered}
-            plan={{ ...plan, first: compareBy }}
-            onFilter={setFilter}
+            bands={plan.bands}
+            onFilter={(picks) => {
+              // Show the days behind the bar, row or cell that was clicked.
+              for (const [key, f] of picks) setFilter(key, f);
+              setShowCharts(false);
+            }}
             compareBy={compareBy}
             onCompare={setCompareBy}
+            gridBy={gridBy}
+            onGrid={setGridBy}
           />
         </div>
       )}
-      <div className="te-quality">
-        <span className="te-quality-dot" /> {filtered.filter((r) => r.raw.estimated).length}{' '}
-        estimated-price days <span>•</span>{' '}
-        {filtered.filter((r) => columns.some((c) => r.values[c.key] == null)).length} days missing a
-        visible reading{' '}
-        <details>
-          <summary>About this data</summary>
-          <p>
-            Signal, IV and Greeks describe information at the signal. Path, losing leg and loss
-            figures describe later outcomes. All amounts use today's lot size across every year.
-          </p>
-        </details>
-      </div>
-      <div className="te-table-heading">
-        <div>
-          <span className="te-eyebrow">TRADE JOURNAL</span>
-          <strong>{summary.days.toLocaleString('en-IN')} trading days</strong>
-          <span>Click any day to inspect its chart and signal</span>
-        </div>
-        {sort.key && (
+      <div className="te-status">
+        <span>
+          <b>{setLabel}</b> · {loadingSet ? 'loading the selected set… · ' : ''}
+          {summary.days.toLocaleString('en-IN')} of {days.length.toLocaleString('en-IN')} days ·
+          data through {days[days.length - 1]?.raw.date} · ₹ for 1 lot of {days[0]?.raw.trade.qty}
+          {estimatedDays > 0 && ` · ${estimatedDays} estimated-price days`}
+          {missingDays > 0 && ` · ${missingDays} days missing a visible reading`}
+          {unavailableDays > 0 && ` · ${unavailableDays} days unavailable for this set`}
+          {openNotice && <span className="text-[var(--red)]"> · {openNotice}</span>}
+        </span>
+        {activeFilters > 0 && (
+          <button type="button" onClick={() => update({ filters: {} })}>
+            Clear {activeFilters} filter{activeFilters === 1 ? '' : 's'}
+          </button>
+        )}
+        {sort.key && !similar && (
           <button type="button" onClick={() => update({ sort: { key: '', dir: 1 } })}>
             Clear sorting
           </button>
         )}
-        <span className="te-sort-hint">
-          Click a column heading to sort · click again to reverse
-        </span>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 border-b border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1">
-        <span className="text-[var(--text-muted)]">
-          {setLabel} · data through {days[days.length - 1]?.raw.date} · all ₹ for 1 lot of{' '}
-          {days[0]?.raw.trade.qty}, today's lot size in every year
-        </span>
-        {activeFilters > 0 && (
-          <button
-            type="button"
-            className="text-[var(--accent)]"
-            onClick={() => update({ filters: {} })}
-          >
-            Clear {activeFilters} filter{activeFilters === 1 ? '' : 's'}
-          </button>
-        )}
+        <details>
+          <summary>About this data</summary>
+          <p>
+            Both legs sold, entry one minute after the signal, exit 15:29. All amounts use today's
+            lot size in every year. Signal, IV and Greeks describe information at the signal. Path,
+            losing leg and loss figures describe later outcomes. Price bands apply to each leg and
+            vary by days to expiry. Worst set uses hindsight across pairs with stored prices. Click
+            a column heading to sort and again to reverse; click a day for its chart and chain.
+          </p>
+        </details>
       </div>
 
       <div className="te-table-workspace flex min-h-0 flex-1">
@@ -1028,26 +1368,26 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
             style={{
               tableLayout: 'fixed',
               width: splitView ? '100%' : tableWidth,
-              minWidth: splitView ? Math.max(760, columns.length * 60) : undefined,
+              minWidth: splitView
+                ? Math.max(760, (columns.length + riskColumns.length) * 60)
+                : undefined,
             }}
           >
             <colgroup>
-              {columns.map((c, i) => (
-                <col
-                  key={c.key}
-                  style={{
-                    width: splitView
-                      ? `${((i === 0 ? firstWidth : c.width) / tableWidth) * 100}%`
-                      : i === 0
-                        ? firstWidth
-                        : c.width,
-                  }}
-                />
-              ))}
+              {columns.flatMap((c, i) =>
+                i === 0
+                  ? [
+                      <col key={c.key} style={{ width: colWidth(firstWidth) }} />,
+                      ...riskColumns.map((r) => (
+                        <col key={`risk-${r.key}`} style={{ width: colWidth(r.width) }} />
+                      )),
+                    ]
+                  : [<col key={c.key} style={{ width: colWidth(c.width) }} />],
+              )}
             </colgroup>
             <thead className="sticky top-0 z-10 bg-[var(--bg-card)]">
               <tr>
-                {columns.map((c, i) => (
+                {columns.flatMap((c, i) => [
                   <th
                     key={c.key}
                     title={c.title}
@@ -1079,11 +1419,22 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
                         </button>
                       )}
                     </div>
-                  </th>
-                ))}
+                  </th>,
+                  ...(i === 0
+                    ? riskColumns.map((r) => (
+                        <th
+                          key={`risk-${r.key}`}
+                          title={`${r.title} (shown on group rows)`}
+                          className="te-risk-head px-1.5 py-1 text-right font-semibold"
+                        >
+                          <span className="block truncate">{r.label}</span>
+                        </th>
+                      ))
+                    : []),
+                ])}
               </tr>
               <tr>
-                {columns.map((c, i) => (
+                {columns.flatMap((c, i) => [
                   <th
                     key={c.key}
                     style={i === 0 ? { ...pinned, zIndex: 3 } : undefined}
@@ -1118,8 +1469,16 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
                         </button>
                       )}
                     </div>
-                  </th>
-                ))}
+                  </th>,
+                  ...(i === 0
+                    ? riskColumns.map((r) => (
+                        <th
+                          key={`risk-${r.key}`}
+                          className="te-risk-head border-b border-[var(--border)]"
+                        />
+                      ))
+                    : []),
+                ])}
               </tr>
             </thead>
             <tbody>
@@ -1146,6 +1505,21 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
                 value={detailWidth}
                 onChange={(e) => setDetailWidth(Number(e.target.value))}
               />
+              <span className="flex-1" />
+              <button
+                type="button"
+                className="te-similar-action"
+                disabled={similar?.date === selectedRow.raw.date}
+                title="Rank every day by how close it is to this one on the columns you choose"
+                onClick={(e) => {
+                  e.preventDefault();
+                  startSimilar(selectedRow.raw.date);
+                }}
+              >
+                {similar?.date === selectedRow.raw.date
+                  ? 'Showing similar days'
+                  : 'Find similar days'}
+              </button>
             </label>
             <TradeExplorerDetail
               row={selectedRow}
@@ -1169,149 +1543,6 @@ export default function TradeExplorer({ theme }: { theme: Theme }) {
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function ExplorerCharts({
-  rows,
-  plan,
-  onFilter,
-  compareBy,
-  onCompare,
-}: {
-  rows: DayRow[];
-  plan: GroupPlan;
-  onFilter: (key: string, filter: ColumnFilter) => void;
-  compareBy: string;
-  onCompare: (key: string) => void;
-}) {
-  const values = rows.flatMap((r) =>
-    typeof r.values.maxLoss === 'number' ? [r.values.maxLoss] : [],
-  );
-  const ceiling = Math.max(1, ...values);
-  const step = ceiling / 8;
-  const bins = Array.from({ length: 8 }, (_, i) => {
-    const lo = i * step,
-      hi = (i + 1) * step;
-    return { lo, hi, count: values.filter((v) => v >= lo && (i === 7 ? v <= hi : v < hi)).length };
-  });
-  const largest = Math.max(1, ...bins.map((b) => b.count));
-  const groupColumn = COLUMN_BY_KEY.get(compareBy)!;
-  const groups = bucketRows(rows, groupColumn, plan.bands).map((g) => ({
-    ...g,
-    summary: lossSummary(g.rows),
-  }));
-  const peak = Math.max(1, ...groups.map((g) => g.summary.median ?? 0));
-  return (
-    <div className="te-analysis">
-      <section className="te-chart-card">
-        <div className="te-card-heading">
-          <div>
-            <span className="te-eyebrow">RISK PROFILE</span>
-            <h2>Where do losses concentrate?</h2>
-          </div>
-          <span className="te-badge">{values.length} readings</span>
-        </div>
-        <p className="te-caption">Maximum intraday loss · select a range to explore its days</p>
-        <div className="te-histogram">
-          {bins.map((b, i) => (
-            <button
-              key={i}
-              disabled={!b.count}
-              title={`${money(b.lo)} to ${money(b.hi)}: ${b.count} days`}
-              onClick={() =>
-                onFilter('maxLoss', {
-                  min: String(b.lo),
-                  max: String(i === 7 ? b.hi : b.hi - Math.max(Number.EPSILON * b.hi, 1e-9)),
-                })
-              }
-            >
-              <span className="te-bin-count">{b.count}</span>
-              <span className="te-bin-track">
-                <span className="te-bin-fill" style={{ height: `${(b.count / largest) * 100}%` }} />
-              </span>
-              <span className="te-bin-label">{money(b.lo)}</span>
-            </button>
-          ))}
-        </div>
-        <div className="te-chart-foot">
-          <span>Lower loss</span>
-          <span>Maximum loss per lot →</span>
-          <span>{money(ceiling)}</span>
-        </div>
-        {!values.length && (
-          <p>No loss readings in this selection. Clear a filter to broaden the sample.</p>
-        )}
-      </section>
-      <section className="te-chart-card">
-        <div className="te-card-heading">
-          <div>
-            <span className="te-eyebrow">COMPARE CONDITIONS</span>
-            <h2>What changes the risk?</h2>
-          </div>
-          <select
-            aria-label="Compare conditions"
-            value={compareBy}
-            onChange={(e) => onCompare(e.target.value)}
-          >
-            {[
-              'dte',
-              'ivLevel',
-              'year',
-              'lossGroup',
-              'path',
-              'warnGroup',
-              'direction',
-              'losingLeg',
-            ].map((k) => (
-              <option key={k} value={k}>
-                {COLUMN_BY_KEY.get(k)?.title}
-              </option>
-            ))}
-          </select>
-        </div>
-        <p className="te-caption">Median max loss by condition · click a row to filter</p>
-        <div className="te-comparison">
-          <div className="te-compare-row te-compare-labels">
-            <span>Condition</span>
-            <span>Days</span>
-            <span>Median</span>
-            <span>1 in 10 past</span>
-            <span>Closed red</span>
-          </div>
-          {groups.map((g) => (
-            <button
-              key={g.id}
-              className="te-compare-row"
-              onClick={() =>
-                onFilter(groupColumn.key, {
-                  values: [...new Set(g.rows.map((r) => r.values[groupColumn.key]))],
-                })
-              }
-            >
-              <span className="te-condition">
-                <span>{g.label}</span>
-                <i style={{ width: `${((g.summary.median ?? 0) / peak) * 100}%` }} />
-              </span>
-              <span
-                className={g.rows.length < 20 ? 'te-small-sample' : ''}
-                title={g.rows.length < 20 ? 'Small sample: fewer than 20 days' : 'Sample size'}
-              >
-                {g.rows.length}
-              </span>
-              <span>{money(g.summary.median)}</span>
-              <span>{money(g.summary.oneInTen)}</span>
-              <span>
-                {g.summary.closedRed == null ? '–' : `${Math.round(g.summary.closedRed * 100)}%`}
-              </span>
-            </button>
-          ))}
-        </div>
-        <div className="te-chart-foot">
-          Amber counts indicate fewer than 20 days. Outcome groups describe hindsight.
-        </div>
-      </section>
     </div>
   );
 }

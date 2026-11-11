@@ -16,7 +16,7 @@ const Watchlist = lazy(() => import('../Watchlist'));
 const Tracker = lazy(() => import('../Tracker'));
 const Analysis = lazy(() => import('../Analysis'));
 const SignalBacktest = lazy(() => import('../SignalBacktest'));
-const TradeExplorer = lazy(() => import('../TradeExplorer'));
+const TradeExplorer = lazy(() => import('../TradeExplorerHost'));
 
 function PaneLoading() {
   return (

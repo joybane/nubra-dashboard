@@ -581,9 +581,6 @@
   margin: 0;
   white-space: nowrap;
 }
-.te-metric > div:last-child {
-  display: none;
-}
 .te-quality {
   padding: 0 2px 5px;
   font-size: 10px;
@@ -1185,4 +1182,209 @@
 .te-report-detail .te-centered-chain[data-flow='false'] td:nth-child(4),
 .te-report-detail .te-centered-chain[data-flow='false'] th:nth-child(4),
 .te-report-detail .te-centered-chain[data-flow='true'] td:nth-child(6),
-.te-report-detail .te-centered-chain[data-flow='true'] th:nth-child(6) { text-align:center; }
+.te-report-detail .te-centered-chain[data-flow='true'] th:nth-child(6) {
+  text-align: center;
+}
+
+/* One-line header: the toolbar carries the trade set and appearance; the status line carries the notes. */
+.te-toolbar {
+  margin-top: 8px;
+}
+.te-toolbar .te-theme button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+}
+.te-toolbar select {
+  max-width: 220px;
+}
+.te-group-set {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--accent);
+}
+.te-group-set[data-when='after'] {
+  border-left-color: var(--yellow);
+}
+.te-group-set > span {
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.te-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  padding: 0 2px 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.te-status b {
+  color: var(--text-primary);
+}
+.te-status button {
+  color: var(--accent);
+}
+.te-status details {
+  margin-left: auto;
+  position: relative;
+}
+.te-status summary {
+  cursor: pointer;
+}
+.te-status details p {
+  position: absolute;
+  right: 0;
+  top: 20px;
+  width: 340px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 14px;
+  z-index: 30;
+  line-height: 1.7;
+  border-radius: 8px;
+  color: var(--text-secondary);
+}
+.te-metric {
+  flex: 1 0 120px;
+}
+/* Group-row risk figures sit apart from the user's own columns. */
+.trade-explorer thead th.te-risk-head {
+  background: var(--accent-dim);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.te-risk-cell {
+  background: color-mix(in srgb, var(--accent-dim) 45%, transparent);
+}
+.te-ref-tag {
+  margin-left: 4px;
+  color: var(--accent);
+}
+/* Similar days */
+.te-similar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent-dim);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.te-similar label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.te-similar-chip {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-card);
+}
+.te-similar-action {
+  padding: 3px 9px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  color: var(--accent);
+  background: var(--bg-card);
+  white-space: nowrap;
+}
+.te-similar-action:disabled {
+  opacity: 0.6;
+}
+.te-similar-note {
+  flex-basis: 100%;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+/* Analysis charts: two cards, then the two-condition grid across the full width. */
+.te-analysis-overlay .te-analysis {
+  flex: 0 0 auto;
+  grid-template-rows: minmax(380px, auto) auto;
+}
+.te-grid-card {
+  grid-column: 1 / -1;
+}
+.te-grid-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.te-grid-picks label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.te-grid-scroll {
+  overflow: auto;
+}
+.trade-explorer table.te-grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.trade-explorer .te-grid thead th {
+  background: var(--bg-card);
+}
+.te-grid th {
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-align: right;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+}
+.te-grid th:first-child {
+  text-align: left;
+}
+.te-grid td {
+  padding: 0;
+  text-align: right;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--red) var(--heat, 0%), var(--bg-card));
+}
+.te-grid td button,
+.te-grid td.te-grid-total {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  width: 100%;
+  padding: 7px 10px;
+  gap: 1px;
+}
+.te-grid td.te-grid-total {
+  display: table-cell;
+  background: var(--bg-secondary);
+}
+.te-grid td.te-grid-total span {
+  display: block;
+}
+.te-grid td span {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+.te-grid td span.te-small-sample {
+  color: var(--yellow);
+}
+.te-grid td.te-grid-empty {
+  background: var(--bg-secondary);
+}
+.te-histogram button[data-beyond='true'] .te-bin-fill {
+  background: linear-gradient(to top, var(--accent-dim), var(--red));
+}
+.te-histogram button[data-beyond='true'] {
+  margin-left: 10px;
+}

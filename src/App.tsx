@@ -33,7 +33,9 @@ function AppInner() {
   const [auth, setAuth] = useState<AuthStatus>('unknown');
   const [strategyChart, setStrategyChart] = useState<StrategyChartTarget | null>(null);
 
-  const { loadInstrumentInActivePane } = useWorkspaceState();
+  const { loadInstrumentInActivePane, state: workspaceState } = useWorkspaceState();
+  // The Trade Explorer is research on a saved run: the orders panel only takes rows away from it.
+  const researchOnly = workspaceState.panes.every((p) => p.view === 'tradeexplorer');
   const { subscribe } = useWs();
 
   const openStrategyChart = useCallback(
@@ -114,7 +116,10 @@ function AppInner() {
         <div className="flex-1 min-h-0 overflow-hidden">
           <WorkspaceRoot theme={theme} />
         </div>
-        <OrderTerminal onOpenStrategyChart={openStrategyChart} />
+        {/* Hidden, not unmounted, so its state and subscriptions carry on. */}
+        <div className={researchOnly ? 'hidden' : 'contents'}>
+          <OrderTerminal onOpenStrategyChart={openStrategyChart} />
+        </div>
       </div>
     </main>
   );

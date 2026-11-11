@@ -69,20 +69,26 @@ const DIRECTIONS = ['Quiet day', 'Spot went furthest up', 'Spot went furthest do
 const SPEEDS = ['Fast', 'Middle', 'Slow'];
 const LEGS = ['Call', 'Put'];
 
-/** The report's ready-made groupings, in the order its sections show them. */
-export const REPORT_GROUPS: Array<{ key: string; label: string }> = [
-  { key: 'dte', label: 'Day to expiry' },
-  { key: 'lossGroup', label: 'Loss group' },
-  { key: 'ivLevel', label: 'IV level' },
-  { key: 'path', label: 'Path type' },
-  { key: 'touched', label: 'Strike touched' },
-  { key: 'warnGroup', label: 'Warning signs' },
-  { key: 'year', label: 'Year' },
-  { key: 'moveFifth', label: 'Move vs IV' },
-  { key: 'direction', label: 'Direction' },
-  { key: 'speedGroup', label: 'Speed' },
-  { key: 'losingLeg', label: 'Losing leg' },
+/**
+ * The report's ready-made groupings. `entry` ones are known when the trade is placed and can guide
+ * a decision; `after` ones describe how the day went, so they explain a loss but cannot predict it.
+ */
+export const REPORT_GROUPS: Array<{ key: string; label: string; when: 'entry' | 'after' }> = [
+  { key: 'dte', label: 'Day to expiry', when: 'entry' },
+  { key: 'ivLevel', label: 'IV level', when: 'entry' },
+  { key: 'warnGroup', label: 'Warning signs', when: 'entry' },
+  { key: 'year', label: 'Year', when: 'entry' },
+  { key: 'lossGroup', label: 'Loss group', when: 'after' },
+  { key: 'path', label: 'Path type', when: 'after' },
+  { key: 'touched', label: 'Strike touched', when: 'after' },
+  { key: 'moveFifth', label: 'Move vs IV', when: 'after' },
+  { key: 'direction', label: 'Direction', when: 'after' },
+  { key: 'speedGroup', label: 'Speed', when: 'after' },
+  { key: 'losingLeg', label: 'Losing leg', when: 'after' },
 ];
+
+/** Groups smaller than this are flagged: their figures move a lot with one day. */
+export const SMALL_SAMPLE = 20;
 
 export type CellValue = number | string | null;
 
@@ -712,6 +718,20 @@ COLUMNS.push(
     width: 110,
   },
 );
+/** Filled only while "similar days" is on; see withSimilarity. */
+export const SIMILAR_KEY = 'similar';
+COLUMNS.push({
+  key: SIMILAR_KEY,
+  label: 'Distance',
+  title:
+    'Distance from the chosen day on the compared columns: 0 is identical, 1 is about one typical spread away',
+  section: 'Similar days',
+  type: 'num',
+  width: 80,
+  digits: 2,
+});
+/** Columns the user can pick, group or compare by. */
+export const PICKABLE_COLUMNS = COLUMNS.filter((c) => c.key !== SIMILAR_KEY);
 export const COLUMN_BY_KEY = new Map(COLUMNS.map((c) => [c.key, c]));
 export const DEFAULT_COLUMN_KEYS = COLUMNS.filter((c) => c.shown).map((c) => c.key);
 
@@ -1009,10 +1029,14 @@ export interface LossSummary {
   oneInTen: number | null;
   worst: number | null;
   closedRed: number | null;
+  /** The 15:29 result: the middle day, and all days added up. */
+  medianPnl: number | null;
+  totalPnl: number | null;
 }
 
 export function lossSummary(rows: DayRow[]): LossSummary {
   const ml = numbers(rows, 'maxLoss');
+  const pnl = numbers(rows, 'pnl');
   return {
     days: rows.length,
     median: quantile(ml, 0.5),
@@ -1020,7 +1044,115 @@ export function lossSummary(rows: DayRow[]): LossSummary {
     oneInTen: quantile(ml, 0.9),
     worst: ml.length ? Math.max(...ml) : null,
     closedRed: rows.length ? rows.filter((r) => r.values.red === 'Yes').length / rows.length : null,
+    medianPnl: quantile(pnl, 0.5),
+    totalPnl: pnl.length ? pnl.reduce((a, b) => a + b, 0) : null,
   };
+}
+
+// ── loss histogram ───────────────────────────────────────────────────────────
+
+export interface LossBin {
+  lo: number;
+  hi: number;
+  count: number;
+  /** The last bar: everything past the 1-in-10 level, however far it runs. */
+  beyond: boolean;
+}
+
+/**
+ * Equal-width bars up to the 1-in-10 level and one bar for the days beyond it. Bars across the
+ * whole range put nearly every day in the first one, because a few days are many times worse.
+ */
+export function lossBins(values: number[], bars = 8): LossBin[] {
+  if (!values.length) return [];
+  const max = Math.max(...values);
+  const cap = quantile(values, 0.9) as number;
+  const tail = cap > 0 && cap < max;
+  const inner = tail ? bars - 1 : bars;
+  const top = tail ? cap : Math.max(max, 1);
+  const step = top / inner;
+  const out: LossBin[] = Array.from({ length: inner }, (_, i) => {
+    const lo = i * step;
+    const hi = i === inner - 1 ? top : (i + 1) * step;
+    const last = i === inner - 1;
+    return {
+      lo,
+      hi,
+      count: values.filter((v) => v >= lo && (last ? v <= hi : v < hi)).length,
+      beyond: false,
+    };
+  });
+  if (tail) {
+    out.push({ lo: cap, hi: max, count: values.filter((v) => v > cap).length, beyond: true });
+  }
+  return out;
+}
+
+// ── similar days ─────────────────────────────────────────────────────────────
+
+export interface SimilarPlan {
+  /** The day to compare every other day with. */
+  date: string;
+  /** Number and time columns measure closeness; category columns must be the same. */
+  keys: string[];
+  /** How many of the closest days to keep; 0 keeps all. */
+  keep: number;
+}
+export const DEFAULT_SIMILAR_KEYS = ['ceChange', 'peChange', 'gap'];
+
+/** A column's typical spread: the width of its middle half, so a few extreme days do not shrink every distance. */
+function spread(rows: DayRow[], key: string): number {
+  const v = numbers(rows, key);
+  if (v.length < 2) return 1;
+  const iqr = (quantile(v, 0.75) as number) - (quantile(v, 0.25) as number);
+  if (iqr > 0) return iqr;
+  const range = Math.max(...v) - Math.min(...v);
+  return range > 0 ? range : 1;
+}
+
+/**
+ * Every row with its distance from the chosen day in `values.similar`. Each compared column counts
+ * equally: its difference is measured in that column's own typical spread, then the columns are
+ * combined (root of the mean square). Blank when a compared reading is missing or a category differs.
+ */
+export function withSimilarity(rows: DayRow[], plan: SimilarPlan | null): DayRow[] {
+  const ref = plan ? rows.find((r) => r.raw.date === plan.date) : undefined;
+  const cols = plan ? plan.keys.flatMap((k) => COLUMN_BY_KEY.get(k) ?? []) : [];
+  if (!ref || !cols.length) return rows;
+  const measured = cols.filter((c) => c.type === 'num' || c.type === 'time');
+  const same = cols.filter((c) => c.type !== 'num' && c.type !== 'time');
+  const scale = new Map(measured.map((c) => [c.key, spread(rows, c.key)]));
+  return rows.map((r) => {
+    let distance: number | null = same.every((c) => r.values[c.key] === ref.values[c.key])
+      ? 0
+      : null;
+    if (distance != null && measured.length) {
+      let sum = 0;
+      for (const c of measured) {
+        const a = r.values[c.key];
+        const b = ref.values[c.key];
+        if (typeof a !== 'number' || typeof b !== 'number') {
+          distance = null;
+          break;
+        }
+        sum += ((a - b) / (scale.get(c.key) as number)) ** 2;
+      }
+      if (distance != null) distance = Math.sqrt(sum / measured.length);
+    }
+    return { raw: r.raw, values: { ...r.values, [SIMILAR_KEY]: distance } };
+  });
+}
+
+/** The closest days first; days with no distance are left out. */
+export function nearest(rows: DayRow[], keep: number): DayRow[] {
+  const ranked = rows
+    .filter((r) => typeof r.values[SIMILAR_KEY] === 'number')
+    .sort(
+      (a, b) =>
+        (a.values[SIMILAR_KEY] as number) - (b.values[SIMILAR_KEY] as number) ||
+        (a.raw.date < b.raw.date ? 1 : -1),
+    );
+  return keep > 0 ? ranked.slice(0, keep) : ranked;
 }
 
 // ── grouping ─────────────────────────────────────────────────────────────────
@@ -1064,6 +1196,23 @@ export function bucketRows(rows: DayRow[], c: Column, bands: number): Bucket[] {
   const blank = rows.filter((r) => typeof r.values[c.key] !== 'number');
   if (blank.length) out.push({ id: 'blank', label: 'No reading', rows: blank });
   return out;
+}
+
+/** Two conditions at once: one bucket list down, one across, and the days in each crossing. */
+export function crossGrid(
+  rows: DayRow[],
+  down: Column,
+  across: Column,
+  bands: number,
+): { down: Bucket[]; across: Bucket[]; cells: DayRow[][][] } {
+  const a = bucketRows(rows, down, bands);
+  const b = bucketRows(rows, across, bands);
+  const members = b.map((bucket) => new Set(bucket.rows));
+  return {
+    down: a,
+    across: b,
+    cells: a.map((bucket) => members.map((set) => bucket.rows.filter((r) => set.has(r)))),
+  };
 }
 
 export type TableItem =
@@ -1131,4 +1280,20 @@ export function allGroupIds(rows: DayRow[], plan: GroupPlan): string[] {
     a.id,
     ...(second ? bucketRows(a.rows, second, plan.bands).map((b) => `${a.id}/${b.id}`) : []),
   ]);
+}
+
+// ── shared display helpers ───────────────────────────────────────────────────
+
+export const money = (v: number | null) =>
+  v == null ? '–' : `₹${Math.round(v).toLocaleString('en-IN')}`;
+export const share = (v: number | null) => (v == null ? '–' : `${Math.round(v * 100)}%`);
+
+/** The filter that keeps exactly a bucket's days: its values for a category, its range for numbers. */
+export function bucketFilter(c: Column, bucket: Bucket): ColumnFilter {
+  const v = bucket.rows.map((r) => r.values[c.key]);
+  if (c.type !== 'num' && c.type !== 'time') return { values: [...new Set(v)] };
+  const n = v.filter((x): x is number => typeof x === 'number');
+  if (!n.length) return { values: [null] };
+  const text = (x: number) => (c.type === 'time' ? formatClock(x) : String(x));
+  return { min: text(Math.min(...n)), max: text(Math.max(...n)) };
 }

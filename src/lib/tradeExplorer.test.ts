@@ -6,11 +6,16 @@ import {
   applyFilters,
   bucketRows,
   buildItems,
+  SIMILAR_KEY,
   categoryValues,
+  crossGrid,
   formatCell,
+  lossBins,
   lossSummary,
+  nearest,
   parseBound,
   sortRows,
+  withSimilarity,
   type Column,
   type DayRow,
   type GroupPlan,
@@ -149,5 +154,64 @@ describe('figures', () => {
     expect(formatCell(col('t2'), 645)).toBe('10:45');
     expect(formatCell(col('dte'), 0)).toBe('Exp');
     expect(formatCell(col('ivNow'), null)).toBe('–');
+  });
+});
+
+describe('loss histogram', () => {
+  test('even steps to the 1-in-10 level, then one bar for everything beyond', () => {
+    const values = [...Array.from({ length: 99 }, (_, i) => i + 1), 5000];
+    const bins = lossBins(values, 5);
+    expect(bins).toHaveLength(5);
+    expect(bins[4]).toMatchObject({ beyond: true, hi: 5000 });
+    expect(bins.slice(0, 4).every((b) => !b.beyond)).toBe(true);
+    // The outlier no longer squeezes every other day into the first bar.
+    expect(bins[0].count).toBeLessThan(30);
+    expect(bins.reduce((a, b) => a + b.count, 0)).toBe(values.length);
+  });
+  test('no tail bar when nothing lies past the 1-in-10 level', () => {
+    expect(lossBins([5, 5, 5], 4).some((b) => b.beyond)).toBe(false);
+    expect(lossBins([])).toEqual([]);
+  });
+});
+
+describe('similar days', () => {
+  const sample = [
+    day('2026-02-01', { ceChange: 100, peChange: 100, dte: 0 }),
+    day('2026-02-02', { ceChange: 110, peChange: 90, dte: 1 }),
+    day('2026-02-03', { ceChange: 500, peChange: -400, dte: 0 }),
+    day('2026-02-04', { ceChange: null, peChange: 100, dte: 0 }),
+    day('2026-02-05', { ceChange: 90, peChange: 400, dte: 0 }),
+  ];
+  const find = (keys: string[], keep = 0) =>
+    nearest(withSimilarity(sample, { date: '2026-02-01', keys, keep }), keep);
+  test('the chosen day comes first at distance 0, then the closest', () => {
+    const out = find(['ceChange', 'peChange']);
+    expect(dates(out)).toEqual(['01', '02', '05', '03']);
+    expect(out[0].values[SIMILAR_KEY]).toBe(0);
+  });
+  test('a day missing a compared reading is left out', () => {
+    expect(dates(find(['ceChange']))).not.toContain('04');
+  });
+  test('a category column must be the same', () => {
+    expect(dates(find(['ceChange', 'dte']))).toEqual(['01', '05', '03']);
+  });
+  test('only the closest few are kept', () => {
+    expect(dates(find(['ceChange', 'peChange'], 2))).toEqual(['01', '02']);
+  });
+  test('no plan or no columns leaves the rows untouched', () => {
+    expect(withSimilarity(sample, null)).toBe(sample);
+    expect(withSimilarity(sample, { date: '2026-02-01', keys: [], keep: 0 })).toBe(sample);
+  });
+});
+
+describe('two conditions at once', () => {
+  test('each crossing holds the days in both groups', () => {
+    const grid = crossGrid(rows, col('dte'), col('red'), 2);
+    expect(grid.down.map((b) => b.label)).toEqual(['Exp', 'Exp−1']);
+    expect(grid.across.map((b) => b.label)).toEqual(['Yes', 'No']);
+    expect(grid.cells.map((line) => line.map(dates))).toEqual([
+      [['03'], ['01', '04']],
+      [['02'], []],
+    ]);
   });
 });
