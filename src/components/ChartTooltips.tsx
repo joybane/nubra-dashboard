@@ -1,8 +1,5 @@
 import React, { useState, useRef, useImperativeHandle, memo, forwardRef } from 'react';
-
-function fmtPrice(p: number) {
-  return p.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
+import { fmtPrice } from '../lib/utils';
 
 // Each tooltip comes in two pieces: a `*Body` that renders the card from plain props, and the
 // original `forwardRef` wrapper that owns visibility/position and drives the body from its own

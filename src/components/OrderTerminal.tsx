@@ -13,7 +13,9 @@ import type {
 } from '../types';
 import { exchangeFromName } from '../types';
 import { strategyPositionExchange } from '../lib/strategyPositionMeta';
-import { fmtPrice } from '../lib/utils';
+import { fmtPrice, fmtTime } from '../lib/utils';
+import { setVisibleInterval } from '../lib/visibleInterval';
+import { createLtpBatcher, mergeLtps } from '../lib/ltpBatch';
 import { terminalHeight } from '../lib/workspaceSizing';
 import { liveLevels } from '../lib/positionRuleLevels';
 import { isOnLocalDay, openPositionPnlPaise, summarizeTodayPositions } from '../lib/paperPnl';
@@ -41,17 +43,6 @@ import ConfirmDialog from './ConfirmDialog';
 function paise(v: number | undefined | null): string {
   if (v == null) return '—';
   return fmtPrice(v / 100);
-}
-
-function fmtTime(ns: number | undefined | null): string {
-  if (!ns) return '—';
-  const ms = ns / 1_000_000;
-  return new Date(ms).toLocaleTimeString('en-IN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
 }
 
 function fmtDateStr(d: Date): string {
@@ -169,7 +160,6 @@ function OrdersTab({
   const [editDraft, setEditDraft] = useState<OrderDraft>(EMPTY_DRAFT);
   const [editError, setEditError] = useState<string | null>(null);
   const [savingOrder, setSavingOrder] = useState(false);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const toggleExpand = useCallback((gid: string) => {
     setExpanded((prev) => {
@@ -204,10 +194,7 @@ function OrdersTab({
     if (!uatAuth) return;
     setLoading(true);
     fetchOrders().finally(() => setLoading(false));
-    timerRef.current = setInterval(fetchOrders, 5000);
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
+    return setVisibleInterval(fetchOrders, 5000);
   }, [uatAuth, fetchOrders]);
 
   const commitRename = useCallback(
@@ -875,7 +862,7 @@ interface PositionsTabProps {
   onOpenStrategyChart?: (basketGroupId: string, strategyName: string) => void;
 }
 
-function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: PositionsTabProps) {
+function PositionsTab({ uatAuth, onViewChart, onOpenStrategyChart }: PositionsTabProps) {
   const [positions, setPositions] = useState<PaperPosition[]>([]);
   // Backdated entries ("↺ 09:25:30"), read on their own so the positions payload stays untouched.
   const [backdated, setBackdated] = useState<BackdatedTrade[]>([]);
@@ -890,10 +877,10 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
         })
         .catch(() => {});
     load();
-    const id = setInterval(load, 5000);
+    const stop = setVisibleInterval(load, 5000);
     return () => {
       alive = false;
-      clearInterval(id);
+      stop();
     };
   }, [uatAuth]);
   // Live mismatch tracker per strategy (≠ toggle), read on its own like the backdated badges.
@@ -910,8 +897,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
   useEffect(() => {
     if (!uatAuth) return;
     loadMismatchTrackers();
-    const id = setInterval(loadMismatchTrackers, 5000);
-    return () => clearInterval(id);
+    return setVisibleInterval(loadMismatchTrackers, 5000);
   }, [uatAuth, loadMismatchTrackers]);
   const toggleMismatch = useCallback(
     async (gid: string, enabled: boolean) => {
@@ -1085,11 +1071,12 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     if (!uatAuth) return;
     setLoading(true);
     fetch_().finally(() => setLoading(false));
-    const t = setInterval(fetch_, 2000);
-    return () => clearInterval(t);
+    return setVisibleInterval(fetch_, 2000);
   }, [uatAuth, fetch_]);
 
   useEffect(() => {
+    // Ticks for the same frame land as one render — see lib/ltpBatch.ts.
+    const ltpBatch = createLtpBatcher((ltps) => setPositions((prev) => mergeLtps(prev, ltps)));
     const unsub1 = subscribe('option_chain', (msg: WsMessage) => {
       if (msg.type !== 'option_chain') return;
       const data = msg.data as OptionChainData;
@@ -1101,18 +1088,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
         if (refId && ltp > 0) ltpMap.set(refId, ltp);
       }
       if (ltpMap.size === 0) return;
-      setPositions((prev) => {
-        let changed = false;
-        const next = prev.map((p) => {
-          const newLtp = ltpMap.get(p.ref_id);
-          if (newLtp != null && newLtp !== p.last_traded_price) {
-            changed = true;
-            return { ...p, last_traded_price: newLtp };
-          }
-          return p;
-        });
-        return changed ? next : prev;
-      });
+      ltpBatch.push(ltpMap);
     });
 
     const unsub2 = subscribe('position_ltp', (msg: WsMessage) => {
@@ -1121,18 +1097,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
       if (!updates || updates.length === 0) return;
       const ltpMap = new Map<number, number>();
       for (const u of updates) ltpMap.set(u.ref_id, u.ltp);
-      setPositions((prev) => {
-        let changed = false;
-        const next = prev.map((p) => {
-          const newLtp = ltpMap.get(p.ref_id);
-          if (newLtp != null && newLtp !== p.last_traded_price) {
-            changed = true;
-            return { ...p, last_traded_price: newLtp };
-          }
-          return p;
-        });
-        return changed ? next : prev;
-      });
+      ltpBatch.push(ltpMap);
     });
 
     // A server-side SL/target/trailing rule fired — refresh immediately instead
@@ -1143,6 +1108,7 @@ function PositionsTab({ uatAuth, onViewChart, onExit, onOpenStrategyChart }: Pos
     });
 
     return () => {
+      ltpBatch.cancel();
       unsub1();
       unsub2();
       unsub3();

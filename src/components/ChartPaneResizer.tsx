@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { setVisibleInterval } from '../lib/visibleInterval';
 import type { IChartApi, IPaneApi, Time } from 'lightweight-charts';
 
 /** Floor so a drag can't collapse a pane out of existence. */
@@ -95,8 +96,7 @@ export default function ChartPaneResizer({
   }, [measure, refreshKey]);
 
   useEffect(() => {
-    const id = window.setInterval(measure, POLL_MS);
-    return () => window.clearInterval(id);
+    return setVisibleInterval(measure, POLL_MS);
   }, [measure]);
 
   useEffect(() => {

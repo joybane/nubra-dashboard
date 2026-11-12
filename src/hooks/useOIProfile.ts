@@ -495,7 +495,7 @@ export function useOIProfile({
       const chunks: string[][] = [];
       for (let i = 0; i < values.length; i += BATCH) chunks.push(values.slice(i, i + BATCH));
 
-      console.log(`[OI] Fetching ${values.length} instruments in ${chunks.length} batches`);
+      console.debug(`[OI] Fetching ${values.length} instruments in ${chunks.length} batches`);
 
       const map = new Map<string, { ts: number; v: number }[]>();
       const fetchChunk = async (chunk: string[]) => {
@@ -559,7 +559,7 @@ export function useOIProfile({
         }
       }
 
-      console.log(`[OI] Fetched ${map.size}/${values.length} instruments`);
+      console.debug(`[OI] Fetched ${map.size}/${values.length} instruments`);
       if (ticket !== oiHistTicketRef.current) return; // superseded by a newer expiry change
       oiHistoricalRef.current = map;
       oiHistFetchedRef.current = true;
@@ -838,7 +838,7 @@ export function useOIProfile({
     oiToMsRef.current = atEnd ? null : timeToMs(toTime);
 
     if (!oiHistFetchedRef.current && !oiHistLoadingRef.current && !oiHistFailedRef.current) {
-      console.log('[OI] Slider triggered fetch, from:', fromTime, 'to:', toTime);
+      console.debug('[OI] Slider triggered fetch, from:', fromTime, 'to:', toTime);
       fetchOIHistory();
     }
     drawOIRef.current();

@@ -26,6 +26,9 @@ test('normalizeUnderlying rejects underlyings we hold no data for', () => {
 // The rest reads the real parquet tree. Skipped rather than failed where it is absent, so the
 // suite still runs on a checkout without the ~5 years of options data.
 const haveData = existsSync(path.join(DATA_ROOT, 'NIFTY'));
+// The first test to touch the tree pays the cold read off the hard disk (measured 5+ s, past
+// vitest's 5 s default); later ones hit the per-expiry cache. A generous budget, not a speed check.
+const COLD_READ_MS = 60_000;
 
 test.skipIf(!haveData)(
   'buildIvHistory returns sane, DTE-tagged, in-window observations',
@@ -60,6 +63,7 @@ test.skipIf(!haveData)(
     const seen = new Set(res.observations.map((o) => `${o.date}|${o.dte}`));
     expect(seen.size).toBe(res.observations.length);
   },
+  COLD_READ_MS,
 );
 
 /**
@@ -162,12 +166,16 @@ test.skipIf(!haveData)('the per-expiry cache makes a repeat call effectively fre
   expect(res.observations.length).toBeGreaterThan(50);
 });
 
-test.skipIf(!haveData)('a wider window is a superset of a narrower one', async () => {
-  const short = await buildIvHistory('NIFTY', 120);
-  const long = await buildIvHistory('NIFTY', 700);
-  expect(long.observations.length).toBeGreaterThan(short.observations.length);
-  const longKeys = new Set(long.observations.map((o) => `${o.date}|${o.dte}|${o.iv}`));
-  for (const o of short.observations) {
-    expect(longKeys.has(`${o.date}|${o.dte}|${o.iv}`), `${o.date} @${o.dte}`).toBe(true);
-  }
-});
+test.skipIf(!haveData)(
+  'a wider window is a superset of a narrower one',
+  async () => {
+    const short = await buildIvHistory('NIFTY', 120);
+    const long = await buildIvHistory('NIFTY', 700);
+    expect(long.observations.length).toBeGreaterThan(short.observations.length);
+    const longKeys = new Set(long.observations.map((o) => `${o.date}|${o.dte}|${o.iv}`));
+    for (const o of short.observations) {
+      expect(longKeys.has(`${o.date}|${o.dte}|${o.iv}`), `${o.date} @${o.dte}`).toBe(true);
+    }
+  },
+  COLD_READ_MS,
+);

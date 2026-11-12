@@ -7,6 +7,7 @@ import { usePaperTrading } from './hooks/usePaperTrading';
 import { useBasket } from './hooks/useBasketContext';
 import { legMtm, legQty, netGreeks, netPremium } from './lib/basketMath';
 import { fmtPrice, fmtLakh, formatExpiry, strikeRs } from './lib/utils';
+import { isPageHidden, setVisibleInterval } from './lib/visibleInterval';
 
 const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 
@@ -379,14 +380,13 @@ export default function OptionChain({
   const [feed, setFeed] = useState<{ src: 'ws' | 'poll'; ageMs: number } | null>(null);
 
   useEffect(() => {
-    const id = setInterval(() => {
+    return setVisibleInterval(() => {
       setFeed(
         lastTickRef.current
           ? { src: feedSrcRef.current, ageMs: Date.now() - lastTickRef.current }
           : null,
       );
     }, 1000);
-    return () => clearInterval(id);
   }, []);
 
   // WS subscription for live updates
@@ -424,7 +424,7 @@ export default function OptionChain({
   function startPoll(sym: string, exch: string, exp: string) {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = window.setInterval(async () => {
-      if (!sym || !exp || wsActiveRef.current) return;
+      if (!sym || !exp || wsActiveRef.current || isPageHidden()) return;
       try {
         const data = await fetchChainApi(sym, exch, exp);
         if (data.chain) {

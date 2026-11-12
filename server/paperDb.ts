@@ -562,6 +562,15 @@ export function dbArchivePnlTicks(
   return { moved, vacuumed, bytesAfter };
 }
 
+/**
+ * Online copy of the whole book to `dest` (SQLite's backup API: consistent, and it does not block
+ * writers). Buffered P&L ticks are flushed first so the copy is as current as the live file.
+ */
+export async function dbBackupTo(dest: string): Promise<void> {
+  dbFlushPnlTicks();
+  await db.backup(dest);
+}
+
 /** Flush buffered writes and close the database, checkpointing the WAL. Safe to call twice. */
 export function closeDb(): void {
   if (!db?.open) return;

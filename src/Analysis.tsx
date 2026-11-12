@@ -1,5 +1,6 @@
 import { chartTheme } from './lib/chartTheme';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { setVisibleInterval } from './lib/visibleInterval';
 import {
   createChart,
   CandlestickSeries,
@@ -436,8 +437,7 @@ export default function Analysis({ theme, onChangeView }: Props) {
   const syncRunning = !!status?.sync.running;
   useEffect(() => {
     if (!syncRunning) return;
-    const id = window.setInterval(() => void refreshStatus(), 3000);
-    return () => window.clearInterval(id);
+    return setVisibleInterval(() => void refreshStatus(), 3000);
   }, [syncRunning, refreshStatus]);
 
   const startSync = useCallback(async () => {

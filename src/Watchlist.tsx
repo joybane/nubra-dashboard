@@ -12,6 +12,7 @@ import type {
   WsMessage,
 } from './types';
 import { fmtPrice } from './lib/utils';
+import { isPageHidden } from './lib/visibleInterval';
 
 interface LivePrice {
   ltp: number;
@@ -119,7 +120,9 @@ export default function Watchlist({ onNavigateToChart }: WatchlistProps = {}) {
     }
 
     fetchPrices(true);
-    pollRef.current = window.setInterval(() => void fetchPrices(), 2000);
+    pollRef.current = window.setInterval(() => {
+      if (!isPageHidden()) void fetchPrices();
+    }, 2000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };

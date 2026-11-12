@@ -13,6 +13,7 @@ import {
   initDb,
   closeDb,
   dbArchivePnlTicks,
+  dbBackupTo,
   PNL_ARCHIVE_PATH,
   dbUpsertOcSub,
   dbLoadOcSubs,
@@ -20,6 +21,7 @@ import {
   dbUpsertSnapshot,
   dbGetSnapshot,
 } from './paperDb.ts';
+import { runPaperBackup } from './paperBackup.ts';
 import { buildBasketSnapshot, istDateString, type SnapPosition } from './snapshotBuilder.ts';
 import { registerBacktestRoutes } from './backtest/routes.ts';
 import { registerNubraBacktestRoutes } from './nubraBacktestRoutes.ts';
@@ -106,14 +108,43 @@ function archivePnlTicks(when: 'startup' | 'daily'): void {
   }
 }
 
+// ─── paper.db daily copy ──────────────────────────────────────────────────────
+// One dated copy per IST day in PAPER_BACKUP_DIR (default .paper-backups/ beside paper.db),
+// newest PAPER_BACKUP_KEEP kept (default 5). See paperBackup.ts.
+const PAPER_BACKUP_DIR =
+  process.env.PAPER_BACKUP_DIR || path.join(path.dirname(PNL_ARCHIVE_PATH), '.paper-backups');
+const PAPER_BACKUP_KEEP = Math.max(1, Number(process.env.PAPER_BACKUP_KEEP) || 5);
+
+function backupPaperDb(when: 'startup' | 'daily', istDate: string): void {
+  const startedAt = Date.now();
+  runPaperBackup({
+    dir: PAPER_BACKUP_DIR,
+    dateKey: istDate,
+    keep: PAPER_BACKUP_KEEP,
+    copy: dbBackupTo,
+  })
+    .then(({ written, pruned }) => {
+      if (written) {
+        console.log(
+          `[paper backup] ${when}: wrote ${path.basename(written)} (${Date.now() - startedAt}ms)` +
+            (pruned.length ? `; pruned ${pruned.length} older` : ''),
+        );
+      }
+    })
+    // Housekeeping only: a failed copy must never stop the server.
+    .catch((e) => console.error(`[paper backup] ${when} run failed:`, (e as Error).message));
+}
+
 archivePnlTicks('startup');
 let pnlArchivedIstDate = new Date(Date.now() + 5.5 * 3_600_000).toISOString().slice(0, 10);
+backupPaperDb('startup', pnlArchivedIstDate);
 setInterval(() => {
   const ist = new Date(Date.now() + 5.5 * 3_600_000);
   const istDate = ist.toISOString().slice(0, 10);
   if (ist.getUTCHours() >= 9 || istDate === pnlArchivedIstDate) return;
   pnlArchivedIstDate = istDate;
   archivePnlTicks('daily');
+  backupPaperDb('daily', istDate);
 }, 10 * 60_000).unref();
 
 const __filename = fileURLToPath(import.meta.url);

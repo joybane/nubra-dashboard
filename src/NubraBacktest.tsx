@@ -233,8 +233,6 @@ function chartOpts(theme: Theme, hideLeftScale: boolean = false) {
   };
 }
 
-const LEG_COLORS = ['#3b82f6', '#ec4899', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#14b8a6'];
-
 // Nearest sample at or before `targetTime`. Shared by the hover tooltips and the pinned cards,
 // which is why it sits outside the chart effect that used to own it.
 function findLatestAt<T extends { time: any }>(
@@ -506,7 +504,7 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   const priceTooltipRef = useRef<PriceTooltipRef>(null);
   const pnlTooltipRef = useRef<PnlTooltipRef>(null);
   const greeksTooltipRef = useRef<GreeksTooltipRef>(null);
-  const [activeChartType, setActiveChartType] = useState<'price' | 'pnl' | 'greeks' | null>(null);
+  const [, setActiveChartType] = useState<'price' | 'pnl' | 'greeks' | null>(null);
 
   // Mirrored out of the chart-building effect for the Indicators sync effect below, the same way
   // `indexSeriesRef` already is: it has to reach these without re-entering that effect. Null
@@ -2003,20 +2001,6 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
     });
   }, [legs, lotSize]);
 
-  const maxProfit = payoffData.length ? Math.max(...payoffData.map((d) => d.pnl)) : 0;
-  const maxLoss = payoffData.length ? Math.min(...payoffData.map((d) => d.pnl)) : 0;
-  const breakevenPoints = useMemo(() => {
-    const bps: number[] = [];
-    for (let i = 1; i < payoffData.length; i++) {
-      if (
-        (payoffData[i - 1].pnl < 0 && payoffData[i].pnl >= 0) ||
-        (payoffData[i - 1].pnl >= 0 && payoffData[i].pnl < 0)
-      )
-        bps.push(Math.round((payoffData[i - 1].spot + payoffData[i].spot) / 2));
-    }
-    return bps;
-  }, [payoffData]);
-
   const totalPremium = useMemo(
     () => legs.reduce((acc, l) => acc + (l.side === 'BUY' ? -1 : 1) * l.ltp * l.lots * lotSize, 0),
     [legs, lotSize],
@@ -2377,8 +2361,6 @@ export default function NubraBacktest({ instrument, theme = 'dark' }: Props) {
   }
 
   // ── Render ─────────────────────────────────────────────────────────────────
-
-  const isDark = theme !== 'light';
 
   /**
    * The topmost visible pane, which is the one that flexes to fill the chart column; every pane

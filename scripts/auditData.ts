@@ -9,8 +9,8 @@
 //
 //   run:  node --experimental-strip-types server/backtest/auditData.ts NIFTY 2026-05-01 2026-05-31 09:35
 // ─────────────────────────────────────────────────────────────────────────────
-import { resolveExpiry, getStrikeIndex, readContract, type Bar } from './dataLayer.ts';
-import type { Underlying } from './types.ts';
+import { resolveExpiry, getStrikeIndex, readContract, type Bar } from '../server/backtest/dataLayer.ts';
+import type { Underlying } from '../server/backtest/types.ts';
 
 const und = (process.argv[2] as Underlying) || 'NIFTY';
 const from = process.argv[3] || '2026-05-01';

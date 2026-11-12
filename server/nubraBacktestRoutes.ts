@@ -582,7 +582,7 @@ export function registerNubraBacktestRoutes({
   }
 
   // ─── Debug timeseries endpoint ───
-  fastify.get('/api/debug-chart', async (req, reply) => {
+  fastify.get('/api/debug-chart', async (req, _reply) => {
     try {
       const exchange = 'NFO';
       const sym = 'NIFTY23JUL2624100CE';

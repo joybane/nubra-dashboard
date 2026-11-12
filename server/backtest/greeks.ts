@@ -23,7 +23,7 @@ export function bsDelta(
   strike: number,
   ivPct: number,
   tYears: number,
-  isFutures = true,
+  _isFutures = true,
 ): number {
   if (!(spot > 0) || !(strike > 0) || !(ivPct > 0) || !(tYears > 0)) {
     // degenerate: fall back to moneyness sign

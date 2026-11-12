@@ -308,6 +308,23 @@ function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderl
     return () => ctl.abort();
   }, [underlying, raw.date, raw.source, raw.signal.t2]);
 
+  // When a trade's chain arrives, scroll the detail pane so the chain sits at
+  // the top and the whole ATM ± 7 ladder is readable without scrolling.
+  const controlsRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = controlsRef.current;
+    if (!chain || !el) return;
+    let pane = el.parentElement;
+    while (pane) {
+      const { overflowY } = getComputedStyle(pane);
+      if ((overflowY === 'auto' || overflowY === 'scroll') && pane.scrollHeight > pane.clientHeight)
+        break;
+      pane = pane.parentElement;
+    }
+    if (!pane) return;
+    pane.scrollTop += el.getBoundingClientRect().top - pane.getBoundingClientRect().top - 8;
+  }, [chain]);
+
   if (error) {
     return (
       <Panel title="Option chain at the signal">
@@ -349,7 +366,7 @@ function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderl
         </>
       }
     >
-      <div className="te-chain-controls">
+      <div className="te-chain-controls" ref={controlsRef}>
         <span>ATM ± 7 strikes · OTM calls above ATM / OTM puts below ATM</span>
         <button type="button" onClick={() => setShowAllStrikes((v) => !v)}>
           {showAllStrikes ? 'ATM ± 7 strikes' : 'Show entire chain'}

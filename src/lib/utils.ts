@@ -9,6 +9,18 @@ export function fmtPrice(v: number | null | undefined): string {
   return Number(v).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/** Wall-clock HH:MM:SS (en-IN, 24h) for a nanosecond epoch timestamp; '—' when absent. */
+export function fmtTime(ns: number | undefined | null): string {
+  if (!ns) return '—';
+  const ms = ns / 1_000_000;
+  return new Date(ms).toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+}
+
 export function fmtNum(v: number | null | undefined): string {
   if (v == null) return '—';
   return Number(v).toLocaleString('en-IN');

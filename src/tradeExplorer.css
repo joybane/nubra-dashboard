@@ -668,21 +668,27 @@
 /* Day detail follows the NIFTY/SENSEX loss report's reading layout. */
 @font-face {
   font-family: 'Report Body';
-  src: url('/fonts/PublicSans.ttf') format('truetype');
+  src:
+    url('/fonts/PublicSans.woff2') format('woff2'),
+    url('/fonts/PublicSans.ttf') format('truetype');
   font-style: normal;
   font-weight: 100 900;
   font-display: swap;
 }
 @font-face {
   font-family: 'Report Display';
-  src: url('/fonts/Archivo.ttf') format('truetype');
+  src:
+    url('/fonts/Archivo.woff2') format('woff2'),
+    url('/fonts/Archivo.ttf') format('truetype');
   font-style: normal;
   font-weight: 100 900;
   font-display: swap;
 }
 @font-face {
   font-family: 'Report Mono';
-  src: url('/fonts/JetBrainsMono.ttf') format('truetype');
+  src:
+    url('/fonts/JetBrainsMono.woff2') format('woff2'),
+    url('/fonts/JetBrainsMono.ttf') format('truetype');
   font-style: normal;
   font-weight: 100 900;
   font-display: swap;

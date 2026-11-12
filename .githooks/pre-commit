@@ -1,0 +1,41 @@
+#!/bin/sh
+# Pre-commit gate: the same checks the project already defines, run before every commit so
+# formatting drift, type errors and broken tests stop at the door instead of piling up.
+# About 25 s. Skip once, deliberately, with:  git commit --no-verify
+#
+# Enabled per clone by `npm install` (the "prepare" script sets core.hooksPath to .githooks).
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if ! command -v npx >/dev/null 2>&1; then
+  echo "pre-commit: node/npx not on PATH here; skipping the gate." >&2
+  exit 0
+fi
+
+# Staged files the format/lint gates cover (git pathspec '*' also matches across folders).
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- 'src/*.ts' 'src/*.tsx' 'src/*.css' 'server/*.ts')
+lintable=$(printf '%s\n' "$staged" | grep -E '\.(ts|tsx)$')
+
+fail() {
+  echo "" >&2
+  echo "pre-commit: $1 failed - commit stopped. Fix it, or bypass once with: git commit --no-verify" >&2
+  exit 1
+}
+
+if [ -n "$staged" ]; then
+  echo "pre-commit: prettier (staged files)"
+  # shellcheck disable=SC2086
+  npx --no-install prettier --check $staged || fail "formatting (run: npm run format)"
+fi
+
+if [ -n "$lintable" ]; then
+  echo "pre-commit: eslint (staged files, errors only)"
+  # shellcheck disable=SC2086
+  npx --no-install eslint --quiet $lintable || fail "lint"
+fi
+
+echo "pre-commit: typecheck"
+npm run --silent typecheck || fail "typecheck"
+
+echo "pre-commit: tests"
+npx --no-install vitest run --reporter=dot || fail "tests"

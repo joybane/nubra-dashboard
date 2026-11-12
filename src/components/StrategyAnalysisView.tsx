@@ -19,7 +19,16 @@ import type {
   OptionLeg,
   Theme,
 } from '../types';
-import { fmtPrice, IST_OFFSET, markSessionBreaks, marketSession, toChartTime } from '../lib/utils';
+import { setVisibleInterval } from '../lib/visibleInterval';
+import { createLtpBatcher, mergeLtps } from '../lib/ltpBatch';
+import {
+  fmtPrice,
+  fmtTime,
+  IST_OFFSET,
+  markSessionBreaks,
+  marketSession,
+  toChartTime,
+} from '../lib/utils';
 import { useWs } from '../hooks/useWsContext';
 import { chartFrame, isChartLive, removeChart } from '../lib/chartLifecycle';
 import { syncChartPanes } from '../lib/syncChartPanes';
@@ -55,17 +64,6 @@ interface LegMeta {
 function paise(v: number | undefined | null): string {
   if (v == null) return '—';
   return fmtPrice(v / 100);
-}
-
-function fmtTime(ns: number | undefined | null): string {
-  if (!ns) return '—';
-  const ms = ns / 1_000_000;
-  return new Date(ms).toLocaleTimeString('en-IN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
 }
 
 function fmtChartTime(chartTime: number): string {
@@ -183,7 +181,7 @@ function safeSetVisibleLogicalRange(chart: IChartApi | null | undefined, range: 
   if (!isChartLive(chart) || !range) return;
   try {
     chart.timeScale().setVisibleLogicalRange(range);
-  } catch (e) {
+  } catch {
     // Ignore genuinely bad ranges
   }
 }
@@ -555,7 +553,7 @@ export default function StrategyAnalysisView({
   // ── Position / order state ──
   const [positions, setPositions] = useState<PaperPosition[]>([]);
   const [closedPositions, setClosedPositions] = useState<PaperPosition[]>([]);
-  const [orders, setOrders] = useState<PaperOrder[]>([]);
+  const [, setOrders] = useState<PaperOrder[]>([]);
   const [posSubTab, setPosSubTab] = useState<'open' | 'closed'>('open');
   const [dataLoaded, setDataLoaded] = useState(false);
 
@@ -576,16 +574,6 @@ export default function StrategyAnalysisView({
     legPnl: Map<number, ISeriesApi<'Line'>>;
     basketPnl: ISeriesApi<'Line'> | null;
   }>({ underlying: null, legPrice: new Map(), legPnl: new Map(), basketPnl: null });
-  // Price-panel min-max normalization (same idea as Greeks): NIFTY and each option leg are mapped to
-  // [-1,1] over their own range so they share one draggable axis and zoom together. Badges/tooltip
-  // de-normalize via {mid,half}: true value = plotted × half + mid.
-  const priceFactorsRef = useRef<{
-    underlying: { mid: number; half: number };
-    legs: Map<number, { mid: number; half: number }>;
-  }>({
-    underlying: { mid: 0, half: 1 },
-    legs: new Map(),
-  });
   const [chartData, setChartData] = useState<ChartDataCache | null>(null);
   const [historicalEnrichmentReady, setHistoricalEnrichmentReady] = useState(false);
   const chartDataRef = useRef<ChartDataCache | null>(null);
@@ -682,7 +670,6 @@ export default function StrategyAnalysisView({
   const [orderBookHeight, setOrderBookHeight] = useState(200);
   const orderBookPaneRef = useRef<HTMLDivElement>(null);
 
-  const positionsPaneRef = useRef<HTMLDivElement>(null);
   const [priceVisible, setPriceVisible] = useState(true);
   const [pnlVisible, setPnlVisible] = useState(true);
 
@@ -921,7 +908,7 @@ export default function StrategyAnalysisView({
                 const searchData = (await res.json()) as { results: any[] };
                 const match = searchData.results?.[0];
                 if (match?.expiry) expiryCacheRef.current.set(p.zanskar_name!, match.expiry);
-              } catch (e) {}
+              } catch {}
             }),
           );
         }
@@ -1098,8 +1085,7 @@ export default function StrategyAnalysisView({
   useEffect(() => {
     if (isSnapshot) return; // frozen snapshot → no live polling
     fetchData();
-    const t = setInterval(fetchData, 3000);
-    return () => clearInterval(t);
+    return setVisibleInterval(fetchData, 3000);
   }, [fetchData, isSnapshot]);
 
   // ── Subscribe for live underlying ticks ──
@@ -1660,7 +1646,7 @@ export default function StrategyAnalysisView({
         try {
           const r = pc.timeScale().getVisibleLogicalRange();
           if (r) safeSetVisibleLogicalRange(pnlChartRef.current, r);
-        } catch (e) {}
+        } catch {}
       }
     }
   }, [chartData]);
@@ -1719,8 +1705,7 @@ export default function StrategyAnalysisView({
     setMismatchToggleError(null);
     if (isSnapshot) return;
     loadMismatchTracker();
-    const id = setInterval(loadMismatchTracker, 5000);
-    return () => clearInterval(id);
+    return setVisibleInterval(loadMismatchTracker, 5000);
   }, [isSnapshot, loadMismatchTracker]);
   const toggleMismatchTracker = useCallback(async () => {
     const on = !mismatchTracker?.enabled;
@@ -2102,7 +2087,7 @@ export default function StrategyAnalysisView({
             sourceChart.unsubscribeCrosshairMove(onCrosshairMove);
           } catch {}
         });
-      } catch (e) {}
+      } catch {}
     }
 
     return () => {
@@ -2317,26 +2302,17 @@ export default function StrategyAnalysisView({
   }, [positions, closedPositions, isSnapshot]);
 
   // ── 7. Live LTP for position table ──
+  // Chart series above still take every tick directly; only the table's state is frame-batched.
   useEffect(() => {
     if (isSnapshot) return;
+    const ltpBatch = createLtpBatcher((ltps) => setPositions((prev) => mergeLtps(prev, ltps)));
     const unsub1 = subscribe('position_ltp', (msg: WsMessage) => {
       if (msg.type !== 'position_ltp') return;
       const updates = msg.data as { ref_id: number; ltp: number }[];
       if (!updates?.length) return;
       const ltpMap = new Map<number, number>();
       for (const u of updates) ltpMap.set(u.ref_id, u.ltp);
-      setPositions((prev) => {
-        let changed = false;
-        const next = prev.map((p) => {
-          const v = ltpMap.get(p.ref_id);
-          if (v != null && v !== p.last_traded_price) {
-            changed = true;
-            return { ...p, last_traded_price: v };
-          }
-          return p;
-        });
-        return changed ? next : prev;
-      });
+      ltpBatch.push(ltpMap);
     });
     const unsub2 = subscribe('option_chain', (msg: WsMessage) => {
       if (msg.type !== 'option_chain') return;
@@ -2349,20 +2325,10 @@ export default function StrategyAnalysisView({
         if (refId && ltp > 0) ltpMap.set(refId, ltp);
       }
       if (ltpMap.size === 0) return;
-      setPositions((prev) => {
-        let changed = false;
-        const next = prev.map((p) => {
-          const v = ltpMap.get(p.ref_id);
-          if (v != null && v !== p.last_traded_price) {
-            changed = true;
-            return { ...p, last_traded_price: v };
-          }
-          return p;
-        });
-        return changed ? next : prev;
-      });
+      ltpBatch.push(ltpMap);
     });
     return () => {
+      ltpBatch.cancel();
       unsub1();
       unsub2();
     };

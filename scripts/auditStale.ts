@@ -1,7 +1,7 @@
 // Quick probe: for ONE fixed contract (strike+expiry), print the 09:35 close and
 // embedded spot for each date in the expiry week. If the premium is identical
 // across dates while spot moves, the premium series is stale/duplicated.
-import { getStrikeIndex, readContract, type Bar } from './dataLayer.ts';
+import { getStrikeIndex, readContract, type Bar } from '../server/backtest/dataLayer.ts';
 
 const und = 'NIFTY';
 const expiry = process.argv[2] || '2026-05-12';

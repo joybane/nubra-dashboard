@@ -1,5 +1,6 @@
 import { chartTheme } from './lib/chartTheme';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { isPageHidden } from './lib/visibleInterval';
 import { createPortal } from 'react-dom';
 import {
   createChart,
@@ -1144,7 +1145,9 @@ export default function CandleChart({ instrument, theme }: Props) {
   // ── Countdown ─────────────────────────────────────────────────────────────
   function startCountdown() {
     if (countdownRef.current) clearInterval(countdownRef.current);
-    countdownRef.current = window.setInterval(tickCountdown, 1000);
+    countdownRef.current = window.setInterval(() => {
+      if (!isPageHidden()) tickCountdown();
+    }, 1000);
     tickCountdown();
   }
   function stopCountdown() {

@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "concurrently -n \"server,vite\" -c \"cyan,green\" \"node --experimental-strip-types server/index.ts\" \"vite --port 8000\"",
+    "start:light": "node --experimental-strip-types server/index.ts",
     "dev": "vite --port 8000",
     "build": "tsc -b && vite build",
     "server": "node --experimental-strip-types server/index.ts",
@@ -15,7 +16,8 @@
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\" \"server/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"server/**/*.ts\"",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepare": "git config core.hooksPath .githooks || exit 0"
   },
   "dependencies": {
     "@fastify/compress": "^8.3.1",

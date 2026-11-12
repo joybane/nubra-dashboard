@@ -9,6 +9,8 @@ dist/
 *.db-wal
 *.db-shm
 *.db.*
+# Daily paper.db copies (see server/paperBackup.ts)
+.paper-backups/
 
 # Environment
 .env
