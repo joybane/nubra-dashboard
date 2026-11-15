@@ -102,6 +102,7 @@ export interface PositionSizing {
 export interface EntryFilters {
   dteMin?: number;
   dteMax?: number;
+  dteDays?: number[];
   ivMin?: number;
   ivMax?: number;
   premiumMin?: number;

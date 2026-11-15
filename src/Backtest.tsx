@@ -441,6 +441,37 @@ export default function Backtest({ instrument }: Props) {
           </span>
         </label>
 
+        {/* days to expiry: which days before the expiry to trade (none selected = all) */}
+        <div>
+          <span className={lblCls}>Days to expiry (none = all)</span>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {[0, 1, 2, 3, 4, 5, 6].map((d) => {
+              const on = ef.dteDays?.includes(d) ?? false;
+              return (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => {
+                    const cur = ef.dteDays ?? [];
+                    const next = on
+                      ? cur.filter((x) => x !== d)
+                      : [...cur, d].sort((a, b) => a - b);
+                    patch({ entryFilters: { ...ef, dteDays: next.length ? next : undefined } });
+                  }}
+                  className={`px-2 py-1 rounded text-[11px] border ${
+                    on
+                      ? 'bg-[var(--accent)] text-white border-[var(--accent)]'
+                      : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                  }`}
+                  title={d === 0 ? 'Expiry day' : `${d} day${d > 1 ? 's' : ''} before expiry`}
+                >
+                  {d === 0 ? 'Expiry day' : `${d}d`}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* entry filters */}
         <div>
           <button
@@ -464,7 +495,7 @@ export default function Backtest({ instrument }: Props) {
                   ['premiumMin', 'Combined prem min'],
                   ['premiumMax', 'Combined prem max'],
                   ['waitTradePct', 'Wait & trade %'],
-                ] as [keyof typeof ef, string][]
+                ] as [Exclude<keyof typeof ef, 'dteDays'>, string][]
               ).map(([key, label]) => (
                 <label key={key}>
                   <span className={lblCls}>{label} (0=off)</span>

@@ -119,6 +119,7 @@ export interface Leg {
 export interface EntryFilters {
   dteMin?: number; // reference expiry days-to-expiry ≥ this
   dteMax?: number; // reference expiry days-to-expiry ≤ this
+  dteDays?: number[]; // only trade when days-to-expiry is one of these (0 = expiry day); empty/undef = all
   ivMin?: number; // reference contract IV at entry ≥ this
   ivMax?: number; // reference contract IV at entry ≤ this
   premiumMin?: number; // combined per-unit entry premium of all legs ≥ this

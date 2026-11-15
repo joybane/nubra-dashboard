@@ -728,6 +728,7 @@ async function simulateDay(
   const refDte = dte(date, refRes.expiry);
   if (filters.dteMin != null && refDte < filters.dteMin) return null;
   if (filters.dteMax != null && refDte > filters.dteMax) return null;
+  if (filters.dteDays?.length && !filters.dteDays.includes(refDte)) return null;
 
   const refDay = await loadExpiryDay(cfg.underlying, refRes.expiry, refRes.flag, date);
   if (!refDay.strikes.length) return null;
