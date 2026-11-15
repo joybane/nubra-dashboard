@@ -354,11 +354,11 @@ function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderl
       </Panel>
     );
   }
-  const atmIndex = chain.rows.findIndex((r) => r.strike === chain.atm);
+  // Lowest strike at the top, like the Option Chain tab.
+  const ladder = [...chain.rows].sort((a, b) => a.strike - b.strike);
+  const atmIndex = ladder.findIndex((r) => r.strike === chain.atm);
   const visibleRows =
-    showAllStrikes || atmIndex < 0
-      ? chain.rows
-      : chain.rows.slice(Math.max(0, atmIndex - 7), atmIndex + 8);
+    showAllStrikes || atmIndex < 0 ? ladder : ladder.slice(Math.max(0, atmIndex - 7), atmIndex + 8);
   const sold = (kind: 'CE' | 'PE', strike: number) =>
     raw.trade.legs.some((l) => l.kind === kind && l.strike === strike);
   const ref = (kind: 'CE' | 'PE', strike: number) =>
@@ -382,7 +382,7 @@ function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderl
       }
     >
       <div className="te-chain-controls" ref={controlsRef}>
-        <span>ATM ± 7 strikes · OTM calls above ATM / OTM puts below ATM</span>
+        <span>ATM ± 7 strikes · OTM calls below ATM / OTM puts above ATM</span>
         <button type="button" onClick={() => setShowAllStrikes((v) => !v)}>
           {showAllStrikes ? 'ATM ± 7 strikes' : 'Show entire chain'}
         </button>
