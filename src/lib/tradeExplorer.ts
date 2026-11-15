@@ -1006,7 +1006,7 @@ export function quantile(values: number[], p: number): number | null {
   return s[lo] + (s[hi] - s[lo]) * (i - lo);
 }
 
-const numbers = (rows: DayRow[], key: string) =>
+export const numbers = (rows: DayRow[], key: string) =>
   rows.flatMap((r) => {
     const v = r.values[key];
     return typeof v === 'number' ? [v] : [];
@@ -1101,7 +1101,7 @@ export interface SimilarPlan {
 export const DEFAULT_SIMILAR_KEYS = ['ceChange', 'peChange', 'gap'];
 
 /** A column's typical spread: the width of its middle half, so a few extreme days do not shrink every distance. */
-function spread(rows: DayRow[], key: string): number {
+export function spread(rows: DayRow[], key: string): number {
   const v = numbers(rows, key);
   if (v.length < 2) return 1;
   const iqr = (quantile(v, 0.75) as number) - (quantile(v, 0.25) as number);

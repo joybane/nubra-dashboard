@@ -5,9 +5,13 @@
  * chain at the signal minute beside the table.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { cachedJson, cachedValue, clearExplorerCache, prefetchDay } from './lib/explorerCache';
 import './tradeExplorer.css';
 import TradeExplorerDetail from './components/TradeExplorerDetail';
 import TradeExplorerCharts from './components/TradeExplorerCharts';
+import TradeExplorerSplits from './components/TradeExplorerSplits';
+import type { Outcome } from './lib/tradeExplorerSplits';
+import TradeExplorerUpdate from './components/TradeExplorerUpdate';
 import { IV_LEVELS } from './lib/ivSignal';
 import {
   COLUMNS,
@@ -22,6 +26,7 @@ import {
   allGroupIds,
   applyFilters,
   buildDayRows,
+  bucketFilter,
   buildItems,
   categoryValues,
   filterActive,
@@ -44,6 +49,8 @@ import {
   type TableItem,
 } from './lib/tradeExplorer';
 import type { SignalUnderlying } from './lib/signalBacktest';
+import { clearSlimSets } from './components/TradeExplorerCompareViews';
+import type { SavedCriteria } from './lib/tradeExplorerCompare';
 import type { Theme } from './types';
 
 const UNDERLYINGS: SignalUnderlying[] = ['NIFTY', 'SENSEX'];
@@ -61,6 +68,8 @@ interface Settings {
   /** The last choice for "similar days": which columns to compare and how many days to keep. */
   similarKeys?: string[];
   similarKeep?: number;
+  /** Criteria the user named and saved, to compare side by side. */
+  savedCriteria?: SavedCriteria[];
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -96,6 +105,7 @@ function loadSettings(): Settings {
       plan: { ...DEFAULT_SETTINGS.plan, ...raw.plan },
       similarKeys: Array.isArray(raw.similarKeys) ? raw.similarKeys.filter(known) : undefined,
       similarKeep: typeof raw.similarKeep === 'number' ? raw.similarKeep : undefined,
+      savedCriteria: Array.isArray(raw.savedCriteria) ? raw.savedCriteria : undefined,
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -360,9 +370,28 @@ export interface ReportOpenRequest {
   seq: number;
 }
 
+interface SetOption {
+  key: string;
+  label: string;
+  group?: string;
+  hidden?: boolean;
+}
+
+/** Trade-set choices in their dropdown sections; a hidden one shows only while it is chosen. */
+const setOptionGroups = (options: SetOption[], chosen: string) => {
+  const groups = new Map<string, SetOption[]>();
+  for (const o of options)
+    if (!o.hidden || o.key === chosen)
+      groups.set(o.group ?? '', [...(groups.get(o.group ?? '') ?? []), o]);
+  return [...groups.entries()];
+};
+
 /** The report's OTM 2 is the saved run itself (with the report's groups), so open that. */
 const reportSetKey = (key: string) =>
   key === 'otm2' ? 'saved' : /^(otm[0-7]|band\d{1,2})$/.test(key) ? key : 'saved';
+
+/** Rows built from a cached list, so returning to it skips the rebuild. */
+const builtRows = new WeakMap<object, ReturnType<typeof buildDayRows>>();
 
 export default function TradeExplorer({
   theme,
@@ -391,21 +420,35 @@ export default function TradeExplorer({
   const [detailWidth, setDetailWidth] = useState(46);
   const [detailFullscreen, setDetailFullscreen] = useState(false);
   const [showCharts, setShowCharts] = useState(false);
+  const [showSplits, setShowSplits] = useState(false);
+  const [splitOutcome, setSplitOutcome] = useState<Outcome>('maxLoss');
+  const [splitMode, setSplitMode] = useState<
+    'groups' | 'worst' | 'split' | 'bands' | 'sets' | 'saved'
+  >('groups');
+  const [otherRows, setOtherRows] = useState<DayRow[] | null>(null);
+  const [splitTrail, setSplitTrail] = useState<
+    Array<{ label: string; key: string; prev: ColumnFilter | undefined }>
+  >([]);
   const ROW_HEIGHT = compact ? 27 : 36;
   const [days, setDays] = useState<DayRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings>(loadSettings);
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   const [selected, setSelected] = useState<string | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const [columnsAnchor, setColumnsAnchor] = useState<DOMRect | null>(null);
   const closeColumns = useCallback(() => setColumnsAnchor(null), []);
   const scroller = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, height: 600 });
   const [tradeSet, setTradeSet] = useState('saved');
-  const [setOptions, setSetOptions] = useState([{ key: 'saved', label: 'Saved run · OTM 2' }]);
+  const [setOptions, setSetOptions] = useState<SetOption[]>([
+    { key: 'saved', label: 'Saved run · OTM 2' },
+  ]);
   const [setLabel, setSetLabel] = useState('Saved run · OTM 2');
   const [unavailableDays, setUnavailableDays] = useState(0);
   const [loadingSet, setLoadingSet] = useState(false);
+  /** Bumped when "Update data" finishes, so the saved run is read again. */
+  const [reloadKey, setReloadKey] = useState(0);
   /** Which underlying|set the rows in `days` belong to, so a report click waits for the right ones. */
   const [daysKey, setDaysKey] = useState('');
   const pendingOpen = useRef<ReportOpenRequest | null>(null);
@@ -441,23 +484,28 @@ export default function TradeExplorer({
     setError(null);
     setOpen(new Set());
     setLoadingSet(true);
-    if (loadedUnderlying.current !== underlying) setDays(null);
+    const url = `/api/signal-backtest/explorer-sets?underlying=${underlying}&set=${tradeSet}&v=${reloadKey}`;
+    // A list already in the cache draws at once, without a "Loading" step in between.
+    if (loadedUnderlying.current !== underlying && !cachedValue(url)) setDays(null);
     loadedUnderlying.current = underlying;
-    const ctl = new AbortController();
-    fetch(`/api/signal-backtest/explorer-sets?underlying=${underlying}&set=${tradeSet}`, {
-      signal: ctl.signal,
-    })
-      .then(async (res) => {
-        const body = (await res.json()) as {
-          ok: boolean;
-          rows?: SavedRow[];
-          setOptions?: Array<{ key: string; label: string }>;
-          setLabel?: string;
-          skipped?: unknown[];
-          error?: string;
-        };
+    let live = true;
+    // Kept in the explorer cache, so switching index or trade set back is instant.
+    cachedJson<{
+      ok: boolean;
+      rows?: SavedRow[];
+      setOptions?: SetOption[];
+      setLabel?: string;
+      skipped?: unknown[];
+      error?: string;
+    }>(url)
+      .then((body) => {
+        if (!live) return;
         if (body.ok && body.rows) {
-          const built = buildDayRows(body.rows, underlying);
+          let built = builtRows.get(body.rows);
+          if (!built) {
+            built = buildDayRows(body.rows, underlying);
+            builtRows.set(body.rows, built);
+          }
           if (body.setOptions) setSetOptions(body.setOptions);
           setSetLabel(body.setLabel ?? tradeSet);
           setUnavailableDays(body.skipped?.length ?? 0);
@@ -467,11 +515,37 @@ export default function TradeExplorer({
         } else setError(body.error ?? 'The saved run could not be read.');
       })
       .catch((e: unknown) => {
-        if (!ctl.signal.aborted) setLoadingSet(false);
-        if (!ctl.signal.aborted) setError(`The saved run could not be read: ${String(e)}`);
+        if (!live) return;
+        setLoadingSet(false);
+        setError(`The saved run could not be read: ${String(e)}`);
       });
-    return () => ctl.abort();
-  }, [underlying, tradeSet]);
+    return () => {
+      live = false;
+    };
+  }, [underlying, tradeSet, reloadKey]);
+
+  // The other index's days for the same trade set, loaded only while the panel is open.
+  const otherUnderlying: SignalUnderlying = underlying === 'NIFTY' ? 'SENSEX' : 'NIFTY';
+  useEffect(() => {
+    if (!showSplits) return;
+    setOtherRows(null);
+    let live = true;
+    const url = `/api/signal-backtest/explorer-sets?underlying=${otherUnderlying}&set=${tradeSet}&v=${reloadKey}`;
+    cachedJson<{ ok: boolean; rows?: SavedRow[] }>(url)
+      .then((body) => {
+        if (!live || !body.ok || !body.rows) return;
+        let built = builtRows.get(body.rows);
+        if (!built) {
+          built = buildDayRows(body.rows, otherUnderlying);
+          builtRows.set(body.rows, built);
+        }
+        setOtherRows(built);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [showSplits, otherUnderlying, tradeSet, reloadKey]);
 
   useEffect(() => {
     try {
@@ -521,10 +595,10 @@ export default function TradeExplorer({
   }, [columnKeys, similar]);
 
   const scored = useMemo(() => (days ? withSimilarity(days, similar) : []), [days, similar]);
-  const filtered = useMemo(() => {
-    const kept = applyFilters(scored, filters);
-    return similar ? nearest(kept, similar.keep) : kept;
-  }, [scored, filters, similar]);
+  const filtered = useMemo(
+    () => applyFilters(similar ? nearest(scored, similar.keep) : scored, filters),
+    [scored, filters, similar],
+  );
   const items = useMemo(() => buildItems(filtered, sort, plan, open), [filtered, sort, plan, open]);
   const summary = useMemo(() => lossSummary(filtered), [filtered]);
   const baseline = useMemo(() => lossSummary(days ?? []), [days]);
@@ -545,6 +619,17 @@ export default function TradeExplorer({
     [scored, similar],
   );
   const selectedIndex = dayItems.findIndex((d) => d.raw.date === selected);
+  // Fetch the days either side of the open one while idle, so ↑ / ↓ and the next click are instant.
+  useEffect(() => {
+    if (selectedIndex < 0) return;
+    const id = setTimeout(() => {
+      for (const d of [1, -1, 2, -2]) {
+        const next = dayItems[selectedIndex + d];
+        if (next) prefetchDay(underlying, next.raw);
+      }
+    }, 250);
+    return () => clearTimeout(id);
+  }, [selectedIndex, dayItems, underlying]);
 
   const update = (patch: Partial<Settings>) => setSettings((s) => ({ ...s, ...patch }));
   const setPlan = (patch: Partial<GroupPlan>) => {
@@ -775,6 +860,12 @@ export default function TradeExplorer({
         }}
         className="cursor-pointer hover:bg-[var(--bg-hover)]"
         onClick={() => setSelected(date)}
+        // Resting on a row starts its chart and chain downloading, so the click opens at once.
+        onMouseEnter={() => {
+          clearTimeout(hoverTimer.current);
+          hoverTimer.current = setTimeout(() => prefetchDay(underlying, it.row.raw, true), 120);
+        }}
+        onMouseLeave={() => clearTimeout(hoverTimer.current)}
       >
         {columns.flatMap((c, i) => {
           const v = it.row.values[c.key];
@@ -870,11 +961,20 @@ export default function TradeExplorer({
             value={tradeSet}
             onChange={(e) => chooseTradeSet(e.target.value)}
           >
-            {setOptions.map((option) => (
-              <option key={option.key} value={option.key}>
-                {option.label}
-              </option>
-            ))}
+            {setOptionGroups(setOptions, tradeSet).map(([group, options]) => {
+              const list = options.map((option) => (
+                <option key={option.key} value={option.key}>
+                  {option.label}
+                </option>
+              ));
+              return group ? (
+                <optgroup key={group} label={group}>
+                  {list}
+                </optgroup>
+              ) : (
+                list
+              );
+            })}
           </select>
         </label>
         <label>
@@ -959,7 +1059,26 @@ export default function TradeExplorer({
           />{' '}
           Analysis charts
         </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={showSplits}
+            onChange={(e) => {
+              setShowSplits(e.target.checked);
+              if (!e.target.checked) setSplitTrail([]);
+            }}
+          />{' '}
+          What differs
+        </label>
         <span className="flex-1" />
+        <TradeExplorerUpdate
+          underlying={underlying}
+          onUpdated={() => {
+            clearExplorerCache();
+            clearSlimSets();
+            setReloadKey((k) => k + 1);
+          }}
+        />
         <div className="te-theme">
           {['midnight', 'paper'].map((p) => (
             <button
@@ -1211,6 +1330,9 @@ export default function TradeExplorer({
               Compare with {selected} instead
             </button>
           )}
+          <button type="button" className="te-similar-action" onClick={() => setShowSplits(true)}>
+            What differs
+          </button>
           <button type="button" className="te-similar-action" onClick={stopSimilar}>
             Stop ×
           </button>
@@ -1231,7 +1353,7 @@ export default function TradeExplorer({
           ) : (
             <span className="te-similar-note">
               Distance 0 is identical; 1 is about one typical spread away on each column. The
-              figures below describe these days only.
+              figures below describe these days only. Column filters narrow these days.
             </span>
           )}
         </div>
@@ -1312,6 +1434,99 @@ export default function TradeExplorer({
             onCompare={setCompareBy}
             gridBy={gridBy}
             onGrid={setGridBy}
+          />
+        </div>
+      )}
+      {showSplits && (
+        <div className="te-analysis-overlay">
+          <div className="te-analysis-overlay-heading">
+            <strong>What differs between these days</strong>
+            <button
+              onClick={() => {
+                setShowSplits(false);
+                setSplitTrail([]);
+              }}
+              aria-label="Close what differs"
+            >
+              Close ×
+            </button>
+          </div>
+          <TradeExplorerSplits
+            rows={filtered}
+            outcome={splitOutcome}
+            onOutcome={setSplitOutcome}
+            mode={splitMode}
+            onMode={setSplitMode}
+            trail={splitTrail.map((s) => s.label)}
+            onBack={() => {
+              const last = splitTrail[splitTrail.length - 1];
+              if (!last) return;
+              setFilter(last.key, last.prev);
+              setSplitTrail(splitTrail.slice(0, -1));
+            }}
+            onPick={(key, side, label, close) => {
+              const c = COLUMN_BY_KEY.get(key);
+              if (!c) return;
+              const prev = filters[key];
+              setFilter(key, bucketFilter(c, { id: '', label, rows: side }));
+              if (close) {
+                setShowSplits(false);
+                setSplitTrail([]);
+              } else setSplitTrail([...splitTrail, { label, key, prev }]);
+            }}
+            onPickMany={(picks, close) => {
+              const made = picks.flatMap((pk) => {
+                const c = COLUMN_BY_KEY.get(pk.key);
+                return c ? [{ ...pk, c, prev: filters[pk.key] }] : [];
+              });
+              if (!made.length) return;
+              for (const m of made)
+                setFilter(m.key, bucketFilter(m.c, { id: '', label: m.label, rows: m.side }));
+              setSettings((cur) => {
+                const miss = (list: string[]) =>
+                  made.map((m) => m.key).filter((k) => !list.includes(k));
+                const add = miss(cur.columns);
+                const addDetail = cur.detailColumns ? miss(cur.detailColumns) : [];
+                if (!add.length && !addDetail.length) return cur;
+                return {
+                  ...cur,
+                  columns: [...cur.columns, ...add],
+                  detailColumns: cur.detailColumns
+                    ? [...cur.detailColumns, ...addDetail]
+                    : cur.detailColumns,
+                };
+              });
+              if (close) {
+                setShowSplits(false);
+                setSplitTrail([]);
+              } else
+                setSplitTrail([
+                  ...splitTrail,
+                  ...made.map((m) => ({ label: m.label, key: m.key, prev: m.prev })),
+                ]);
+            }}
+            onOpenDay={(date) => {
+              setSelected(date);
+              setShowSplits(false);
+              setSplitTrail([]);
+            }}
+            underlying={underlying}
+            tradeSet={tradeSet}
+            allRows={days ?? []}
+            current={{ filters, similar }}
+            saved={settings.savedCriteria ?? []}
+            onSaved={(list) => update({ savedCriteria: list })}
+            onLoad={(c) => {
+              if (!c.similar && similar) stopSimilar();
+              update({ filters: c.filters });
+              if (c.similar) {
+                if (!similar) sortBeforeSimilar.current = sort;
+                setSimilar(c.similar);
+                update({ sort: { key: SIMILAR_KEY, dir: 1 } });
+              }
+              setSplitTrail([]);
+            }}
+            other={otherRows ? { name: otherUnderlying, rows: otherRows } : undefined}
           />
         </div>
       )}

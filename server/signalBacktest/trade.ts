@@ -631,6 +631,25 @@ function pickByPremium(
   return best ? best.strike : `no ${kind} strike priced ₹${lo}–${hi} at ${hhmmAt(entryIdx)}`;
 }
 
+/**
+ * Every strike's entry price on one side at `entryIdx` (same convention as the trade itself), for
+ * tools that pick strikes their own way — the Strangle Max Loss report builder's price bands.
+ */
+export function entryPricesAt(
+  day: DaySeries,
+  kind: OptionKind,
+  entryIdx: number,
+  ohlc: OhlcSource | null,
+): Array<{ strike: number; price: number }> {
+  const out: Array<{ strike: number; price: number }> = [];
+  for (const strike of candidateStrikes(day, kind, ohlc)) {
+    const prices = legPrices(day, kind, strike, ohlc);
+    const e = prices && entryOf(prices, entryIdx);
+    if (e) out.push({ strike, price: e.price });
+  }
+  return out.sort((a, b) => a.strike - b.strike);
+}
+
 /** Every strike a PREMIUM-mode leg could take on one side: the day's own ladder plus the OHLC source's. */
 function candidateStrikes(day: DaySeries, kind: OptionKind, ohlc: OhlcSource | null): number[] {
   const strikes = new Set<number>(Object.keys(kind === 'CE' ? day.ce : day.pe).map(Number));

@@ -9,6 +9,7 @@
  * Reads GET /api/signal-backtest/day, which serves the same cache the run reads, so the chart and the
  * table cannot disagree.
  */
+import { cachedJson, cachedValue, dayUrl } from '../lib/explorerCache';
 import { useEffect, useRef, useState } from 'react';
 import {
   BaselineSeries,
@@ -305,6 +306,8 @@ function addTradePnlPane(
 interface Props {
   /** The detail pane already supplies date navigation and close controls. */
   embedded?: boolean;
+  /** Reuse the Trade Explorer's day cache (its data only changes on "Update data"). */
+  cached?: boolean;
   theme: Theme;
   underlying: SignalUnderlying;
   row: SignalBacktestRow;
@@ -325,8 +328,11 @@ export default function SignalDayChart({
   canStep,
   fillLegs,
   embedded = false,
+  cached = false,
 }: Props) {
-  const [data, setData] = useState<SignalDayResponse | null>(null);
+  const [data, setData] = useState<SignalDayResponse | null>(() =>
+    cached ? (cachedValue<SignalDayResponse>(dayUrl(underlying, row)) ?? null) : null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<View>(loadView);
   const [shown, setShown] = useState<GreekKey[]>(loadGreeks);
@@ -340,6 +346,25 @@ export default function SignalDayChart({
   const tradeLegs = row.trade.legs.map((l) => `${l.kind}:${l.strike}`).join(',');
 
   useEffect(() => {
+    if (cached) {
+      const url = dayUrl(underlying, row);
+      const hit = cachedValue<SignalDayResponse>(url);
+      setData(hit ?? null);
+      setError(null);
+      if (hit) return;
+      let live = true;
+      cachedJson<SignalDayResponse | { ok: false; error?: string }>(url)
+        .then((body) => {
+          if (!body.ok) throw new Error(('error' in body && body.error) || 'No day data');
+          if (live) setData(body);
+        })
+        .catch((e: unknown) => {
+          if (live) setError(e instanceof Error ? e.message : String(e));
+        });
+      return () => {
+        live = false;
+      };
+    }
     const ctrl = new AbortController();
     setData(null);
     setError(null);
@@ -365,7 +390,9 @@ export default function SignalDayChart({
         setError(e instanceof Error ? e.message : String(e));
       });
     return () => ctrl.abort();
-  }, [underlying, row.date, row.source, row.ohlcSource, ceStrike, peStrike, tradeLegs]);
+    // `row` itself is read only through the keys listed here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [underlying, row.date, row.source, row.ohlcSource, ceStrike, peStrike, tradeLegs, cached]);
 
   // ── Trade view ──────────────────────────────────────────────────────────────
   useEffect(() => {

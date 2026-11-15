@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import { emptyGrid, SESSION_BARS, type DaySeries } from '../analysis/daySeries.ts';
-import { explorerDaySets, explorerSetOptions } from './explorerSets.ts';
+import { explorerDaySets, explorerSetOptions, parseSetKey } from './explorerSets.ts';
 import type { SignalBacktestRow } from './routes.ts';
 
 function fixture() {
@@ -66,9 +66,17 @@ test('price-band selection uses the report range for that expiry distance', () =
   base.dte = 4;
   const r = explorerDaySets(base, day, null, 'NIFTY', 'band5');
   expect(r.trade).not.toBeNull();
-  expect(r.label).toContain('₹45–66.1');
-  for (const leg of r.trade!.legs) {
-    expect(leg.entryPrice).toBeGreaterThanOrEqual(45);
-    expect(leg.entryPrice).toBeLessThanOrEqual(66.1);
-  }
+  expect(r.label).toBe('₹45–66 band');
+  // Report rule: per leg, the price nearest the band's middle (55.55), up to one width outside.
+  expect(r.trade!.legs.map((l) => l.entryPrice)).toEqual([65, 50]);
+});
+
+test('bands are listed per expiry distance, the way the report ranks them', () => {
+  const options = explorerSetOptions('NIFTY');
+  expect(options.find((o) => o.key === 'band11@0')?.label).toBe('Exp · ₹36–51 per leg');
+  expect(options.find((o) => o.key === 'band11@1')?.label).toBe('Exp−1 · ₹52–76 per leg');
+  // The bare key the report sends on a day click still works, unlisted.
+  expect(options.find((o) => o.key === 'band11')?.hidden).toBe(true);
+  expect(parseSetKey('band11@2')).toEqual({ set: 'band11', dte: 2 });
+  expect(parseSetKey('otm3')).toEqual({ set: 'otm3', dte: null });
 });

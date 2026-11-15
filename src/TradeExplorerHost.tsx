@@ -4,8 +4,9 @@
  * explorer, with the report's strike choice (OTM step or price band) as the trade set. Both views
  * stay loaded, so going back to the report keeps its place.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import TradeExplorer, { type ReportOpenRequest } from './TradeExplorer';
+import ShareMaxLossReport, { type ReportInfo } from './components/ShareMaxLossReport';
 import type { SignalUnderlying } from './lib/signalBacktest';
 import type { Theme } from './types';
 
@@ -14,6 +15,16 @@ const VIEW_KEY = 'nubra-trade-explorer-view';
 const UNDERLYINGS: SignalUnderlying[] = ['NIFTY', 'SENSEX'];
 
 type View = 'report' | 'trades';
+
+/**
+ * Hidden views stay laid out (visibility, not display: none). With display: none the browser
+ * throws the report's layout away and rebuilds all 14 MB of it on every switch back, which froze
+ * the page for about half a second; hidden this way, switching is just a repaint.
+ */
+const shownStyle = (on: boolean): CSSProperties =>
+  on
+    ? { visibility: 'visible', zIndex: 1 }
+    : { visibility: 'hidden', pointerEvents: 'none', zIndex: 0 };
 
 const remembered = (): { view: View; underlying: SignalUnderlying } => {
   try {
@@ -40,6 +51,22 @@ export default function TradeExplorerHost({ theme }: { theme: Theme }) {
   const frames = useRef(new Map<SignalUnderlying, HTMLIFrameElement>());
   const [request, setRequest] = useState<ReportOpenRequest | null>(null);
   const [from, setFrom] = useState<string | null>(null);
+  // Each report's file date and range; re-read whenever the report view is shown, so a report
+  // rebuilt by "Update data" reloads (its iframe address carries the file time).
+  const [info, setInfo] = useState<Partial<Record<SignalUnderlying, ReportInfo>>>({});
+  useEffect(() => {
+    if (view !== 'report') return;
+    const ctl = new AbortController();
+    fetch(`/api/signal-backtest/max-loss-report/info?underlying=${reportUnderlying}`, {
+      signal: ctl.signal,
+    })
+      .then((r) => r.json() as Promise<ReportInfo>)
+      .then((i) => setInfo((m) => ({ ...m, [reportUnderlying]: i })))
+      .catch(() => {
+        if (!ctl.signal.aborted) setInfo((m) => ({ ...m, [reportUnderlying]: { ok: false } }));
+      });
+    return () => ctl.abort();
+  }, [view, reportUnderlying]);
 
   useEffect(() => {
     try {
@@ -127,6 +154,11 @@ export default function TradeExplorerHost({ theme }: { theme: Theme }) {
             <span className="text-[var(--text-muted)]">
               Strangle Max Loss report · click any day in it to open that trade here
             </span>
+            <span className="flex-1" />
+            <ShareMaxLossReport
+              underlying={reportUnderlying}
+              info={info[reportUnderlying] ?? null}
+            />
           </>
         ) : (
           from && (
@@ -145,26 +177,29 @@ export default function TradeExplorerHost({ theme }: { theme: Theme }) {
           <div
             key={u}
             className="absolute inset-0"
-            style={{ display: view === 'report' && reportUnderlying === u ? 'block' : 'none' }}
+            style={shownStyle(view === 'report' && reportUnderlying === u)}
           >
             {!ready.has(u) && (
               <div className="absolute inset-0 p-4 text-[12px] text-[var(--text-muted)]">
                 Loading the {u} report…
               </div>
             )}
-            <iframe
-              ref={(el) => {
-                if (el) frames.current.set(u, el);
-                else frames.current.delete(u);
-              }}
-              title={`${u} Strangle Max Loss report`}
-              src={`/api/signal-backtest/max-loss-report?underlying=${u}`}
-              className="h-full w-full border-0"
-              onLoad={() => setReady((r) => new Set([...r, u]))}
-            />
+            {/* Waits for the file time, so the 14 MB report loads once, not twice. */}
+            {info[u] && (
+              <iframe
+                ref={(el) => {
+                  if (el) frames.current.set(u, el);
+                  else frames.current.delete(u);
+                }}
+                title={`${u} Strangle Max Loss report`}
+                src={`/api/signal-backtest/max-loss-report?underlying=${u}${info[u]?.mtime ? `&v=${Math.round(info[u]!.mtime!)}` : ''}`}
+                className="h-full w-full border-0"
+                onLoad={() => setReady((r) => new Set([...r, u]))}
+              />
+            )}
           </div>
         ))}
-        <div className="absolute inset-0" style={{ display: view === 'trades' ? 'block' : 'none' }}>
+        <div className="absolute inset-0" style={shownStyle(view === 'trades')}>
           <TradeExplorer theme={theme} openRequest={request} />
         </div>
       </div>

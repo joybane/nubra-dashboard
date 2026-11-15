@@ -13,11 +13,18 @@
  * local parquet tree. The signal rules are the Analysis ones, validated by the Analysis
  * `parseFinderParams`; nothing in server/analysis is changed or re-registered here.
  */
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply } from 'fastify';
+import { gunzipSync } from 'zlib';
 import { createReadStream } from 'fs';
 import { stat, readFile } from 'fs/promises';
-import { classifyExplorerSets, explorerDaySets, explorerSetOptions } from './explorerSets.ts';
+import {
+  classifyExplorerSets,
+  explorerDaySets,
+  explorerSetOptions,
+  parseSetKey,
+} from './explorerSets.ts';
 import { MAX_LOSS_REPORT_FILE, withExplorerHook } from './maxLossReport.ts';
+import { createExplorerSetStore, type SavedRun } from './explorerSetStore.ts';
 import path from 'path';
 import type { FinderParams } from '../analysis/caseFinder.ts';
 import {
@@ -719,6 +726,41 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
   });
 
   const explorerCache = new Map<string, Promise<unknown>>();
+  // The saved run parsed once per file version (8 MB of JSON; a day-click used to re-parse it).
+  const savedRuns = new Map<string, { mtime: number; run: Promise<Record<string, unknown>> }>();
+  const readSavedRun = (underlying: string, file: string, mtime: number) => {
+    const hit = savedRuns.get(underlying);
+    if (hit && hit.mtime === mtime) return hit.run;
+    const run = readFile(file, 'utf8').then((t) => JSON.parse(t) as Record<string, unknown>);
+    savedRuns.set(underlying, { mtime, run });
+    run.catch(() => savedRuns.delete(underlying));
+    return run;
+  };
+  const setStore = createExplorerSetStore({
+    rootDir,
+    readSavedRun: async (underlying) => {
+      const file = path.join(rootDir, '.signal-cache', underlying, SAVED_RUN_FILE);
+      const mtime = (await stat(file)).mtimeMs;
+      return { run: (await readSavedRun(underlying, file, mtime)) as SavedRun, mtime };
+    },
+    readDay: (underlying, source, date) => readDay(underlying, source, date),
+    resolveOhlc,
+    log: (msg) => fastify.log.warn(msg),
+  });
+  /** A stored gzipped JSON body, passed on as it is when the browser takes gzip. */
+  const sendGzipJson = (
+    req: { headers: Record<string, string | string[] | undefined> },
+    reply: FastifyReply,
+    body: Buffer,
+  ) => {
+    reply.header('Content-Type', 'application/json; charset=utf-8');
+    reply.header('Vary', 'Accept-Encoding');
+    if (/\bgzip\b/.test(String(req.headers['accept-encoding'] ?? ''))) {
+      reply.header('Content-Encoding', 'gzip');
+      return reply.send(body);
+    }
+    return reply.send(gunzipSync(body));
+  };
   fastify.get<{ Querystring: { underlying?: string; set?: string; date?: string } }>(
     '/api/signal-backtest/explorer-sets',
     async (req, reply) => {
@@ -733,11 +775,29 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
         return reply.code(400).send({ ok: false, error: 'Unknown trade set' });
       const file = path.join(rootDir, '.signal-cache', underlying, SAVED_RUN_FILE);
       const stamp = await stat(file);
+      // Whole lists come from the trade-set store: built once per saved run, sent as stored.
+      if (!req.query.date) {
+        const stored = await setStore.ready(underlying, selected).catch(() => null);
+        if (stored) return sendGzipJson(req, reply, stored);
+        if (selected === 'saved') {
+          // The explorer just opened: build every other set in the background meanwhile.
+          void setStore.ensure(underlying).catch(() => undefined);
+        } else {
+          return sendGzipJson(req, reply, await setStore.list(underlying, selected));
+        }
+      }
       const key = `${underlying}|${selected}|${req.query.date ?? 'all'}|${stamp.mtimeMs}`;
       let pending = explorerCache.get(key);
       if (!pending) {
         pending = (async () => {
-          const saved = JSON.parse(await readFile(file, 'utf8'));
+          // A shallow copy: the parsed run is shared, only `rows` is replaced below.
+          const saved = { ...(await readSavedRun(underlying, file, stamp.mtimeMs)) } as Record<
+            string,
+            unknown
+          > & {
+            rows: SignalBacktestRow[];
+            tradeParams?: { strikeMode?: string; otmSteps?: number };
+          };
           const savedLabel =
             saved.tradeParams?.strikeMode === 'OTM'
               ? `OTM ${saved.tradeParams.otmSteps}`
@@ -747,6 +807,10 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
             return { ...saved, skipped: [], setOptions: options, setLabel: options[0].label };
           if (req.query.date)
             saved.rows = saved.rows.filter((row: SignalBacktestRow) => row.date === req.query.date);
+          // A per-expiry band (`band11@0`) covers only that column's days, as in the report.
+          const { set: setKey, dte: onlyDte } = parseSetKey(selected);
+          if (onlyDte != null)
+            saved.rows = saved.rows.filter((row: SignalBacktestRow) => row.dte === onlyDte);
           const rows = [];
           const skipped: Array<{ date: string; reason: string }> = [];
           for (const base of saved.rows as SignalBacktestRow[]) {
@@ -762,7 +826,7 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
               base.expiry,
               true,
             );
-            const result = explorerDaySets(base, day, ohlc, underlying, selected);
+            const result = explorerDaySets(base, day, ohlc, underlying, setKey);
             if (selected !== 'saved' && !result.trade) {
               skipped.push({
                 date: base.date,
@@ -814,7 +878,11 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
           };
         })();
         explorerCache.set(key, pending);
-        if (explorerCache.size > 2) explorerCache.delete(explorerCache.keys().next().value!);
+        // Whole lists are large, so only two are kept; one-day answers are small and many.
+        const oneDay = (k: string) => !k.includes('|all|');
+        const same = [...explorerCache.keys()].filter((k) => oneDay(k) === oneDay(key));
+        for (const k of same.slice(0, Math.max(0, same.length - (oneDay(key) ? 400 : 2))))
+          explorerCache.delete(k);
         pending.catch(() => explorerCache.delete(key));
       }
       return pending;
@@ -824,7 +892,30 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
   // The Strangle Max Loss report, shown in the Trade Explorer's Report view. Its day-clicks are
   // handed to the explorer (see maxLossReport.ts); the file itself is never changed.
   const reportCache = new Map<string, { mtime: number; html: string }>();
+  // What the report covers (written by loss-analysis-work/report-build/update_report.mjs).
   fastify.get<{ Querystring: { underlying?: string } }>(
+    '/api/signal-backtest/max-loss-report/info',
+    async (req, reply) => {
+      const underlying = String(req.query.underlying ?? 'NIFTY').toUpperCase();
+      if (!(UNDERLYINGS as readonly string[]).includes(underlying)) {
+        reply.code(400);
+        return { ok: false, error: `unsupported underlying ${req.query.underlying}` };
+      }
+      const file = path.join(rootDir, '.signal-cache', underlying, MAX_LOSS_REPORT_FILE);
+      try {
+        const st = await stat(file);
+        const meta = await readFile(file.replace(/\.html$/, '.json'), 'utf8')
+          .then((t) => JSON.parse(t) as Record<string, unknown>)
+          .catch(() => ({}));
+        return { ok: true, underlying, mtime: st.mtimeMs, bytes: st.size, ...meta };
+      } catch {
+        reply.code(404);
+        return { ok: false, error: `no ${underlying} report saved` };
+      }
+    },
+  );
+
+  fastify.get<{ Querystring: { underlying?: string; raw?: string } }>(
     '/api/signal-backtest/max-loss-report',
     async (req, reply) => {
       const underlying = String(req.query.underlying ?? 'NIFTY').toUpperCase();
@@ -840,6 +931,16 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
         reply.code(404);
         reply.type('text/html; charset=utf-8');
         return `<p style="font:14px system-ui;padding:16px">No ${underlying} report saved at ${file}.</p>`;
+      }
+      // raw=1: the page exactly as built, to share or keep (no dashboard hook).
+      if (req.query.raw === '1') {
+        const meta = await readFile(file.replace(/\.html$/, '.json'), 'utf8')
+          .then((t) => JSON.parse(t) as { through?: string })
+          .catch(() => ({}) as { through?: string });
+        const name = `${underlying} Strangle Max Loss${meta.through ? ` to ${meta.through}` : ''}.html`;
+        reply.type('text/html; charset=utf-8');
+        reply.header('Content-Disposition', `attachment; filename="${name}"`);
+        return reply.send(createReadStream(file));
       }
       let cached = reportCache.get(underlying);
       if (!cached || cached.mtime !== mtime) {

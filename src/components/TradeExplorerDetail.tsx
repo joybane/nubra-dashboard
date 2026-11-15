@@ -5,6 +5,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import SignalDayChart from './SignalDayChart';
+import { cachedJson, cachedValue, chainUrl, comparisonUrl } from '../lib/explorerCache';
 import UiIcon from './UiIcon';
 import { IV_CUTS, IV_LEVELS } from '../lib/ivSignal';
 import {
@@ -62,6 +63,8 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
 
 const th = 'px-1.5 py-1 text-right font-normal text-[var(--text-muted)]';
 const td = 'border-t border-[var(--border)] px-1.5 py-0.5 text-right font-mono';
+// OI, Vol, Delta, IV, Call | Strike | Put, IV, Delta, Vol, OI (percent of table width).
+const CHAIN_COL_WIDTHS = [11.5, 11, 6, 6, 10, 11, 10, 6, 6, 11, 11.5];
 const tdName = 'border-t border-[var(--border)] px-1.5 py-0.5 text-left';
 
 function SignalPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderlying }) {
@@ -284,46 +287,58 @@ interface ChainResponse {
 function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderlying }) {
   const { raw } = row;
   const [showAllStrikes, setShowAllStrikes] = useState(false);
-  const [chain, setChain] = useState<ChainResponse | null>(null);
+  const url = chainUrl(underlying, raw);
+  const [chain, setChain] = useState<ChainResponse | null>(
+    () => cachedValue<ChainResponse>(url) ?? null,
+  );
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    const ctl = new AbortController();
-    setChain(null);
+    let live = true;
+    const hit = cachedValue<ChainResponse>(url);
+    setChain(hit ?? null);
     setError(null);
-    const qs = new URLSearchParams({
-      underlying,
-      date: raw.date,
-      source: raw.source,
-      time: raw.signal.t2,
-    });
-    fetch(`/api/signal-backtest/chain?${qs}`, { signal: ctl.signal })
-      .then(async (res) => {
-        const body = await res.json();
-        if (body.ok) setChain(body as ChainResponse);
+    if (hit) return;
+    cachedJson<ChainResponse & { error?: string }>(url)
+      .then((body) => {
+        if (!live) return;
+        if (body.ok) setChain(body);
         else setError(body.error ?? 'The chain could not be read.');
       })
       .catch((e: unknown) => {
-        if (!ctl.signal.aborted) setError(String(e));
+        if (live) setError(String(e));
       });
-    return () => ctl.abort();
-  }, [underlying, raw.date, raw.source, raw.signal.t2]);
+    return () => {
+      live = false;
+    };
+  }, [url]);
 
   // When a trade's chain arrives, scroll the detail pane so the chain sits at
   // the top and the whole ATM ± 7 ladder is readable without scrolling.
   const controlsRef = useRef<HTMLDivElement>(null);
+  // Deferred one frame: the parent's layout effect resets the pane to the top
+  // on every day change and runs after this child's, so scrolling synchronously
+  // was undone whenever the chain came from the cache. `url` is a dependency
+  // because a cached chain can be the same object across days.
   useLayoutEffect(() => {
-    const el = controlsRef.current;
-    if (!chain || !el) return;
-    let pane = el.parentElement;
-    while (pane) {
-      const { overflowY } = getComputedStyle(pane);
-      if ((overflowY === 'auto' || overflowY === 'scroll') && pane.scrollHeight > pane.clientHeight)
-        break;
-      pane = pane.parentElement;
-    }
-    if (!pane) return;
-    pane.scrollTop += el.getBoundingClientRect().top - pane.getBoundingClientRect().top - 8;
-  }, [chain]);
+    if (!chain) return;
+    const frame = requestAnimationFrame(() => {
+      const el = controlsRef.current;
+      if (!el) return;
+      let pane = el.parentElement;
+      while (pane) {
+        const { overflowY } = getComputedStyle(pane);
+        if (
+          (overflowY === 'auto' || overflowY === 'scroll') &&
+          pane.scrollHeight > pane.clientHeight
+        )
+          break;
+        pane = pane.parentElement;
+      }
+      if (!pane) return;
+      pane.scrollTop += el.getBoundingClientRect().top - pane.getBoundingClientRect().top - 8;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [chain, url]);
 
   if (error) {
     return (
@@ -375,18 +390,18 @@ function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderl
       <div className="te-chain-scroll">
         <table
           className="te-centered-chain w-full border-collapse text-[11px]"
-          data-flow={hasFlow}
           style={{ tableLayout: 'fixed' }}
         >
+          {/* Always the full 11-column ladder; days without stored OI/Vol show dashes. */}
           <colgroup>
-            {Array.from({ length: hasFlow ? 11 : 7 }, (_, i) => (
-              <col key={i} />
+            {CHAIN_COL_WIDTHS.map((w, i) => (
+              <col key={i} style={{ width: `${w}%` }} />
             ))}
           </colgroup>
           <thead>
             <tr>
-              {hasFlow && <th className={th}>OI</th>}
-              {hasFlow && <th className={th}>Vol</th>}
+              <th className={th}>OI</th>
+              <th className={th}>Vol</th>
               <th className={th}>Delta</th>
               <th className={th}>IV</th>
               <th className={th}>Call</th>
@@ -394,8 +409,8 @@ function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderl
               <th className={th}>Put</th>
               <th className={th}>IV</th>
               <th className={th}>Delta</th>
-              {hasFlow && <th className={th}>Vol</th>}
-              {hasFlow && <th className={th}>OI</th>}
+              <th className={th}>Vol</th>
+              <th className={th}>OI</th>
             </tr>
           </thead>
           <tbody>
@@ -404,15 +419,13 @@ function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderl
               const peItm = r.strike > chain.spot;
               return (
                 <tr key={r.strike} className={r.strike === chain.atm ? 'te-chain-atm' : undefined}>
-                  {hasFlow && <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.oi, 0)}</td>}
-                  {hasFlow && (
-                    <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.volume, 0)}</td>
-                  )}
+                  <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.oi, 0)}</td>
+                  <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.volume, 0)}</td>
                   <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.delta)}</td>
                   <td className={cls('CE', r.strike, ceItm)}>{plain(r.ce?.iv)}</td>
                   <td className={cls('CE', r.strike, ceItm)}>
                     {ref('CE', r.strike) && (
-                      <span className="mr-1 text-[9px] text-[var(--yellow)]">09:15</span>
+                      <span className="mr-0.5 text-[8px] text-[var(--yellow)]">09:15</span>
                     )}
                     {plain(r.ce?.close)}
                   </td>
@@ -426,15 +439,13 @@ function ChainPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderl
                   <td className={cls('PE', r.strike, peItm)}>
                     {plain(r.pe?.close)}
                     {ref('PE', r.strike) && (
-                      <span className="ml-1 text-[9px] text-[var(--yellow)]">09:15</span>
+                      <span className="ml-0.5 text-[8px] text-[var(--yellow)]">09:15</span>
                     )}
                   </td>
                   <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.iv)}</td>
                   <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.delta)}</td>
-                  {hasFlow && (
-                    <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.volume, 0)}</td>
-                  )}
-                  {hasFlow && <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.oi, 0)}</td>}
+                  <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.volume, 0)}</td>
+                  <td className={cls('PE', r.strike, peItm)}>{plain(r.pe?.oi, 0)}</td>
                 </tr>
               );
             })}
@@ -474,28 +485,32 @@ export default function TradeExplorerDetail({
   onToggleFullscreen: () => void;
   onSelectSet: (key: string) => void;
 }) {
-  const [comparisonRow, setComparisonRow] = useState<DayRow['raw'] | null>(null);
+  type Comparisons = { ok: boolean; rows?: Array<DayRow['raw']>; error?: string };
+  const compareUrl = comparisonUrl(underlying, row.raw.date);
+  const [comparisonRow, setComparisonRow] = useState<DayRow['raw'] | null>(
+    () => cachedValue<Comparisons>(compareUrl)?.rows?.[0] ?? null,
+  );
   const [comparisonError, setComparisonError] = useState<string | null>(null);
   useEffect(() => {
-    setComparisonRow(null);
     setComparisonError(null);
-    if (row.raw.comparisons) return;
-    const ctl = new AbortController();
-    fetch(
-      `/api/signal-backtest/explorer-sets?underlying=${underlying}&set=saved&date=${row.raw.date}`,
-      { signal: ctl.signal },
-    )
-      .then(async (res) => {
-        const body = await res.json();
+    if (row.raw.comparisons) return setComparisonRow(null);
+    const hit = cachedValue<Comparisons>(compareUrl)?.rows?.[0];
+    setComparisonRow(hit ?? null);
+    if (hit) return;
+    let live = true;
+    cachedJson<Comparisons>(compareUrl)
+      .then((body) => {
         if (!body.ok || !body.rows?.[0])
           throw new Error(body.error ?? 'No comparison prices available');
-        setComparisonRow(body.rows[0]);
+        if (live) setComparisonRow(body.rows[0]);
       })
       .catch((error: unknown) => {
-        if (!ctl.signal.aborted) setComparisonError(String(error));
+        if (live) setComparisonError(String(error));
       });
-    return () => ctl.abort();
-  }, [row.raw, underlying]);
+    return () => {
+      live = false;
+    };
+  }, [row.raw, compareUrl]);
   const comparison = row.raw.comparisons ? row.raw : comparisonRow;
   const scrollRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -679,6 +694,7 @@ export default function TradeExplorerDetail({
             <div className="te-detail-chart h-[340px] shrink-0 overflow-hidden rounded border border-[var(--border)]">
               <SignalDayChart
                 embedded
+                cached
                 theme={theme}
                 underlying={underlying}
                 row={row.raw}

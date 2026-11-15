@@ -27,6 +27,7 @@ import { registerBacktestRoutes } from './backtest/routes.ts';
 import { registerNubraBacktestRoutes } from './nubraBacktestRoutes.ts';
 import { registerAnalysisRoutes } from './analysis/routes.ts';
 import { registerSignalBacktestRoutes } from './signalBacktest/routes.ts';
+import { registerExplorerUpdate } from './signalBacktest/explorerUpdate.ts';
 import type { WideSync } from './signalBacktest/wideSource.ts';
 import { createBacktestRefdataStore } from './backtestRefdataStore.ts';
 import { createBacktestBarStore } from './backtestBarStore.ts';
@@ -1807,6 +1808,8 @@ detailSync = registerSignalBacktestRoutes({
           })
       : null,
 }).wideSync;
+// Trade Explorer "Update data": download, re-run with the saved settings, re-add the report groups.
+registerExplorerUpdate({ fastify, rootDir: path.join(__dirname, '..') });
 
 // ─── Shutdown ─────────────────────────────────────────────────────────────────
 // Ctrl+C (directly or through `npm start`'s concurrently), a service stop, or closing the console

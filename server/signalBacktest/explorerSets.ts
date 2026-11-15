@@ -2,6 +2,9 @@ import { REPORT_SETS, REPORT_GROUP_CUTS } from './explorerSetsConfig.ts';
 import { DEFAULT_TRADE_PARAMS, simulateSignalTrade, type OhlcSource } from './trade.ts';
 import { minuteIndex, hhmmAt, type DaySeries } from '../analysis/daySeries.ts';
 import type { SignalBacktestRow } from './routes.ts';
+import { bandRange, dteName, pickBand } from './bandPick.ts';
+
+const STRIKE_STEP: Record<string, number> = { NIFTY: 50, SENSEX: 100 };
 
 export interface ExplorerComparison {
   key: string;
@@ -69,21 +72,59 @@ export function classifyExplorerSets(
     }
   }
 }
-export const explorerSetOptions = (underlying: string) => {
-  const bands = new Set<string>();
-  for (const combos of Object.values(REPORT_SETS[underlying as keyof typeof REPORT_SETS])) {
-    for (const c of combos) if (c.kind === 'band') bands.add(c.key);
+export interface ExplorerSetOption {
+  key: string;
+  label: string;
+  /** Dropdown section. */
+  group?: string;
+  /** Still accepted (the report opens days with it) but not listed unless chosen. */
+  hidden?: boolean;
+}
+
+/** `band11@0` = price band 11 on expiry-day signals only (one cell of the report's Ranking). */
+export const parseSetKey = (key: string) => {
+  const m = /^(band\d{1,2})@(\d)$/.exec(key);
+  return m ? { set: m[1], dte: Number(m[2]) } : { set: key, dte: null };
+};
+
+export const explorerSetOptions = (underlying: string): ExplorerSetOption[] => {
+  // A band number is a position in each expiry distance's own price ladder, so the report only
+  // compares bands within one days-to-expiry column; the dropdown lists them the same way.
+  const config = REPORT_SETS[underlying as keyof typeof REPORT_SETS] as Record<
+    string,
+    Array<{ key: string; kind: string; lo: number | null; hi: number | null }>
+  >;
+  const dtes = Object.keys(config).sort((a, b) => Number(a) - Number(b));
+  const perDte: ExplorerSetOption[] = [];
+  const mixed = new Map<string, string[]>();
+  for (const dte of dtes) {
+    const bands = config[dte]
+      .filter((c) => c.kind === 'band')
+      .sort((x, y) => Number(y.key.slice(4)) - Number(x.key.slice(4)));
+    for (const c of bands) {
+      const range = bandRange(c.lo!, c.hi!);
+      perDte.push({
+        key: `${c.key}@${dte}`,
+        label: `${dteName(Number(dte))} · ${range} per leg`,
+        group: `Price bands · ${dteName(Number(dte))} days only`,
+      });
+      mixed.set(c.key, [...(mixed.get(c.key) ?? []), `${dteName(Number(dte))} ${range}`]);
+    }
   }
   return [
     { key: 'saved', label: 'Saved run · OTM 2' },
     { key: 'worst', label: 'Largest max loss each day · all available sets' },
     ...Array.from({ length: 8 }, (_, n) => ({
       key: `otm${n}`,
-      label: n ? `OTM ${n}` : 'ATM / OTM 0',
+      label: n === 7 ? 'OTM 7 (not in the report)' : `OTM ${n}${n ? '' : ' (ATM)'}`,
+      group: 'Strikes from ATM · all days',
     })),
-    ...[...bands]
-      .sort((a, b) => Number(b.slice(4)) - Number(a.slice(4)))
-      .map((key) => ({ key, label: `Price band ${key.slice(4)} · range by expiry` })),
+    ...perDte,
+    ...[...mixed.entries()].map(([key, ranges]) => ({
+      key,
+      label: `Price band ${key.slice(4)} · ${ranges.join(' · ')}`,
+      hidden: true,
+    })),
   ];
 };
 
@@ -115,25 +156,43 @@ export function explorerDaySets(
   let selectedLabel = '';
   let worstTrade: SignalBacktestRow['trade'] | null = null;
   let worst: ExplorerComparison | null = null;
+  // Every set's trade for this day, for building all the lists in one pass.
+  const trades: Record<string, { trade: SignalBacktestRow['trade']; label: string }> = {};
   for (const def of definitions) {
+    // Bands use the report's rule (nearest the band's middle), priced exactly at those strikes.
+    let exact: { ce: number; pe: number } | null = null;
+    if (def.kind === 'band') {
+      const e = minuteIndex(base.signal.t2) + DEFAULT_TRADE_PARAMS.delayMinutes;
+      const p = pickBand(
+        day,
+        ohlc,
+        e,
+        STRIKE_STEP[underlying] ?? 50,
+        def.lo!,
+        def.hi!,
+        1000,
+        false,
+      );
+      if (!p) continue;
+      exact = { ce: p.CE.price, pe: p.PE.price };
+    }
     const params = {
       ...DEFAULT_TRADE_PARAMS,
       lots: 1,
       premiumTiersOnly: false,
       strikeMode: def.kind === 'otm' ? ('OTM' as const) : ('PREMIUM' as const),
       otmSteps: def.kind === 'otm' ? Number(def.key.slice(3)) : 2,
-      cePremiumMin: def.lo ?? 0,
-      cePremiumMax: def.hi ?? 0,
-      pePremiumMin: def.lo ?? 0,
-      pePremiumMax: def.hi ?? 0,
+      cePremiumMin: exact ? exact.ce : (def.lo ?? 0),
+      cePremiumMax: exact ? exact.ce : (def.hi ?? 0),
+      pePremiumMin: exact ? exact.pe : (def.lo ?? 0),
+      pePremiumMax: exact ? exact.pe : (def.hi ?? 0),
     };
     const result = simulateSignalTrade(day, minuteIndex(base.signal.t2), params, ohlc, base.dte);
     if (!result.ok) continue;
     const t = result.trade;
     const ce = t.legs.find((l) => l.kind === 'CE');
     const pe = t.legs.find((l) => l.kind === 'PE');
-    const label =
-      def.kind === 'otm' ? def.label : `Band ${def.key.slice(4)} · ₹${def.lo}–${def.hi} per leg`;
+    const label = def.kind === 'otm' ? def.label : `${bandRange(def.lo!, def.hi!)} band`;
     const c = {
       key: def.key,
       label,
@@ -154,6 +213,7 @@ export function explorerDaySets(
       c.maxLossTime = hhmmAt(t.stop.trade.steps[t.stop.trade.steps.length - 1][0]);
     t.maxLossTime = c.maxLossTime;
     comparisons.push(c);
+    trades[def.key] = { trade: t, label };
     if (!worst || c.maxLoss > worst.maxLoss) {
       worst = c;
       worstTrade = t;
@@ -167,5 +227,6 @@ export function explorerDaySets(
     selectedTrade = worstTrade;
     selectedLabel = worst?.label ?? '';
   }
-  return { trade: selectedTrade, label: selectedLabel, worst, comparisons };
+  if (worstTrade && worst) trades.worst = { trade: worstTrade, label: worst.label };
+  return { trade: selectedTrade, label: selectedLabel, worst, comparisons, trades };
 }
