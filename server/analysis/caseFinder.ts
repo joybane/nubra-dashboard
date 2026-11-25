@@ -144,6 +144,7 @@ export function pickLegs(day: DaySeries, params: FinderParams): DayLegs | string
   const start = minuteIndex(params.entryTime);
   if (start < 0) return `entry time ${params.entryTime} is outside the session`;
   const step = strikeStep(day);
+  let missingSeries: string | undefined;
   for (let i = start; i <= start + ENTRY_SLACK_MINUTES && i < day.spot.length; i++) {
     const spot = day.spot[i];
     if (spot == null) continue;
@@ -152,13 +153,19 @@ export function pickLegs(day: DaySeries, params: FinderParams): DayLegs | string
     const peStrike = atm - params.strikeOffset * step;
     const ce = day.ce[String(ceStrike)];
     const pe = day.pe[String(peStrike)];
-    if (!ce || !pe) return `no data for ${ceStrike} CE / ${peStrike} PE`;
+    if (!ce || !pe) {
+      missingSeries ??= `no data for ${ceStrike} CE / ${peStrike} PE`;
+      continue;
+    }
     const ceEntry = ce[i];
     const peEntry = pe[i];
     if (ceEntry == null || peEntry == null) continue;
     return { ceStrike, peStrike, entryTime: hhmmAt(i), entrySpot: spot, ceEntry, peEntry };
   }
-  return `no complete prices within ${ENTRY_SLACK_MINUTES} minutes of ${params.entryTime}`;
+  return (
+    missingSeries ??
+    `no complete prices within ${ENTRY_SLACK_MINUTES} minutes of ${params.entryTime}`
+  );
 }
 
 export function findCases(day: DaySeries, params: FinderParams): DayScan {

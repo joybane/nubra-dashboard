@@ -68,6 +68,10 @@ const contractCache = new Map<string, Promise<Contract>>();
 const strikeIdxCache = new Map<string, Promise<StrikeFile[]>>();
 const expiryDayCache = new Map<string, Promise<ExpiryDay>>();
 const expiryCache = new Map<string, Promise<string[]>>();
+const combinedExpiryCache = new Map<
+  Underlying,
+  Promise<{ union: string[]; weekSet: Set<string> }>
+>();
 
 function num(v: unknown): number {
   return typeof v === 'bigint' ? Number(v) : (v as number);
@@ -131,10 +135,17 @@ export async function resolveExpiry(
     const t = i + offset;
     return t < months.length ? { expiry: months[t], flag: 'MONTH' } : null;
   }
-  const wk = await listExpiries(und, 'WEEK');
-  const mo = await listExpiries(und, 'MONTH');
-  const weekSet = new Set(wk);
-  const union = [...new Set([...wk, ...mo])].sort();
+  let combined = combinedExpiryCache.get(und);
+  if (!combined) {
+    combined = Promise.all([listExpiries(und, 'WEEK'), listExpiries(und, 'MONTH')]).then(
+      ([weeks, months]) => ({
+        union: [...new Set([...weeks, ...months])].sort(),
+        weekSet: new Set(weeks),
+      }),
+    );
+    combinedExpiryCache.set(und, combined);
+  }
+  const { union, weekSet } = await combined;
   const i = union.findIndex((e) => e >= tradeDate);
   if (i === -1) return null;
   const t = i + offset;
@@ -349,5 +360,6 @@ export function clearCaches(): void {
   contractCache.clear();
   strikeIdxCache.clear();
   expiryCache.clear();
+  combinedExpiryCache.clear();
   expiryDayCache.clear();
 }

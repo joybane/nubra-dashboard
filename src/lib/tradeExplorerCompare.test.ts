@@ -4,7 +4,9 @@ import {
   applyCriteria,
   crossTrait,
   crossWorst,
+  criteriaFilters,
   ladder,
+  migrateActiveFilters,
   setLine,
   slimSet,
 } from './tradeExplorerCompare';
@@ -69,10 +71,57 @@ describe('crossWorst / crossTrait', () => {
 });
 
 describe('applyCriteria', () => {
+  test('older rules use the original money basis, while new rules keep face-value amounts', () => {
+    const sensex = [day('a', { gap: 615 }), day('b', { gap: 616 }), day('c', { gap: 2000 })];
+    const nifty = [day('a', { gap: 1999 }), day('b', { gap: 2000 })];
+    const legacy = { name: 'old', filters: { gap: { min: '₹2,000' } }, similar: null };
+    const current = { ...legacy, signalMoneyBasis: 'per-lot' as const };
+    expect(applyCriteria(sensex, legacy, 'SENSEX')).toEqual(sensex.slice(1));
+    expect(applyCriteria(nifty, legacy, 'NIFTY')).toEqual(nifty.slice(1));
+    expect(applyCriteria(sensex, current, 'SENSEX')).toEqual(sensex.slice(2));
+    expect(legacy.filters.gap.min).toBe('₹2,000');
+  });
+
+  test('scaling preserves inclusive equal bounds, numeric exact matches and other criteria', () => {
+    const rows = [
+      day('a', { gap: 818, ceChange: -666, peChange: null, both: 57, maxLoss: 35 }),
+      day('b', { gap: 818, ceChange: -665.99, peChange: null, both: 57, maxLoss: 35 }),
+    ];
+    const legacy = {
+      name: 'old',
+      filters: {
+        gap: { min: '₹2,658.50', max: '2658.5' },
+        ceChange: { values: [-2164.5, 'unchanged'] },
+        peChange: { values: [null] },
+        both: { min: 'not a bound', max: '  ' },
+        maxLoss: { min: '35' },
+      },
+      similar: null,
+    };
+    expect(criteriaFilters(legacy, 'SENSEX')).toEqual({
+      gap: { min: '818', max: '818' },
+      ceChange: { values: [-666, 'unchanged'] },
+      peChange: { values: [null] },
+      both: { min: 'not a bound', max: '  ' },
+      maxLoss: { min: '35' },
+    });
+    expect(applyCriteria(rows, legacy, 'SENSEX')).toEqual(rows.slice(0, 1));
+  });
+
+  test('active filters are migrated once on their stored index', () => {
+    const filters = { gap: { min: '₹2,000' }, maxLoss: { max: '300' } };
+    const first = migrateActiveFilters(filters, 'SENSEX');
+    expect(first.filters.gap.min).toBe(String((2000 * 20) / 65));
+    expect(first.filters.maxLoss).toBe(filters.maxLoss);
+    const second = migrateActiveFilters(first.filters, 'SENSEX', first.filterSettingsVersion);
+    expect(second).toEqual(first);
+    expect(migrateActiveFilters(filters, 'NIFTY').filters).toEqual(filters);
+  });
+
   test('no rows when the similar-days date is not in the list', () => {
     const rows = Array.from({ length: 10 }, (_, i) => day(date(i), { ivRatio: i, maxLoss: i }));
     const c = { name: 'x', filters: {}, similar: { date: 'missing', keys: ['ivRatio'], keep: 5 } };
-    expect(applyCriteria(rows, c)).toEqual([]);
+    expect(applyCriteria(rows, c, 'NIFTY')).toEqual([]);
   });
 });
 

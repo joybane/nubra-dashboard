@@ -1,4 +1,5 @@
 import { chartTheme } from '../lib/chartTheme';
+import { parseTheme } from '../lib/experience';
 import { useAppearanceTheme } from '../hooks/useAppearanceTheme';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -109,11 +110,7 @@ function chartOpts(
 ) {
   return {
     autoSize: true,
-    ...chartTheme(
-      theme === 'light' || theme === 'bloomberg' || theme === 'graphite' || theme === 'apex'
-        ? theme
-        : 'dark',
-    ),
+    ...chartTheme(parseTheme(theme)),
     leftPriceScale: { visible: !hideLeftScale, borderVisible: false, minimumWidth: 75 },
     rightPriceScale: { visible: true, borderVisible: false, minimumWidth: 75 },
     timeScale: {

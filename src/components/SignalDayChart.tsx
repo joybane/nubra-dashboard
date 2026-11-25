@@ -55,11 +55,10 @@ const TOTAL_DOWN = '#ef4444';
 const GREEKS_KEY = 'nubra-signal-backtest-chart-greeks';
 const VIEW_KEY = 'nubra-signal-backtest-chart-view';
 const DEFAULT_GREEKS: GreekKey[] = ['delta', 'theta', 'vega'];
+const CHART_CONTROL =
+  'h-7 rounded px-2 font-medium text-[var(--text-muted)] hover:text-[var(--text-primary)] aria-pressed:bg-[var(--bg-card)] aria-pressed:font-semibold aria-pressed:text-[var(--accent)] aria-pressed:shadow-sm';
 
 type View = 'trade' | 'greeks';
-
-/** Empty slots added after the day's last minute in the trade view, for marker text at the edge. */
-const EDGE_ROOM = 14;
 
 function loadGreeks(): GreekKey[] {
   try {
@@ -106,93 +105,65 @@ function sessionStart(date: string): number {
 
 const clockOf = (t: Time) => new Date((t as number) * 1000).toISOString().slice(11, 16);
 
-/** One line of the hover tooltip. */
-interface TipRow {
-  label: string;
-  value: string;
-  /** Swatch colour; none for a plain line. */
-  color?: string;
-  bold?: boolean;
-}
-
-/** Fills the tooltip with a title and rows, built as DOM nodes (no HTML from data). */
-function paintTip(el: HTMLElement, title: string, rows: TipRow[]): void {
-  el.replaceChildren();
-  const head = document.createElement('div');
-  head.className = 'mb-0.5 font-semibold';
-  head.textContent = title;
-  el.append(head);
-  for (const r of rows) {
-    const line = document.createElement('div');
-    line.className = 'flex items-center justify-between gap-4';
-    if (r.bold) line.classList.add('font-semibold');
-    const left = document.createElement('span');
-    left.className = 'flex items-center gap-1.5';
-    if (r.color) {
-      const swatch = document.createElement('span');
-      swatch.style.cssText = `display:inline-block;width:8px;height:8px;border-radius:2px;background:${r.color}`;
-      left.append(swatch);
-    }
-    left.append(document.createTextNode(r.label));
-    const value = document.createElement('span');
-    value.className = 'font-mono';
-    value.textContent = r.value;
-    line.append(left, value);
-    el.append(line);
-  }
-}
-
-/** Puts the tooltip beside the pointer, on whichever side has room, and shows it. */
-function placeTip(el: HTMLElement, box: HTMLElement, point: { x: number; y: number }): void {
-  const gap = 14;
-  el.style.display = 'block';
-  const w = el.offsetWidth;
-  const h = el.offsetHeight;
-  // The right axis is about 80px wide; stay clear of it as well as of the edge.
-  let x = point.x + gap;
-  if (x + w > box.clientWidth - 80) x = Math.max(0, point.x - gap - w);
-  const y = Math.max(0, Math.min(point.y + gap, box.clientHeight - h - 4));
-  el.style.transform = `translate(${x}px, ${y}px)`;
-}
-
-const hideTip = (el: HTMLElement | null) => {
-  if (el) el.style.display = 'none';
-};
-
 /** A chart in `box` with the axes both views share. */
-function baseChart(box: HTMLElement, theme: Theme): IChartApi {
+function baseChart(box: HTMLElement, theme: Theme, embedded: boolean): IChartApi {
+  const appearance = chartTheme(theme);
   const report = box.closest('.te-report-detail');
   const style = report ? getComputedStyle(box) : null;
   const reportLayout = style
     ? {
-        ...chartTheme(theme).layout,
+        ...appearance.layout,
         background: { type: ColorType.Solid, color: style.getPropertyValue('--bg-card').trim() },
         textColor: style.getPropertyValue('--text-muted').trim(),
         fontFamily: 'Report Mono, Consolas, monospace',
-        fontSize: 12,
       }
-    : null;
+    : appearance.layout;
+  const scale = { visible: true, borderVisible: false, scaleMargins: { top: 0.24, bottom: 0.12 } };
   return createChart(box, {
-    autoSize: true,
-    ...chartTheme(theme),
-    ...(reportLayout ? { layout: reportLayout } : {}),
-    leftPriceScale: { visible: true, borderVisible: false, minimumWidth: 70 },
-    rightPriceScale: { visible: true, borderVisible: false, minimumWidth: 75 },
-    timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
+    ...appearance,
+    width: box.clientWidth,
+    height: box.clientHeight,
+    layout: reportLayout,
+    leftPriceScale: scale,
+    rightPriceScale: scale,
+    timeScale: {
+      borderVisible: false,
+      timeVisible: true,
+      secondsVisible: false,
+      minBarSpacing: 0.15,
+      rightOffsetPixels: 18,
+    },
+    ...(embedded && {
+      handleScroll: { mouseWheel: false },
+      handleScale: { mouseWheel: false },
+    }),
   });
 }
 
-/** Maintain a full-session overview when its container expands or restores. */
-function frameSessionOnResize(chart: IChartApi, box: HTMLElement, last: number) {
-  const fit = () => chart.timeScale().setVisibleLogicalRange({ from: -1, to: last });
-  fit();
+/** Keep minute slots on the shared time scale even when the spot feed has gaps. */
+function spotTimeline(grid: Grid, timeOf: (i: number) => UTCTimestamp) {
+  return Array.from(grid, (value, i) =>
+    value == null ? { time: timeOf(i) } : { time: timeOf(i), value },
+  );
+}
+
+/** Resize and fit together, so two observers cannot overwrite each other's time scale. */
+function frameSessionOnResize(chart: IChartApi, box: HTMLElement) {
+  chart.timeScale().fitContent();
   let width = box.clientWidth;
+  let height = box.clientHeight;
   let frame = 0;
   const observer = new ResizeObserver(() => {
-    if (width === box.clientWidth) return;
-    width = box.clientWidth;
     cancelAnimationFrame(frame);
-    frame = requestAnimationFrame(fit);
+    frame = requestAnimationFrame(() => {
+      const nextWidth = box.clientWidth;
+      const nextHeight = box.clientHeight;
+      if (!nextWidth || !nextHeight || (width === nextWidth && height === nextHeight)) return;
+      chart.resize(nextWidth, nextHeight);
+      if (width !== nextWidth) chart.timeScale().fitContent();
+      width = nextWidth;
+      height = nextHeight;
+    });
   });
   observer.observe(box);
   return () => {
@@ -201,13 +172,201 @@ function frameSessionOnResize(chart: IChartApi, box: HTMLElement, last: number) 
   };
 }
 
-type PnlReading = {
-  label: string;
+/** Pane widgets are created by the chart on its first drawing frame. */
+function labelPanes(chart: IChartApi, labels: string[]) {
+  const frame = requestAnimationFrame(() => {
+    chart.panes().forEach((pane, index) => {
+      const row = pane.getHTMLElement();
+      if (!(row instanceof HTMLTableRowElement) || !labels[index]) return;
+      const label = document.createElement('span');
+      label.className =
+        'signal-day-pane-label pointer-events-none absolute left-2 top-[5px] z-[3] whitespace-nowrap rounded bg-[var(--bg-card)] px-1 py-px font-sans text-[11px] font-semibold leading-normal text-[var(--text-primary)]';
+      label.textContent = labels[index];
+      row.cells[1]?.append(label);
+    });
+  });
+  return () => cancelAnimationFrame(frame);
+}
+
+function SeriesKey({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 whitespace-nowrap text-[var(--text-primary)]">
+      <span aria-hidden className="h-0.5 w-3 rounded" style={{ background: color }} />
+      {label}
+    </span>
+  );
+}
+
+const tradeExtremes = (trade: SignalBacktestRow['trade']) => [
+  { time: trade.maxProfitTime, label: 'Best', value: trade.maxProfit, color: TOTAL_UP },
+  { time: trade.maxLossTime, label: 'Worst', value: trade.maxLoss, color: TOTAL_DOWN },
+];
+
+type HoverValue = {
   series: ISeriesApi<'Line' | 'Baseline'>;
-  money: boolean;
   color: string;
+  format: (value: number) => string;
+};
+
+type HoverRow = {
+  label: string;
+  values: HoverValue[];
   bold?: boolean;
 };
+
+type HoverGroup = { label: string; rows: HoverRow[]; legs?: boolean };
+
+/** Set up one set of value nodes per chart and paint at most once per animation frame. */
+function watchHover(
+  chart: IChartApi,
+  box: HTMLElement,
+  tip: HTMLElement | null,
+  groups: HoverGroup[],
+  trade?: SignalBacktestRow['trade'],
+) {
+  if (!tip) return () => {};
+  const panel = tip;
+  type Paint = (event: MouseEventParams<Time>, clock: string) => void;
+  let paint: Paint | undefined;
+  let previousTime: Time | undefined;
+  let anchorRight: boolean | undefined;
+  let latest: MouseEventParams<Time> | undefined;
+  let frame = 0;
+
+  function buildTip(): Paint {
+    const title = document.createElement('div');
+    title.className = 'border-b border-[var(--border)] pb-1 font-mono font-semibold tabular-nums';
+    const timestamp = document.createTextNode('');
+    title.append(timestamp);
+    panel.append(title);
+    const updates: Paint[] = [];
+
+    for (const group of groups) {
+      const section = document.createElement('section');
+      section.className = 'border-b border-[var(--border)] py-1 last:border-0 last:pb-0';
+      const header = document.createElement('div');
+      header.className = 'flex items-center gap-2 font-semibold text-[var(--text-muted)]';
+      const heading = document.createElement('span');
+      heading.className = 'mr-auto';
+      heading.textContent = group.label;
+      header.append(heading);
+      if (group.legs) {
+        for (const text of ['CE', 'PE']) {
+          const cell = document.createElement('span');
+          cell.className = 'w-[4.25rem] text-right';
+          cell.textContent = text;
+          header.append(cell);
+        }
+      }
+      section.append(header);
+
+      for (const row of group.rows) {
+        const line = document.createElement('div');
+        line.className = 'flex items-center gap-2' + (row.bold ? ' font-semibold' : '');
+        const label = document.createElement('span');
+        label.className = 'mr-auto flex items-center gap-1.5 whitespace-nowrap';
+        label.append(row.label);
+        const swatch = group.legs ? null : document.createElement('span');
+        if (swatch) {
+          swatch.className = 'h-1.5 w-1.5 shrink-0 rounded-sm';
+          swatch.setAttribute('aria-hidden', 'true');
+          label.prepend(swatch);
+        }
+        line.append(label);
+
+        for (const reading of row.values) {
+          const cell = document.createElement('span');
+          cell.className = 'text-right font-mono tabular-nums' + (group.legs ? ' w-[4.25rem]' : '');
+          const node = document.createTextNode('—');
+          cell.append(node);
+          line.append(cell);
+          if (swatch && reading.color !== 'sign') swatch.style.backgroundColor = reading.color;
+          let lastColor: string | undefined;
+          updates.push((event) => {
+            const value = (event.seriesData.get(reading.series) as LineData<Time> | undefined)
+              ?.value;
+            const text = value == null ? '—' : reading.format(value);
+            if (node.data !== text) node.data = text;
+            if (swatch && reading.color === 'sign') {
+              const color = (value ?? 0) >= 0 ? TOTAL_UP : TOTAL_DOWN;
+              if (lastColor !== color) swatch.style.backgroundColor = color;
+              lastColor = color;
+            }
+          });
+        }
+        section.append(line);
+      }
+      if (trade && group.label === 'P&L') {
+        for (const extreme of tradeExtremes(trade)) {
+          const line = document.createElement('div');
+          line.className = 'flex justify-between gap-2';
+          line.style.display = 'none';
+          const label = document.createElement('span');
+          label.textContent = extreme.label;
+          const value = document.createElement('span');
+          value.className = 'font-mono tabular-nums';
+          value.textContent = inr(extreme.value);
+          line.append(label, value);
+          section.append(line);
+          updates.push((_event, clock) => {
+            const display = clock === extreme.time ? '' : 'none';
+            if (line.style.display !== display) line.style.display = display;
+          });
+        }
+      }
+      panel.append(section);
+    }
+
+    return (event, clock) => {
+      timestamp.data = clock;
+      for (const update of updates) update(event, clock);
+    };
+  }
+
+  function leave() {
+    cancelAnimationFrame(frame);
+    frame = 0;
+    latest = undefined;
+    panel.hidden = true;
+  }
+
+  function move(event: MouseEventParams<Time>) {
+    if (event.time == null || !event.point) {
+      leave();
+      return;
+    }
+    latest = event;
+    if (frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      const next = latest;
+      latest = undefined;
+      if (next?.time == null || !next.point) return;
+      if (previousTime !== next.time) {
+        paint ??= buildTip();
+        paint(next, clockOf(next.time));
+        previousTime = next.time;
+      }
+      // Anchor opposite the cursor using the chart model's width, with no layout reads.
+      const right = next.point.x < chart.timeScale().width() / 2;
+      if (anchorRight !== right) {
+        panel.style.left = right ? 'auto' : '8px';
+        panel.style.right = right ? '8px' : 'auto';
+        anchorRight = right;
+      }
+      panel.hidden = false;
+    });
+  }
+
+  chart.subscribeCrosshairMove(move);
+  box.addEventListener('pointerleave', leave);
+  return () => {
+    chart.unsubscribeCrosshairMove(move);
+    box.removeEventListener('pointerleave', leave);
+    leave();
+    panel.replaceChildren();
+  };
+}
 
 function addTradePnlPane(
   chart: IChartApi,
@@ -215,15 +374,19 @@ function addTradePnlPane(
   closes: Array<Grid | null>,
   timeOf: (i: number) => UTCTimestamp,
   paneIndex: number,
-): PnlReading[] {
-  const readable: PnlReading[] = [];
+): HoverRow[] {
+  const readable: HoverRow[] = [];
   const colorOf = (kind: 'CE' | 'PE') => (kind === 'CE' ? CE_COLOR : PE_COLOR);
   const line = (grid: Grid) =>
     grid.flatMap((v, i) => (v == null ? [] : [{ time: timeOf(i), value: v }]));
   // Pane 1: P&L. Each leg thin, the total bold and shaded either side of zero. With one leg the
   // total is that leg, so it is drawn once.
   const pnl = tradePnlSeries(trade, closes);
-  const pnlFormat = { type: 'price', precision: 0, minMove: 1 } as const;
+  const pnlFormat = {
+    type: 'custom',
+    minMove: 1,
+    formatter: (value: number) => `${value < 0 ? '−' : ''}₹${num(Math.abs(value), 0)}`,
+  } as const;
   if (trade.legs.length > 1) {
     trade.legs.forEach((leg, n) => {
       const s = chart.addSeries(
@@ -231,9 +394,8 @@ function addTradePnlPane(
         {
           color: colorOf(leg.kind),
           lineWidth: 1,
-          title: `${leg.kind} P&L`,
           priceLineVisible: false,
-          lastValueVisible: true,
+          lastValueVisible: false,
           priceFormat: pnlFormat,
         },
         paneIndex,
@@ -241,9 +403,7 @@ function addTradePnlPane(
       s.setData(line(pnl.legs[n]));
       readable.push({
         label: `${leg.kind} P&L`,
-        series: s,
-        money: true,
-        color: colorOf(leg.kind),
+        values: [{ series: s, color: colorOf(leg.kind), format: inr }],
       });
     });
   }
@@ -257,9 +417,9 @@ function addTradePnlPane(
       bottomLineColor: TOTAL_DOWN,
       bottomFillColor1: 'rgba(239,68,68,0.03)',
       bottomFillColor2: 'rgba(239,68,68,0.28)',
-      lineWidth: 2,
-      title: trade.legs.length > 1 ? 'Total P&L' : 'P&L',
+      lineWidth: 3,
       priceLineVisible: false,
+      lastValueVisible: false,
       priceFormat: pnlFormat,
     },
     paneIndex,
@@ -273,30 +433,24 @@ function addTradePnlPane(
     axisLabelVisible: false,
     title: '',
   });
-  // The extremes are high/low based, so the label carries the amount; the dot sits on the close line.
+  // The markers sit on the close line. The hover readout gives the high/low-based extremes.
   createSeriesMarkers(
     total,
-    (
-      [
-        [trade.maxProfitTime, 'aboveBar', TOTAL_UP, trade.maxProfit],
-        [trade.maxLossTime, 'belowBar', TOTAL_DOWN, trade.maxLoss],
-      ] as const
-    )
-      .filter(([hhmm]) => pnl.total[slotOf(hhmm)] != null)
-      .sort(([a], [b]) => slotOf(a) - slotOf(b))
-      .map(([hhmm, position, color, value]) => ({
-        time: timeOf(slotOf(hhmm)),
-        position,
-        shape: position === 'aboveBar' ? 'arrowDown' : 'arrowUp',
+    tradeExtremes(trade)
+      .filter(({ time }) => pnl.total[slotOf(time)] != null)
+      .sort((a, b) => slotOf(a.time) - slotOf(b.time))
+      .map(({ time, label, color }) => ({
+        time: timeOf(slotOf(time)),
+        position: label === 'Best' ? 'aboveBar' : 'belowBar',
+        shape: label === 'Best' ? 'arrowDown' : 'arrowUp',
+        size: 0.8,
         color,
-        text: `${position === 'aboveBar' ? 'max profit' : 'max loss'} ${inr(value)}`,
+        text: label,
       })),
   );
   readable.push({
     label: trade.legs.length > 1 ? 'Total P&L' : 'P&L',
-    series: total,
-    money: true,
-    color: 'sign',
+    values: [{ series: total, color: 'sign', format: inr }],
     bold: true,
   });
 
@@ -336,9 +490,25 @@ export default function SignalDayChart({
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<View>(loadView);
   const [shown, setShown] = useState<GreekKey[]>(loadGreeks);
+  const [canDraw, setCanDraw] = useState(!embedded);
   const boxRef = useRef<HTMLDivElement>(null);
-  const readoutRef = useRef<HTMLDivElement>(null);
   const tipRef = useRef<HTMLDivElement>(null);
+
+  // Load the data immediately, then mount the canvases as the chart approaches the scrollport.
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!embedded || !box || canDraw) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) return;
+        observer.disconnect();
+        setCanDraw(true);
+      },
+      { root: box.closest('.te-report-scroll'), rootMargin: '160px 0px' },
+    );
+    observer.observe(box);
+    return () => observer.disconnect();
+  }, [embedded, canDraw]);
 
   const { ceStrike, peStrike } = row.signal.legs;
   // The legs the trade sold, so the server can send their prices; the row's price source tells it
@@ -397,7 +567,7 @@ export default function SignalDayChart({
   // ── Trade view ──────────────────────────────────────────────────────────────
   useEffect(() => {
     const box = boxRef.current;
-    if (view !== 'trade' || !box || !data?.legs) return;
+    if (view !== 'trade' || !canDraw || !box || !data?.legs) return;
     const trade = row.trade;
     const start = sessionStart(data.date);
     const timeOf = (i: number) => (start + i * 60) as UTCTimestamp;
@@ -406,8 +576,7 @@ export default function SignalDayChart({
     const colorOf = (kind: 'CE' | 'PE') => (kind === 'CE' ? CE_COLOR : PE_COLOR);
     const selling = trade.side === 'SELL';
 
-    const chart = baseChart(box, theme);
-    hideTip(tipRef.current);
+    const chart = baseChart(box, theme, embedded);
 
     // Pane 0: the underlying on the right axis, the prices of the legs sold on the left — one pane,
     // so a move in the underlying and the premium it caused are read against the same time.
@@ -417,17 +586,13 @@ export default function SignalDayChart({
         color: SPOT_COLOR,
         lineWidth: 2,
         priceScaleId: 'right',
-        title: 'Spot',
         priceLineVisible: false,
+        lastValueVisible: false,
+        priceFormat: { type: 'price', minMove: 1, precision: 0 },
       },
       0,
     );
-    // Empty slots after the last minute widen the time axis, so the exit and the extremes — often in
-    // the last minutes — keep their marker text clear of the plot's edge.
-    spot.setData([
-      ...line(data.spot),
-      ...Array.from({ length: EDGE_ROOM }, (_, k) => ({ time: timeOf(data.spot.length + k) })),
-    ]);
+    spot.setData(spotTimeline(data.spot, timeOf));
     const entryIdx = slotOf(trade.entryTime);
     const exitIdx = slotOf(trade.exitTime);
     const spotMarks: SeriesMarker<Time>[] = (
@@ -446,6 +611,7 @@ export default function SignalDayChart({
         position,
         shape: position === 'belowBar' ? 'arrowUp' : 'arrowDown',
         color: MARK_COLOR,
+        size: 0.8,
         text,
       }));
     createSeriesMarkers(spot, spotMarks);
@@ -457,14 +623,9 @@ export default function SignalDayChart({
       const fill = fillLegs?.find((l) => l.kind === leg.kind && l.strike === leg.strike)?.close;
       return got && fill ? got.map((v, i) => v ?? fill[i]) : got;
     });
-    const readable: Array<{
-      label: string;
-      series: ISeriesApi<'Line' | 'Baseline'>;
-      money: boolean;
-      /** A colour, or 'sign' for green above zero and red below. */
-      color: string;
-      bold?: boolean;
-    }> = [{ label: 'Spot', series: spot, money: false, color: SPOT_COLOR }];
+    const prices: HoverRow[] = [
+      { label: 'Spot', values: [{ series: spot, color: SPOT_COLOR, format: num }] },
+    ];
     trade.legs.forEach((leg, n) => {
       const close = closes[n];
       if (!close) return;
@@ -475,9 +636,8 @@ export default function SignalDayChart({
           color,
           lineWidth: 2,
           priceScaleId: 'left',
-          title: `${leg.strike} ${leg.kind}`,
           priceLineVisible: false,
-          lastValueVisible: true,
+          lastValueVisible: false,
         },
         0,
       );
@@ -487,8 +647,7 @@ export default function SignalDayChart({
         color,
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: selling ? 'sold' : 'bought',
+        axisLabelVisible: false,
       });
       const legExit = slotOf(leg.exitTime);
       // Both legs trade in the same minutes: the call's labels go above its line, the put's below.
@@ -501,7 +660,6 @@ export default function SignalDayChart({
               selling ? 'sell' : 'buy',
               `${selling ? 'sold' : 'bought'} ${num(legEntryPrice(leg))}`,
             ],
-            // No text on the exit: its price is already the label on the right axis.
             [legExit, selling ? 'buy' : 'sell', ''],
           ] as const
         )
@@ -511,70 +669,53 @@ export default function SignalDayChart({
             position: leg.kind === 'CE' ? 'aboveBar' : 'belowBar',
             shape: act === 'sell' ? 'arrowDown' : 'arrowUp',
             color,
+            size: 0.8,
             text,
           })),
       );
-      readable.push({ label: `${leg.strike} ${leg.kind}`, series: s, money: false, color });
+      prices.push({
+        label: `${leg.strike} ${leg.kind}`,
+        values: [{ series: s, color, format: num }],
+      });
     });
 
-    readable.push(...addTradePnlPane(chart, trade, closes, timeOf, 1));
+    const pnl = addTradePnlPane(chart, trade, closes, timeOf, 1);
 
     const panes = chart.panes();
     panes[0]?.setStretchFactor(2);
     panes[1]?.setStretchFactor(1.2);
 
-    const idle = `t1 ${row.signal.t1} · t2 ${row.signal.t2} · entry ${trade.entryTime} · exit ${trade.exitTime} — hover for values`;
-    if (readoutRef.current) readoutRef.current.textContent = idle;
-    const onMove = (param: MouseEventParams<Time>) => {
-      const el = readoutRef.current;
-      if (!el) return;
-      if (!param.time) {
-        el.textContent = idle;
-        hideTip(tipRef.current);
-        return;
-      }
-      const values = readable.map((r) => {
-        const v = (param.seriesData.get(r.series) as LineData<Time> | undefined)?.value;
-        return { r, v, text: v == null ? '—' : r.money ? inr(v) : num(v) };
-      });
-      el.textContent = `${clockOf(param.time)}  ·  ${values.map((x) => `${x.r.label} ${x.text}`).join('  ·  ')}`;
-      if (tipRef.current && param.point) {
-        paintTip(
-          tipRef.current,
-          clockOf(param.time),
-          values.map(({ r, v, text }) => ({
-            label: r.label,
-            value: text,
-            bold: r.bold,
-            color: r.color === 'sign' ? ((v ?? 0) >= 0 ? TOTAL_UP : TOTAL_DOWN) : r.color,
-          })),
-        );
-        placeTip(tipRef.current, box, param.point);
-      }
-    };
-    chart.subscribeCrosshairMove(onMove);
-    // The whole day and the empty slots after it. (fitContent would end on the last real minute and
-    // leave the padding to push the day off to the right.)
-    const stopFraming = frameSessionOnResize(chart, box, data.spot.length - 1 + EDGE_ROOM);
+    const stopHover = watchHover(
+      chart,
+      box,
+      tipRef.current,
+      [
+        { label: 'Prices', rows: prices },
+        { label: 'P&L', rows: pnl },
+      ],
+      trade,
+    );
+    const stopFraming = frameSessionOnResize(chart, box);
+    const stopLabeling = labelPanes(chart, ['Spot & traded premiums', 'Trade P&L']);
 
     return () => {
       stopFraming();
-      chart.unsubscribeCrosshairMove(onMove);
+      stopLabeling();
+      stopHover();
       removeChart(chart);
     };
-  }, [view, data, theme, row.trade, row.signal.t1, row.signal.t2, fillLegs]);
+  }, [view, canDraw, data, theme, row.trade, row.signal.t1, row.signal.t2, fillLegs, embedded]);
 
   // ── Greeks view ─────────────────────────────────────────────────────────────
   useEffect(() => {
     const box = boxRef.current;
-    if (view !== 'greeks' || !box || !data) return;
+    if (view !== 'greeks' || !canDraw || !box || !data) return;
     const start = sessionStart(data.date);
     const timeOf = (i: number) => (start + i * 60) as UTCTimestamp;
     const line = (grid: Grid) =>
       grid.flatMap((v, i) => (v == null ? [] : [{ time: timeOf(i), value: v }]));
 
-    const chart = baseChart(box, theme);
-    hideTip(tipRef.current);
+    const chart = baseChart(box, theme, embedded);
 
     const t1 = slotOf(row.signal.t1);
     const t2 = slotOf(row.signal.t2);
@@ -583,26 +724,27 @@ export default function SignalDayChart({
     // Pane 0: spot on the right axis, the two reference premiums on the left.
     const spot = chart.addSeries(LineSeries, {
       color: SPOT_COLOR,
-      lineWidth: 1,
+      lineWidth: 2,
       priceScaleId: 'right',
-      title: 'Spot',
       priceLineVisible: false,
+      lastValueVisible: false,
+      priceFormat: { type: 'price', minMove: 1, precision: 0 },
     });
-    spot.setData(line(data.spot));
+    spot.setData(spotTimeline(data.spot, timeOf));
     const cePrice = chart.addSeries(LineSeries, {
       color: CE_COLOR,
       lineWidth: 2,
       priceScaleId: 'left',
-      title: 'CE',
       priceLineVisible: false,
+      lastValueVisible: false,
     });
     cePrice.setData(line(data.ce));
     const pePrice = chart.addSeries(LineSeries, {
       color: PE_COLOR,
       lineWidth: 2,
       priceScaleId: 'left',
-      title: 'PE',
       priceLineVisible: false,
+      lastValueVisible: false,
     });
     pePrice.setData(line(data.pe));
 
@@ -622,15 +764,17 @@ export default function SignalDayChart({
         position: text === 'entry' ? 'belowBar' : 'aboveBar',
         shape: text === 'entry' ? 'arrowUp' : 'arrowDown',
         color: MARK_COLOR,
+        size: 0.8,
         text,
       }));
     createSeriesMarkers(spot, spotMarks);
 
     // One pane per chosen greek; CE and PE share it. Dots at t1 and t2 are the table's numbers.
-    const readable: Array<{ label: string; series: ISeriesApi<'Line'>; digits: number }> = [
-      { label: 'Spot', series: spot, digits: 2 },
-      { label: 'CE', series: cePrice, digits: 2 },
-      { label: 'PE', series: pePrice, digits: 2 },
+    const fixed = (value: number) => value.toFixed(2);
+    const prices: HoverRow[] = [
+      { label: 'Spot', values: [{ series: spot, color: SPOT_COLOR, format: fixed }] },
+      { label: 'CE', values: [{ series: cePrice, color: CE_COLOR, format: fixed }] },
+      { label: 'PE', values: [{ series: pePrice, color: PE_COLOR, format: fixed }] },
     ];
     const closes = row.trade.legs.map((leg) => {
       const got =
@@ -641,12 +785,7 @@ export default function SignalDayChart({
     const pnlReadings =
       embedded && data.legs ? addTradePnlPane(chart, row.trade, closes, timeOf, 1) : [];
     const greekPaneOffset = pnlReadings.length ? 2 : 1;
-    const greekRows: Array<{
-      label: string;
-      ce: ISeriesApi<'Line'>;
-      pe: ISeriesApi<'Line'>;
-      digits: number;
-    }> = [];
+    const greekRows: HoverRow[] = [];
     shown.forEach((key, n) => {
       const meta = GREEKS.find((g) => g.key === key)!;
       const pane = n + greekPaneOffset;
@@ -656,10 +795,10 @@ export default function SignalDayChart({
           LineSeries,
           {
             color,
-            lineWidth: 1,
+            lineWidth: 2,
             priceScaleId: 'right',
-            title: `${meta.label} ${side}`,
             priceLineVisible: false,
+            lastValueVisible: false,
             priceFormat: { type: 'price', precision: meta.digits, minMove: 10 ** -meta.digits },
           },
           pane,
@@ -673,12 +812,19 @@ export default function SignalDayChart({
             position: 'inBar',
             shape: 'circle',
             color,
-            size: 1.5,
+            size: 0.8,
           }));
         createSeriesMarkers(s, dots);
         return s;
       };
-      greekRows.push({ label: meta.label, ce: make('CE'), pe: make('PE'), digits: meta.digits });
+      const format = (value: number) => value.toFixed(meta.digits);
+      greekRows.push({
+        label: meta.label,
+        values: [
+          { series: make('CE'), color: CE_COLOR, format },
+          { series: make('PE'), color: PE_COLOR, format },
+        ],
+      });
     });
 
     const panes = chart.panes();
@@ -686,59 +832,35 @@ export default function SignalDayChart({
     for (let i = 1; i < panes.length; i++) panes[i].setStretchFactor(1);
     if (pnlReadings.length) panes[1]?.setStretchFactor(1.3);
 
-    const idle = `t1 ${row.signal.t1} · t2 ${row.signal.t2} · entry ${row.trade.entryTime} — hover for values`;
-    if (readoutRef.current) readoutRef.current.textContent = idle;
-    const onMove = (param: MouseEventParams<Time>) => {
-      const el = readoutRef.current;
-      if (!el) return;
-      if (!param.time) {
-        el.textContent = idle;
-        hideTip(tipRef.current);
-        return;
-      }
-      const val = (s: ISeriesApi<'Line' | 'Baseline'>) =>
-        (param.seriesData.get(s) as LineData<Time> | undefined)?.value;
-      const parts = readable.map((r) => `${r.label} ${val(r.series)?.toFixed(r.digits) ?? '—'}`);
-      const tip: TipRow[] = [
-        { label: 'Spot', value: val(spot)?.toFixed(2) ?? '—', color: SPOT_COLOR },
-        { label: 'CE', value: val(cePrice)?.toFixed(2) ?? '—', color: CE_COLOR },
-        { label: 'PE', value: val(pePrice)?.toFixed(2) ?? '—', color: PE_COLOR },
-      ];
-      for (const reading of pnlReadings) {
-        const value = val(reading.series);
-        const formatted = value == null ? '—' : inr(value);
-        parts.push(`${reading.label} ${formatted}`);
-        tip.push({
-          label: reading.label,
-          value: formatted,
-          bold: reading.bold,
-          color:
-            reading.color === 'sign' ? ((value ?? 0) >= 0 ? TOTAL_UP : TOTAL_DOWN) : reading.color,
-        });
-      }
-      for (const g of greekRows) {
-        const f = (v: number | undefined) => (v == null ? '—' : v.toFixed(g.digits));
-        parts.push(`${g.label} CE ${f(val(g.ce))} / PE ${f(val(g.pe))}`);
-        tip.push(
-          { label: `${g.label} CE`, value: f(val(g.ce)), color: CE_COLOR },
-          { label: `${g.label} PE`, value: f(val(g.pe)), color: PE_COLOR },
-        );
-      }
-      el.textContent = `${clockOf(param.time)}  ·  ${parts.join('  ·  ')}`;
-      if (tipRef.current && param.point) {
-        paintTip(tipRef.current, clockOf(param.time), tip);
-        placeTip(tipRef.current, box, param.point);
-      }
-    };
-    chart.subscribeCrosshairMove(onMove);
-    const stopFraming = frameSessionOnResize(chart, box, data.spot.length - 1);
+    const groups: HoverGroup[] = [{ label: 'Prices', rows: prices }];
+    if (pnlReadings.length) groups.push({ label: 'P&L', rows: pnlReadings });
+    if (greekRows.length) groups.push({ label: 'Greeks', rows: greekRows, legs: true });
+    const stopHover = watchHover(chart, box, tipRef.current, groups, row.trade);
+    const stopFraming = frameSessionOnResize(chart, box);
+    const stopLabeling = labelPanes(chart, [
+      'Spot & reference premiums',
+      ...(pnlReadings.length ? ['Trade P&L'] : []),
+      ...greekRows.map((row) => row.label),
+    ]);
 
     return () => {
       stopFraming();
-      chart.unsubscribeCrosshairMove(onMove);
+      stopLabeling();
+      stopHover();
       removeChart(chart);
     };
-  }, [view, data, theme, shown, row.signal.t1, row.signal.t2, row.trade, fillLegs, embedded]);
+  }, [
+    view,
+    canDraw,
+    data,
+    theme,
+    shown,
+    row.signal.t1,
+    row.signal.t2,
+    row.trade,
+    fillLegs,
+    embedded,
+  ]);
 
   // Functional update, so two toggles before a re-render cannot overwrite each other.
   const toggle = (key: GreekKey) =>
@@ -759,7 +881,7 @@ export default function SignalDayChart({
 
   return (
     <div className="flex h-full min-h-0 flex-col border-t border-[var(--border)] bg-[var(--bg-primary)]">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-[var(--border)] px-3 py-1 text-[11px]">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-[var(--border)] px-2 py-2 text-[11px]">
         {onStep && !embedded && (
           <span className="flex items-center gap-0.5">
             <button
@@ -796,72 +918,41 @@ export default function SignalDayChart({
             {badge}
           </span>
         )}
-        <span className="flex items-center gap-1">
+        <div
+          role="group"
+          aria-label="Chart view"
+          className="flex items-center gap-0.5 rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] p-0.5"
+        >
           {(['trade', 'greeks'] as const).map((v) => (
             <button
               key={v}
               type="button"
               aria-pressed={view === v}
               onClick={() => setView(v)}
-              className={`h-5 rounded border px-2 text-[11px] ${
-                view === v
-                  ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]'
-                  : 'border-[var(--border)] text-[var(--text-muted)]'
-              }`}
+              className={CHART_CONTROL}
             >
               {v === 'trade' ? 'Trade' : 'Greeks'}
             </button>
           ))}
-        </span>
-        {view === 'trade' ? (
-          <span className="text-[var(--text-muted)]">
-            {row.trade.side} {row.trade.qty} ·{' '}
-            {row.trade.legs.map((leg, n) => (
-              <span key={leg.kind}>
-                {n > 0 && ' / '}
-                <span style={{ color: leg.kind === 'CE' ? CE_COLOR : PE_COLOR }}>
-                  {leg.strike} {leg.kind}
-                </span>{' '}
-                {num(legEntryPrice(leg))}
-              </span>
-            ))}{' '}
-            · expiry {row.expiry}
-            {row.dte != null && ` (${dteLabel(row.dte).toLowerCase()})`} · P&L{' '}
-            <span
-              className="font-semibold"
-              style={{ color: row.trade.pnl >= 0 ? TOTAL_UP : TOTAL_DOWN }}
-            >
-              {inr(row.trade.pnl)}
-            </span>
-          </span>
-        ) : (
-          <>
-            <span className="text-[var(--text-muted)]">
-              {embedded ? 'Trade P&L + reference' : 'reference'}{' '}
-              <span style={{ color: CE_COLOR }}>{ceStrike} CE</span> /{' '}
-              <span style={{ color: PE_COLOR }}>{peStrike} PE</span> · expiry {row.expiry}
-            </span>
-            <span className="ml-2 flex items-center gap-1">
-              {GREEKS.map((g) => {
-                const on = shown.includes(g.key);
-                return (
-                  <button
-                    key={g.key}
-                    type="button"
-                    aria-pressed={on}
-                    onClick={() => toggle(g.key)}
-                    className={`h-5 rounded border px-1.5 text-[11px] ${
-                      on
-                        ? 'border-[var(--accent)] text-[var(--accent)]'
-                        : 'border-[var(--border)] text-[var(--text-muted)]'
-                    }`}
-                  >
-                    {g.label}
-                  </button>
-                );
-              })}
-            </span>
-          </>
+        </div>
+        {view === 'greeks' && (
+          <div
+            role="group"
+            aria-label="Visible Greeks"
+            className="flex flex-wrap items-center gap-0.5 rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] p-0.5"
+          >
+            {GREEKS.map((g) => (
+              <button
+                key={g.key}
+                type="button"
+                aria-pressed={shown.includes(g.key)}
+                onClick={() => toggle(g.key)}
+                className={CHART_CONTROL}
+              >
+                {g.label}
+              </button>
+            ))}
+          </div>
         )}
         {!embedded && (
           <button
@@ -875,10 +966,52 @@ export default function SignalDayChart({
           </button>
         )}
       </div>
-      <div
-        ref={readoutRef}
-        className="min-h-[18px] truncate border-b border-[var(--border)] px-3 py-0.5 font-mono text-[10px] text-[var(--text-muted)]"
-      />
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[var(--border)] px-2 py-2 text-[11px]">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+          <span className="text-[var(--text-muted)]">Left scale</span>
+          {view === 'trade' ? (
+            row.trade.legs.map((leg) => (
+              <span key={leg.kind} className="inline-flex items-center gap-1 whitespace-nowrap">
+                <SeriesKey
+                  color={leg.kind === 'CE' ? CE_COLOR : PE_COLOR}
+                  label={`${leg.strike} ${leg.kind}`}
+                />
+                <span className="font-mono text-[var(--text-muted)]">
+                  {num(legEntryPrice(leg))}
+                </span>
+              </span>
+            ))
+          ) : (
+            <>
+              <SeriesKey color={CE_COLOR} label={`${ceStrike} CE`} />
+              <SeriesKey color={PE_COLOR} label={`${peStrike} PE`} />
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-2 whitespace-nowrap">
+          <span className="text-[var(--text-muted)]">Right scale</span>
+          <SeriesKey color={SPOT_COLOR} label="Spot" />
+        </div>
+        <span className="text-[var(--text-muted)]">Expiry {row.expiry}</span>
+        {view === 'trade' ? (
+          <span className="text-[var(--text-muted)]">
+            {row.trade.side} {row.trade.qty}
+            {row.dte != null && ` · ${dteLabel(row.dte)}`} · P&L{' '}
+            <span
+              className="font-semibold"
+              style={{ color: row.trade.pnl >= 0 ? TOTAL_UP : TOTAL_DOWN }}
+            >
+              {inr(row.trade.pnl)}
+            </span>
+          </span>
+        ) : null}
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 border-b border-[var(--border)] px-2 py-1.5 font-mono text-[10px] tabular-nums text-[var(--text-muted)]">
+        <span>t1 {row.signal.t1}</span>
+        <span>t2 {row.signal.t2}</span>
+        <span>Entry {row.trade.entryTime}</span>
+        <span>Exit {row.trade.exitTime}</span>
+      </div>
       {noPrices.length > 0 && (
         <div className="border-b border-[var(--border)] px-3 py-0.5 text-[10px] text-[#f59e0b]">
           No minute prices stored for {noPrices.map((l) => `${l.strike} ${l.kind}`).join(', ')} —
@@ -890,10 +1023,12 @@ export default function SignalDayChart({
         <div
           ref={tipRef}
           role="tooltip"
-          className="pointer-events-none absolute left-0 top-0 z-10 hidden min-w-[150px] rounded border border-[var(--border)] bg-[var(--bg-card)] px-2 py-1.5 text-[11px] text-[var(--text-primary)] shadow-lg"
+          hidden
+          className="pointer-events-none absolute top-2 z-10 w-[13rem] max-w-[calc(100%-1rem)] rounded-md border border-[var(--border)] bg-[var(--bg-card)] px-2.5 py-1.5 font-sans text-[11px] leading-[1.35] text-[var(--text-primary)] shadow-lg"
         />
         {(error || !data || olderServer) && (
           <div
+            role={error || olderServer ? 'alert' : 'status'}
             className={`absolute inset-0 flex items-center justify-center text-[12px] ${
               error || olderServer ? 'text-[#ef4444]' : 'text-[var(--text-muted)]'
             }`}
@@ -901,7 +1036,7 @@ export default function SignalDayChart({
             {error ??
               (olderServer
                 ? 'This server predates the trade chart — restart it (Ctrl+C, then npm start).'
-                : 'Loading…')}
+                : 'Loading intraday prices and Greeks…')}
           </div>
         )}
       </div>

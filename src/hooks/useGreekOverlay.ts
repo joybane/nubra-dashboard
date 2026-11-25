@@ -311,6 +311,7 @@ export interface GreekOverlayApi {
   setShowPuts: (v: boolean) => void;
   setIvMeasure: (v: IvMeasure) => void;
   toggle: () => void;
+  restoreVisibility: () => void;
   openSettings: () => void;
   applySettings: () => void;
   refresh: () => void;
@@ -341,6 +342,8 @@ interface Deps {
   chartRef: React.RefObject<IChartApi | null>;
   currentInstRef: React.RefObject<Instrument | null>;
   allBarsRef: React.RefObject<OhlcBar[]>;
+  /** Optional browser preference for this overlay's visibility. */
+  visibilityStorageKey?: string;
   /** Render greeks inline on the price pane (Tracker) instead of a sub-pane below (Chart). */
   inline?: boolean;
   /**
@@ -394,7 +397,7 @@ interface Deps {
 // 'iv' is a single line, so only `ce` is used for it.
 const GREEK_PALETTE: Record<OverlayKind, { ce: string; pe: string }> = {
   vega: { ce: '#22c55e', pe: '#ef4444' }, // green / red
-  theta: { ce: '#a855f7', pe: '#f59e0b' }, // purple / amber
+  theta: { ce: '#10b981', pe: '#dc3150' }, // emerald green / crimson red
   iv: { ce: '#38bdf8', pe: '#38bdf8' }, // sky
 };
 
@@ -419,6 +422,7 @@ export function useGreekOverlay({
   chartRef,
   currentInstRef,
   allBarsRef,
+  visibilityStorageKey,
   inline,
   axisScaleId,
   vScale,
@@ -469,6 +473,9 @@ export function useGreekOverlay({
 
   // ── Refs ─────────────────────────────────────────────────────────────────
   const enabledRef = useRef(false);
+  const visibilityPreferenceRef = useRef<boolean | undefined>(undefined);
+  const chainLoadGenRef = useRef(0);
+  const chainPendingRef = useRef(false);
   const snapshotsRef = useRef<Map<number, ChainSnapshot>>(new Map());
   const referenceMachineRef = useRef(new ReferenceBandMachine());
   const referencePointsRef = useRef<Map<number, ReferenceBandPoint>>(new Map());
@@ -1183,16 +1190,18 @@ export function useGreekOverlay({
     return unsub;
   }, [subscribe]);
 
-  // Stop the fallback poll and any queued redraw on unmount (toggle/clear handle the
-  // normal teardown paths). Without cancelDraw here, a redraw queued in the last frame
-  // before the host chart unmounts lands on a removed chart.
+  // Release our live subscription claims and invalidate work that could outlast the host chart.
   useEffect(
     () => () => {
+      invalidateChainLoad();
+      histGenRef.current++;
+      enabledRef.current = false;
+      unsubscribeWsAll();
       stopLivePoll();
       cancelDraw();
       cancelDayFetch();
     },
-    [],
+    [unsubscribeOC],
   );
 
   // ── Layout: the axis the totals hang off ───────────────────────────────────
@@ -1253,7 +1262,8 @@ export function useGreekOverlay({
   /** One REST chain pull → refresh live legs + store a fresh snapshot (fallback path). */
   async function pollLiveOnce() {
     const inst = currentInstRef.current;
-    if (!inst || pollBusyRef.current) return;
+    if (!inst || pollBusyRef.current || chainPendingRef.current) return;
+    const gen = chainLoadGenRef.current;
     pollBusyRef.current = true;
     try {
       const sym = getChainAsset(inst);
@@ -1262,11 +1272,13 @@ export function useGreekOverlay({
       for (const exp of exps) {
         try {
           const data = await fetchChainShared(sym, exp, inst.exchange);
+          if (gen !== chainLoadGenRef.current) return;
           if (data.chain) {
             liveLegsRef.current.set(exp, legsFromChain(data.chain, exp));
             any = true;
           }
         } catch {
+          if (gen !== chainLoadGenRef.current) return;
           /* skip this expiry */
         }
       }
@@ -1280,17 +1292,36 @@ export function useGreekOverlay({
   }
 
   // ── Load chain (expiries, lot size, opening snapshot) ──────────────────────
-  async function loadChain() {
+  function invalidateChainLoad() {
+    chainLoadGenRef.current++;
+    chainPendingRef.current = false;
+  }
+
+  async function startChainLoad(expiriesSel?: string[], fromSettings = false) {
     const inst = currentInstRef.current;
     if (!inst) return;
+    const gen = ++chainLoadGenRef.current;
+    chainPendingRef.current = true;
+    const rememberOnEnable = fromSettings && !enabledRef.current;
+    try {
+      if (expiriesSel) await reloadAll(inst, expiriesSel, gen);
+      else await loadChain(inst, gen);
+      if (gen === chainLoadGenRef.current && rememberOnEnable && enabledRef.current)
+        rememberVisibility(true);
+    } finally {
+      if (gen === chainLoadGenRef.current) chainPendingRef.current = false;
+    }
+  }
+
+  async function loadChain(inst: Instrument, gen: number) {
     const sym = getChainAsset(inst);
     if (isLocal) {
-      await loadLocalChain(inst, sym);
+      await loadLocalChain(inst, sym, gen);
       return;
     }
     try {
       const data = await fetchChainShared(sym, undefined, inst.exchange);
-      if (!data.chain) return;
+      if (gen !== chainLoadGenRef.current || !data.chain) return;
       const exps = data.chain.all_expiries || [];
       setExpiries(exps);
       // Keep the previous pick only while the chain still lists it. A selection that has since
@@ -1302,7 +1333,7 @@ export function useGreekOverlay({
       anchorExpiryRef.current = initial[0] || '';
       if (typeof data.chain.lot_size === 'number' && data.chain.lot_size > 0)
         lotSizeRef.current = data.chain.lot_size;
-      await reloadAll(initial);
+      await reloadAll(inst, initial, gen);
     } catch (e) {
       console.warn(`[${greekLabel}] loadChain failed:`, e);
     }
@@ -1317,7 +1348,7 @@ export function useGreekOverlay({
    * `loadChain` for a local host. There is no live chain for a date the broker never served, so
    * the expiry list comes from the day's local contract list instead.
    */
-  async function loadLocalChain(inst: Instrument, sym: string) {
+  async function loadLocalChain(inst: Instrument, sym: string, gen: number) {
     try {
       const data = await fetchBandContractsShared(
         sym,
@@ -1326,6 +1357,7 @@ export function useGreekOverlay({
         inst.exchange || 'NSE',
         'local',
       );
+      if (gen !== chainLoadGenRef.current) return;
       const exps = (data.availableExpiries ?? (data.expiry ? [data.expiry] : [])).map(
         toChainExpiry,
       );
@@ -1334,7 +1366,7 @@ export function useGreekOverlay({
       const initial = kept.length ? kept : data.expiry ? [toChainExpiry(data.expiry)] : [];
       setSelExpiries(initial);
       anchorExpiryRef.current = initial[0] || '';
-      await reloadAll(initial);
+      await reloadAll(inst, initial, gen);
     } catch (e) {
       console.warn(`[${greekLabel}] local loadChain failed:`, e);
     }
@@ -1344,7 +1376,7 @@ export function useGreekOverlay({
    * `reloadAll` for a local host: the basket is the day's local contract list, and nothing live is
    * seeded, subscribed or polled. Everything after the meta is the same path the broker takes.
    */
-  async function reloadAllLocal(inst: Instrument, selected: string[]) {
+  async function reloadAllLocal(inst: Instrument, selected: string[], gen: number) {
     const sym = getChainAsset(inst);
     const meta = new Map<string, { sp: number; type: 'CE' | 'PE'; exp: string }>();
     for (const exp of selected) {
@@ -1355,6 +1387,7 @@ export function useGreekOverlay({
         inst.exchange || 'NSE',
         'local',
       );
+      if (gen !== chainLoadGenRef.current) return;
       for (const c of data.contracts ?? []) {
         if (c.side === 'CE' || c.side === 'PE')
           meta.set(c.name, { sp: c.strike, type: c.side, exp: toChainExpiry(c.expiry) });
@@ -1390,14 +1423,13 @@ export function useGreekOverlay({
     fetchHistoryForDay(day);
   }
 
-  async function reloadAll(expiriesSel: string[]) {
-    const inst = currentInstRef.current;
-    if (!inst || !expiriesSel.length) return;
+  async function reloadAll(inst: Instrument, expiriesSel: string[], gen: number) {
+    if (!expiriesSel.length) return;
     const selected = isIv ? expiriesSel : expiriesSel.slice(0, 1);
     if (selected.length !== expiriesSel.length) setSelExpiries(selected);
     if (isLocal) {
       try {
-        await reloadAllLocal(inst, selected);
+        await reloadAllLocal(inst, selected, gen);
       } catch (e) {
         console.warn(`[${greekLabel}] local reload failed:`, e);
       }
@@ -1423,6 +1455,7 @@ export function useGreekOverlay({
 
       for (const exp of selected) {
         const data = await fetchChainShared(sym, exp, inst.exchange);
+        if (gen !== chainLoadGenRef.current) return;
         if (!data.chain) continue;
         if (typeof data.chain.lot_size === 'number' && data.chain.lot_size > 0)
           lotSizeRef.current = data.chain.lot_size;
@@ -2253,8 +2286,34 @@ export function useGreekOverlay({
     drawPendingRef.current = false;
   }
 
+  function rememberVisibility(visible: boolean) {
+    if (!visibilityStorageKey) return;
+    visibilityPreferenceRef.current = visible;
+    try {
+      window.localStorage.setItem(visibilityStorageKey, String(visible));
+    } catch {
+      // Keep the choice for this chart even if the browser blocks storage.
+    }
+  }
+
+  function restoreVisibility() {
+    if (!visibilityStorageKey || enabledRef.current || chainPendingRef.current) return;
+    let visible = visibilityPreferenceRef.current;
+    if (visible === undefined) {
+      try {
+        visible = window.localStorage.getItem(visibilityStorageKey) === 'true';
+      } catch {
+        return;
+      }
+    }
+    if (visible) void startChainLoad();
+  }
+
   function toggle() {
-    if (enabledRef.current) {
+    if (enabledRef.current || (visibilityStorageKey && chainPendingRef.current)) {
+      rememberVisibility(false);
+      invalidateChainLoad();
+      histGenRef.current++;
       enabledRef.current = false;
       setOn(false);
       setShowPopup(false);
@@ -2267,18 +2326,19 @@ export function useGreekOverlay({
       resetTicks();
       applyIvLegend(null);
     } else if (currentInstRef.current) {
-      loadChain();
+      rememberVisibility(true);
+      void startChainLoad();
     }
   }
 
   function openSettings() {
     setShowPopup((v) => !v);
-    if (!expiries.length && currentInstRef.current) loadChain();
+    if (!expiries.length && !chainPendingRef.current) void startChainLoad(undefined, true);
   }
 
   function applySettings() {
     setShowPopup(false);
-    if (selExpiries.length) reloadAll(selExpiries);
+    if (selExpiries.length) void startChainLoad(selExpiries, true);
   }
 
   function refresh() {
@@ -2286,6 +2346,7 @@ export function useGreekOverlay({
   }
 
   function clearForInstrumentChange() {
+    invalidateChainLoad();
     enabledRef.current = false;
     setOn(false);
     cancelDraw();
@@ -2354,6 +2415,7 @@ export function useGreekOverlay({
     setShowPuts,
     setIvMeasure,
     toggle,
+    restoreVisibility,
     openSettings,
     applySettings,
     refresh,

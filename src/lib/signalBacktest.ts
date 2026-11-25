@@ -556,18 +556,29 @@ export function fmtGreek(key: GreekKey, value: number | null | undefined, signed
 
 // ── Formatting ────────────────────────────────────────────────────────────────
 
+const indianNumberFormats = new Map<number, Intl.NumberFormat>();
+
+export function formatIndianNumber(value: number, digits: number): string {
+  let formatter = indianNumberFormats.get(digits);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat('en-IN', {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    });
+    indianNumberFormats.set(digits, formatter);
+  }
+  return formatter.format(value);
+}
+
 export function inr(n: number | null | undefined, signed = true): string {
   if (n == null || !Number.isFinite(n)) return '—';
   const sign = signed ? (n > 0 ? '+' : n < 0 ? '-' : '') : n < 0 ? '-' : '';
-  return `${sign}₹${Math.abs(n).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `${sign}₹${formatIndianNumber(Math.abs(n), 2)}`;
 }
 
 export function num(n: number | null | undefined, digits = 2): string {
   if (n == null || !Number.isFinite(n)) return '—';
-  return n.toLocaleString('en-IN', {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  });
+  return formatIndianNumber(n, digits);
 }
 
 export function pnlClass(n: number | null | undefined): string {

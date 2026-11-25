@@ -26,6 +26,10 @@ const WHAT: Record<string, string> = {
   both: 'The call and put changes added together, ₹ per lot.',
   gap: 'How far the call change and the put change disagreed, ₹ per lot. This is the mismatch the signal is built on.',
   gapPct: "The mismatch as a share of the bigger leg's change. The rule needs at least 50%.",
+  strikeDist:
+    'How far the sold strikes sit from spot, counted in implied moves: half the gap between the two strikes, divided by the move IV is pricing between now and expiry. Below about 0.25 the strikes are close; a strike 150 points away is close when IV is high and far when IV is low.',
+  warnCount:
+    "How many of four signs were present at the signal: IV ratio high (top fifth), strikes close (closest fifth), mismatch large (top fifth), previous day's loss large (top third). The cut-offs come from all days of the trade set on screen.",
   premium: 'Call plus put price collected at entry, ₹ per lot.',
   theta: 'Time decay of both legs at the signal, ₹ per lot per day. More negative = more decay.',
   vega: 'How much both legs move for one point of IV, ₹ per lot.',
@@ -45,7 +49,10 @@ const GREEK_UNLIKE =
 const TIME_UNLIKE =
   '"t1" is the first matching moment, "Signal" (t2) is when the trade is placed, and "t1→t2 min" is the wait between them.';
 
-const UNLIKE: Record<string, string> = {};
+const UNLIKE: Record<string, string> = {
+  warnCount:
+    'Not the same as the report\'s "Warning" and "Warning signs" columns, which use the report\'s own four tests and cut-offs. "Risk signs" is a plain count, and more signs meant more days above the loss line on both NIFTY and SENSEX.',
+};
 for (const k of ['ivNow', 'ivUsual', 'ivRatio', 'ivLevel', 'ceIv', 'peIv', 'skew', 'warnGroup'])
   UNLIKE[k] = IV_UNLIKE;
 for (const k of ['ceChange', 'peChange', 'both', 'gap', 'gapPct']) UNLIKE[k] = LEG_UNLIKE;
@@ -61,7 +68,11 @@ const PANEL: Record<string, string> = {
   'After entry': 'In a day\'s detail: the chart and "Minute by minute".',
   'Report groups': 'In a day\'s detail: the chart and "Minute by minute".',
 };
+const TABLE_ONLY = 'In the table only (add the column from "Columns").';
 const PANEL_OVERRIDE: Record<string, string> = {
+  strikeDist: TABLE_ONLY,
+  warnCount: TABLE_ONLY,
+  warnSigns: TABLE_ONLY,
   prevMaxLoss: "In the table only: it is the previous day's Max loss.",
   warnGroup: "In a day's detail: the facts at the top.",
 };
@@ -74,6 +85,6 @@ export function glossFor(key: string): Gloss {
   return {
     what: WHAT[key] ?? c?.title ?? key,
     unlike: UNLIKE[key],
-    where: `Table column "${c?.label ?? key}". ${panel}${live}`,
+    where: panel === TABLE_ONLY ? panel : `Table column "${c?.label ?? key}". ${panel}${live}`,
   };
 }

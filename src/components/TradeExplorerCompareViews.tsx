@@ -29,21 +29,23 @@ export function clearSlimSets() {
   slimSets.clear();
 }
 
-const SETS = [0, 1, 2, 3, 4, 5, 6, 7].map((n) => ({
+export const SETS = [0, 1, 2, 3, 4, 5, 6, 7].map((n) => ({
   key: `otm${n}`,
   label: n === 0 ? 'OTM 0 (ATM)' : `OTM ${n}`,
 }));
-const rupees = (v: number | null) =>
+export const rupees = (v: number | null) =>
   v == null ? '–' : `₹${Math.round(v).toLocaleString('en-IN')}`;
-const percent = (v: number | null, digits = 1) => (v == null ? '–' : `${v.toFixed(digits)}%`);
+export const percent = (v: number | null, digits = 1) =>
+  v == null ? '–' : `${v.toFixed(digits)}%`;
 
-export function StrikeDistancesView(props: {
-  rows: DayRow[];
-  underlying: SignalUnderlying;
-  tradeSet: string;
-}) {
-  const { rows, underlying } = props;
-  const dates = useMemo(() => new Set(rows.map((r) => r.raw.date)), [rows]);
+export function useSlimSets(underlying: SignalUnderlying): {
+  get(setKey: string): SlimSet | undefined;
+  loading: string | null;
+  failed: ReadonlySet<string>;
+  anyLoaded: boolean;
+  load(): Promise<void>;
+} {
+  const get = (setKey: string) => slimSets.get(`${underlying}|${setKey}`);
   const [, bump] = useState(0);
   const [loading, setLoading] = useState<string | null>(null);
   const [failed, setFailed] = useState<ReadonlySet<string>>(new Set());
@@ -76,8 +78,18 @@ export function StrikeDistancesView(props: {
     if (alive.current) setLoading(null);
   };
 
+  return { get, loading, failed, anyLoaded: SETS.some((s) => get(s.key) != null), load };
+}
+
+export function StrikeDistancesView(props: {
+  rows: DayRow[];
+  underlying: SignalUnderlying;
+  tradeSet: string;
+}) {
+  const { rows, underlying } = props;
+  const dates = useMemo(() => new Set(rows.map((r) => r.raw.date)), [rows]);
+  const { get, loading, failed, anyLoaded, load } = useSlimSets(underlying);
   const onScreen = props.tradeSet === 'saved' ? 'otm2' : props.tradeSet;
-  const anyLoaded = SETS.some((s) => slimSets.has(`${underlying}|${s.key}`));
   return (
     <section className="te-chart-card te-cmp-card">
       <div className="te-card-heading">
@@ -112,7 +124,7 @@ export function StrikeDistancesView(props: {
             </thead>
             <tbody>
               {SETS.map((s) => {
-                const slim = slimSets.get(`${underlying}|${s.key}`);
+                const slim = get(s.key);
                 const line = slim ? setLine(dates, slim) : null;
                 return (
                   <tr key={s.key}>
@@ -166,13 +178,14 @@ const summary = (c: SavedCriteria) => {
 
 export function SavedCriteriaView(props: {
   allRows: DayRow[];
+  underlying: SignalUnderlying;
   outcome: Outcome;
   current: { filters: Filters; similar: SimilarPlan | null };
   saved: SavedCriteria[];
   onSaved(list: SavedCriteria[]): void;
   onLoad(c: SavedCriteria): void;
 }) {
-  const { allRows, outcome, saved } = props;
+  const { allRows, outcome, saved, underlying } = props;
   const [name, setName] = useState('');
   const [ticked, setTicked] = useState<string[] | null>(null);
   const outCol = COLUMN_BY_KEY.get(outcome) as Column;
@@ -196,19 +209,24 @@ export function SavedCriteriaView(props: {
       { title: 'All days', rows: allRows },
       ...saved
         .filter((c) => chosen.includes(c.name))
-        .map((c) => ({ title: c.name, rows: applyCriteria(allRows, c) })),
+        .map((c) => ({ title: c.name, rows: applyCriteria(allRows, c, underlying) })),
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [allRows, saved, chosen.join('|')],
+    [allRows, saved, underlying, chosen.join('|')],
   );
   const cols = columns.map((c) => ({ ...c, col: ladder(c.rows, outcome, line, cuts) }));
 
   const save = () => {
     const n = name.trim();
     if (!n) return;
-    const next = [
+    const next: SavedCriteria[] = [
       ...saved.filter((c) => c.name !== n),
-      { name: n, filters: props.current.filters, similar: props.current.similar },
+      {
+        name: n,
+        filters: props.current.filters,
+        similar: props.current.similar,
+        signalMoneyBasis: 'per-lot',
+      },
     ];
     props.onSaved(next.slice(-MAX_SAVED));
     setName('');

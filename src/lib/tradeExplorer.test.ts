@@ -6,6 +6,7 @@ import {
   applyFilters,
   bucketRows,
   buildItems,
+  buildDayRows,
   SIMILAR_KEY,
   categoryValues,
   crossGrid,
@@ -19,7 +20,87 @@ import {
   type Column,
   type DayRow,
   type GroupPlan,
+  type SavedRow,
 } from './tradeExplorer';
+
+function savedTradeRow(stop?: SavedRow['trade']['stop']): SavedRow {
+  return {
+    date: '2026-01-02',
+    source: 'local',
+    expiry: '2026-01-02',
+    dte: 0,
+    ohlcSource: 'parquet',
+    signal: {
+      legs: { ceStrike: 24000, peStrike: 23800, entryTime: '09:15', entrySpot: 23900 },
+      t1: '09:15',
+      t2: '10:00',
+      spot1: 23900,
+      spot2: 23900,
+      ce1: 45,
+      ce2: 42,
+      pe1: 39,
+      pe2: 40,
+      ceDelta: 195,
+      peDelta: -65,
+      totalDelta: 130,
+      gap: 260,
+    },
+    trade: {
+      entryTime: '10:01',
+      entrySpot: 23900,
+      atm: 23900,
+      step: 50,
+      otmSteps: 2,
+      qty: 65,
+      side: 'SELL',
+      legs: [],
+      exitTime: '15:29',
+      pnl: 20,
+      maxProfit: 200,
+      maxProfitTime: '12:15',
+      maxLoss: -181,
+      maxLossTime: '10:19',
+      basis: 'ohlc',
+      stop,
+    },
+  };
+}
+
+describe('daily readings', () => {
+  test('depth and time come from the final stop step', () => {
+    const raw = savedTradeRow({ trade: { premium: 1000, steps: [[56, 118.63, 0]] }, legs: [] });
+    const [row] = buildDayRows([raw], 'NIFTY');
+    expect(row.values).toMatchObject({ maxLoss: 118.63, maxLossAt: 611, toMaxLoss: 10 });
+  });
+
+  test('an empty path has no loss and an absent path uses the old fields', () => {
+    const empty = savedTradeRow({ trade: { premium: 1000, steps: [] }, legs: [] });
+    const [zero] = buildDayRows([empty], 'NIFTY');
+    expect(zero.values).toMatchObject({ maxLoss: 0, maxLossAt: null, toMaxLoss: null });
+    const [legacy] = buildDayRows([savedTradeRow()], 'NIFTY');
+    expect(legacy.values).toMatchObject({ maxLoss: 181, maxLossAt: 619, toMaxLoss: 18 });
+  });
+
+  test('signal money uses one lot of the index and keeps the originating readings', () => {
+    const raw = savedTradeRow();
+    const [nifty] = buildDayRows([raw], 'NIFTY');
+    const [sensex] = buildDayRows([raw], 'SENSEX');
+    expect(nifty.values).toMatchObject({ ceChange: 195, peChange: -65, both: 130, gap: 260 });
+    expect(sensex.values).toMatchObject({ ceChange: 60, peChange: -20, both: 40, gap: 80 });
+    expect(sensex.values.gapPct).toBe(nifty.values.gapPct);
+    expect(raw.signal.gap).toBe(260);
+    const normalized = {
+      ...raw,
+      signal: { ...raw.signal, ceDelta: 60, peDelta: -20, totalDelta: 40, gap: 80 },
+    };
+    expect(buildDayRows([normalized], 'SENSEX')[0].values).toMatchObject({
+      ceChange: 60,
+      peChange: -20,
+      both: 40,
+      gap: 80,
+    });
+  });
+});
 
 const col = (k: string) => COLUMN_BY_KEY.get(k) as Column;
 const day = (date: string, values: Record<string, number | string | null>) =>

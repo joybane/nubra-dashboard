@@ -264,6 +264,33 @@ twice the other (`legMismatchPct` 50). Pairs rank by the gap between the legs. E
 `maxCasesPerDay`: first pairs whose start and end are both `spacingMinutes` from every kept case,
 then free slots go to pairs that are near a kept case at one end only.
 
+### Opening OTM 2 P&L in Trade Explorer
+
+The pane uses the Analysis archive to sell one simulated lot of the OTM 2 call and put at the
+09:15 minute close and hold those strikes through the 15:29 bar. The Analysis entry rule allows up
+to five minutes of delay for incomplete quotes. The 09:15 filter excludes delayed entries. P&L is
+gross, and a combined mark or closing outcome requires both prices at the relevant minute. The
+study defaults to the full stored date range for the selected index, including local-only sessions
+and using Nubra on overlapping dates. Date, expiry and source filters narrow the study. The
+**All history** button clears the date range and exact expiry filters. The study groups stored
+expiries by trading DTE, and the driver view compares conditions within a DTE group.
+Black-76 attribution uses exact time to 15:30 IST and averages every order of changing the
+forward, time and leg IV. Cohort attribution uses matched observations at each checkpoint.
+
+The P&L research view requests each trade's minute marks and entry inputs with `includeResearch`.
+Opening gap uses the previous stored session's exact 15:29 spot close. Opening credit and IV are
+also compared with the median of the prior 20 valid readings at the same exact trading DTE.
+These references use the full source calendar and default opening rule regardless of display filters.
+Entry-rule thresholds are fitted on the earlier 70% of eligible sessions and measured on the later 30%.
+Rule totals deduct the selected round-trip cost once per trade. Baselines use all eligible sessions
+with exact closing marks in each period, and the report keeps sample size and missing inputs visible.
+
+| Method | Path                                   | Purpose                                                   |
+| ------ | -------------------------------------- | --------------------------------------------------------- |
+| GET    | `/api/analysis/opening-strangle/dates` | Stored sessions and source coverage                       |
+| GET    | `/api/analysis/opening-strangle/day`   | One replayed session and minute-level marks               |
+| POST   | `/api/analysis/opening-strangle/study` | Expiry and condition-group summaries for a filtered range |
+
 ### Signal backtest (first mismatch case → option trade)
 
 | Method | Path                       | Purpose                                                       |

@@ -279,7 +279,7 @@ export interface WatchlistItem {
 }
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
-export type Theme = 'dark' | 'light' | 'bloomberg' | 'graphite' | 'apex';
+export type Theme = 'dark' | 'navy' | 'light' | 'bloomberg' | 'graphite' | 'apex';
 
 // ─── Paper Trading ────────────────────────────────────────────────────────────
 export type PaperOrderType =

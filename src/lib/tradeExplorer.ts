@@ -3,7 +3,14 @@
  * columns, per-column filters, grouping and group figures. No React here.
  */
 import { ivSignalByDate, IV_LEVELS } from './ivSignal';
-import { dteShort, type SignalBacktestRow, type SignalUnderlying } from './signalBacktest';
+import {
+  dteShort,
+  formatIndianNumber,
+  LOT_SIZE,
+  type SignalBacktestRow,
+  type SignalUnderlying,
+} from './signalBacktest';
+import { signalLotMoney } from './signalMoney';
 
 /** The Strangle Max Loss report's groups for a day, added when the run was saved. */
 export interface ReportGroups {
@@ -258,6 +265,33 @@ export const COLUMNS: Column[] = [
     digits: 0,
     unit: 'pct',
     shown: true,
+  },
+  {
+    key: 'strikeDist',
+    label: 'Strike distance',
+    title:
+      'How far the sold strikes are from spot, counted in implied moves to expiry (1.00 = one implied move away)',
+    section: 'Signal',
+    type: 'num',
+    width: 100,
+    digits: 2,
+  },
+  {
+    key: 'warnCount',
+    label: 'Risk signs',
+    title: 'How many of the four risk signs were present at the signal (0 to 4)',
+    section: 'Signal',
+    type: 'num',
+    width: 84,
+    digits: 0,
+  },
+  {
+    key: 'warnSigns',
+    label: 'Signs present',
+    title: 'Which risk signs were present at the signal',
+    section: 'Signal',
+    type: 'text',
+    width: 220,
   },
 
   {
@@ -751,8 +785,8 @@ export function formatClock(minutes: number): string {
 }
 
 function maxLossOf(r: SignalBacktestRow): number {
-  const steps = r.trade.stop?.trade.steps;
-  return Math.max(0, steps?.length ? steps[steps.length - 1][1] : -r.trade.maxLoss);
+  const steps = r.trade.stop?.trade?.steps;
+  return Math.max(0, steps == null ? -r.trade.maxLoss : (steps.at(-1)?.[1] ?? 0));
 }
 
 function speedBounds(rows: SavedRow[]): Map<number, [number, number]> {
@@ -769,11 +803,64 @@ function speedBounds(rows: SavedRow[]): Map<number, [number, number]> {
   return out;
 }
 
+/** Half the gap between the sold strikes, in implied moves to expiry. */
+export function strikeDistance(
+  ce: number | null,
+  pe: number | null,
+  spot: number | null,
+  ivNow: number | null,
+  dte: number | null,
+): number | null {
+  if (
+    ce == null ||
+    pe == null ||
+    spot == null ||
+    ivNow == null ||
+    dte == null ||
+    spot <= 0 ||
+    ivNow <= 0
+  )
+    return null;
+  const halfGapPct = ((ce - pe) / 2 / spot) * 100;
+  const impliedMove = (ivNow / Math.sqrt(252)) * Math.sqrt(Math.max(0.35, dte + 0.75));
+  return halfGapPct / impliedMove;
+}
+
+export const RISK_SIGNS = [
+  { id: 'iv', key: 'ivRatio', label: 'IV ratio high', side: 'ge', p: 0.8 },
+  { id: 'dist', key: 'strikeDist', label: 'Strikes close', side: 'le', p: 0.2 },
+  { id: 'gap', key: 'gap', label: 'Mismatch large', side: 'ge', p: 0.8 },
+  { id: 'prev', key: 'prevMaxLoss', label: 'Previous day loss large', side: 'ge', p: 0.67 },
+] as const;
+
+/** Each sign's cut-off: that quantile of the column over the given rows (null if no readings). */
+export function riskCuts(rows: DayRow[]): Record<string, number | null> {
+  return Object.fromEntries(
+    RISK_SIGNS.map(({ id, key, p }) => {
+      const readings = rows.flatMap((row) => {
+        const value = row.values[key];
+        return typeof value === 'number' && Number.isFinite(value) ? [value] : [];
+      });
+      return [id, quantile(readings, p)];
+    }),
+  );
+}
+
+/** Which signs a row shows, in RISK_SIGNS order. A missing reading is not present. */
+export function riskFlags(row: DayRow, cuts: Record<string, number | null>): boolean[] {
+  return RISK_SIGNS.map(({ id, key, side }) => {
+    const reading = row.values[key];
+    const cut = cuts[id];
+    if (typeof reading !== 'number' || !Number.isFinite(reading) || cut == null) return false;
+    return side === 'ge' ? reading >= cut : reading <= cut;
+  });
+}
+
 export function buildDayRows(rows: SavedRow[], underlying: SignalUnderlying): DayRow[] {
   const iv = ivSignalByDate(rows, underlying);
   const speeds = speedBounds(rows);
   let prevMaxLoss: number | null = null;
-  return [...rows]
+  const out = [...rows]
     .sort((a, b) => (a.date < b.date ? -1 : 1))
     .map((raw: SavedRow) => {
       const { signal: s, trade: t, groups: G } = raw;
@@ -785,15 +872,19 @@ export function buildDayRows(rows: SavedRow[], underlying: SignalUnderlying): Da
       const pe = t.legs.find((l) => l.kind === 'PE');
       const g = s.greeks?.t2;
       const reading = iv.get(raw.date);
+      const ivNow = reading?.ivNow ?? null;
       const lot = t.qty;
       const maxLoss = maxLossOf(raw);
       const premium =
         t.stop?.trade.premium ?? ((ce?.entryPrice ?? 0) + (pe?.entryPrice ?? 0)) * lot;
       const entry = clock(t.entryTime);
-      const maxLossAt = maxLoss > 0 ? clock(t.maxLossTime) : null;
+      const stopSteps = t.stop?.trade?.steps;
+      const peak = stopSteps?.at(-1);
+      const maxLossAt = maxLoss > 0 ? (peak ? 9 * 60 + 15 + peak[0] : clock(t.maxLossTime)) : null;
       const high = t.spotHigh ?? null;
       const low = t.spotLow ?? null;
       const d = new Date(`${raw.date}T00:00:00Z`);
+      const signalMoney = signalLotMoney(s, LOT_SIZE[underlying]);
       const ceG = g?.CE ?? null;
       const peG = g?.PE ?? null;
       const values: Record<string, CellValue> = {
@@ -812,15 +903,22 @@ export function buildDayRows(rows: SavedRow[], underlying: SignalUnderlying): Da
         t2: clock(s.t2),
         wait: (clock(s.t2) ?? 0) - (clock(s.t1) ?? 0),
         morning: s.legs.entrySpot > 0 ? (s.spot2 / s.legs.entrySpot - 1) * 100 : null,
-        ceChange: s.ceDelta,
-        peChange: s.peDelta,
-        both: s.totalDelta,
-        gap: s.gap,
+        ceChange: signalMoney.ceDelta,
+        peChange: signalMoney.peDelta,
+        both: signalMoney.totalDelta,
+        gap: signalMoney.gap,
         gapPct: ratioPct(s.gap, Math.max(Math.abs(s.ceDelta), Math.abs(s.peDelta))),
+        strikeDist: strikeDistance(
+          ce?.strike ?? null,
+          pe?.strike ?? null,
+          s.spot2,
+          ivNow,
+          raw.dte ?? null,
+        ),
         ceIv: ceG?.iv ?? null,
         peIv: peG?.iv ?? null,
         skew: ceG && peG ? peG.iv - ceG.iv : null,
-        ivNow: reading?.ivNow ?? null,
+        ivNow,
         ivHistoryCount: reading?.historyCount ?? 0,
         ivUsual: reading?.usual ?? null,
         ivRatio: reading?.ratio ?? null,
@@ -892,6 +990,14 @@ export function buildDayRows(rows: SavedRow[], underlying: SignalUnderlying): Da
       prevMaxLoss = maxLoss;
       return { raw, values };
     });
+  const cuts = riskCuts(out);
+  for (const row of out) {
+    const flags = riskFlags(row, cuts);
+    const signs = RISK_SIGNS.filter((_, index) => flags[index]);
+    row.values.warnCount = signs.length;
+    row.values.warnSigns = signs.map((sign) => sign.label).join(' · ') || 'None';
+  }
+  return out;
 }
 
 // ── display ──────────────────────────────────────────────────────────────────
@@ -901,10 +1007,7 @@ export function formatCell(c: Column, v: CellValue): string {
   if (c.type === 'time') return formatClock(Number(v));
   if (c.type === 'cat') return c.name ? c.name(v) : String(v);
   if (typeof v === 'string') return v;
-  const abs = Math.abs(v).toLocaleString('en-IN', {
-    minimumFractionDigits: c.digits ?? 0,
-    maximumFractionDigits: c.digits ?? 0,
-  });
+  const abs = formatIndianNumber(Math.abs(v), c.digits ?? 0);
   const sign = v < 0 ? '−' : c.signed && v > 0 ? '+' : '';
   if (c.unit === 'rupee') return `${sign}₹${abs}`;
   if (c.unit === 'pct') return `${sign}${abs}%`;

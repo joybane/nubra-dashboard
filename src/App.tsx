@@ -116,10 +116,8 @@ function AppInner() {
         <div className="flex-1 min-h-0 overflow-hidden">
           <WorkspaceRoot theme={theme} />
         </div>
-        {/* Hidden, not unmounted, so its state and subscriptions carry on. */}
-        <div className={researchOnly ? 'hidden' : 'contents'}>
-          <OrderTerminal onOpenStrategyChart={openStrategyChart} />
-        </div>
+        {/* Keep the terminal mounted so it retains its state and subscriptions. */}
+        <OrderTerminal hidden={researchOnly} onOpenStrategyChart={openStrategyChart} />
       </div>
     </main>
   );

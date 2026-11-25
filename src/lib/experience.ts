@@ -7,7 +7,8 @@ export interface ExperienceOption {
 }
 
 export const EXPERIENCE_OPTIONS: readonly ExperienceOption[] = [
-  { id: 'dark', label: 'Dark', detail: 'Refined low-light workspace' },
+  { id: 'dark', label: 'Dark', detail: 'Charcoal surfaces and subtle chart grids' },
+  { id: 'navy', label: 'Navy', detail: 'Blue-gray surfaces and brighter chart guides' },
   { id: 'light', label: 'Light', detail: 'Refined daytime workspace' },
   { id: 'graphite', label: 'Graphite', detail: 'Refined neutral chart workspace' },
   { id: 'bloomberg', label: 'Bloomberg', detail: 'High-density terminal' },

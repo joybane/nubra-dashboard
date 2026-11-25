@@ -55,6 +55,28 @@ describe('pickLegs', () => {
     );
     expect(pickLegs(day, params())).toMatchObject({ entryTime: '09:18', ceEntry: 60 });
   });
+
+  test('missing strike series allow a complete pair through 09:20', () => {
+    const day = makeDay(
+      (i) => (i === 0 ? 23250 : i < 5 ? 23200 : 23300),
+      () => 60,
+      () => 55,
+      23400,
+      23200,
+    );
+    expect(pickLegs(day, params())).toEqual({
+      ceStrike: 23400,
+      peStrike: 23200,
+      entryTime: '09:20',
+      entrySpot: 23300,
+      ceEntry: 60,
+      peEntry: 55,
+    });
+
+    // The 09:21 pair is outside the window, and the first missing pair explains the failure.
+    day.pe['23200'][5] = null;
+    expect(pickLegs(day, params())).toBe('no data for 23350 CE / 23150 PE');
+  });
 });
 
 describe('findCases', () => {

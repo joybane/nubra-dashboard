@@ -5,11 +5,17 @@
  * chain at the signal minute beside the table.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { cachedJson, cachedValue, clearExplorerCache, prefetchDay } from './lib/explorerCache';
+import {
+  cachedJson,
+  cachedValue,
+  clearExplorerCache,
+  dayUrl,
+  prefetchDay,
+} from './lib/explorerCache';
 import './tradeExplorer.css';
 import TradeExplorerDetail from './components/TradeExplorerDetail';
 import TradeExplorerCharts from './components/TradeExplorerCharts';
-import TradeExplorerSplits from './components/TradeExplorerSplits';
+import TradeExplorerSplits, { type SplitMode } from './components/TradeExplorerSplits';
 import type { Outcome } from './lib/tradeExplorerSplits';
 import TradeExplorerUpdate from './components/TradeExplorerUpdate';
 import { IV_LEVELS } from './lib/ivSignal';
@@ -50,7 +56,11 @@ import {
 } from './lib/tradeExplorer';
 import type { SignalUnderlying } from './lib/signalBacktest';
 import { clearSlimSets } from './components/TradeExplorerCompareViews';
-import type { SavedCriteria } from './lib/tradeExplorerCompare';
+import {
+  criteriaFilters,
+  migrateActiveFilters,
+  type SavedCriteria,
+} from './lib/tradeExplorerCompare';
 import type { Theme } from './types';
 
 const UNDERLYINGS: SignalUnderlying[] = ['NIFTY', 'SENSEX'];
@@ -60,6 +70,7 @@ const GROUPED_DATE_WIDTH = 230;
 
 interface Settings {
   underlying: SignalUnderlying;
+  filterSettingsVersion: number;
   columns: string[];
   detailColumns?: string[];
   filters: Filters;
@@ -75,7 +86,7 @@ interface Settings {
 const DEFAULT_SETTINGS: Settings = {
   underlying: 'NIFTY',
   columns: DEFAULT_COLUMN_KEYS,
-  filters: {},
+  ...migrateActiveFilters({}, 'NIFTY'),
   sort: { key: 'maxLoss', dir: -1 },
   plan: { first: null, second: null, bands: 5, sortGroups: false, how: 'median' },
 };
@@ -91,11 +102,12 @@ function loadSettings(): Settings {
     const columns = Array.isArray(raw.columns) ? raw.columns.filter(known) : DEFAULT_COLUMN_KEYS;
     const filters = raw.filters && typeof raw.filters === 'object' ? { ...raw.filters } : {};
     delete filters[SIMILAR_KEY];
+    const underlying = raw.underlying === 'SENSEX' ? 'SENSEX' : 'NIFTY';
     return {
-      underlying: raw.underlying === 'SENSEX' ? 'SENSEX' : 'NIFTY',
+      underlying,
+      ...migrateActiveFilters(filters, underlying, raw.filterSettingsVersion),
       columns: columns.length ? columns : DEFAULT_COLUMN_KEYS,
       detailColumns: Array.isArray(raw.detailColumns) ? raw.detailColumns.filter(known) : undefined,
-      filters,
       sort:
         raw.sort &&
         (raw.sort.key === '' || known(raw.sort.key)) &&
@@ -422,9 +434,7 @@ export default function TradeExplorer({
   const [showCharts, setShowCharts] = useState(false);
   const [showSplits, setShowSplits] = useState(false);
   const [splitOutcome, setSplitOutcome] = useState<Outcome>('maxLoss');
-  const [splitMode, setSplitMode] = useState<
-    'groups' | 'worst' | 'split' | 'bands' | 'sets' | 'saved'
-  >('groups');
+  const [splitMode, setSplitMode] = useState<SplitMode>('groups');
   const [otherRows, setOtherRows] = useState<DayRow[] | null>(null);
   const [splitTrail, setSplitTrail] = useState<
     Array<{ label: string; key: string; prev: ColumnFilter | undefined }>
@@ -558,7 +568,10 @@ export default function TradeExplorer({
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setView((v) => ({ ...v, height: el.clientHeight })));
+    const ro = new ResizeObserver(() => {
+      const height = el.clientHeight;
+      setView((v) => (v.height === height ? v : { ...v, height }));
+    });
     ro.observe(el);
     return () => ro.disconnect();
   }, [days]);
@@ -619,6 +632,14 @@ export default function TradeExplorer({
     [scored, similar],
   );
   const selectedIndex = dayItems.findIndex((d) => d.raw.date === selected);
+  const openDay = useCallback(
+    (row: DayRow, dayUnderlying = underlying) => {
+      // Begin loading the chart before mounting the comparison and option chain.
+      void cachedJson(dayUrl(dayUnderlying, row.raw)).catch(() => undefined);
+      setSelected(row.raw.date);
+    },
+    [underlying],
+  );
   // Fetch the days either side of the open one while idle, so ↑ / ↓ and the next click are instant.
   useEffect(() => {
     if (selectedIndex < 0) return;
@@ -726,19 +747,20 @@ export default function TradeExplorer({
     if (!want || !days || loadingSet) return;
     if (daysKey !== `${want.underlying}|${reportSetKey(want.key)}`) return;
     pendingOpen.current = null;
-    if (days.some((d) => d.raw.date === want.date)) {
-      setSelected(want.date);
+    const match = days.find((d) => d.raw.date === want.date);
+    if (match) {
+      openDay(match, want.underlying);
       setTimeout(() => reveal(want.date), 0);
     } else {
       setSelected(null);
       setOpenNotice(`${want.date} has no trade in ${setLabel}, so it can't be opened here.`);
     }
-  }, [days, daysKey, loadingSet, setLabel, reveal, openRequest?.seq]);
+  }, [days, daysKey, loadingSet, setLabel, reveal, openDay, openRequest?.seq]);
 
   const step = (dir: -1 | 1) => {
     const next = dayItems[selectedIndex + dir];
     if (!next) return;
-    setSelected(next.raw.date);
+    openDay(next);
     reveal(next.raw.date);
   };
 
@@ -859,7 +881,7 @@ export default function TradeExplorer({
           boxShadow: on ? 'inset 3px 0 var(--accent)' : undefined,
         }}
         className="cursor-pointer hover:bg-[var(--bg-hover)]"
-        onClick={() => setSelected(date)}
+        onClick={() => openDay(it.row)}
         // Resting on a row starts its chart and chain downloading, so the click opens at once.
         onMouseEnter={() => {
           clearTimeout(hoverTimer.current);
@@ -1506,7 +1528,8 @@ export default function TradeExplorer({
                 ]);
             }}
             onOpenDay={(date) => {
-              setSelected(date);
+              const match = scored.find((d) => d.raw.date === date);
+              if (match) openDay(match);
               setShowSplits(false);
               setSplitTrail([]);
             }}
@@ -1518,7 +1541,7 @@ export default function TradeExplorer({
             onSaved={(list) => update({ savedCriteria: list })}
             onLoad={(c) => {
               if (!c.similar && similar) stopSimilar();
-              update({ filters: c.filters });
+              update({ filters: criteriaFilters(c, underlying) });
               if (c.similar) {
                 if (!similar) sortBeforeSimilar.current = sort;
                 setSimilar(c.similar);

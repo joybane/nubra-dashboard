@@ -1,10 +1,13 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { finiteSegments, nearestPointIndex } from '../lib/svgChartGeometry';
 
+type YAxis = 'left' | 'right';
+
 interface Series {
   dataKey: string;
   color: string;
-  strokeWidth?: number;
+  yAxis?: YAxis;
+  strokeWidth?: number | string;
   dashed?: boolean;
   fill?: string;
 }
@@ -16,6 +19,11 @@ interface RefLine {
   label?: string;
   labelColor?: string;
 }
+export interface SvgChartLinkedHover {
+  index: number | null;
+  active: boolean;
+  onChange: (index: number | null) => void;
+}
 interface Props {
   data: Record<string, any>[];
   xKey: string;
@@ -25,13 +33,17 @@ interface Props {
   yFormatter?: (v: number) => string;
   tooltipFormatter?: (dataPoint: Record<string, number>) => string;
   xLabel?: string;
+  xTickSpacing?: number;
   yLabel?: string;
+  rightAxis?: { label: string; formatter?: (value: number) => string };
   showLegend?: boolean;
   legendLabels?: Record<string, string>;
-  margin?: { top: number; right: number; bottom: number; left: number };
+  margin?: Partial<{ top: number; right: number; bottom: number; left: number }>;
   gridColor?: string;
   bgColor?: string;
   axisColor?: string;
+  frameColor?: string;
+  linkedHover?: SvgChartLinkedHover;
 }
 
 function niceTicks(min: number, max: number, count: number) {
@@ -47,6 +59,12 @@ function niceTicks(min: number, max: number, count: number) {
   );
 }
 
+function paddedDomain([min, max]: [number, number]): [number, number] | undefined {
+  if (!Number.isFinite(min)) return undefined;
+  const padding = (max - min) * 0.1 || Math.max(Math.abs(min) * 0.01, 1);
+  return [min - padding, max + padding];
+}
+
 export default function SvgChart({
   data,
   xKey,
@@ -56,20 +74,32 @@ export default function SvgChart({
   yFormatter,
   tooltipFormatter,
   xLabel,
+  xTickSpacing = 95,
   yLabel,
+  rightAxis,
   showLegend,
   legendLabels,
   margin,
   gridColor = 'var(--chart-grid)',
   bgColor = 'var(--chart-bg)',
   axisColor = 'var(--text-muted)',
+  frameColor,
+  linkedHover,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const clipId = useId().replace(/:/g, '');
   const [size, setSize] = useState({ w: 400, h: 300 });
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const [localHoverIndex, setLocalHoverIndex] = useState<number | null>(null);
+  const [cursorY, setCursorY] = useState<number | null>(null);
   const [tipSize, setTipSize] = useState({ w: 180, h: 90 });
+  const hoverIndex = linkedHover ? linkedHover.index : localHoverIndex;
+  const active = linkedHover?.active ?? true;
+  const setHoverIndex = linkedHover?.onChange ?? setLocalHoverIndex;
+  const clearHover = () => {
+    setCursorY(null);
+    setHoverIndex(null);
+  };
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -86,48 +116,59 @@ export default function SvgChart({
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [hoverIndex]);
+  }, [active, hoverIndex]);
 
-  const m = { top: 18, right: 24, bottom: xLabel ? 46 : 28, left: yLabel ? 76 : 64, ...margin };
+  const m = {
+    top: 18,
+    right: rightAxis ? 76 : 24,
+    bottom: xLabel ? 46 : 28,
+    left: yLabel ? 76 : 64,
+    ...margin,
+  };
   const plotW = Math.max(0, size.w - m.left - m.right);
   const plotH = Math.max(0, size.h - m.top - m.bottom);
   const numeric = typeof data[0]?.[xKey] === 'number';
   const xs = data.map((d, i) => (numeric ? Number(d[xKey]) : i));
   let xMin = Infinity,
-    xMax = -Infinity,
-    yMin = Infinity,
-    yMax = -Infinity;
+    xMax = -Infinity;
   xs.forEach((x) => {
     if (Number.isFinite(x)) {
       xMin = Math.min(xMin, x);
       xMax = Math.max(xMax, x);
     }
   });
-  data.forEach((d) =>
-    series.forEach((s) => {
+  const extents: Record<YAxis, [number, number]> = {
+    left: [Infinity, -Infinity],
+    right: [Infinity, -Infinity],
+  };
+  const axisFor = (s: Series): YAxis => (rightAxis && s.yAxis === 'right' ? 'right' : 'left');
+  for (const s of series) {
+    const extent = extents[axisFor(s)];
+    for (const d of data) {
       const value = d[s.dataKey];
       if (typeof value === 'number' && Number.isFinite(value)) {
-        yMin = Math.min(yMin, value);
-        yMax = Math.max(yMax, value);
+        extent[0] = Math.min(extent[0], value);
+        extent[1] = Math.max(extent[1], value);
       }
-    }),
-  );
-  const hasData = Number.isFinite(xMin) && Number.isFinite(yMin);
+    }
+  }
   refLines?.forEach((line) => {
-    if (line.axis === 'y' && Number.isFinite(line.value) && hasData) {
-      yMin = Math.min(yMin, line.value);
-      yMax = Math.max(yMax, line.value);
+    if (line.axis === 'y' && Number.isFinite(line.value) && Number.isFinite(extents.left[0])) {
+      extents.left[0] = Math.min(extents.left[0], line.value);
+      extents.left[1] = Math.max(extents.left[1], line.value);
     }
   });
+  const domains = { left: paddedDomain(extents.left), right: paddedDomain(extents.right) };
+  const hasData = Number.isFinite(xMin) && Boolean(domains.left || domains.right);
   if (xMin === xMax) {
     xMin -= 0.5;
     xMax += 0.5;
   }
-  const padding = (yMax - yMin) * 0.1 || Math.max(Math.abs(yMin) * 0.01, 1);
-  yMin -= padding;
-  yMax += padding;
   const toX = (value: number) => m.left + ((value - xMin) / (xMax - xMin)) * plotW;
-  const toY = (value: number) => m.top + (1 - (value - yMin) / (yMax - yMin)) * plotH;
+  const toY = (value: number, axis: YAxis = 'left') => {
+    const [min, max] = domains[axis] ?? [0, 1];
+    return m.top + (1 - (value - min) / (max - min)) * plotH;
+  };
   const fmtX =
     xFormatter ||
     ((value: any) =>
@@ -136,13 +177,29 @@ export default function SvgChart({
         : String(value));
   const fmtY =
     yFormatter || ((value: number) => value.toLocaleString('en-IN', { maximumFractionDigits: 2 }));
-  const xTicks = niceTicks(xMin, xMax, Math.max(2, Math.floor(plotW / 95)));
-  const yTicks = niceTicks(yMin, yMax, Math.max(2, Math.floor(plotH / 55)));
+  const fmtRightY = rightAxis?.formatter ?? fmtY;
+  const xTicks = niceTicks(xMin, xMax, Math.max(2, Math.floor(plotW / xTickSpacing)));
+  const yTicks = (axis: YAxis) => {
+    const domain = domains[axis];
+    return domain ? niceTicks(...domain, Math.max(2, Math.floor(plotH / 55))) : [];
+  };
   const hover =
     hoverIndex !== null && data[hoverIndex] && Number.isFinite(xs[hoverIndex]) ? hoverIndex : null;
   const hoverX = hover !== null ? toX(xs[hover]) : 0;
+  const horizontalY =
+    linkedHover &&
+    active &&
+    hover !== null &&
+    cursorY !== null &&
+    cursorY >= m.top &&
+    cursorY <= m.top + plotH
+      ? cursorY
+      : null;
+  const tooltipLeft =
+    linkedHover && hoverX + 16 + tipSize.w > size.w - 8 ? hoverX - 16 - tipSize.w : hoverX + 16;
+  const axisLabels = [yLabel, rightAxis?.label].filter(Boolean).join(' and ');
   const chartLabel =
-    (yLabel || series.map((s) => legendLabels?.[s.dataKey] || s.dataKey).join(', ')) + ' chart';
+    (axisLabels || series.map((s) => legendLabels?.[s.dataKey] || s.dataKey).join(', ')) + ' chart';
 
   return (
     <div
@@ -173,24 +230,30 @@ export default function SvgChart({
               role="img"
               aria-label={chartLabel + '. Use left and right arrow keys to inspect points.'}
               tabIndex={0}
-              style={{ display: 'block', overflow: 'hidden' }}
+              style={{
+                display: 'block',
+                overflow: 'hidden',
+                cursor: linkedHover ? 'crosshair' : undefined,
+              }}
               onMouseMove={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
                 const x = e.clientX - rect.left,
                   y = e.clientY - rect.top;
                 if (x < m.left || x > m.left + plotW || y < m.top || y > m.top + plotH) {
-                  setHoverIndex(null);
+                  clearHover();
                   return;
                 }
                 const index = nearestPointIndex(xs, xMin + ((x - m.left) / plotW) * (xMax - xMin));
+                if (linkedHover) setCursorY(y);
                 setHoverIndex(index < 0 ? null : index);
               }}
-              onMouseLeave={() => setHoverIndex(null)}
-              onBlur={() => setHoverIndex(null)}
+              onMouseLeave={clearHover}
+              onBlur={clearHover}
               onKeyDown={(e) => {
-                if (e.key === 'Escape') setHoverIndex(null);
+                if (e.key === 'Escape') clearHover();
                 if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
                   e.preventDefault();
+                  setCursorY(null);
                   setHoverIndex(
                     Math.max(
                       0,
@@ -204,13 +267,13 @@ export default function SvgChart({
                 }
               }}
             >
-              <title>{chartLabel}</title>
+              {!linkedHover && <title>{chartLabel}</title>}
               <defs>
                 <clipPath id={clipId}>
                   <rect x={m.left} y={m.top} width={plotW} height={plotH} />
                 </clipPath>
               </defs>
-              {yTicks.map((v) => (
+              {yTicks('left').map((v) => (
                 <g key={'y' + v}>
                   <line
                     x1={m.left}
@@ -227,6 +290,25 @@ export default function SvgChart({
                     fontSize={11}
                   >
                     {fmtY(v)}
+                  </text>
+                </g>
+              ))}
+              {yTicks('right').map((v) => (
+                <g key={'right-y' + v}>
+                  <line
+                    x1={m.left + plotW}
+                    x2={m.left + plotW + 5}
+                    y1={toY(v, 'right')}
+                    y2={toY(v, 'right')}
+                    stroke={axisColor}
+                  />
+                  <text
+                    x={m.left + plotW + 9}
+                    y={toY(v, 'right') + 4}
+                    fill={axisColor}
+                    fontSize={11}
+                  >
+                    {fmtRightY(v)}
                   </text>
                 </g>
               ))}
@@ -265,9 +347,20 @@ export default function SvgChart({
                       </text>
                     ) : null,
                   )}
+              {frameColor && (
+                <rect
+                  x={m.left}
+                  y={m.top}
+                  width={plotW}
+                  height={plotH}
+                  fill="none"
+                  stroke={frameColor}
+                  shapeRendering="crispEdges"
+                />
+              )}
               <g clipPath={'url(#' + clipId + ')'}>
                 {refLines
-                  ?.filter((r) => Number.isFinite(r.value))
+                  ?.filter((r) => Number.isFinite(r.value) && (r.axis === 'x' || domains.left))
                   .map((r, i) => {
                     const horizontal = r.axis === 'y';
                     const x = horizontal ? m.left : toX(r.value),
@@ -275,6 +368,7 @@ export default function SvgChart({
                     return (
                       <g key={i}>
                         <line
+                          className="svg-chart-reference-line"
                           x1={x}
                           x2={horizontal ? m.left + plotW : x}
                           y1={y}
@@ -284,6 +378,7 @@ export default function SvgChart({
                         />
                         {r.label && (
                           <text
+                            className="svg-chart-reference-label"
                             x={horizontal ? m.left + plotW - 5 : x + 5}
                             y={horizontal ? y - 6 : y + 12}
                             textAnchor={horizontal ? 'end' : 'start'}
@@ -301,10 +396,11 @@ export default function SvgChart({
                     xs,
                     data.map((d) => d[s.dataKey]),
                   ).map((segment, n) => {
+                    const axis = axisFor(s);
                     const points = segment
-                      .map((i) => toX(xs[i]) + ',' + toY(data[i][s.dataKey]))
+                      .map((i) => toX(xs[i]) + ',' + toY(data[i][s.dataKey], axis))
                       .join(' ');
-                    const baseline = Math.min(m.top + plotH, Math.max(m.top, toY(0)));
+                    const baseline = Math.min(m.top + plotH, Math.max(m.top, toY(0, axis)));
                     return (
                       <g key={s.dataKey + n}>
                         {s.fill && (
@@ -326,7 +422,7 @@ export default function SvgChart({
                         {segment.length === 1 ? (
                           <circle
                             cx={toX(xs[segment[0]])}
-                            cy={toY(data[segment[0]][s.dataKey])}
+                            cy={toY(data[segment[0]][s.dataKey], axis)}
                             r={3}
                             fill={s.color}
                           />
@@ -353,15 +449,27 @@ export default function SvgChart({
                       y1={m.top}
                       y2={m.top + plotH}
                       stroke={axisColor}
+                      strokeWidth={linkedHover ? 1.5 : undefined}
                       strokeDasharray="4 4"
                     />
+                    {horizontalY !== null && (
+                      <line
+                        x1={m.left}
+                        x2={m.left + plotW}
+                        y1={horizontalY}
+                        y2={horizontalY}
+                        stroke={axisColor}
+                        strokeWidth={1.5}
+                        strokeDasharray="4 4"
+                      />
+                    )}
                     {series.map((s) => {
                       const v = data[hover][s.dataKey];
                       return typeof v === 'number' && Number.isFinite(v) ? (
                         <circle
                           key={s.dataKey}
                           cx={hoverX}
-                          cy={toY(v)}
+                          cy={toY(v, axisFor(s))}
                           r={4}
                           fill={s.color}
                           stroke={bgColor}
@@ -383,7 +491,7 @@ export default function SvgChart({
                   {xLabel}
                 </text>
               )}
-              {yLabel && (
+              {yLabel && domains.left && (
                 <text
                   x={15}
                   y={m.top + plotH / 2}
@@ -395,14 +503,62 @@ export default function SvgChart({
                   {yLabel}
                 </text>
               )}
+              {rightAxis && domains.right && (
+                <text
+                  x={size.w - 15}
+                  y={m.top + plotH / 2}
+                  textAnchor="middle"
+                  fill={axisColor}
+                  fontSize={11}
+                  transform={`rotate(90,${size.w - 15},${m.top + plotH / 2})`}
+                >
+                  {rightAxis.label}
+                </text>
+              )}
             </svg>
-            {hover !== null && (
+            {horizontalY !== null &&
+              (['left', 'right'] as const).map((axis) => {
+                const domain = domains[axis];
+                if (!domain) return null;
+                const [min, max] = domain;
+                const value = max - ((horizontalY - m.top) / plotH) * (max - min);
+                const isLeft = axis === 'left';
+                return (
+                  <span
+                    key={axis}
+                    aria-hidden="true"
+                    data-crosshair-axis={axis}
+                    style={{
+                      position: 'absolute',
+                      top: horizontalY,
+                      right: isLeft ? size.w - m.left : undefined,
+                      left: isLeft ? undefined : m.left + plotW,
+                      transform: 'translateY(-50%)',
+                      zIndex: 11,
+                      pointerEvents: 'none',
+                      padding: '0 4px',
+                      border: '1px solid var(--chart-crosshair-border, #8294a9)',
+                      borderRadius: 4,
+                      background: 'var(--chart-crosshair-bg, #31435a)',
+                      color: 'var(--chart-crosshair-text, #fff)',
+                      fontSize: 11,
+                      fontWeight: 600,
+                      fontVariantNumeric: 'tabular-nums',
+                      lineHeight: '16px',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {(isLeft ? fmtY : fmtRightY)(value)}
+                  </span>
+                );
+              })}
+            {active && hover !== null && (
               <div
                 ref={tooltipRef}
                 role="status"
                 style={{
                   position: 'absolute',
-                  left: Math.max(8, Math.min(hoverX + 16, size.w - tipSize.w - 8)),
+                  left: Math.max(8, Math.min(tooltipLeft, size.w - tipSize.w - 8)),
                   top: Math.max(8, Math.min(m.top + 8, size.h - tipSize.h - 8)),
                   maxWidth: Math.max(40, size.w - 16),
                   maxHeight: Math.max(40, size.h - 16),
@@ -440,7 +596,7 @@ export default function SvgChart({
                         <strong style={{ marginLeft: 'auto', paddingLeft: 12 }}>
                           {typeof data[hover][s.dataKey] === 'number' &&
                           Number.isFinite(data[hover][s.dataKey])
-                            ? fmtY(data[hover][s.dataKey])
+                            ? (axisFor(s) === 'right' ? fmtRightY : fmtY)(data[hover][s.dataKey])
                             : '—'}
                         </strong>
                       </div>

@@ -72,7 +72,7 @@ function useShared(props: LossViewProps) {
   return { p, line, entry, after, fmt, pick, cross };
 }
 
-function InfoBox({ keys }: { keys: string[] }) {
+export function InfoBox({ keys }: { keys: string[] }) {
   return (
     <div className="te-loss-info">
       {keys.map((k) => {

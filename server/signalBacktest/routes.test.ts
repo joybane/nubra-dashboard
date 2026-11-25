@@ -72,6 +72,24 @@ describe('POST /api/signal-backtest/run', () => {
     expect(body.summary).toMatchObject({ daysScanned: 1, daysWithSignal: 1, trades: 1 });
   });
 
+  test('defaults the reference quantity by index and respects an explicit quantity', async () => {
+    const base = day('2026-01-05', 'nubra');
+    await store.write({
+      ...base,
+      underlying: 'SENSEX',
+      spot: base.spot.map(() => 81000),
+      ce: { '81200': base.ce['23350'] },
+      pe: { '80800': base.pe['23150'] },
+    });
+    const sensex = { underlying: 'SENSEX', includeLocalOnly: false };
+    const standard = await run(sensex);
+    const custom = await run({ ...sensex, signalParams: { qty: 65 } });
+    expect(standard.body.signalParams.qty).toBe(20);
+    expect(custom.body.signalParams.qty).toBe(65);
+    expect(standard.body.rows[0].signal).toMatchObject({ ceDelta: 60, gap: 60 });
+    expect(custom.body.rows[0].signal).toMatchObject({ ceDelta: 195, gap: 195 });
+  });
+
   test('Nubra wins over local for the same date; local-only days follow the flag', async () => {
     for (const [date, source] of [
       ['2026-01-05', 'nubra'],
@@ -239,6 +257,39 @@ describe('GET /api/signal-backtest/day', () => {
     expect(missing.legs).toEqual([{ kind: 'CE', strike: 23500, close: null }]);
     // Without `legs` the response simply has none.
     expect((await get(ok)).json().legs).toEqual([]);
+  });
+
+  test('only reads OHLC when traded closes are missing and retains the saved closes', async () => {
+    await app.close();
+    const calls: string[] = [];
+    const fallback = emptyGrid().map(() => 12);
+    app = Fastify();
+    registerSignalBacktestRoutes({
+      fastify: app,
+      rootDir: dir,
+      store,
+      loadOhlc: async (_underlying, date) => {
+        calls.push(date);
+        return {
+          series: () => ({ o: fallback, h: fallback, l: fallback, c: fallback }),
+          strikes: () => [23350],
+        };
+      },
+    });
+    await app.ready();
+    await store.write(day(ok.date, 'nubra'));
+    const gapDay = day('2026-01-04', 'nubra');
+    gapDay.ce['23350'][0] = null;
+    await store.write(gapDay);
+
+    const query = { ...ok, legs: 'CE:23350,PE:23150', ohlc: 'parquet' };
+    expect((await get(query)).json().legs[0].close[0]).toBe(200);
+    expect(calls).toEqual([]);
+    const { legs } = (await get({ ...query, date: gapDay.date })).json();
+    expect(calls).toEqual([gapDay.date]);
+    expect(legs[0].close[0]).toBe(12);
+    expect(legs[0].close[1]).toBeCloseTo(199.9);
+    expect(legs[1].close[0]).toBe(50);
   });
 
   test('a strike beyond the ladder is found in the row’s wide Nubra data', async () => {

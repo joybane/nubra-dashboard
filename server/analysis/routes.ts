@@ -40,6 +40,21 @@ import { dayGreekSeries } from './greeks.ts';
 import { createPacer, type PostTimeseries } from './nubraSource.ts';
 import { createAnalysisSync, type AnalysisSync, type DetailProgress } from './sync.ts';
 import { readValidationReport } from './validation.ts';
+import {
+  OPENING_DRIVERS,
+  OPENING_DTE_GROUPS,
+  OPENING_STRANGLE_API,
+  type OpeningDates,
+  type OpeningFilters,
+  type OpeningStudy,
+} from '../../src/lib/openingStrangle.ts';
+import { daysToExpiry } from '../signalBacktest/expiry.ts';
+import {
+  openingDteGroup,
+  replayOpeningStrangle,
+  summarizeOpeningStrangles,
+} from './openingStrangle.ts';
+import { buildOpeningResearch } from './openingStrangleResearch.ts';
 
 const UNDERLYINGS = ['NIFTY', 'SENSEX'] as const;
 type AnalysisUnderlying = (typeof UNDERLYINGS)[number];
@@ -93,6 +108,12 @@ function normalizeUnderlying(raw: unknown): AnalysisUnderlying | null {
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
+
+function isOpeningDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !ISO.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().startsWith(value);
+}
 
 /** Merge a client's partial params over the defaults, rejecting anything out of range. */
 export function parseFinderParams(raw: unknown): FinderParams | string {
@@ -206,6 +227,213 @@ export function registerAnalysisRoutes(deps: AnalysisRouteDeps): void {
   // A scan over five years reads ~1,400 files; the same scan asked twice should not.
   const scanCache = new Map<string, ScanResponse>();
   const SCAN_CACHE_MAX = 6;
+
+  const openingDates = async (
+    underlying: AnalysisUnderlying,
+    requested?: boolean,
+  ): Promise<OpeningDates> => {
+    const defaultIncludeLocalOnly = true;
+    const includeLocalOnly = requested ?? defaultIncludeLocalOnly;
+    return {
+      underlying,
+      includeLocalOnly,
+      defaultIncludeLocalOnly,
+      dates: await sourcePlan(store, underlying, includeLocalOnly),
+    };
+  };
+
+  type OpeningQuery = {
+    underlying?: string;
+    includeLocalOnly?: string;
+    date?: string;
+    onTimeOnly?: string;
+  };
+  const optionalBool = (value?: string) =>
+    value === undefined || value === 'true' || value === 'false';
+  const fromQueryBool = (value?: string) => (value === undefined ? undefined : value === 'true');
+
+  fastify.get<{ Querystring: OpeningQuery }>(
+    `${OPENING_STRANGLE_API}/dates`,
+    async (req, reply) => {
+      const underlying = normalizeUnderlying(req.query.underlying);
+      if (!underlying || !optionalBool(req.query.includeLocalOnly)) {
+        return reply.code(400).send({ error: 'Choose NIFTY or SENSEX and a valid source filter.' });
+      }
+      return openingDates(underlying, fromQueryBool(req.query.includeLocalOnly));
+    },
+  );
+
+  fastify.get<{ Querystring: OpeningQuery }>(`${OPENING_STRANGLE_API}/day`, async (req, reply) => {
+    const { date, includeLocalOnly, onTimeOnly } = req.query;
+    const underlying = normalizeUnderlying(req.query.underlying);
+    if (
+      !underlying ||
+      !isOpeningDate(date) ||
+      !optionalBool(includeLocalOnly) ||
+      !optionalBool(onTimeOnly)
+    ) {
+      return reply.code(400).send({ error: 'Choose a valid trading date, index and filters.' });
+    }
+    const dates = await sourcePlan(store, underlying, true);
+    const source = dates.find(
+      (item) => item.date === date && (includeLocalOnly !== 'false' || item.source === 'nubra'),
+    )?.source;
+    const day = source ? await store.read(underlying, source, date) : null;
+    if (!source || !day || isEmptyDay(day)) {
+      return reply
+        .code(404)
+        .send({ error: `No stored ${underlying} prices for ${date} with these filters.` });
+    }
+    const dte = daysToExpiry(
+      date,
+      day.expiry,
+      dates.map((item) => item.date),
+    );
+    if (dte == null)
+      return reply.code(422).send({ error: 'The stored expiry is invalid for this session.' });
+    const result = replayOpeningStrangle(
+      day,
+      {
+        date,
+        source,
+        expiry: day.expiry,
+        monthly: day.monthly,
+        dte,
+        dteGroup: openingDteGroup(dte),
+      },
+      underlying,
+      { detail: true, onTimeOnly: fromQueryBool(onTimeOnly) },
+    );
+    if (typeof result === 'string') return reply.code(422).send({ error: result });
+    return result;
+  });
+
+  fastify.post<{ Body: Partial<OpeningFilters> }>(
+    `${OPENING_STRANGLE_API}/study`,
+    async (req, reply) => {
+      const body = req.body ?? {};
+      const {
+        from,
+        to,
+        expiry,
+        contract = 'all',
+        unit = 'creditPct',
+        roundTripCost = 0,
+        onTimeOnly = false,
+        includeLocalOnly,
+        driver,
+        dte,
+        includeResearch = false,
+      } = body;
+      const underlying = normalizeUnderlying(body.underlying);
+      if (
+        !underlying ||
+        (from !== undefined && !isOpeningDate(from)) ||
+        (to !== undefined && !isOpeningDate(to)) ||
+        (from && to && from > to) ||
+        (expiry !== undefined && !isOpeningDate(expiry)) ||
+        !['all', 'weekly', 'monthly'].includes(contract) ||
+        !['creditPct', 'rupees'].includes(unit) ||
+        !Number.isFinite(roundTripCost) ||
+        roundTripCost < 0 ||
+        typeof onTimeOnly !== 'boolean' ||
+        typeof includeResearch !== 'boolean' ||
+        (includeLocalOnly !== undefined && typeof includeLocalOnly !== 'boolean') ||
+        (driver !== undefined && (!OPENING_DRIVERS.includes(driver) || dte === undefined)) ||
+        (dte !== undefined && !OPENING_DTE_GROUPS.includes(dte))
+      )
+        return reply
+          .code(400)
+          .send({ error: 'Choose a valid date range, expiry and study filters.' });
+
+      // Source and date filters select replays, while DTE uses every stored session.
+      const dates = await sourcePlan(store, underlying, true);
+      const calendar = dates.map((item) => item.date);
+      const range = dates.filter(
+        ({ date, source }) =>
+          (includeLocalOnly !== false || source === 'nubra') &&
+          (!from || date >= from) &&
+          (!to || date <= to),
+      );
+      const rows = [];
+      const skipped: OpeningStudy['skipped'] = [];
+      const expiries = new Set<string>();
+      for (let i = 0; i < range.length; i += 16) {
+        if (reply.raw.destroyed) return;
+        const batch = await Promise.all(
+          range.slice(i, i + 16).map(async ({ date, source }) => ({
+            date,
+            source,
+            day: await store.read(underlying, source, date),
+          })),
+        );
+        for (const { date, source, day } of batch) {
+          if (!day || isEmptyDay(day)) {
+            skipped.push({ date, source, reason: 'Stored session prices are unavailable.' });
+            continue;
+          }
+          if (contract !== 'all' && day.monthly !== (contract === 'monthly')) continue;
+          expiries.add(day.expiry);
+          if (expiry && day.expiry !== expiry) continue;
+          const count = daysToExpiry(date, day.expiry, calendar);
+          if (count == null) {
+            skipped.push({
+              date,
+              source,
+              reason: 'The stored expiry is invalid for this session.',
+            });
+            continue;
+          }
+          const result = replayOpeningStrangle(
+            day,
+            {
+              date,
+              source,
+              expiry: day.expiry,
+              monthly: day.monthly,
+              dte: count,
+              dteGroup: openingDteGroup(count),
+            },
+            underlying,
+            { onTimeOnly },
+          );
+          if (typeof result === 'string') skipped.push({ date, source, reason: result });
+          else rows.push(result);
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      if (reply.raw.destroyed) return;
+      const research = includeResearch
+        ? {
+            rows: await buildOpeningResearch(
+              store,
+              underlying,
+              dates,
+              rows,
+              () => reply.raw.destroyed,
+            ),
+          }
+        : undefined;
+      if (reply.raw.destroyed) return;
+      const response: OpeningStudy = {
+        days: rows.map((row) => row.summary),
+        skipped,
+        expiries: [...expiries].sort(),
+        roundTripCost,
+        ...summarizeOpeningStrangles(rows, {
+          underlying,
+          contract,
+          unit,
+          roundTripCost,
+          onTimeOnly,
+          driver,
+          dte,
+        }),
+        ...(research && { research }),
+      };
+      return response;
+    },
+  );
 
   fastify.get<{ Querystring: { underlying?: string } }>(
     '/api/analysis/status',

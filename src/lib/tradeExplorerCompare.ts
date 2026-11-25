@@ -1,5 +1,7 @@
 import {
   applyFilters,
+  COLUMN_BY_KEY,
+  parseBound,
   nearest,
   quantile,
   withSimilarity,
@@ -7,6 +9,7 @@ import {
   type Filters,
   type SimilarPlan,
 } from './tradeExplorer';
+import { LOT_SIZE, type SignalUnderlying } from './signalBacktest';
 import type { Outcome } from './tradeExplorerSplits';
 import {
   applySpec,
@@ -22,6 +25,7 @@ import {
 export interface SlimDay {
   maxLoss: number | null;
   maxLossPct: number | null;
+  touched: boolean | null;
 }
 export type SlimSet = Map<string, SlimDay>;
 
@@ -35,6 +39,7 @@ export function slimSet(rows: DayRow[]): SlimSet {
     out.set(r.raw.date, {
       maxLoss: finite(r.values.maxLoss),
       maxLossPct: finite(r.values.maxLossPct),
+      touched: r.values.touched == null ? null : r.values.touched === 'Yes',
     });
   }
   return out;
@@ -47,6 +52,7 @@ export interface SetLine {
   medianPct: number | null;
   usualPct: number | null;
   worseShare: number | null;
+  touchedShare: number | null;
 }
 
 const present = (v: Array<number | null>) => v.filter((x): x is number => x != null);
@@ -56,6 +62,7 @@ export function setLine(dates: ReadonlySet<string>, slim: SlimSet): SetLine {
     const s = slim.get(d);
     return s ? [s] : [];
   });
+  const touched = chosen.filter((s) => s.touched != null);
   const loss = present(chosen.map((s) => s.maxLoss));
   const pct = present(chosen.map((s) => s.maxLossPct));
   const usualPct = quantile(present([...slim.values()].map((s) => s.maxLossPct)), 0.5);
@@ -65,6 +72,7 @@ export function setLine(dates: ReadonlySet<string>, slim: SlimSet): SetLine {
     oneInTen: quantile(loss, 0.9),
     medianPct: quantile(pct, 0.5),
     usualPct,
+    touchedShare: touched.length ? touched.filter((s) => s.touched).length / touched.length : null,
     worseShare:
       usualPct == null || !pct.length ? null : pct.filter((v) => v > usualPct).length / pct.length,
   };
@@ -149,12 +157,64 @@ export interface SavedCriteria {
   name: string;
   filters: Filters;
   similar: SimilarPlan | null;
+  /** Missing on criteria saved while both indices used a 65-unit signal. */
+  signalMoneyBasis?: 'per-lot';
 }
 
-export function applyCriteria(days: DayRow[], c: SavedCriteria): DayRow[] {
+const SIGNAL_MONEY_KEYS = ['ceChange', 'peChange', 'both', 'gap'];
+const LEGACY_SIGNAL_QTY = 65;
+const FILTER_SETTINGS_VERSION = 1;
+
+function legacySignalFilters(filters: Filters, underlying: SignalUnderlying): Filters {
+  const lot = LOT_SIZE[underlying];
+  if (lot === LEGACY_SIGNAL_QTY) return filters;
+  const next = { ...filters };
+  for (const key of SIGNAL_MONEY_KEYS) {
+    const filter = filters[key];
+    if (!filter) continue;
+    const scale = (value: number) => (value * lot) / LEGACY_SIGNAL_QTY;
+    const bound = (value: string) => {
+      const n = /\d/.test(value) ? parseBound(COLUMN_BY_KEY.get(key)!, value) : null;
+      return n == null ? value : String(scale(n));
+    };
+    next[key] = {
+      ...filter,
+      ...(typeof filter.min === 'string' && { min: bound(filter.min) }),
+      ...(typeof filter.max === 'string' && { max: bound(filter.max) }),
+      ...(filter.values && {
+        values: filter.values.map((v) => (typeof v === 'number' ? scale(v) : v)),
+      }),
+    };
+  }
+  return next;
+}
+
+/** Active filters become literal per-lot bounds when an older settings record is loaded. */
+export function migrateActiveFilters(
+  filters: Filters,
+  underlying: SignalUnderlying,
+  version?: number,
+): { filters: Filters; filterSettingsVersion: number } {
+  return version != null && version >= FILTER_SETTINGS_VERSION
+    ? { filters, filterSettingsVersion: version }
+    : {
+        filters: legacySignalFilters(filters, underlying),
+        filterSettingsVersion: FILTER_SETTINGS_VERSION,
+      };
+}
+
+export function criteriaFilters(c: SavedCriteria, underlying: SignalUnderlying): Filters {
+  return c.signalMoneyBasis === 'per-lot' ? c.filters : legacySignalFilters(c.filters, underlying);
+}
+
+export function applyCriteria(
+  days: DayRow[],
+  c: SavedCriteria,
+  underlying: SignalUnderlying,
+): DayRow[] {
   return applyFilters(
     c.similar ? nearest(withSimilarity(days, c.similar), c.similar.keep) : days,
-    c.filters,
+    criteriaFilters(c, underlying),
   );
 }
 

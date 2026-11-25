@@ -1,68 +1,74 @@
 import { ColorType, CrosshairMode, LineStyle } from 'lightweight-charts';
 import type { Theme } from '../types';
 
+const palette = {
+  dark: {
+    background: '#101318',
+    axis: '#aab6c8',
+    grid: '#1d222a',
+    border: '#2b313a',
+    crosshair: '#8593a8',
+    crosshairLabel: '#4657b7',
+  },
+  navy: {
+    background: '#141d29',
+    axis: '#afc0d3',
+    grid: '#354252',
+    border: '#354252',
+    crosshair: '#a1b5cd',
+    crosshairLabel: '#365888',
+  },
+  light: {
+    background: '#ffffff',
+    axis: '#4b6078',
+    grid: 'rgba(71, 91, 118, 0.10)',
+    border: '#cdd7e2',
+    crosshair: '#647c99',
+    crosshairLabel: '#4657b7',
+  },
+  graphite: {
+    background: '#0b0e0f',
+    axis: '#c1c7d0',
+    grid: 'rgba(142, 151, 166, 0.075)',
+    border: '#292d34',
+    crosshair: '#7f8793',
+    crosshairLabel: '#343b48',
+  },
+  bloomberg: {
+    background: '#050709',
+    axis: '#98a6b3',
+    grid: 'rgba(116, 138, 157, 0.11)',
+    border: '#26323b',
+    crosshair: '#4ec9d7',
+    crosshairLabel: '#126b76',
+  },
+  apex: {
+    background: '#070b12',
+    axis: '#aab8c8',
+    grid: 'rgba(86, 197, 255, 0.075)',
+    border: '#27364a',
+    crosshair: '#56c5ff',
+    crosshairLabel: '#2563eb',
+  },
+};
+
 /** Shared visual options only. Callers retain their own scales, time zones and data. */
 export function chartTheme(appearance: boolean | Theme, fontSize = 12) {
   const theme: Theme =
     typeof appearance === 'boolean' ? (appearance ? 'dark' : 'light') : appearance;
-  const isDark = theme !== 'light';
-  const isBloomberg = theme === 'bloomberg';
-  const isGraphite = theme === 'graphite';
-  const isApex = theme === 'apex';
-  const grid = isBloomberg
-    ? 'rgba(116, 138, 157, 0.11)'
-    : isApex
-      ? 'rgba(86, 197, 255, 0.075)'
-      : isGraphite
-        ? 'rgba(142, 151, 166, 0.075)'
-        : isDark
-          ? 'rgba(151, 169, 199, 0.08)'
-          : 'rgba(71, 91, 118, 0.10)';
-  const crosshair = isBloomberg
-    ? '#4ec9d7'
-    : isApex
-      ? '#56c5ff'
-      : isGraphite
-        ? '#7f8793'
-        : isDark
-          ? '#7789a4'
-          : '#647c99';
-  const border = isBloomberg
-    ? '#26323b'
-    : isApex
-      ? '#27364a'
-      : isGraphite
-        ? '#292d34'
-        : isDark
-          ? '#2b3340'
-          : '#cdd7e2';
+  const { background, axis, grid, border, crosshair, crosshairLabel } = palette[theme];
   return {
     layout: {
       background: {
         type: ColorType.Solid,
-        color: isBloomberg
-          ? '#050709'
-          : isApex
-            ? '#070b12'
-            : isGraphite
-              ? '#0b0e0f'
-              : isDark
-                ? '#101318'
-                : '#ffffff',
+        color: background,
       },
-      textColor: isBloomberg
-        ? '#98a6b3'
-        : isApex
-          ? '#aab8c8'
-          : isGraphite
-            ? '#c1c7d0'
-            : isDark
-              ? '#aebbd0'
-              : '#4b6078',
+      textColor: axis,
       fontSize,
-      fontFamily: isBloomberg
-        ? "'Cascadia Mono', 'SFMono-Regular', Consolas, monospace"
-        : "'Inter', 'Segoe UI', sans-serif",
+      fontFamily:
+        theme === 'bloomberg'
+          ? "'Cascadia Mono', 'SFMono-Regular', Consolas, monospace"
+          : "'Inter', 'Segoe UI', sans-serif",
     },
     grid: {
       vertLines: { color: grid, style: LineStyle.Solid },
@@ -74,25 +80,13 @@ export function chartTheme(appearance: boolean | Theme, fontSize = 12) {
         color: crosshair,
         width: 1 as const,
         style: LineStyle.Dashed,
-        labelBackgroundColor: isBloomberg
-          ? '#126b76'
-          : isApex
-            ? '#2563eb'
-            : isGraphite
-              ? '#343b48'
-              : '#4657b7',
+        labelBackgroundColor: crosshairLabel,
       },
       horzLine: {
         color: crosshair,
         width: 1 as const,
         style: LineStyle.Dashed,
-        labelBackgroundColor: isBloomberg
-          ? '#126b76'
-          : isApex
-            ? '#2563eb'
-            : isGraphite
-              ? '#343b48'
-              : '#4657b7',
+        labelBackgroundColor: crosshairLabel,
       },
     },
     leftPriceScale: { borderColor: border },

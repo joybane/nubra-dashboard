@@ -10,6 +10,7 @@ import { fmtPrice, fmtLakh, formatExpiry, strikeRs } from './lib/utils';
 import { isPageHidden, setVisibleInterval } from './lib/visibleInterval';
 
 const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+const normalizedOiWidths = new WeakMap<HTMLElement, { requested: string; applied: string }>();
 
 function normalizeIndiaVix(input: string): string | null {
   const key = input.toUpperCase().replace(/[^A-Z0-9]/g, '');
@@ -539,7 +540,6 @@ export default function OptionChain({
     if (cp) setSpot(Number(cp) / 100);
 
     // Recompute max OI on every tick so bar widths scale correctly after data changes.
-    // Without this, live updates would call setCellHtml with plain fmtOI() text, stripping the bar.
     let maxCeOi = 1,
       maxPeOi = 1;
     for (const ce of ceList) {
@@ -564,10 +564,7 @@ export default function OptionChain({
       const cePct = Math.min(100, (ceOi / maxCeOiRef.current) * 100);
       setLtpCells(sp, 'ce', ce);
       setCellText(`${sp}-ce-iv`, fmtIV(iv));
-      setCellHtml(
-        `${sp}-ce-oi`,
-        `<div>${fmtOI(ceOi)}</div><div class="oi-bar-wrap"><div class="oi-bar oi-bar-ce" style="width:${cePct}%"></div></div>`,
-      );
+      setOiCell(sp, 'ce', ceOi, cePct);
       setCellText(`${sp}-ce-vol`, fmtOI(g(ce, 'volume')));
       setCellText(`${sp}-ce-delta`, fmtDec(g(ce, 'delta'), 4));
       setCellText(`${sp}-ce-gamma`, fmtDec(g(ce, 'gamma'), 4));
@@ -579,10 +576,7 @@ export default function OptionChain({
       const peOi = g(pe, 'oi') || 0;
       const pePct = Math.min(100, (peOi / maxPeOiRef.current) * 100);
       setLtpCells(sp, 'pe', pe);
-      setCellHtml(
-        `${sp}-pe-oi`,
-        `<div>${fmtOI(peOi)}</div><div class="oi-bar-wrap"><div class="oi-bar oi-bar-pe" style="width:${pePct}%"></div></div>`,
-      );
+      setOiCell(sp, 'pe', peOi, pePct);
       setCellText(`${sp}-pe-vol`, fmtOI(g(pe, 'volume')));
       setCellText(`${sp}-pe-delta`, fmtDec(g(pe, 'delta'), 4));
       setCellText(`${sp}-pe-gamma`, fmtDec(g(pe, 'gamma'), 4));
@@ -591,16 +585,35 @@ export default function OptionChain({
     }
   }
 
-  // Plain-text cells. Used for every column except the two OI cells, which build
-  // a bar and therefore need markup.
   function setCellText(key: string, text: string) {
     const el = cellMapRef.current.get(key);
     if (el && el.textContent !== text) el.textContent = text;
   }
 
-  function setCellHtml(key: string, html: string) {
-    const td = cellMapRef.current.get(key);
-    if (td && td.innerHTML !== html) td.innerHTML = html;
+  function setOiCell(sp: number, side: 'ce' | 'pe', oi: number, pct: number) {
+    const td = cellMapRef.current.get(`${sp}-${side}-oi`);
+    if (!td) return;
+    const value = td.firstElementChild;
+    const bar = td.lastElementChild?.firstElementChild as HTMLElement | null | undefined;
+    const text = fmtOI(oi);
+    if (!value || !bar) {
+      // A strike can start with only one side in the snapshot and get the other in a live update.
+      td.innerHTML = `<div>${text}</div><div class="oi-bar-wrap"><div class="oi-bar oi-bar-${side}" style="width:${pct}%"></div></div>`;
+      return;
+    }
+    if (value.textContent !== text) value.textContent = text;
+
+    const width = pct >= 0 ? `${pct}%` : '';
+    const current = bar.style.width;
+    if (current === width) return;
+    // CSSOM may round a percentage when reading it back. Also compare what was applied so a
+    // React render that changes the style never leaves the cached request looking current.
+    const normalized = normalizedOiWidths.get(bar);
+    if (normalized?.requested === width && normalized.applied === current) return;
+    bar.style.width = width;
+    const applied = bar.style.width;
+    if (applied !== width) normalizedOiWidths.set(bar, { requested: width, applied });
+    else normalizedOiWidths.delete(bar);
   }
 
   // Price and change % live in two separately registered text nodes so they update

@@ -3,6 +3,7 @@ import { DEFAULT_TRADE_PARAMS, simulateSignalTrade, type OhlcSource } from './tr
 import { minuteIndex, hhmmAt, type DaySeries } from '../analysis/daySeries.ts';
 import type { SignalBacktestRow } from './routes.ts';
 import { bandRange, dteName, pickBand } from './bandPick.ts';
+import { signalLotMoney } from '../../src/lib/signalMoney.ts';
 
 const STRIKE_STEP: Record<string, number> = { NIFTY: 50, SENSEX: 100 };
 
@@ -28,8 +29,10 @@ export function classifyExplorerSets(
     const s = [...values].sort((a, b) => a - b);
     return (s[Math.floor((s.length - 1) / 2)] + s[Math.ceil((s.length - 1) / 2)]) / 2;
   };
-  const loss = (r: SignalBacktestRow) =>
-    Math.max(0, r.trade.stop?.trade.steps.at(-1)?.[1] ?? -r.trade.maxLoss);
+  const loss = (r: SignalBacktestRow) => {
+    const steps = r.trade.stop?.trade?.steps;
+    return Math.max(0, steps == null ? -r.trade.maxLoss : (steps.at(-1)?.[1] ?? 0));
+  };
   const cuts = REPORT_GROUP_CUTS[underlying as keyof typeof REPORT_GROUP_CUTS];
   const lines = new Map<number, number>();
   for (const d of new Set(rows.map((r) => r.dte)))
@@ -60,7 +63,7 @@ export function classifyExplorerSets(
       lossGroup: line == null ? null : (ml >= line ? 2 : 0) + (t.pnl > 0 ? 0 : 1),
       warn: w
         ? (iv != null && history.length >= 4 && iv / med(history.slice(-8)) > w.iv ? 1 : 0) |
-          (r.signal.gap > w.gap ? 2 : 0) |
+          (signalLotMoney(r.signal, 65).gap > w.gap ? 2 : 0) |
           (previous != null && previous > w.prev ? 4 : 0) |
           (Math.abs(r.signal.spot2 / r.signal.legs.entrySpot - 1) * 100 > w.move ? 8 : 0)
         : null,

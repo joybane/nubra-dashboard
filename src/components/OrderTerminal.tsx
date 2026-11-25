@@ -2274,8 +2274,10 @@ function HoldingsTab({ uatAuth }: { uatAuth: boolean }) {
 
 // ─── OrderTerminal ────────────────────────────────────────────────────────────
 export default function OrderTerminal({
+  hidden = false,
   onOpenStrategyChart,
 }: {
+  hidden?: boolean;
   onOpenStrategyChart?: (basketGroupId: string, strategyName: string, snapshotId?: string) => void;
 }) {
   const { authenticated: uatAuth, refreshAuthStatus, openTicket } = usePaperTrading();
@@ -2352,10 +2354,19 @@ export default function OrderTerminal({
     window.addEventListener('blur', finish);
   }
 
+  function expand() {
+    setCollapsed(false);
+    setHeight((value) => terminalHeight(value, availableHeight));
+  }
+
+  function selectTab(nextTab: typeof tab) {
+    setTab(nextTab);
+    if (collapsed) expand();
+  }
+
   function toggleCollapse() {
     if (collapsed) {
-      setCollapsed(false);
-      setHeight((value) => terminalHeight(value, availableHeight));
+      expand();
     } else {
       setFullscreen(false);
       setCollapsed(true);
@@ -2425,7 +2436,7 @@ export default function OrderTerminal({
   return (
     <div
       ref={containerRef}
-      className="order-terminal flex flex-col bg-[var(--bg-primary)] border-t border-[var(--border)] shrink-0 transition-[height] duration-200"
+      className={`order-terminal ${hidden ? 'hidden' : 'flex'} flex-col bg-[var(--bg-primary)] border-t border-[var(--border)] shrink-0 transition-[height] duration-200`}
       style={{ height: effectiveH }}
     >
       {/* drag handle — hidden when collapsed */}
@@ -2452,16 +2463,16 @@ export default function OrderTerminal({
 
       {/* header bar */}
       <div className="h-9 shrink-0 flex items-center border-b border-[var(--border)] bg-[var(--bg-secondary)] px-2 gap-1">
-        <button onClick={() => setTab('orders')} className={TAB_STYLE('orders')}>
+        <button onClick={() => selectTab('orders')} className={TAB_STYLE('orders')}>
           Regular Orders
         </button>
-        <button onClick={() => setTab('positions')} className={TAB_STYLE('positions')}>
+        <button onClick={() => selectTab('positions')} className={TAB_STYLE('positions')}>
           Positions
         </button>
-        <button onClick={() => setTab('holdings')} className={TAB_STYLE('holdings')}>
+        <button onClick={() => selectTab('holdings')} className={TAB_STYLE('holdings')}>
           Holdings
         </button>
-        <button onClick={() => setTab('saved')} className={TAB_STYLE('saved')}>
+        <button onClick={() => selectTab('saved')} className={TAB_STYLE('saved')}>
           Saved
         </button>
 

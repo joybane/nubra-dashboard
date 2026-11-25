@@ -289,7 +289,7 @@ export function runMonteCarlo(trades: DayTrade[], simCount = 1000): MonteCarloRe
   finals.sort((a, b) => a - b);
   dds.sort((a, b) => a - b);
 
-  const pctile = (arr: number[], p: number) => {
+  const pctile = (arr: ArrayLike<number>, p: number) => {
     const i = Math.floor(p * arr.length);
     return arr[Math.min(i, arr.length - 1)];
   };
@@ -304,8 +304,17 @@ export function runMonteCarlo(trades: DayTrade[], simCount = 1000): MonteCarloRe
   const medianCurve: number[] = [];
   const p5Curve: number[] = [];
   const p95Curve: number[] = [];
+  // Sort one reusable numeric column. Keep comparator sorting for nonfinite inputs because
+  // it handles NaN differently from typed-array sorting.
+  const column = pnls.every(Number.isFinite) ? new Float64Array(allCurves.length) : null;
   for (let i = 0; i < n; i++) {
-    const col = allCurves.map((c) => c[i]).sort((a, b) => a - b);
+    let col: ArrayLike<number>;
+    if (column) {
+      for (let s = 0; s < allCurves.length; s++) column[s] = allCurves[s][i];
+      col = column.sort();
+    } else {
+      col = allCurves.map((c) => c[i]).sort((a, b) => a - b);
+    }
     medianCurve.push(round2(pctile(col, 0.5)));
     p5Curve.push(round2(pctile(col, 0.05)));
     p95Curve.push(round2(pctile(col, 0.95)));

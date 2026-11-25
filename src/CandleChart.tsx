@@ -68,6 +68,16 @@ const EMPTY_GAP_LIMIT_DAYS = 45;
 const GOTO_INTRADAY_PIECE_DAYS = 60;
 const GOTO_DAILY_PIECE_DAYS = 1825;
 type Interval = (typeof INTERVALS)[number];
+const CHART_INTERVAL_STORAGE_KEY = 'nubra-chart-timeframe';
+
+function readChartInterval(): Interval {
+  try {
+    const saved = window.localStorage.getItem(CHART_INTERVAL_STORAGE_KEY);
+    return INTERVALS.find((candidate) => candidate === saved) ?? '5m';
+  } catch {
+    return '5m';
+  }
+}
 
 // The OI slider spans one trading session. Its length is exchange-specific: NSE is
 // 375 minutes, MCX 870 (09:00–23:30), so these are derived per render rather than
@@ -262,7 +272,7 @@ export default function CandleChart({ instrument, theme }: Props) {
   const optTickExpiryRef = useRef<string | null>(null);
   const optTickExchRef = useRef<string>('NSE');
 
-  const [interval, setInterval] = useState<Interval>('5m');
+  const [interval, setInterval] = useState<Interval>(readChartInterval);
   const [loading, setLoading] = useState<string | null>('Select a symbol to begin');
   const [showVol, setShowVol] = useState(false);
   const [ohlc, setOhlc] = useState<{
@@ -377,12 +387,30 @@ export default function CandleChart({ instrument, theme }: Props) {
     };
   }, [timeframeOpen]);
 
-  const vega = useGreekOverlay({ greek: 'vega', chartRef, currentInstRef, allBarsRef });
-  const theta = useGreekOverlay({ greek: 'theta', chartRef, currentInstRef, allBarsRef });
+  const vega = useGreekOverlay({
+    greek: 'vega',
+    chartRef,
+    currentInstRef,
+    allBarsRef,
+    visibilityStorageKey: 'nubra-chart-vega-visible',
+  });
+  const theta = useGreekOverlay({
+    greek: 'theta',
+    chartRef,
+    currentInstRef,
+    allBarsRef,
+    visibilityStorageKey: 'nubra-chart-theta-visible',
+  });
   // IV rides the same sub-pane path as its siblings here (the Tracker renders all three inline).
   // Named `ivOverlay`, not `iv`: the load callback already binds `iv` to the chart INTERVAL, and
   // a shadowed name there would silently hide the overlay from the teardown it must take part in.
-  const ivOverlay = useGreekOverlay({ greek: 'iv', chartRef, currentInstRef, allBarsRef });
+  const ivOverlay = useGreekOverlay({
+    greek: 'iv',
+    chartRef,
+    currentInstRef,
+    allBarsRef,
+    visibilityStorageKey: 'nubra-chart-iv-visible',
+  });
 
   // ── Chart initialization ──────────────────────────────────────────────────
   useEffect(() => {
@@ -447,23 +475,30 @@ export default function CandleChart({ instrument, theme }: Props) {
       updateCountdownPosition();
       oi.requestDraw();
       const bar = param.seriesData?.get(candle) as OhlcBar | undefined;
-      const vBar = param.seriesData?.get(vol) as { value: number } | undefined;
       // `visible:false` (unchecking Total) leaves the series' data in place — only
       // hidden — so without this check a stale reading would linger in the legend.
-      const oiTotalBar =
-        oiTotal.options().visible !== false
-          ? (param.seriesData?.get(oiTotal) as { value: number } | undefined)
+      const oiTotalBar = param.seriesData?.get(oiTotal) as { value: number } | undefined;
+      const netOi =
+        oiTotalBar && oiTotal.options().visible !== false ? oiTotalBar.value : undefined;
+      const hovered = bar ?? lastBarRef.current;
+      if (hovered) {
+        const { open: o, high: h, low: l, close: c } = hovered;
+        const volume = bar
+          ? (param.seriesData?.get(vol) as { value: number } | undefined)?.value
           : undefined;
-      const netOi = oiTotalBar?.value;
-      if (bar) {
-        setOhlc({ o: bar.open, h: bar.high, l: bar.low, c: bar.close, vol: vBar?.value, netOi });
-      } else if (lastBarRef.current) {
-        setOhlc({
-          o: lastBarRef.current.open,
-          h: lastBarRef.current.high,
-          l: lastBarRef.current.low,
-          c: lastBarRef.current.close,
-          netOi,
+        setOhlc((previous) => {
+          if (
+            previous &&
+            previous.o === o &&
+            previous.h === h &&
+            previous.l === l &&
+            previous.c === c &&
+            previous.vol === volume &&
+            previous.netOi === netOi
+          ) {
+            return previous;
+          }
+          return { o, h, l, c, vol: volume, netOi };
         });
       }
 
@@ -474,14 +509,15 @@ export default function CandleChart({ instrument, theme }: Props) {
       // once when the chart is created and never rebound on re-render, so a plain state
       // read here would always see whatever it was at mount — the ref is the one thing
       // in this closure guaranteed to reflect the latest toggle.
-      const container = containerRef.current;
-      const topBand = container ? container.clientHeight * 0.22 : 0;
+      const point = param.point;
       const detail =
-        param.time != null ? oi.oiTotalDetailRef.current.get(param.time as number) : undefined;
-      if (oi.showTotalOiRef.current && detail && param.point && param.point.y <= topBand) {
+        oi.showTotalOiRef.current && point && param.time != null
+          ? oi.oiTotalDetailRef.current.get(param.time as number)
+          : undefined;
+      if (detail && point && point.y <= (containerRef.current?.clientHeight ?? 0) * 0.22) {
         setTotalHover({
-          x: param.point.x,
-          y: param.point.y,
+          x: point.x,
+          y: point.y,
           ce: detail.ce,
           pe: detail.pe,
           net: detail.ce - detail.pe,
@@ -978,6 +1014,13 @@ export default function CandleChart({ instrument, theme }: Props) {
         }
       } catch (err: unknown) {
         setLoading(`Error: ${(err as Error).message}`);
+      } finally {
+        // Restore after the candle request settles so the overlays can use the latest trading day.
+        if (isChartLive(chartRef.current) && ticket === loadTicketRef.current) {
+          vega.restoreVisibility();
+          theta.restoreVisibility();
+          ivOverlay.restoreVisibility();
+        }
       }
     },
     [unsubscribeChart, subscribeChart],
@@ -1544,6 +1587,11 @@ export default function CandleChart({ instrument, theme }: Props) {
                       onClick={() => {
                         setInterval(iv);
                         setTimeframeOpen(false);
+                        try {
+                          window.localStorage.setItem(CHART_INTERVAL_STORAGE_KEY, iv);
+                        } catch {
+                          // The selected timeframe still applies when storage is unavailable.
+                        }
                       }}
                       className={`min-h-7 rounded px-2 text-[11px] font-medium transition-colors ${
                         interval === iv

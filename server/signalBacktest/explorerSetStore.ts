@@ -26,7 +26,7 @@ import type { SignalBacktestRow } from './routes.ts';
 
 const gzip = promisify(zlib.gzip);
 /** Bump when the shape or rules of a built list change, so old files are rebuilt. */
-const STORE_VERSION = 1;
+const STORE_VERSION = 2;
 
 type Row = SignalBacktestRow & { groups?: Record<string, unknown> };
 export type SavedRun = Record<string, unknown> & {
@@ -234,8 +234,7 @@ export function createExplorerSetStore(deps: Deps) {
   }
 
   /** The gzipped list if it is already on disk; never waits for a build. */
-  async function ready(underlying: string, key: string): Promise<Buffer | null> {
-    const { mtime } = await deps.readSavedRun(underlying);
+  async function ready(underlying: string, key: string, mtime: number): Promise<Buffer | null> {
     const file = path.join(dirFor(underlying, mtime), fileName(key));
     return existsSync(file) ? readFile(file) : null;
   }

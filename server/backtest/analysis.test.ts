@@ -1,5 +1,5 @@
-import { test, expect } from 'vitest';
-import { buildEquityCurve, computeMetrics } from './analysis.ts';
+import { test, expect, vi } from 'vitest';
+import { buildEquityCurve, computeMetrics, runMonteCarlo } from './analysis.ts';
 import type { DayTrade } from './types.ts';
 
 /** Minimal DayTrade factory — computeMetrics/buildEquityCurve read only pnl, cumPnl, costs, date. */
@@ -15,6 +15,43 @@ function ledger(pnls: number[], costs = 0): DayTrade[] {
     } as unknown as DayTrade;
   });
 }
+
+function seededSimulation(pnls: number[]) {
+  let seed = 0x561b34cd;
+  const random = vi.spyOn(Math, 'random').mockImplementation(() => {
+    seed ^= seed << 13;
+    seed ^= seed >>> 17;
+    seed ^= seed << 5;
+    return (seed >>> 0) / 4294967296;
+  });
+  try {
+    const result = runMonteCarlo(ledger(pnls), 5);
+    expect(random).toHaveBeenCalledTimes(20);
+    return result;
+  } finally {
+    random.mockRestore();
+  }
+}
+
+test('runMonteCarlo preserves seeded equity curves and drawdown percentiles', () => {
+  expect(seededSimulation([10.1, -30.2, 0, 5.74, 24.66])).toEqual({
+    simulations: 5,
+    percentiles: [5, 25, 50, 75, 95].map((pct) => ({
+      pct,
+      finalEquity: 10.3,
+      maxDrawdown: 30.2,
+    })),
+    medianCurve: [5.74, -24.46, -20.1, 0.2, 10.3],
+    p5Curve: [-30.2, -30.2, -24.46, -14.36, 10.3],
+    p95Curve: [10.1, 15.84, 15.84, 40.5, 10.3],
+  });
+});
+
+test('runMonteCarlo preserves comparator ordering for nonfinite paths', () => {
+  const { p5Curve, p95Curve } = seededSimulation([5, -5, NaN, 10, -3]);
+  expect(p5Curve).toEqual([10, NaN, NaN, NaN, NaN]);
+  expect(p95Curve).toEqual([5, 15, 2, 7, NaN]);
+});
 
 test('computeMetrics: empty ledger returns a fully-zeroed metrics object', () => {
   const m = computeMetrics([]);

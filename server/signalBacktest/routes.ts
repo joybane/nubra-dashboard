@@ -62,6 +62,7 @@ import {
   legCloses,
   premiumUniverse,
   simulateSignalTrade,
+  LOT_SIZE,
   type OhlcSource,
   type OptionKind,
   type PremiumRange,
@@ -431,7 +432,10 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
       reply.code(400);
       return { ok: false, error: `unsupported underlying ${body.underlying}` };
     }
-    const signalParams = parseFinderParams(body.signalParams);
+    const signalParams = parseFinderParams({
+      qty: LOT_SIZE[underlying],
+      ...body.signalParams,
+    });
     if (typeof signalParams === 'string') {
       reply.code(400);
       return { ok: false, error: signalParams };
@@ -645,11 +649,24 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
       reply.code(404);
       return { ok: false, error: `${date} holds no ${ceStrike} CE / ${peStrike} PE` };
     }
-    // Strikes beyond the day's ladder (a premium rule can sell them) live in the row's price source.
-    const { ohlc } =
-      wanted && tradeLegs.length
-        ? await resolveOhlc(underlying, date, q.source, day.expiry, wanted === 'parquet')
-        : { ohlc: null };
+    const legs = tradeLegs.map((leg) => ({
+      ...leg,
+      close: legCloses(day, leg.kind, leg.strike, null),
+    }));
+    const incomplete = legs.filter((leg) => !leg.close || leg.close.includes(null));
+    // The row's OHLC source fills gaps and strikes outside the stored ladder.
+    if (wanted && incomplete.length) {
+      const { ohlc } = await resolveOhlc(
+        underlying,
+        date,
+        q.source,
+        day.expiry,
+        wanted === 'parquet',
+      );
+      if (ohlc) {
+        for (const leg of incomplete) leg.close = legCloses(day, leg.kind, leg.strike, ohlc);
+      }
+    }
     const response: SignalDayResponse = {
       ok: true,
       underlying,
@@ -662,7 +679,7 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
       ce,
       pe,
       greeks: dayGreekSeries(day, { ceStrike, peStrike }),
-      legs: tradeLegs.map((l) => ({ ...l, close: legCloses(day, l.kind, l.strike, ohlc) })),
+      legs,
     };
     return response;
   });
@@ -777,7 +794,7 @@ export function registerSignalBacktestRoutes(deps: SignalBacktestDeps): { wideSy
       const stamp = await stat(file);
       // Whole lists come from the trade-set store: built once per saved run, sent as stored.
       if (!req.query.date) {
-        const stored = await setStore.ready(underlying, selected).catch(() => null);
+        const stored = await setStore.ready(underlying, selected, stamp.mtimeMs).catch(() => null);
         if (stored) return sendGzipJson(req, reply, stored);
         if (selected === 'saved') {
           // The explorer just opened: build every other set in the background meanwhile.

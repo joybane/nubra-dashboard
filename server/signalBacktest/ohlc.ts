@@ -195,7 +195,10 @@ function sourceOf(day: StitchedDay): OhlcSource {
   };
 }
 
-export function createParquetOhlcLoader(deps: ParquetOhlcDeps): OhlcLoader {
+export function createParquetOhlcLoader(
+  deps: ParquetOhlcDeps,
+  { memoizeDays = true } = {},
+): OhlcLoader {
   const buckets = new Map<string, Promise<BucketColumns | null>>();
   const days = new Map<string, Promise<OhlcSource | null>>();
   const listings = new Map<string, Promise<BucketPair[]>>();
@@ -262,6 +265,7 @@ export function createParquetOhlcLoader(deps: ParquetOhlcDeps): OhlcLoader {
     const und = underlying as Underlying;
     const resolved = await deps.resolve(und, date);
     if (!resolved || resolved.expiry !== expiry) return null;
+    if (!memoizeDays) return load(und, resolved.expiry, resolved.flag, date);
     const key = `${und}|${resolved.expiry}|${resolved.flag}|${date}`;
     let p = days.get(key);
     if (!p) {
@@ -274,11 +278,17 @@ export function createParquetOhlcLoader(deps: ParquetOhlcDeps): OhlcLoader {
 }
 
 /** The loader the server uses: the real tree, worker-thread decoding, days kept under `cacheRoot`. */
-export function createParquetOhlcLoaderFor(cacheRoot: string): OhlcLoader {
-  return createParquetOhlcLoader({
-    resolve: (und, date) => resolveExpiry(und, 'WEEK', date, 0),
-    listBuckets: defaultListBuckets,
-    readBucket: defaultReadBucket(),
-    store: createOhlcDayStore(cacheRoot),
-  });
+export function createParquetOhlcLoaderFor(
+  cacheRoot: string,
+  options?: { memoizeDays?: boolean },
+): OhlcLoader {
+  return createParquetOhlcLoader(
+    {
+      resolve: (und, date) => resolveExpiry(und, 'WEEK', date, 0),
+      listBuckets: defaultListBuckets,
+      readBucket: defaultReadBucket(),
+      store: createOhlcDayStore(cacheRoot),
+    },
+    options,
+  );
 }

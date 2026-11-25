@@ -1,11 +1,12 @@
 /**
- * The Trade Explorer tab: the Strangle Max Loss report in full, and the trade-by-trade explorer.
+ * The Trade Explorer tab: the Strangle Max Loss report, trade-by-trade explorer and Usual Option Chain.
  * Clicking any day in the report (its tables, charts, day tiles) opens that day here in the
- * explorer, with the report's strike choice (OTM step or price band) as the trade set. Both views
+ * explorer, with the report's strike choice (OTM step or price band) as the trade set. Opened views
  * stay loaded, so going back to the report keeps its place.
  */
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties } from 'react';
 import TradeExplorer, { type ReportOpenRequest } from './TradeExplorer';
+import ErrorBoundary from './components/ErrorBoundary';
 import ShareMaxLossReport, { type ReportInfo } from './components/ShareMaxLossReport';
 import type { SignalUnderlying } from './lib/signalBacktest';
 import type { Theme } from './types';
@@ -14,7 +15,9 @@ const OPEN_DAY_MESSAGE = 'max-loss-report:open-day';
 const VIEW_KEY = 'nubra-trade-explorer-view';
 const UNDERLYINGS: SignalUnderlying[] = ['NIFTY', 'SENSEX'];
 
-type View = 'report' | 'trades';
+const OpeningStranglePane = lazy(() => import('./components/OpeningStranglePane'));
+
+type View = 'report' | 'trades' | 'usual-option-chain' | 'opening-otm2-pnl';
 
 /**
  * Hidden views stay laid out (visibility, not display: none). With display: none the browser
@@ -30,7 +33,12 @@ const remembered = (): { view: View; underlying: SignalUnderlying } => {
   try {
     const raw = JSON.parse(localStorage.getItem(VIEW_KEY) ?? '{}');
     return {
-      view: raw.view === 'trades' ? 'trades' : 'report',
+      view:
+        raw.view === 'trades' ||
+        raw.view === 'usual-option-chain' ||
+        raw.view === 'opening-otm2-pnl'
+          ? raw.view
+          : 'report',
       underlying: raw.underlying === 'SENSEX' ? 'SENSEX' : 'NIFTY',
     };
   } catch {
@@ -40,6 +48,8 @@ const remembered = (): { view: View; underlying: SignalUnderlying } => {
 
 export default function TradeExplorerHost({ theme }: { theme: Theme }) {
   const [view, setView] = useState<View>(() => remembered().view);
+  const [optionChainMounted, setOptionChainMounted] = useState(view === 'usual-option-chain');
+  const [openingMounted, setOpeningMounted] = useState(view === 'opening-otm2-pnl');
   const [reportUnderlying, setReportUnderlying] = useState<SignalUnderlying>(
     () => remembered().underlying,
   );
@@ -118,6 +128,8 @@ export default function TradeExplorerHost({ theme }: { theme: Theme }) {
             [
               ['report', 'Report'],
               ['trades', 'Trade by trade'],
+              ['usual-option-chain', 'Usual Option Chain'],
+              ['opening-otm2-pnl', 'Opening OTM 2 P&L'],
             ] as const
           ).map(([v, label]) => (
             <button
@@ -126,7 +138,11 @@ export default function TradeExplorerHost({ theme }: { theme: Theme }) {
               className="border-r border-[var(--border)] px-3 py-1 font-semibold last:border-r-0"
               style={segButton(view === v)}
               aria-pressed={view === v}
-              onClick={() => setView(v)}
+              onClick={() => {
+                if (v === 'usual-option-chain') setOptionChainMounted(true);
+                if (v === 'opening-otm2-pnl') setOpeningMounted(true);
+                setView(v);
+              }}
             >
               {label}
             </button>
@@ -161,6 +177,7 @@ export default function TradeExplorerHost({ theme }: { theme: Theme }) {
             />
           </>
         ) : (
+          view === 'trades' &&
           from && (
             <button
               type="button"
@@ -199,9 +216,30 @@ export default function TradeExplorerHost({ theme }: { theme: Theme }) {
             )}
           </div>
         ))}
-        <div className="absolute inset-0" style={shownStyle(view === 'trades')}>
+        {/* Keep the active trades view out of a stacking context so fullscreen can cover the navbar. */}
+        <div className="absolute inset-0" style={view === 'trades' ? undefined : shownStyle(false)}>
           <TradeExplorer theme={theme} openRequest={request} />
         </div>
+        {optionChainMounted && (
+          <div className="absolute inset-0" style={shownStyle(view === 'usual-option-chain')}>
+            <iframe
+              title="Usual Option Chain"
+              src="/usual-option-chain.html"
+              sandbox="allow-scripts"
+              className="h-full w-full border-0"
+              style={{ colorScheme: theme === 'light' ? 'light' : 'dark' }}
+            />
+          </div>
+        )}
+        {openingMounted && (
+          <div className="absolute inset-0" style={shownStyle(view === 'opening-otm2-pnl')}>
+            <ErrorBoundary label="Opening OTM 2 P&L">
+              <Suspense fallback={<div className="p-4 text-xs">Loading opening P&amp;L…</div>}>
+                <OpeningStranglePane />
+              </Suspense>
+            </ErrorBoundary>
+          </div>
+        )}
       </div>
     </div>
   );

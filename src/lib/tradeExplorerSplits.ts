@@ -25,6 +25,7 @@ export const ENTRY_KEYS = [
   'ivRatio',
   'gap',
   'gapPct',
+  'strikeDist',
   'ceChange',
   'peChange',
   'both',
@@ -42,6 +43,7 @@ export const ENTRY_KEYS = [
   'deltaLean',
   'theta',
   'vega',
+  'warnCount',
 ];
 /** How the day went. Shown only when the user asks; they explain a loss but cannot predict it. */
 export const AFTER_KEYS = [

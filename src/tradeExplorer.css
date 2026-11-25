@@ -903,9 +903,6 @@
   display: grid;
   gap: 10px;
 }
-.te-report-chart-panel .te-report-note {
-  margin: 0 !important;
-}
 .te-report-detail .te-detail-chart {
   height: 720px !important;
   min-width: 0;
@@ -915,29 +912,6 @@
 .te-report-detail .te-detail-chart > div {
   background: var(--bg-card);
   border-top: 0;
-}
-.te-report-detail .te-detail-chart > div > div:first-child {
-  background: var(--bg-card);
-  padding: 8px 0;
-  gap: 8px;
-  font-size: 12px;
-}
-.te-report-detail .te-detail-chart button[aria-pressed] {
-  height: 30px;
-  padding: 4px 10px;
-  font-size: 12px;
-  background: var(--bg-card);
-  border-radius: 5px;
-}
-.te-report-detail .te-detail-chart button[aria-pressed='true'] {
-  background: var(--bg-secondary);
-  font-weight: 600;
-}
-.te-report-detail .te-detail-chart > div > div:nth-child(2) {
-  padding: 7px 0;
-  font-size: 11px;
-  white-space: normal;
-  min-height: 32px;
 }
 @container (max-width:900px) {
   .te-report-grid {
@@ -1652,4 +1626,31 @@
 .te-cmp-list {
   display: grid;
   gap: 6px;
+}
+
+.te-risk-signs {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.te-risk-signs .te-loss-info {
+  margin-top: 4px;
+}
+.te-risk-subheading {
+  font-size: 14px;
+  margin: 4px 0 0;
+}
+.te-risk-combined > th,
+.te-risk-combined > td {
+  border-top: 2px solid var(--border);
+}
+.te-risk-total {
+  font-weight: 700;
+}
+.te-risk-distances thead tr:first-child th:last-child,
+.te-risk-distances thead tr:nth-child(2) th:nth-child(6),
+.te-risk-distances tbody td:nth-child(7) {
+  border-left: 1px solid var(--border);
 }

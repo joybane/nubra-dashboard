@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { SavedCriteriaView, StrikeDistancesView } from './TradeExplorerCompareViews';
 import { LossGroupsView, WorstCriteriaView } from './TradeExplorerLossViews';
+import { RiskSignsView, RuleTesterView } from './TradeExplorerRiskViews';
 import {
   COLUMN_BY_KEY,
   SMALL_SAMPLE,
@@ -24,7 +25,7 @@ import {
   type Split,
 } from '../lib/tradeExplorerSplits';
 
-export type SplitMode = 'groups' | 'worst' | 'split' | 'bands' | 'sets' | 'saved';
+export type SplitMode = 'groups' | 'worst' | 'risk' | 'rule' | 'split' | 'bands' | 'sets' | 'saved';
 
 interface Props {
   rows: DayRow[];
@@ -145,7 +146,8 @@ export default function TradeExplorerSplits(props: Props) {
   const nothing = !head || (headChance != null && headChance >= 0.2);
   const word = (i: number) => (ready ? chanceWord(ready.perSplit[i]) : 'checking…');
 
-  const isLoss = mode === 'groups' || mode === 'worst';
+  const canCrossCheck = mode === 'groups' || mode === 'worst';
+  const isLoss = canCrossCheck || mode === 'risk';
   const lineValue = useMemo(() => {
     const v = quantile(nums(rows, outcome), linePct);
     return v == null ? '–' : formatCell(outcomeCol, v);
@@ -188,6 +190,20 @@ export default function TradeExplorerSplits(props: Props) {
         </button>
         <button
           type="button"
+          className={mode === 'risk' ? 'on' : ''}
+          onClick={() => props.onMode('risk')}
+        >
+          Risk signs
+        </button>
+        <button
+          type="button"
+          className={mode === 'rule' ? 'on' : ''}
+          onClick={() => props.onMode('rule')}
+        >
+          Rule tester
+        </button>
+        <button
+          type="button"
           className={mode === 'split' ? 'on' : ''}
           onClick={() => props.onMode('split')}
         >
@@ -215,7 +231,7 @@ export default function TradeExplorerSplits(props: Props) {
           Saved criteria
         </button>
       </div>
-      {isLoss && props.other && (
+      {canCrossCheck && props.other && (
         <label>
           <input type="checkbox" checked={crossOn} onChange={(e) => setCrossOn(e.target.checked)} />{' '}
           Cross-check on {props.other.name}
@@ -290,6 +306,26 @@ export default function TradeExplorerSplits(props: Props) {
           other={crossOn ? props.other : undefined}
         />
       )}
+      {mode === 'risk' && (
+        <RiskSignsView
+          rows={rows}
+          allRows={props.allRows}
+          outcome={outcome}
+          linePct={linePct}
+          onPick={props.onPickMany}
+        />
+      )}
+      {mode === 'rule' && (
+        <RuleTesterView
+          key={props.underlying}
+          rows={rows}
+          allRows={props.allRows}
+          outcome={outcome}
+          underlying={props.underlying}
+          tradeSet={props.tradeSet}
+          onPick={props.onPickMany}
+        />
+      )}
       {mode === 'sets' && (
         <StrikeDistancesView
           key={props.underlying}
@@ -301,6 +337,7 @@ export default function TradeExplorerSplits(props: Props) {
       {mode === 'saved' && (
         <SavedCriteriaView
           allRows={props.allRows}
+          underlying={props.underlying}
           outcome={outcome}
           current={props.current}
           saved={props.saved}

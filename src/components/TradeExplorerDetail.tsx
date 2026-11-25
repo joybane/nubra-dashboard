@@ -3,9 +3,9 @@
  * key facts, the signal as a t1 / t2 table in words, the greeks, the IV signal with its working, the
  * option chain at the signal minute, then the day's chart.
  */
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import SignalDayChart from './SignalDayChart';
-import { cachedJson, cachedValue, chainUrl, comparisonUrl } from '../lib/explorerCache';
+import { cachedJson, cachedValue, chainUrl, comparisonUrl, dayUrl } from '../lib/explorerCache';
 import UiIcon from './UiIcon';
 import { IV_CUTS, IV_LEVELS } from '../lib/ivSignal';
 import {
@@ -15,7 +15,12 @@ import {
   type Column,
   type DayRow,
 } from '../lib/tradeExplorer';
-import type { GreekKey, SignalUnderlying } from '../lib/signalBacktest';
+import {
+  formatIndianNumber,
+  LOT_SIZE,
+  type GreekKey,
+  type SignalUnderlying,
+} from '../lib/signalBacktest';
 import type { Theme } from '../types';
 
 const LEVEL_COLOR = [
@@ -27,16 +32,11 @@ const LEVEL_COLOR = [
 ];
 
 const rupee = (v: number | null | undefined) =>
-  v == null ? '–' : `${v < 0 ? '−' : ''}₹${Math.round(Math.abs(v)).toLocaleString('en-IN')}`;
+  v == null ? '–' : `${v < 0 ? '−' : ''}₹${formatIndianNumber(Math.round(Math.abs(v)), 0)}`;
 const signedRupee = (v: number | null | undefined) =>
   v == null ? '–' : `${v > 0 ? '+' : ''}${rupee(v)}`;
 const plain = (v: number | null | undefined, digits = 2) =>
-  v == null
-    ? '–'
-    : `${v < 0 ? '−' : ''}${Math.abs(v).toLocaleString('en-IN', {
-        minimumFractionDigits: digits,
-        maximumFractionDigits: digits,
-      })}`;
+  v == null ? '–' : `${v < 0 ? '−' : ''}${formatIndianNumber(Math.abs(v), digits)}`;
 const colorOf = (v: number | null | undefined) =>
   v == null || v === 0 ? undefined : v < 0 ? 'var(--red)' : 'var(--green)';
 
@@ -70,6 +70,10 @@ const tdName = 'border-t border-[var(--border)] px-1.5 py-0.5 text-left';
 function SignalPanel({ row, underlying }: { row: DayRow; underlying: SignalUnderlying }) {
   const { signal: s, trade: t } = row.raw;
   const pct = row.values.gapPct as number | null;
+  const callChange = row.values.ceChange as number;
+  const putChange = row.values.peChange as number;
+  const both = row.values.both as number;
+  const gap = row.values.gap as number;
   const spotMove = s.spot2 - s.spot1;
   const sentence = (v: number) =>
     v >= 0 ? `made the seller ${rupee(v)}` : `cost the seller ${rupee(-v)}`;
@@ -98,45 +102,46 @@ function SignalPanel({ row, underlying }: { row: DayRow; underlying: SignalUnder
             <td className={tdName}>Call {s.legs.ceStrike}</td>
             <td className={td}>₹{plain(s.ce1)}</td>
             <td className={td}>₹{plain(s.ce2)}</td>
-            <td className={td} style={{ color: colorOf(s.ceDelta) }}>
-              {signedRupee(s.ceDelta)}
+            <td className={td} style={{ color: colorOf(callChange) }}>
+              {signedRupee(callChange)}
             </td>
           </tr>
           <tr>
             <td className={tdName}>Put {s.legs.peStrike}</td>
             <td className={td}>₹{plain(s.pe1)}</td>
             <td className={td}>₹{plain(s.pe2)}</td>
-            <td className={td} style={{ color: colorOf(s.peDelta) }}>
-              {signedRupee(s.peDelta)}
+            <td className={td} style={{ color: colorOf(putChange) }}>
+              {signedRupee(putChange)}
             </td>
           </tr>
           <tr>
             <td className={tdName}>Both legs</td>
             <td className={td} />
             <td className={td} />
-            <td className={td} style={{ color: colorOf(s.totalDelta) }}>
-              {signedRupee(s.totalDelta)}
+            <td className={td} style={{ color: colorOf(both) }}>
+              {signedRupee(both)}
             </td>
           </tr>
           <tr className="font-semibold">
             <td className={tdName}>Difference between the legs</td>
             <td className={td} />
             <td className={td}>{pct == null ? '' : `${Math.round(pct)}% of the bigger leg`}</td>
-            <td className={td}>{rupee(s.gap)}</td>
+            <td className={td}>{rupee(gap)}</td>
           </tr>
         </tbody>
       </table>
       <p className="mt-1.5 text-[11px] leading-snug text-[var(--text-secondary)]">
         At {s.t1} and {s.t2}, {underlying} stood at the same level. The two legs still moved
-        differently: the call {sentence(s.ceDelta)} and the put {sentence(s.peDelta)}, so they
-        disagree by <b>{rupee(s.gap)}</b>
+        differently: the call {sentence(callChange)} and the put {sentence(putChange)}, so they
+        disagree by <b>{rupee(gap)}</b>
         {pct != null && (
           <>
             , which is <b>{Math.round(pct)}%</b> of the bigger leg
           </>
         )}
-        . The rule needs at least 50%. These are the {s.legs.entryTime} legs, ₹ for 1 lot of {t.qty}
-        . You sold {t.entryTime === s.t2 ? 'at the signal' : `one minute later, at ${t.entryTime}`}.
+        . The rule needs at least 50%. These are the {s.legs.entryTime} legs, ₹ for 1 lot of{' '}
+        {LOT_SIZE[underlying]}. You sold{' '}
+        {t.entryTime === s.t2 ? 'at the signal' : `one minute later, at ${t.entryTime}`}.
       </p>
     </Panel>
   );
@@ -520,6 +525,18 @@ export default function TradeExplorerDetail({
   }, [row.raw.date, underlying]);
   const v = row.values;
   const t = row.raw.trade;
+  const lossTime = typeof v.maxLossAt === 'number' ? formatClock(v.maxLossAt) : null;
+  const chartRow = useMemo(
+    () => ({
+      ...row.raw,
+      trade: {
+        ...row.raw.trade,
+        maxLoss: -(row.values.maxLoss as number),
+        maxLossTime: lossTime ?? '',
+      },
+    }),
+    [row, lossTime],
+  );
   const col = (k: string) => COLUMN_BY_KEY.get(k) as Column;
   const estimated = row.raw.estimated;
   const button = 'h-6 w-7 rounded border border-[var(--border)] disabled:opacity-30';
@@ -576,7 +593,7 @@ export default function TradeExplorerDetail({
               .join(' + ')}
             <div>
               Premium collected {rupee(v.premium as number)} · max loss {rupee(v.maxLoss as number)}{' '}
-              at {t.maxLossTime}
+              {lossTime && `at ${lossTime}`}
             </div>
             {comparison?.worstSet && (
               <div>
@@ -633,7 +650,7 @@ export default function TradeExplorerDetail({
                         <td className={td}>{plain(c.pePrice)}</td>
                         <td className={td}>{rupee(c.premium)}</td>
                         <td className={td}>{rupee(c.maxLoss)}</td>
-                        <td className={td}>{c.maxLossTime}</td>
+                        <td className={td}>{c.maxLoss > 0 ? c.maxLossTime : '–'}</td>
                         <td className={td}>{rupee(c.pnl)}</td>
                       </tr>
                     ))}
@@ -687,17 +704,14 @@ export default function TradeExplorerDetail({
           <IvPanel row={row} underlying={underlying} />
           <section className="te-report-panel te-report-chart-panel">
             <h3>Minute by minute</h3>
-            <p className="te-report-note">
-              Compare the trade and reference Greeks through the day. Hover for values; t1 and t2
-              mark the signal moments.
-            </p>
             <div className="te-detail-chart h-[340px] shrink-0 overflow-hidden rounded border border-[var(--border)]">
               <SignalDayChart
+                key={dayUrl(underlying, chartRow)}
                 embedded
                 cached
                 theme={theme}
                 underlying={underlying}
-                row={row.raw}
+                row={chartRow}
                 fillLegs={estimated?.legs}
                 onClose={onClose}
                 onStep={onStep}
